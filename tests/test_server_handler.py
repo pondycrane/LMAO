@@ -353,3 +353,9 @@ class TestHandleLXMFDelivery:
 
         server.handle_lxmf_delivery(msg)
         server.router.handle_outbound.assert_called_once()
+
+
+if __name__ == "__main__":
+    import pytest
+    import sys
+    sys.exit(pytest.main([__file__] + sys.argv[1:]))
