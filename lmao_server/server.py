@@ -6,6 +6,7 @@ Listens for LXMF messages from Cardputer clients and sends acknowledgements.
 """
 
 import sys
+import os
 import logging
 import time
 import atexit
@@ -111,6 +112,16 @@ def main():
         format="%(asctime)s [%(levelname)s] %(message)s",
     )
 
+    # Check if the RNode port exists before initializing
+    cfg_dict = config.get_config_dict()
+    rnode_port = cfg_dict['interfaces']['RNode LoRa']['port']
+    if not os.path.exists(rnode_port):
+        print(f"⚠️  RNode port {rnode_port} not found.")
+        print(f"   The server will start with WiFi AutoInterface only.")
+        print(f"   Set the LMAO_RNODE_PORT environment variable if your RNode is on a different port.")
+        print(f"   Example: LMAO_RNODE_PORT=/dev/ttyACM0 python3 server.py")
+        print(f"   LoRa messaging will be unavailable until an RNode is connected.\n")
+
     # Initialize Reticulum with our config
     print("Initializing Reticulum...")
     try:
@@ -120,6 +131,15 @@ def main():
     except (OSError, PermissionError) as e:
         print(f"FATAL: Failed to create config directory for Reticulum: {e}", file=sys.stderr)
         print("Check that /tmp is writable and disk is not full.", file=sys.stderr)
+        sys.exit(1)
+    except RNS.RNSException as e:
+        print(f"FATAL: Reticulum initialization failed: {e}", file=sys.stderr)
+        print(f"This is often caused by a missing or misconfigured RNode on {rnode_port}.")
+        print("Check that:")
+        print(f"  1. The RNode is plugged in and on the correct port ({rnode_port})")
+        print(f"  2. You have permission: sudo usermod -a -G dialout $USER")
+        print(f"  3. The RNode firmware is flashed correctly")
+        print("  See rnode_firmware/README.md and README Troubleshooting.")
         sys.exit(1)
     except Exception as e:
         print(f"FATAL: Failed to initialize Reticulum: {e}", file=sys.stderr)
@@ -145,11 +165,13 @@ def main():
         sys.exit(1)
 
     # Print startup banner
+    rnode_status = f"RNode on {rnode_port}" if os.path.exists(rnode_port) else "⚠️  RNode not connected — LoRa unavailable"
     print(f"\n{'='*50}")
     print(f"LMAO Server POC — Running")
     print(f"Node identity: {identity_hex}")
     print(f"Listening for LXMF messages...")
-    print(f"  LoRa: RNode on {config.get_config_dict()['interfaces']['RNode LoRa']['port']}")
+    print(f"  LoRa: {rnode_status}")
+    print(f"  WiFi: AutoInterface enabled")
     print(f"  Title discriminator: p:Envelope")
     print(f"{'='*50}\n")
 
