@@ -6,7 +6,6 @@ Sends periodic "Hello" messages and displays received replies.
 """
 
 import time
-import sys
 
 # MicroPython hardware imports
 try:
@@ -30,6 +29,8 @@ except ImportError:
         LXMF = None
 
 import config
+from proto.lma_encoder import make_poc_message
+
 
 # ---- Display helpers ----
 
@@ -59,14 +60,23 @@ def init_display():
 
 
 def display_status(tft, lines):
-    """Write status lines to the Cardputer screen."""
+    """Write status lines to the Cardputer screen.
+
+    Returns tft on success, or None if display hardware has failed
+    (so the caller can disable future display calls).
+    """
     if tft is None:
-        return
-    tft.fill(0x0000)
-    y = 5
-    for line in lines[:10]:  # Max 10 lines at 13px each
-        tft.text(line, 5, y, 0xFFFF)  # White text
-        y += 13
+        return None
+    try:
+        tft.fill(0x0000)
+        y = 5
+        for line in lines[:10]:  # Max 10 lines at 13px each
+            tft.text(line, 5, y, 0xFFFF)  # White text
+            y += 13
+        return tft
+    except Exception as e:
+        print(f"Display error: {e} — disabling display")
+        return None
 
 
 def log(msg, tft=None, status_lines=None):
@@ -77,11 +87,16 @@ def log(msg, tft=None, status_lines=None):
         if len(status_lines) > 8:
             status_lines.pop(0)
         if tft is not None:
-            display_status(tft, status_lines)
+            tft = display_status(tft, status_lines)
+    return tft
 
 
 # ---- LXMF message handler ----
 
+# NOTE: This callback runs in a separate thread/task. The reply is buffered
+# in `last_reply` for the main loop to display. There is a brief race window
+# (after last_reply is consumed and before the next main loop iteration)
+# where a reply could be overwritten before being displayed.
 def handle_reply(message):
     """Callback invoked when an LXMF reply is received."""
     try:
@@ -107,7 +122,7 @@ def main():
 
     # Init display
     tft = init_display()
-    log("LMAO Cardputer Client — Booting...", tft, status_lines)
+    tft = log("LMAO Cardputer Client — Booting...", tft, status_lines)
 
     # Check µReticulum availability
     if RNS is None:
@@ -117,28 +132,28 @@ def main():
             time.sleep(1)
 
     # Initialize Reticulum
-    log("Init Reticulum...", tft, status_lines)
+    tft = log("Init Reticulum...", tft, status_lines)
     reticulum = RNS.Reticulum(config=config.config)
-    log("Reticulum OK.", tft, status_lines)
+    tft = log("Reticulum OK.", tft, status_lines)
 
-    # Create/load identity
+    # Create ephemeral identity (new each boot for POC)
     identity = RNS.Identity()
     identity_hex = RNS.hexrep(identity.hash, delimit=False)
-    log(f"ID: {identity_hex[:16]}...", tft, status_lines)
+    tft = log(f"ID: {identity_hex[:16]}...", tft, status_lines)
 
     # Start LXMF router
     router = LXMF.LXMRouter(identity=identity, storagepath="/flash/lxmf_state")
     router.register_delivery_callback(handle_reply)
-    log("LXMF router started.", tft, status_lines)
+    tft = log("LXMF router started.", tft, status_lines)
 
     # ---- Discovery: announce ourselves so server can find us ----
-    log("Announcing presence...", tft, status_lines)
+    tft = log("Announcing presence...", tft, status_lines)
     router.announce()
-    log("POC Ready.", tft, status_lines)
+    tft = log("POC Ready.", tft, status_lines)
 
     # Display "LMAO POC Ready" prominently
     if tft is not None:
-        display_status(tft, ["LMAO POC Ready", f"ID: {identity_hex[:24]}"])
+        tft = display_status(tft, ["LMAO POC Ready", f"ID: {identity_hex[:24]}"])
 
     # ---- Main loop: periodic hello + listen for replies ----
     seq = 0
@@ -148,40 +163,41 @@ def main():
         try:
             seq += 1
 
-            # If we know the server's identity, send a hello message
+            # If we know the server's identity, send a direct hello message
             if SERVER_IDENTITY_HASH is not None:
                 server_id = RNS.Identity.recall(SERVER_IDENTITY_HASH)
                 if server_id is not None:
                     hello_text = f"Hello from Cardputer — seq {seq}"
+                    content = make_poc_message(identity_hex, hello_text, timestamp=time.ticks_ms())
                     msg = LXMF.LXMessage(
                         destination=server_id,
                         source=identity,
-                        content=hello_text.encode("utf-8"),
+                        content=content,
                         title="p:Envelope",
                         desired_method=LXMF.LXMessage.OPPORTUNISTIC,
                     )
                     router.handle_outbound(msg)
-                    log(f"Sent: {hello_text}", tft, status_lines)
+                    tft = log(f"Sent: {hello_text}", tft, status_lines)
 
-            # Also send as an opportunistic broadcast (server hears all LoRa packets)
-            # This is the POC approach: no need to know the server's hash
+            # If no server hash known, send as an opportunistic broadcast (POC approach)
+            # The server receives all LoRa packets in range
             if SERVER_IDENTITY_HASH is None:
                 broadcast_text = f"Hello from Cardputer — seq {seq}"
-                # Create a broadcast LXMF message
-                # In the POC, we send to a broadcast-like destination
+                # Create protobuf-encoded payload
+                content = make_poc_message(identity_hex, broadcast_text, timestamp=time.ticks_ms())
                 msg = LXMF.LXMessage(
                     destination=None,  # Broadcast / opportunistic
                     source=identity,
-                    content=broadcast_text.encode("utf-8"),
+                    content=content,
                     title="p:Envelope",
                     desired_method=LXMF.LXMessage.OPPORTUNISTIC,
                 )
                 router.handle_outbound(msg)
-                log(f"Sent broadcast: {broadcast_text}", tft, status_lines)
+                tft = log(f"Sent broadcast: {broadcast_text}", tft, status_lines)
 
             # Display last reply if any
             if last_reply is not None:
-                log(f"Reply: {last_reply}", tft, status_lines)
+                tft = log(f"Reply: {last_reply}", tft, status_lines)
                 last_reply = None
 
             # Wait before next cycle (10 seconds for demo)
@@ -191,7 +207,7 @@ def main():
             log("Shutting down...", tft, status_lines)
             break
         except Exception as e:
-            log(f"Loop error: {e}", tft, status_lines)
+            tft = log(f"Loop error: {e}", tft, status_lines)
             time.sleep(5)
 
 

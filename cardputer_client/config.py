@@ -1,9 +1,12 @@
 """
 µReticulum configuration for M5Stack Cardputer ADV with LoRa antenna.
 
-The Cardputer uses its onboard SX1262/SX1276 LoRa radio directly
-(via SPI) rather than an external RNode. This config is loaded by
-µReticulum when running on MicroPython.
+The Cardputer uses its onboard SX1262 LoRa radio directly (via SPI)
+rather than an external RNode. This config is loaded by µReticulum
+when running on MicroPython.
+
+NOTE: This config targets the SX1262 (Cardputer ADV default).
+For SX1276-based boards, remove 'busy_pin' and adjust pin mappings.
 """
 
 config = {

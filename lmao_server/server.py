@@ -2,25 +2,34 @@
 LMAO Server — Reticulum + LXMF message handler.
 
 Runs on Raspberry Pi with an ESP32 RNode acting as a LoRa bridge.
-Listens for LXMF text messages from Cardputer clients and sends acknowledgements.
+Listens for LXMF messages from Cardputer clients and sends acknowledgements.
 """
 
 import sys
+import traceback
+import logging
 import time
+import atexit
+import shutil
 
 import RNS
 import LXMF
 
 # Local imports
 import config
+from proto.lma_pb2 import LMAOEnvelope, TextMessage
+
+logger = logging.getLogger(__name__)
 
 
 def handle_lxmf_delivery(message):
     """
     Callback invoked when an LXMF message is received.
 
-    The message content is a protobuf-encoded LMAOEnvelope with Title="p:Envelope".
-    For this POC, we expect TextMessage payloads and echo them back as a reply.
+    Attempts to decode incoming content as a protobuf LMAOEnvelope when
+    title="p:Envelope". Falls back to raw text for backward compatibility
+    with non-protobuf senders. Sends a protobuf-encoded TextMessage ACK
+    as a reply.
     """
     try:
         source_identity = message.get_source()
@@ -32,18 +41,43 @@ def handle_lxmf_delivery(message):
         print(f"  From: {source_hash}")
         print(f"  Title: {title}")
         print(f"  Content length: {len(content_bytes)} bytes")
-        print(f"  Content preview: {content_bytes[:200]}")
 
-        # For POC: if this looks like a text message, send a simple ACK reply
+        # Try protobuf decode first (matching the documented protocol)
+        display_text = None
+        envelope = LMAOEnvelope()
+        try:
+            envelope.ParseFromString(content_bytes)
+            if envelope.HasField('text'):
+                text_msg = envelope.text
+                display_text = text_msg.content
+                print(f"  Content (protobuf): {display_text}")
+        except Exception:
+            pass  # Fall through to raw text handling
+
+        if display_text is None:
+            # Fallback: treat content as raw UTF-8 text (backward compat)
+            try:
+                display_text = content_bytes.decode("utf-8")
+                print(f"  Content (raw text): {display_text}")
+            except UnicodeDecodeError:
+                display_text = f"<non-text: {len(content_bytes)} bytes>"
+                print(f"  Content: {display_text}")
+
+        # Build and send a protobuf-encoded ACK reply
         reply_text = f"ACK from LMAO Server — received your message ({len(content_bytes)} bytes)"
         print(f"  Reply: {reply_text}")
 
-        # Send reply as LXMF message back to the source
         if source_identity is not None and router is not None:
+            # Build protobuf envelope with TextMessage
+            reply_envelope = LMAOEnvelope()
+            reply_envelope.text.node_id = source_hash
+            reply_envelope.text.content = reply_text
+            reply_envelope.text.timestamp = int(time.time() * 1000)
+
             reply_msg = LXMF.LXMessage(
                 destination=source_identity,
                 source=server_identity,
-                content=reply_text.encode("utf-8"),
+                content=reply_envelope.SerializeToString(),
                 title="p:Envelope",
                 desired_method=LXMF.LXMessage.OPPORTUNISTIC,
             )
@@ -52,8 +86,12 @@ def handle_lxmf_delivery(message):
         else:
             print(f"  WARNING: Could not send reply (no source identity or router).")
 
+    except AttributeError as e:
+        logger.error("LXMF message missing expected attributes: %s", e, exc_info=True)
+    except (RNS.RNSException, LXMF.LXMFException) as e:
+        logger.error("RNS/LXMF error processing message: %s", e, exc_info=True)
     except Exception as e:
-        print(f"ERROR in handle_lxmf_delivery: {e}", file=sys.stderr)
+        logger.error("Unexpected error in handle_lxmf_delivery: %s", e, exc_info=True)
 
 
 # Globals set in main()
@@ -67,20 +105,34 @@ def main():
 
     # Initialize Reticulum with our config
     print("Initializing Reticulum...")
-    configdir = config.get_configdir()
-    reticulum = RNS.Reticulum(configdir=configdir)
+    try:
+        configdir = config.get_configdir()
+        atexit.register(lambda: shutil.rmtree(configdir, ignore_errors=True))
+        RNS.Reticulum(configdir=configdir)  # Initialize singleton (return value unused)
+    except Exception as e:
+        print(f"FATAL: Failed to initialize Reticulum: {e}", file=sys.stderr)
+        print("Check your config and RNode connection. See README Troubleshooting.", file=sys.stderr)
+        sys.exit(1)
     print("Reticulum initialized.")
 
     # Create identity for the server
-    server_identity = RNS.Identity()
+    try:
+        server_identity = RNS.Identity()
+    except Exception as e:
+        print(f"FATAL: Failed to create server identity: {e}", file=sys.stderr)
+        sys.exit(1)
     identity_hex = RNS.hexrep(server_identity.hash, delimit=False)
 
     # Create LXMF router with our identity
     print("Starting LXMF router...")
-    router = LXMF.LXMRouter(identity=server_identity, storagepath="/tmp/lmao_server_lxmf")
-    router.register_delivery_callback(handle_lxmf_delivery)
+    try:
+        router = LXMF.LXMRouter(identity=server_identity, storagepath="/tmp/lmao_server_lxmf")
+        router.register_delivery_callback(handle_lxmf_delivery)
+    except Exception as e:
+        print(f"FATAL: Failed to start LXMF router: {e}", file=sys.stderr)
+        sys.exit(1)
 
-    # Announce ourselves
+    # Print startup banner
     print(f"\n{'='*50}")
     print(f"LMAO Server POC — Running")
     print(f"Node identity: {identity_hex}")
