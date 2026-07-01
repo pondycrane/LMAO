@@ -147,8 +147,11 @@ cd lmao_server
 python3 -c "
 import config
 from RNS import Reticulum
-r = Reticulum(config.config)
+configdir = config.get_configdir()
+r = Reticulum(configdir=configdir)
 print('Reticulum started — RNode interface should be active')
+import shutil
+shutil.rmtree(configdir, ignore_errors=True)
 "
 ```
 

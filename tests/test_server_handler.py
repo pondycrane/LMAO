@@ -41,6 +41,16 @@ def server_with_mocks():
         "interfaces": {"RNode LoRa": {"port": "/dev/ttyUSB0"}},
     })
 
+    # Mock the protobuf module to avoid dependency on protobuf library
+    sys.modules["lmao_server.proto.lma_pb2"] = MagicMock()
+    sys.modules["lmao_server.proto.lma_pb2"].LMAOEnvelope = MagicMock()
+    sys.modules["lmao_server.proto.lma_pb2"].TextMessage = MagicMock()
+
+    # Configure mock envelope so protobuf decode raises DecodeError (triggering fallback)
+    mock_envelope = MagicMock()
+    mock_envelope.ParseFromString.side_effect = type("DecodeError", (Exception,), {})("Test decode error")
+    sys.modules["lmao_server.proto.lma_pb2"].LMAOEnvelope.return_value = mock_envelope
+
     import server
     server.router = MagicMock()
     server.server_identity = MagicMock()
@@ -52,6 +62,7 @@ def server_with_mocks():
     del sys.modules["RNS"]
     del sys.modules["LXMF"]
     del sys.modules["config"]
+    del sys.modules["lmao_server.proto.lma_pb2"]
     if "server" in sys.modules:
         del sys.modules["server"]
 

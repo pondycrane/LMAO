@@ -6,7 +6,6 @@ Listens for LXMF messages from Cardputer clients and sends acknowledgements.
 """
 
 import sys
-import traceback
 import logging
 import time
 import atexit
@@ -17,7 +16,9 @@ import LXMF
 
 # Local imports
 import config
-from proto.lma_pb2 import LMAOEnvelope, TextMessage
+from proto.lma_pb2 import LMAOEnvelope
+
+from google.protobuf.message import DecodeError
 
 logger = logging.getLogger(__name__)
 
@@ -26,10 +27,11 @@ def handle_lxmf_delivery(message):
     """
     Callback invoked when an LXMF message is received.
 
-    Attempts to decode incoming content as a protobuf LMAOEnvelope when
-    title="p:Envelope". Falls back to raw text for backward compatibility
-    with non-protobuf senders. Sends a protobuf-encoded TextMessage ACK
-    as a reply.
+    Decodes incoming content as a protobuf LMAOEnvelope. The protocol uses
+    title="p:Envelope" as a convention, but the handler attempts protobuf
+    decode unconditionally and falls back to raw UTF-8 text for backward
+    compatibility with non-protobuf senders. Sends a protobuf-encoded
+    TextMessage ACK as a reply.
     """
     try:
         source_identity = message.get_source()
@@ -51,8 +53,8 @@ def handle_lxmf_delivery(message):
                 text_msg = envelope.text
                 display_text = text_msg.content
                 print(f"  Content (protobuf): {display_text}")
-        except Exception:
-            pass  # Fall through to raw text handling
+        except DecodeError:
+            logger.warning("Protobuf parse failed, falling back to raw text", exc_info=True)
 
         if display_text is None:
             # Fallback: treat content as raw UTF-8 text (backward compat)
@@ -103,12 +105,22 @@ def main():
     """Initialize Reticulum, LXMF router, and enter main loop."""
     global router, server_identity
 
+    # Configure logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+    )
+
     # Initialize Reticulum with our config
     print("Initializing Reticulum...")
     try:
         configdir = config.get_configdir()
         atexit.register(lambda: shutil.rmtree(configdir, ignore_errors=True))
         RNS.Reticulum(configdir=configdir)  # Initialize singleton (return value unused)
+    except (OSError, PermissionError) as e:
+        print(f"FATAL: Failed to create config directory for Reticulum: {e}", file=sys.stderr)
+        print("Check that /tmp is writable and disk is not full.", file=sys.stderr)
+        sys.exit(1)
     except Exception as e:
         print(f"FATAL: Failed to initialize Reticulum: {e}", file=sys.stderr)
         print("Check your config and RNode connection. See README Troubleshooting.", file=sys.stderr)
