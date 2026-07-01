@@ -7,6 +7,7 @@ py_binary(
         "config.py",
     ],
     main = "server.py",
+    imports = ["."],
     visibility = ["//visibility:public"],
     deps = [
         "//lma_core",

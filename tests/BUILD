@@ -16,6 +16,7 @@ py_test(
     srcs = ["test_server_handler.py"],
     deps = [
         "//lmao_server:server",
+        "@lmao_pip//protobuf",
         "@lmao_pip//pytest",
     ],
 )
