@@ -1,13 +1,21 @@
 """Test suite for lma_encoder — protobuf compatibility tests."""
+import logging
 import pytest
 
 from cardputer_client.proto import lma_encoder as enc
+
+_logger = logging.getLogger(__name__)
 
 # Reference protobuf-generated encoder (only available with protobuf installed)
 try:
     from lma_core import LMAOEnvelope
     HAS_PROTOBUF = True
 except ImportError:
+    _logger.warning(
+        "Could not import LMAOEnvelope from lma_core. "
+        "Cross-validation tests will be skipped. "
+        "Run 'bazel build //proto:lma_py_proto' to generate protobuf stubs."
+    )
     HAS_PROTOBUF = False
 
 

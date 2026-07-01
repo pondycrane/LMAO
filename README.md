@@ -176,21 +176,35 @@ Also see the [rsCardputer radio presets](https://github.com/ratspeak/rsCardputer
 ```
 ├── README.md                          # This file
 ├── ARCHITECTURE.md                    # Full system architecture reference
+├── .bazelversion                      # Bazel version pin (7.4.1)
+├── MODULE.bazel                       # Bazel module definition
+│
+├── proto/                             # Canonical protobuf schema (single source of truth)
+│   ├── BUILD                          # Bazel: proto_library + py_proto_library targets
+│   └── lma.proto                      # Protobuf schema (all message types)
+│
+├── lma_core/                          # Shared Python wrapper library
+│   ├── BUILD                          # Bazel: py_library target
+│   └── __init__.py                    # Re-exports generated protobuf stubs
 │
 ├── lmao_server/                       # Python — runs on Raspberry Pi
+│   ├── BUILD                          # Bazel: py_binary target
 │   ├── requirements.txt               # Python dependencies (rns, lxmf, protobuf)
 │   ├── config.py                      # Reticulum config with RNode LoRa interface
-│   ├── server.py                      # Main server: RNS + LXMF router + echo handler
-│   └── proto/
-│       ├── lma.proto                  # Protobuf schema (all message types)
-│       └── lma_pb2.py                 # Generated Python protobuf stubs
+│   └── server.py                      # Main server: RNS + LXMF router + echo handler
 │
 ├── cardputer_client/                  # MicroPython — runs on M5Stack Cardputer
 │   ├── config.py                      # µReticulum config for onboard LoRa
 │   ├── main.py                        # Client: periodic hello + reply display
 │   └── proto/
+│       ├── BUILD                      # Bazel: py_library for host-side tests
 │       ├── lma.proto                  # Same protobuf schema (reference)
 │       └── lma_encoder.py             # Hand-coded minimal encoder (no protobuf dep)
+│
+├── tests/                             # Host-side tests (Bazel py_test targets)
+│   ├── BUILD                          # Bazel: py_test targets
+│   ├── test_lma_encoder.py            # Encoder round-trip + cross-validation tests
+│   └── test_server_handler.py         # Server handler unit tests (mocked RNS/LXMF)
 │
 └── rnode_firmware/                    # Documentation only
     └── README.md                      # Step-by-step ESP32 RNode flashing guide
@@ -240,7 +254,7 @@ This POC intentionally limits scope to:
 - ✅ LXMF acknowledgements
 - ✅ Protobuf-encoded payloads
 - ❌ No multi-hop / store-and-forward
-- ❌ No WiFi fallback
+- ✅ WiFi fallback (AutoInterface enabled when RNode is not connected)
 - ❌ No sensor integration
 - ❌ No image/audio/file transfer
 - ❌ No encryption key management

@@ -2,6 +2,7 @@
 from unittest.mock import MagicMock, patch
 import pytest
 import sys
+from google.protobuf.message import DecodeError
 
 
 @pytest.fixture
@@ -45,7 +46,8 @@ def server_with_mocks():
 
     # Configure mock envelope so protobuf decode raises DecodeError (triggering fallback)
     mock_envelope = MagicMock()
-    mock_envelope.ParseFromString.side_effect = type("DecodeError", (Exception,), {})("Test decode error")
+    mock_envelope.ParseFromString.side_effect = DecodeError("Test decode error")
+    mock_envelope.SerializeToString.return_value = b"mock-serialized-envelope"
     sys.modules["lma_core"].LMAOEnvelope.return_value = mock_envelope
 
     import server
@@ -66,7 +68,7 @@ def server_with_mocks():
 
 class TestHandleLXMFDelivery:
     def test_reply_sent_for_valid_message(self, server_with_mocks):
-        """Handle valid message and verify reply is sent."""
+        """Handle valid message and verify reply is sent with correct content."""
         server = server_with_mocks
 
         msg = MagicMock()
@@ -83,6 +85,10 @@ class TestHandleLXMFDelivery:
         call_kwargs = server.LXMF.LXMessage.call_args.kwargs
         assert call_kwargs["title"] == "p:Envelope"
         assert call_kwargs["destination"] == msg.get_source.return_value
+        # Verify reply content is a non-empty protobuf envelope
+        reply_content = call_kwargs.get("content")
+        assert reply_content is not None, "Reply must have content"
+        assert len(reply_content) > 0, "Reply envelope must not be empty"
 
     def test_no_reply_when_no_source(self, server_with_mocks):
         """Handle message with no source identity gracefully."""
@@ -144,3 +150,57 @@ class TestHandleLXMFDelivery:
         # Should not raise
         server.handle_lxmf_delivery(msg)
         server.router.handle_outbound.assert_not_called()
+
+    def test_protobuf_decode_success_path(self, server_with_mocks):
+        """Verify protobuf-decoded content is used when ParseFromString succeeds."""
+        server = server_with_mocks
+
+        # Reconfigure mock to simulate successful protobuf decode
+        mock_envelope = MagicMock()
+        mock_envelope.HasField.return_value = True
+        mock_envelope.text.content = "Hello from protobuf"
+        sys.modules["lma_core"].LMAOEnvelope.return_value = mock_envelope
+
+        msg = MagicMock()
+        msg.get_source.return_value = MagicMock()
+        msg.get_source.return_value.hash = b'\x04' * 16
+        msg.content = b"protobuf-bytes"
+        msg.title_as_string.return_value = "p:Envelope"
+
+        server.handle_lxmf_delivery(msg)
+
+        # Verify reply was sent
+        server.router.handle_outbound.assert_called_once()
+        call_kwargs = server.LXMF.LXMessage.call_args.kwargs
+        assert call_kwargs["title"] == "p:Envelope"
+
+    def test_protobuf_decode_non_text_field(self, server_with_mocks):
+        """Verify fallback when protobuf succeeds but has no text field."""
+        server = server_with_mocks
+
+        # Reconfigure mock: ParseFromString succeeds but HasField('text') is False
+        mock_envelope = MagicMock()
+        mock_envelope.HasField.return_value = False
+        sys.modules["lma_core"].LMAOEnvelope.return_value = mock_envelope
+
+        msg = MagicMock()
+        msg.get_source.return_value = MagicMock()
+        msg.get_source.return_value.hash = b'\x05' * 16
+        msg.content = b"non-text protobuf bytes"
+        msg.title_as_string.return_value = "p:Envelope"
+
+        server.handle_lxmf_delivery(msg)
+        server.router.handle_outbound.assert_called_once()
+
+    def test_handles_binary_content(self, server_with_mocks):
+        """Handler should not crash on binary non-decodable content."""
+        server = server_with_mocks
+
+        msg = MagicMock()
+        msg.get_source.return_value = MagicMock()
+        msg.get_source.return_value.hash = b'\x06' * 16
+        msg.content = b"\xff\xfe\xfd\xfc\x00"
+        msg.title_as_string.return_value = "p:Envelope"
+
+        server.handle_lxmf_delivery(msg)
+        server.router.handle_outbound.assert_called_once()

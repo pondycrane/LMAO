@@ -1,8 +1,9 @@
 load("@rules_python//python:defs.bzl", "py_library")
 
-# Host-side wrapper around the hand-coded MicroPython encoder.
-# The encoder itself lives in cardputer_client/ (excluded from Bazel
-# via .bazelignore), but is exposed as a py_library for test deps.
+# Hand-coded MicroPython protobuf encoder, exposed as a py_library for
+# host-side test targets.  cardputer_client/{main,config}.py are excluded
+# from Bazel via .bazelignore, but proto/ remains visible so that this
+# target is available to //tests:test_lma_encoder.
 py_library(
     name = "lma_encoder",
     srcs = ["lma_encoder.py"],

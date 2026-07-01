@@ -40,10 +40,8 @@ def handle_lxmf_delivery(message):
         content_bytes = message.content if hasattr(message, 'content') else b""
         title = message.title_as_string() if hasattr(message, 'title_as_string') else ""
 
-        print(f"\n--- Message Received ---")
-        print(f"  From: {source_hash}")
-        print(f"  Title: {title}")
-        print(f"  Content length: {len(content_bytes)} bytes")
+        logger.info("Message received — From: %s  Title: %s  Content length: %d bytes",
+                     source_hash, title, len(content_bytes))
 
         # Try protobuf decode first (matching the documented protocol)
         display_text = None
@@ -53,7 +51,14 @@ def handle_lxmf_delivery(message):
             if envelope.HasField('text'):
                 text_msg = envelope.text
                 display_text = text_msg.content
-                print(f"  Content (protobuf): {display_text}")
+                logger.info("Content (protobuf): %s", display_text)
+            else:
+                # Envelope decoded but contains a non-text payload.
+                # Only text messages are supported in this POC.
+                logger.warning(
+                    "Envelope contains non-text payload. "
+                    "Only text messages are supported in this POC. Falling back."
+                )
         except DecodeError:
             logger.warning("Protobuf parse failed, falling back to raw text", exc_info=True)
 
@@ -61,14 +66,14 @@ def handle_lxmf_delivery(message):
             # Fallback: treat content as raw UTF-8 text (backward compat)
             try:
                 display_text = content_bytes.decode("utf-8")
-                print(f"  Content (raw text): {display_text}")
+                logger.info("Content (raw text): %s", display_text)
             except UnicodeDecodeError:
                 display_text = f"<non-text: {len(content_bytes)} bytes>"
-                print(f"  Content: {display_text}")
+                logger.info("Content: %s", display_text)
 
         # Build and send a protobuf-encoded ACK reply
         reply_text = f"ACK from LMAO Server — received your message ({len(content_bytes)} bytes)"
-        print(f"  Reply: {reply_text}")
+        logger.info("Reply: %s", reply_text)
 
         if source_identity is not None and router is not None:
             # Build protobuf envelope with TextMessage
@@ -85,9 +90,9 @@ def handle_lxmf_delivery(message):
                 desired_method=LXMF.LXMessage.OPPORTUNISTIC,
             )
             router.handle_outbound(reply_msg)
-            print(f"  Reply sent.")
+            logger.info("Reply sent.")
         else:
-            print(f"  WARNING: Could not send reply (no source identity or router).")
+            logger.warning("Could not send reply (no source identity or router).")
 
     except AttributeError as e:
         logger.error("LXMF message missing expected attributes: %s", e, exc_info=True)
@@ -151,7 +156,8 @@ def main():
     try:
         server_identity = RNS.Identity()
     except Exception as e:
-        print(f"FATAL: Failed to create server identity: {e}", file=sys.stderr)
+        logger.critical("Failed to create server identity: %s", e, exc_info=True)
+        print("FATAL: Failed to create server identity. See log for details.", file=sys.stderr)
         sys.exit(1)
     identity_hex = RNS.hexrep(server_identity.hash, delimit=False)
 
@@ -161,7 +167,8 @@ def main():
         router = LXMF.LXMRouter(identity=server_identity, storagepath="/tmp/lmao_server_lxmf")
         router.register_delivery_callback(handle_lxmf_delivery)
     except Exception as e:
-        print(f"FATAL: Failed to start LXMF router: {e}", file=sys.stderr)
+        logger.critical("Failed to start LXMF router: %s", e, exc_info=True)
+        print("FATAL: Failed to start LXMF router. See log for details.", file=sys.stderr)
         sys.exit(1)
 
     # Print startup banner
