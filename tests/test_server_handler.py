@@ -1,5 +1,5 @@
 """Tests for server message handler (with mocked RNS/LXMF)."""
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, patch, PropertyMock
 import pytest
 import sys
 from google.protobuf.message import DecodeError
@@ -64,6 +64,138 @@ def server_with_mocks():
     del sys.modules["lma_core"]
     if "server" in sys.modules:
         del sys.modules["server"]
+
+
+@pytest.fixture
+def server_with_main_mocks():
+    """Set up mocks for testing server.main() with simulated Reticulum/LXMF.
+
+    Provides a fresh import of the server module with all external
+    dependencies mocked. Call server.main() to exercise the startup path.
+    The main loop is terminated via KeyboardInterrupt raised from time.sleep.
+    """
+    if "server" in sys.modules:
+        del sys.modules["server"]
+
+    # Mock external Python modules
+    sys.modules["RNS"] = MagicMock()
+    sys.modules["LXMF"] = MagicMock()
+    sys.modules["config"] = MagicMock()
+    sys.modules["lma_core"] = MagicMock()
+    sys.modules["lma_core"].LMAOEnvelope = MagicMock()
+    sys.modules["lma_core"].TextMessage = MagicMock()
+
+    # Mock RNS types
+    sys.modules["RNS"].RNSException = type("RNSException", (Exception,), {})
+    sys.modules["RNS"].hexrep = MagicMock(return_value="testhash1234")
+    sys.modules["RNS"].Identity = MagicMock()
+    sys.modules["RNS"].Reticulum = MagicMock()
+
+    # Mock LXMF types
+    sys.modules["LXMF"].LXMFException = type("LXMFException", (Exception,), {})
+    sys.modules["LXMF"].LXMessage = MagicMock()
+    sys.modules["LXMF"].LXMessage.OPPORTUNISTIC = 1
+    sys.modules["LXMF"].LXMRouter = MagicMock()
+
+    # Mock config module
+    sys.modules["config"].get_configdir = MagicMock(return_value="/tmp/test_config")
+    sys.modules["config"].get_config_dict = MagicMock(return_value={
+        "interfaces": {"RNode LoRa": {"port": "/dev/ttyUSB0"}},
+    })
+
+    # Import server after mocks are set up
+    import server
+
+    yield server
+
+    # Cleanup
+    for mod in ["RNS", "LXMF", "config", "lma_core", "server"]:
+        if mod in sys.modules:
+            del sys.modules[mod]
+
+
+class TestMain:
+    """Tests for server.main() startup and initialization."""
+
+    def test_main_successful_startup(self, server_with_main_mocks):
+        """main() should initialize Reticulum and LXMF router, then loop until KeyboardInterrupt."""
+        server = server_with_main_mocks
+
+        # Configure mocks for happy path
+        mock_identity = MagicMock()
+        type(mock_identity).hash = PropertyMock(return_value=b'\x01' * 16)
+        sys.modules["RNS"].Identity.return_value = mock_identity
+
+        # Trigger KeyboardInterrupt to exit the infinite loop
+        with patch.object(server.time, "sleep", side_effect=KeyboardInterrupt):
+            with pytest.raises(SystemExit) as exc:
+                server.main()
+
+        assert exc.value.code == 0, "Should exit with code 0 on KeyboardInterrupt"
+
+        # Verify Reticulum was initialized
+        sys.modules["RNS"].Reticulum.assert_called_once()
+
+        # Verify identity was created
+        sys.modules["RNS"].Identity.assert_called_once()
+
+        # Verify LXMF router was created and callback registered
+        sys.modules["LXMF"].LXMRouter.assert_called_once_with(
+            identity=mock_identity, storagepath="/tmp/lmao_server_lxmf"
+        )
+        mock_router = sys.modules["LXMF"].LXMRouter.return_value
+        mock_router.register_delivery_callback.assert_called_once_with(server.handle_lxmf_delivery)
+
+    @pytest.mark.parametrize("rnode_exists,expected_substr", [
+        (True, "RNode on /dev/ttyUSB0"),
+        (False, "RNode not connected"),
+    ])
+    def test_banner_reflects_rnode_status(self, server_with_main_mocks, rnode_exists, expected_substr, capsys):
+        """Banner should show RNode status or warning based on port existence."""
+        server = server_with_main_mocks
+
+        mock_identity = MagicMock()
+        type(mock_identity).hash = PropertyMock(return_value=b'\x01' * 16)
+        sys.modules["RNS"].Identity.return_value = mock_identity
+
+        with patch.object(server.os.path, "exists", return_value=rnode_exists), \
+             patch.object(server.time, "sleep", side_effect=KeyboardInterrupt):
+            with pytest.raises(SystemExit):
+                server.main()
+
+        captured = capsys.readouterr()
+        assert expected_substr in captured.out, (
+            f"Expected '{expected_substr}' in banner output when rnode_exists={rnode_exists}"
+        )
+
+        # When RNode is missing, warning should be printed before banner
+        if not rnode_exists:
+            assert "not found" in captured.out, "Should print RNode-not-found warning"
+
+    @pytest.mark.parametrize("exc_cls_name,exc_msg,expected_err", [
+        ("PermissionError", "Permission denied", "FATAL"),
+        ("OSError", "Disk full", "FATAL"),
+        ("RNSException", "RNS init failed", "FATAL"),
+        ("Exception", "Generic error", "FATAL"),
+    ])
+    def test_ret_init_failure_handling(self, server_with_main_mocks, exc_cls_name, exc_msg, expected_err, capsys):
+        """main() should print fatal error and exit(1) when Reticulum init fails."""
+        server = server_with_main_mocks
+
+        # Resolve exception class from name
+        if exc_cls_name == "RNSException":
+            exc_cls = sys.modules["RNS"].RNSException
+        else:
+            exc_cls = getattr(__builtins__, exc_cls_name, type(exc_cls_name, (Exception,), {}))
+
+        with patch.object(server.os.path, "exists", return_value=True), \
+             patch.object(server.RNS, "Reticulum", side_effect=exc_cls(exc_msg)):
+            with pytest.raises(SystemExit) as exc:
+                server.main()
+
+        assert exc.value.code == 1, "Should exit with code 1 on initialization failure"
+        captured = capsys.readouterr()
+        assert expected_err in captured.out, "Output should indicate FATAL error"
 
 
 class TestHandleLXMFDelivery:
