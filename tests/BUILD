@@ -39,3 +39,13 @@ py_test(
     # The test auto-skips when hardware is not detected.
     tags = ["e2e", "requires_hardware"],
 )
+
+py_test(
+    name = "test_flash",
+    srcs = ["test_flash.py"],
+    deps = [
+        "//cardputer_client:flash_lib",
+        "@lmao_pip//pyserial",
+        "@lmao_pip//pytest",
+    ],
+)

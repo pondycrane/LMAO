@@ -74,17 +74,16 @@ def _probe_hardware():
 
     # Try opening the port and entering raw REPL to verify MicroPython
     try:
-        ser = serial.Serial(_CARDCOMPUTER_PORT, 115200, timeout=1)
-        time.sleep(0.6)
-        ok = cardputer_flash.enter_raw_repl(ser)
-        ser.close()
-        if ok:
-            _HARDWARE_READY = True
-        else:
-            _HARDWARE_REASON = (
-                f"Device at {_CARDCOMPUTER_PORT} does not respond to MicroPython "
-                "raw REPL. Is the Cardputer running MicroPython?"
-            )
+        with serial.Serial(_CARDCOMPUTER_PORT, 115200, timeout=1) as ser:
+            time.sleep(0.6)
+            ok = cardputer_flash.enter_raw_repl(ser)
+            if ok:
+                _HARDWARE_READY = True
+            else:
+                _HARDWARE_REASON = (
+                    f"Device at {_CARDCOMPUTER_PORT} does not respond to MicroPython "
+                    "raw REPL. Is the Cardputer running MicroPython?"
+                )
     except Exception as exc:
         _HARDWARE_REASON = f"Cannot communicate with {_CARDCOMPUTER_PORT}: {exc}"
 
