@@ -1,0 +1,17 @@
+# Locked pip requirements for LMAO server (with transitive dependencies).
+# Includes test dependencies (pytest).
+# Generated manually from lmao_server/requirements.txt.
+# TODO: Run pip-compile for exact hashes before production deployment.
+
+protobuf==6.33.6
+rns==1.3.5
+lxmf==1.0.1
+cryptography==46.0.5
+cffi==2.0.0
+pycparser==3.0
+pyserial==3.5
+pytest==9.1.1
+iniconfig==2.3.0
+packaging==26.0
+pluggy==1.6.0
+pygments==2.19.2

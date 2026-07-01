@@ -23,5 +23,9 @@ Thumbs.db
 # MicroPython
 *.mpy
 
+# Bazel
+bazel-*
+MODULE.bazel.lock
+
 # Temp files
 /tmp/

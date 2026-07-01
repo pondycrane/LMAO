@@ -47,13 +47,36 @@ After flashing, verify:
 rnodeconf --port /dev/ttyUSB0 --info
 ```
 
-### 2. Install Server Dependencies
+### 2. Build & Install Server Dependencies
 
-On your Raspberry Pi:
+The canonical build system is [Bazel](https://bazel.build/) (see `.bazelversion` for the
+required version). Bazel generates protobuf stubs, resolves Python dependencies, and runs tests.
+
+**Option A — Bazel (recommended):**
 
 ```bash
-cd lmao_server
-pip3 install -r requirements.txt
+# Build everything (generates protobuf stubs, installs deps)
+bazel build //lmao_server
+
+# Run the server
+bazel run //lmao_server
+```
+
+**Option B — pip (no Bazel):**
+
+If you prefer to run without Bazel, you must first generate the protobuf stubs manually,
+then install dependencies with pip:
+
+```bash
+# Generate protobuf Python stubs (required by lma_core)
+protoc --python_out=. proto/lma.proto
+# The generated file will be at proto/lma_pb2.py
+
+# Install Python dependencies
+cd lmao_server && pip3 install -r requirements.txt
+
+# Run from repo root with PYTHONPATH including both lmao_server/ (for config) and repo root
+cd .. && PYTHONPATH="$PWD/lmao_server:$PWD" python3 lmao_server/server.py
 ```
 
 ### 3. Configure the Server
@@ -78,11 +101,14 @@ Edit `lmao_server/config.py` to adjust radio parameters:
 ### 4. Start the Server
 
 ```bash
-cd lmao_server
-python3 server.py
+# Using Bazel (recommended)
+bazel run //lmao_server
+
+# Or without Bazel (from repo root, with PYTHONPATH including lmao_server/)
+PYTHONPATH="$PWD/lmao_server:$PWD" python3 lmao_server/server.py
 ```
 
-Expected output:
+Expected output (same for both methods):
 
 ```
 Initializing Reticulum...
@@ -176,21 +202,35 @@ Also see the [rsCardputer radio presets](https://github.com/ratspeak/rsCardputer
 ```
 ├── README.md                          # This file
 ├── ARCHITECTURE.md                    # Full system architecture reference
+├── .bazelversion                      # Bazel version pin (7.4.1)
+├── MODULE.bazel                       # Bazel module definition
+│
+├── proto/                             # Canonical protobuf schema (single source of truth)
+│   ├── BUILD                          # Bazel: proto_library + py_proto_library targets
+│   └── lma.proto                      # Protobuf schema (all message types)
+│
+├── lma_core/                          # Shared Python wrapper library
+│   ├── BUILD                          # Bazel: py_library target
+│   └── __init__.py                    # Re-exports generated protobuf stubs
 │
 ├── lmao_server/                       # Python — runs on Raspberry Pi
+│   ├── BUILD                          # Bazel: py_binary target
 │   ├── requirements.txt               # Python dependencies (rns, lxmf, protobuf)
 │   ├── config.py                      # Reticulum config with RNode LoRa interface
-│   ├── server.py                      # Main server: RNS + LXMF router + echo handler
-│   └── proto/
-│       ├── lma.proto                  # Protobuf schema (all message types)
-│       └── lma_pb2.py                 # Generated Python protobuf stubs
+│   └── server.py                      # Main server: RNS + LXMF router + echo handler
 │
 ├── cardputer_client/                  # MicroPython — runs on M5Stack Cardputer
 │   ├── config.py                      # µReticulum config for onboard LoRa
 │   ├── main.py                        # Client: periodic hello + reply display
 │   └── proto/
+│       ├── BUILD                      # Bazel: py_library for host-side tests
 │       ├── lma.proto                  # Same protobuf schema (reference)
 │       └── lma_encoder.py             # Hand-coded minimal encoder (no protobuf dep)
+│
+├── tests/                             # Host-side tests (Bazel py_test targets)
+│   ├── BUILD                          # Bazel: py_test targets
+│   ├── test_lma_encoder.py            # Encoder round-trip + cross-validation tests
+│   └── test_server_handler.py         # Server handler unit tests (mocked RNS/LXMF)
 │
 └── rnode_firmware/                    # Documentation only
     └── README.md                      # Step-by-step ESP32 RNode flashing guide
@@ -240,7 +280,7 @@ This POC intentionally limits scope to:
 - ✅ LXMF acknowledgements
 - ✅ Protobuf-encoded payloads
 - ❌ No multi-hop / store-and-forward
-- ❌ No WiFi fallback
+- ✅ WiFi fallback (AutoInterface enabled when RNode is not connected)
 - ❌ No sensor integration
 - ❌ No image/audio/file transfer
 - ❌ No encryption key management
@@ -261,7 +301,7 @@ For the full system design, see [`ARCHITECTURE.md`](ARCHITECTURE.md).
 | No LoRa packets | Both devices on same frequency? In range? |
 | Cardputer display blank | ST7789 driver installed? SPI pins correct? |
 | "Permission denied" on serial | `sudo usermod -a -G dialout $USER` |
-| Protobuf import error | Run `pip3 install -r lmao_server/requirements.txt` |
+| Protobuf import error | Bazel: run `bazel build //proto:lma_py_proto`. Without Bazel: run `protoc --python_out=. proto/lma.proto` from repo root, then set `PYTHONPATH="$PWD"` when running the server. |
 
 ---
 
