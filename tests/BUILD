@@ -20,3 +20,32 @@ py_test(
         "@lmao_pip//pytest",
     ],
 )
+
+py_test(
+    name = "test_cardputer_e2e",
+    srcs = ["e2e/test_cardputer_flash.py"],
+    main = "e2e/test_cardputer_flash.py",
+    data = [
+        "//cardputer_client:config.py",
+        "//cardputer_client:main.py",
+        "//cardputer_client/proto:lma_encoder.py",
+    ],
+    deps = [
+        "//cardputer_client:flash_lib",
+        "@lmao_pip//pyserial",
+        "@lmao_pip//pytest",
+    ],
+    # E2E test requires physical Cardputer hardware connected via USB.
+    # The test auto-skips when hardware is not detected.
+    tags = ["e2e", "requires_hardware"],
+)
+
+py_test(
+    name = "test_flash",
+    srcs = ["test_flash.py"],
+    deps = [
+        "//cardputer_client:flash_lib",
+        "@lmao_pip//pyserial",
+        "@lmao_pip//pytest",
+    ],
+)

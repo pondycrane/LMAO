@@ -217,3 +217,9 @@ class TestEdgeCases:
         result = enc.encode_field(1, 2, payload)
         expected = b"\x0a\x03abc"
         assert result == expected, f"Expected {expected.hex()}, got {result.hex()}"
+
+
+if __name__ == "__main__":
+    import pytest
+    import sys
+    sys.exit(pytest.main([__file__] + sys.argv[1:]))
