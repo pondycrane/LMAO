@@ -58,9 +58,22 @@ pip3 install -r requirements.txt
 
 ### 3. Configure the Server
 
-Edit `lmao_server/config.py`:
-- Set the correct serial port (`/dev/ttyUSB0` or `/dev/ttyACM0`)
-- Set the correct frequency for your region (868 MHz EU / 915 MHz US)
+The RNode port is auto-detected from common ports (`/dev/ttyUSB0`, `/dev/ttyACM0`, etc.).
+Override with the `LMAO_RNODE_PORT` environment variable:
+
+```bash
+# Auto-detect (default)
+python3 server.py
+
+# Or specify the port explicitly
+LMAO_RNODE_PORT=/dev/ttyACM0 python3 server.py
+```
+
+If no RNode is connected, the server starts in WiFi-only mode with a warning.
+
+Edit `lmao_server/config.py` to adjust radio parameters:
+- Set `frequency` for your region (868 MHz EU / 915 MHz US)
+- Set `spreadingfactor`, `bandwidth`, `txpower` — **must match the client**
 
 ### 4. Start the Server
 
@@ -85,7 +98,9 @@ Listening for LXMF messages...
 ==================================================
 ```
 
-### 5. Flash the Cardputer
+### 5. Flash / Prepare the Cardputer
+
+**Option A — MicroPython + cardputer_client** (lighter weight, requires setup):
 
 Copy the `cardputer_client/` directory to your Cardputer (via Thonny, ampy, or
 MicroPython WebREPL):
@@ -103,6 +118,48 @@ The Cardputer will auto-run `main.py` on boot and display:
 LMAO POC Ready
 ID: a1b2c3d4...
 ```
+
+**Option B — rsCardputer native firmware** (recommended, pre-built binary):
+
+Flash the [rsCardputer](https://github.com/ratspeak/rsCardputer) dual-mode firmware
+for a full LXMF messenger with display, keyboard, and LoRa support out of the box:
+
+```bash
+# Using esptool (download the full firmware zip first)
+esptool.py --chip esp32s3 --port /dev/ttyACM0 write-flash 0x0 rscardputer-full.bin
+```
+
+See [rsCardputer README](https://github.com/ratspeak/rsCardputer) for details.
+Either option works with the LMAO server — both use the same Reticulum/LXMF protocol.
+
+### Radio Parameter Compatibility
+
+**All LoRa devices must use identical radio parameters to communicate.**
+
+The server defaults to fast/short-range settings. If using rsCardputer firmware
+(which defaults to Long Fast: SF11, BW250 kHz), update the server config to match:
+
+```python
+# In lmao_server/config.py, update the RNode LoRa interface:
+{
+    "type": "RNodeInterface",
+    "port": "/dev/ttyUSB0",
+    "frequency": 868000000,
+    "bandwidth": 250000,        # Match client
+    "spreadingfactor": 11,       # Match client
+    "codingrate": 5,
+    "txpower": 17,
+}
+```
+
+| Parameter | LMAO default (fast) | rsCardputer default (Long Fast) |
+|-----------|--------------------|-------------------------------|
+| SF | 7 | 11 |
+| BW | 125 kHz | 250 kHz |
+| Bitrate | 10.84 kbps | 1.07 kbps |
+| Link budget | 143 dB | 153 dB |
+
+Also see the [rsCardputer radio presets](https://github.com/ratspeak/rsCardputer?tab=readme-ov-file#radio-presets) for other options.
 
 ### 6. Test Communication
 
@@ -197,7 +254,10 @@ For the full system design, see [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
 | Problem | Check |
 |---------|-------|
-| Server can't find RNode | Is ESP32 plugged in? Correct port in config.py? |
+| Server can't find RNode | Is ESP32 plugged in? Set `LMAO_RNODE_PORT` or check auto-detected port |
+| Server hangs with no output | RNode port not found — the server now warns and starts in WiFi-only mode. Check `LMAO_RNODE_PORT`. |
+| No LoRa packets despite devices on same frequency | Check **all** radio parameters match: SF, BW, CR, and TXP (not just frequency) |
+| Cardputer has µReticulum firmware, not MicroPython | That's expected with rsCardputer firmware — it's a valid LXMF client. Use Option B above. |
 | No LoRa packets | Both devices on same frequency? In range? |
 | Cardputer display blank | ST7789 driver installed? SPI pins correct? |
 | "Permission denied" on serial | `sudo usermod -a -G dialout $USER` |
