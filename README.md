@@ -75,8 +75,8 @@ protoc --python_out=. proto/lma.proto
 # Install Python dependencies
 cd lmao_server && pip3 install -r requirements.txt
 
-# Run from repo root with PYTHONPATH set
-cd .. && PYTHONPATH="$PWD" python3 lmao_server/server.py
+# Run from repo root with PYTHONPATH including both lmao_server/ (for config) and repo root
+cd .. && PYTHONPATH="$PWD/lmao_server:$PWD" python3 lmao_server/server.py
 ```
 
 ### 3. Configure the Server
@@ -104,8 +104,8 @@ Edit `lmao_server/config.py` to adjust radio parameters:
 # Using Bazel (recommended)
 bazel run //lmao_server
 
-# Or without Bazel (from repo root, with PYTHONPATH set)
-PYTHONPATH="$PWD" python3 lmao_server/server.py
+# Or without Bazel (from repo root, with PYTHONPATH including lmao_server/)
+PYTHONPATH="$PWD/lmao_server:$PWD" python3 lmao_server/server.py
 ```
 
 Expected output (same for both methods):

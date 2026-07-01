@@ -134,10 +134,12 @@ def main():
         atexit.register(lambda: shutil.rmtree(configdir, ignore_errors=True))
         RNS.Reticulum(configdir=configdir)  # Initialize singleton (return value unused)
     except (OSError, PermissionError) as e:
+        logger.critical("Failed to create config directory for Reticulum: %s", e, exc_info=True)
         print(f"FATAL: Failed to create config directory for Reticulum: {e}", file=sys.stderr)
         print("Check that /tmp is writable and disk is not full.", file=sys.stderr)
         sys.exit(1)
     except RNS.RNSException as e:
+        logger.critical("Reticulum initialization failed: %s", e, exc_info=True)
         print(f"FATAL: Reticulum initialization failed: {e}", file=sys.stderr)
         print(f"This is often caused by a missing or misconfigured RNode on {rnode_port}.")
         print("Check that:")
@@ -147,6 +149,7 @@ def main():
         print("  See rnode_firmware/README.md and README Troubleshooting.")
         sys.exit(1)
     except Exception as e:
+        logger.critical("Failed to initialize Reticulum: %s", e, exc_info=True)
         print(f"FATAL: Failed to initialize Reticulum: {e}", file=sys.stderr)
         print("Check your config and RNode connection. See README Troubleshooting.", file=sys.stderr)
         sys.exit(1)
