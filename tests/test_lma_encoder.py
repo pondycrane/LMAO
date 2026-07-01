@@ -1,15 +1,11 @@
 """Test suite for lma_encoder — protobuf compatibility tests."""
 import pytest
-import sys
-import os
 
-# Add lma_encoder to path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "cardputer_client"))
-from proto import lma_encoder as enc
+from cardputer_client.proto import lma_encoder as enc
 
-# Reference protobuf-generated encoder (only available on server-side)
+# Reference protobuf-generated encoder (only available with protobuf installed)
 try:
-    from lmao_server.proto import lma_pb2
+    from lma_core import LMAOEnvelope
     HAS_PROTOBUF = True
 except ImportError:
     HAS_PROTOBUF = False
@@ -100,7 +96,7 @@ class TestCrossValidation:
     @pytest.mark.skipif(not HAS_PROTOBUF, reason="protobuf library not available")
     def test_byte_identical_to_protobuf(self):
         """Verify hand-coded encoder produces same bytes as protobuf library."""
-        msg = lma_pb2.LMAOEnvelope()
+        msg = LMAOEnvelope()
         msg.text.node_id = "cross-node"
         msg.text.content = "Cross-validation test"
         msg.text.timestamp = 1234567890

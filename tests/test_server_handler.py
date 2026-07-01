@@ -2,9 +2,6 @@
 from unittest.mock import MagicMock, patch
 import pytest
 import sys
-import os
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lmao_server"))
 
 
 @pytest.fixture
@@ -41,15 +38,15 @@ def server_with_mocks():
         "interfaces": {"RNode LoRa": {"port": "/dev/ttyUSB0"}},
     })
 
-    # Mock the protobuf module to avoid dependency on protobuf library
-    sys.modules["lmao_server.proto.lma_pb2"] = MagicMock()
-    sys.modules["lmao_server.proto.lma_pb2"].LMAOEnvelope = MagicMock()
-    sys.modules["lmao_server.proto.lma_pb2"].TextMessage = MagicMock()
+    # Mock the lma_core module (new Bazel import path)
+    sys.modules["lma_core"] = MagicMock()
+    sys.modules["lma_core"].LMAOEnvelope = MagicMock()
+    sys.modules["lma_core"].TextMessage = MagicMock()
 
     # Configure mock envelope so protobuf decode raises DecodeError (triggering fallback)
     mock_envelope = MagicMock()
     mock_envelope.ParseFromString.side_effect = type("DecodeError", (Exception,), {})("Test decode error")
-    sys.modules["lmao_server.proto.lma_pb2"].LMAOEnvelope.return_value = mock_envelope
+    sys.modules["lma_core"].LMAOEnvelope.return_value = mock_envelope
 
     import server
     server.router = MagicMock()
@@ -62,7 +59,7 @@ def server_with_mocks():
     del sys.modules["RNS"]
     del sys.modules["LXMF"]
     del sys.modules["config"]
-    del sys.modules["lmao_server.proto.lma_pb2"]
+    del sys.modules["lma_core"]
     if "server" in sys.modules:
         del sys.modules["server"]
 

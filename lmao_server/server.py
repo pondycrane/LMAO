@@ -17,7 +17,7 @@ import LXMF
 
 # Local imports
 import config
-from proto.lma_pb2 import LMAOEnvelope
+from lma_core import LMAOEnvelope
 
 from google.protobuf.message import DecodeError
 

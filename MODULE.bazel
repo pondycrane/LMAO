@@ -1,0 +1,35 @@
+"""LMAO monorepo — Reticulum + LXMF messaging."""
+
+module(
+    name = "lmao",
+    version = "0.1.0",
+)
+
+# ── Bazel core dependencies ──────────────────────────────────────────
+
+bazel_dep(name = "rules_proto", version = "7.1.0")
+bazel_dep(name = "protobuf", version = "29.3")
+bazel_dep(name = "rules_python", version = "1.2.0")
+
+# ── Python toolchain ─────────────────────────────────────────────────
+
+python = use_extension("@rules_python//python/extensions:python.bzl", "python")
+python.toolchain(
+    python_version = "3.13",
+    ignore_root_user_error = True,
+)
+
+# ── pip dependencies for server ──────────────────────────────────────
+
+pip = use_extension("@rules_python//python/extensions:pip.bzl", "pip")
+pip.parse(
+    hub_name = "lmao_pip",
+    python_version = "3.13",
+    requirements_lock = "//lmao_server:requirements_lock.txt",
+)
+use_repo(pip, "lmao_pip")
+
+# ── Placeholder for future multi-language support ───────────────────
+
+# bazel_dep(name = "rules_kotlin", version = "...")
+# bazel_dep(name = "nanopb", version = "...")
