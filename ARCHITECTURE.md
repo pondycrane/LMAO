@@ -64,6 +64,14 @@ Interfaces    │  LoRa (RNode) · WiFi (AutoInterface) · TCP/UDP · Serial
 
 ### Where it lives
 
+The canonical protobuf schema lives at `proto/lma.proto` (was `lmao_server/proto/lma.proto`).
+Generated stubs are produced by Bazel at build time and are **not** checked in.
+Python code imports via the `lma_core` wrapper:
+
+```python
+from lma_core import LMAOEnvelope, TextMessage
+```
+
 Replace the msgpack `Fields` dict with a **protobuf blob inside Content**:
 
 ```
@@ -123,11 +131,48 @@ message CallSignal {
 // ... TextMessage, AudioMessage, ImageMessage, CommandAck follow similar patterns
 ```
 
+### Build System Integration (Bazel)
+
+The project uses [Bazel](https://bazel.build/) (v7.4.1) for hermetic builds and
+proto code generation. See `.bazelversion` and `MODULE.bazel`.
+
+#### Key Targets
+
+| Target | Description |
+|--------|-------------|
+| `//proto:lma_proto` | Raw proto library (language-agnostic) |
+| `//proto:lma_py_proto` | Python generated protobuf stubs |
+| `//lma_core` | Shared Python wrapper re-exporting proto stubs |
+| `//lmao_server` | Server binary (RNode + LXMF) |
+| `//tests:test_lma_encoder` | Encoder compatibility tests |
+| `//tests:test_server_handler` | Server handler tests |
+
+#### Proto Schema
+
+The canonical protobuf schema lives at `proto/lma.proto` (was `lmao_server/proto/lma.proto`).
+Generated stubs (`lma_pb2.py`) are produced by Bazel at build time and are **not** checked in.
+
+#### Common Commands
+
+```bash
+# Build everything
+bazel build //proto:all //lma_core //lmao_server //tests:all
+
+# Run tests
+bazel test //tests:all
+
+# Generate protobuf stubs explicitly
+bazel build //proto:lma_py_proto
+```
+
+Multi-language stubs (Go, Kotlin, nanopb) are planned but not yet wired — see
+the placeholder comments in `proto/BUILD`.
+
 ### Per-platform codegen
 
 | Platform | Tool | Notes |
 |----------|------|-------|
-| **LMAO Server (Python)** | `protoc --python_out=` | Full `protobuf` library |
+| **LMAO Server (Python)** | Bazel + `py_proto_library` | Full `protobuf` library, stubs generated at build time |
 | **LMAO IoT (µReticulum)** | **nanopb** compiled as native `.mpy` | <10 KB RAM, static buffers, no malloc |
 | **LMAO IoT (alt)** | Hand-written minimal encoder in MicroPython | Only encodes SensorReport, decodes CommandRequest |
 | **Android (optional fork)** | `protoc --kotlin_out=` | If you build a custom Sideband |
