@@ -1,0 +1,6 @@
+# MicroPython firmware files that aren't buildable by Bazel.
+# The cardputer_client/proto/ subdirectory is NOT excluded because
+# lma_encoder.py is used in host-side test targets.
+
+cardputer_client/main.py
+cardputer_client/config.py
