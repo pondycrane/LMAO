@@ -36,7 +36,7 @@ server and an M5Stack Cardputer ADV client using the
 | ESP32 RNode | Flashed with RNode firmware |
 | Cardputer ADV | M5Stack Cardputer with LoRa antenna, MicroPython installed |
 | LoRa band | Matching frequency (868 MHz EU / 915 MHz US) |
-| Bazel | v7.4.1 (see `.bazelversion`) — [install guide](https://bazel.build/install) |
+| Bazel | v7.4.1 (see `.bazelversion`) — use [bazelisk](https://github.com/bazelbuild/bazelisk) (auto-selects correct version via `.bazelversion`). Install: `npm install -g @bazel/bazelisk`. Ensure `~/.npm-global/bin` (or your npm global bin dir) is in `PATH`. |
 
 ### 1. Flash the ESP32 RNode
 
