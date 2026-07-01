@@ -38,6 +38,30 @@ FILES_TO_UPLOAD = [
     "proto/lma_encoder.py",
 ]
 
+# ---- Path helpers ----
+
+
+def _sanitize_path_for_script(path: str) -> str:
+    """Validate and escape a remote path for embedding in a MicroPython
+    string literal.
+
+    Raises *ValueError* when the path contains backslashes or non-printable
+    characters that cannot be safely escaped.  Single-quotes are escaped so
+    they do not break the generated MicroPython string.
+    """
+    if "\\" in path:
+        raise ValueError(
+            f"Path contains backslash, cannot safely embed in script: {path!r}"
+        )
+    # Escape single quotes for the MicroPython string literal
+    path = path.replace("'", "\\'")
+    # Basic sanity: reject non-printable characters
+    if not all(32 <= ord(c) < 127 for c in path):
+        raise ValueError(
+            f"Path contains non-printable characters: {path!r}"
+        )
+    return path
+
 
 def find_client_root():
     """Locate the cardputer_client/ source directory.
@@ -81,11 +105,23 @@ def find_cardputer_port(preferred=None):
     if preferred:
         return preferred
 
-    ports = serial.tools.list_ports.comports()
+    try:
+        ports = serial.tools.list_ports.comports()
+    except Exception as e:
+        print(f"WARNING: Could not enumerate serial ports: {e}")
+        print("Specify the port manually with --port /dev/ttyACM0")
+        return None
+
     for p in ports:
-        if p.vid == 0x303A:  # Espressif
-            return p.device
-        desc = (p.description or "").lower()
+        try:
+            if p.vid == 0x303A:  # Espressif
+                return p.device
+        except (TypeError, AttributeError):
+            pass  # port object may not have a vid
+        try:
+            desc = (p.description or "").lower()
+        except (TypeError, AttributeError):
+            desc = ""
         if any(kw in desc for kw in ("esp32", "cp210x", "ch340", "jtag", "usb serial")):
             return p.device
 
@@ -101,64 +137,82 @@ def enter_raw_repl(ser):
 
     Returns *True* on success.
     """
-    # Interrupt anything that may be running
-    ser.write(b"\r\x03\x03")
-    time.sleep(0.3)
-    ser.read(ser.in_waiting)  # drain
+    try:
+        # Interrupt anything that may be running
+        ser.write(b"\r\x03\x03")
+        time.sleep(0.3)
+        ser.read(ser.in_waiting)  # drain any residual output
 
-    # Request raw REPL
-    ser.write(b"\r\x01")
-    time.sleep(0.3)
+        # Request raw REPL
+        ser.write(b"\r\x01")
+        time.sleep(0.3)
 
-    data = b""
-    deadline = time.time() + 3
-    while time.time() < deadline:
-        if ser.in_waiting:
-            data += ser.read(ser.in_waiting)
-        if b"raw REPL" in data:
-            # Give device a moment to print the '>' prompt, then drain
-            time.sleep(0.15)
-            ser.read(ser.in_waiting)
-            return True
-        time.sleep(0.05)
+        data = b""
+        deadline = time.time() + 3
+        while time.time() < deadline:
+            if ser.in_waiting:
+                data += ser.read(ser.in_waiting)
+            if b"raw REPL" in data:
+                # Give device a moment to print the '>' prompt, then drain
+                time.sleep(0.15)
+                ser.read(ser.in_waiting)
+                return True
+            time.sleep(0.05)
 
-    return False
+        return False
+    except serial.SerialException as e:
+        print(f"ERROR: Serial communication lost while entering raw REPL: {e}")
+        return False
 
 
 def exit_raw_repl(ser):
     """Leave raw REPL and return to friendly REPL (Ctrl+B)."""
-    ser.write(b"\r\x02")
-    time.sleep(0.2)
-    ser.read(ser.in_waiting)
+    try:
+        ser.write(b"\r\x02")
+        time.sleep(0.2)
+        ser.read(ser.in_waiting)
+    except serial.SerialException:
+        pass  # device may already be gone; nothing to recover
 
 
 def exec_raw(ser, code, timeout=15):
     """Execute *code* (str) in raw REPL mode and return (ok, output).
 
     Sends the code followed by Ctrl+D, then reads until the terminating
-    ``\\x04>`` sequence (or *timeout* seconds elapse).
+    ``\\x04>`` sequence (or *timeout* seconds elapse).  When the terminator
+    is never received (timeout) the output returned may be truncated.
 
-    Returns ``(True, output_string)`` when the response starts with ``OK``,
-    ``(False, output_string)`` otherwise.
+    Returns ``(True, output_string)`` when the response contains the ``OK``
+    marker, ``(False, reason_or_output)`` otherwise.
     """
     if isinstance(code, str):
         code = code.encode("utf-8")
 
-    ser.write(code)
-    ser.write(b"\x04")
+    try:
+        ser.write(code)
+        ser.write(b"\x04")
 
-    data = b""
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        if ser.in_waiting:
-            data += ser.read(ser.in_waiting)
-        if b"\x04>" in data:
-            break
-        time.sleep(0.05)
+        data = b""
+        deadline = time.time() + timeout
+        found_term = False
+        while time.time() < deadline:
+            if ser.in_waiting:
+                data += ser.read(ser.in_waiting)
+            if b"\x04>" in data:
+                found_term = True
+                break
+            time.sleep(0.05)
 
-    output = data.decode("utf-8", errors="replace")
-    ok = output.startswith("OK")
-    return ok, output
+        if not found_term:
+            return False, "Timeout waiting for device response"
+
+        output = data.decode("utf-8", errors="replace")
+        ok = "OK" in output
+        return ok, output
+    except serial.SerialException as e:
+        error_msg = f"Serial communication error during exec_raw: {e}"
+        print(f"  ERROR: {error_msg}")
+        return False, error_msg
 
 
 def verify_device(ser):
@@ -201,17 +255,21 @@ def upload_file(ser, local_path, remote_path, chunk_size=2048):
     remote_path = remote_path.replace("\\", "/")
     if not remote_path.startswith("/"):
         remote_path = "/" + remote_path
+    # Sanitize path for safe embedding in MicroPython string literals
+    remote_path = _sanitize_path_for_script(remote_path)
 
     # Ensure the target directory exists
     dirname = os.path.dirname(remote_path).replace("\\", "/")
     mkdir_block = ""
     if dirname and dirname != "/":
+        # Sanitize dirname before embedding
+        safe_dirname = _sanitize_path_for_script(dirname)
         mkdir_block = f"""
 try:
     import os as _os
-    _os.mkdir('{dirname}')
+    _os.mkdir('{safe_dirname}')
 except:
-    pass
+    pass  # Ignore — directory may already exist
 """
 
     # Build script: remove old file, open new, write in chunks, close
@@ -341,6 +399,13 @@ def main():
 
     except KeyboardInterrupt:
         print("\nAborted by user.")
+        sys.exit(1)
+    except serial.SerialException as e:
+        print(f"\nERROR: Lost connection to Cardputer: {e}")
+        print("Check the USB cable and try again.")
+        sys.exit(1)
+    except Exception as e:
+        print(f"\nERROR: Unexpected error during flashing: {e}")
         sys.exit(1)
     finally:
         ser.close()
