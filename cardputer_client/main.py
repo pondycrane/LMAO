@@ -93,30 +93,45 @@ def log(msg, tft=None, status_lines=None):
 
 # ---- LXMF message handler ----
 
-# NOTE: This callback runs in a separate thread/task. The reply is buffered
-# in `last_reply` for the main loop to display. There is a brief race window
-# (after last_reply is consumed and before the next main loop iteration)
-# where a reply could be overwritten before being displayed.
+# NOTE: This callback may be invoked from a separate execution context
+# (thread, uasyncio task, or interrupt handler). The reply is buffered
+# in `pending_replies` for the main loop to drain.
 def handle_reply(message):
     """Callback invoked when an LXMF reply is received."""
+    # Extract title with individual error handling
     try:
         title = message.title_as_string() if hasattr(message, 'title_as_string') else ""
-        content = message.content_as_string() if hasattr(message, 'content_as_string') else str(message.content)
-        print(f"\n>>> REPLY from server: {content}")
-        # Update global reply buffer
-        global last_reply
-        last_reply = content
     except Exception as e:
-        print(f"handle_reply error: {e}")
+        print(f"handle_reply: title extraction failed: {e}")
+        import sys as _sys
+        _sys.print_exception(e)
+        title = ""
+
+    # Extract content with individual error handling
+    try:
+        if hasattr(message, 'content_as_string'):
+            content = message.content_as_string()
+        else:
+            content = str(message.content)
+    except Exception as e:
+        print(f"handle_reply: content extraction failed: {e}")
+        import sys as _sys
+        _sys.print_exception(e)
+        content = None
+
+    if content is not None:
+        print(f"\n>>> REPLY from server: {content}")
+        pending_replies.append(content)
 
 
-last_reply = None
+# Queue of pending replies for the main loop to drain
+pending_replies = []
 
 
 # ---- Main ----
 
 def main():
-    global last_reply
+    global pending_replies
 
     status_lines = []
 
@@ -157,48 +172,38 @@ def main():
 
     # ---- Main loop: periodic hello + listen for replies ----
     seq = 0
+    consecutive_errors = 0
+    MAX_CONSECUTIVE_ERRORS = 10
     SERVER_IDENTITY_HASH = None  # Set this to the server's 16-byte hash if known
 
     while True:
         try:
+            consecutive_errors = 0  # Reset error counter on successful iteration
             seq += 1
 
-            # If we know the server's identity, send a direct hello message
+            # Send hello message — direct if destination hash known, else broadcast
+            hello_text = f"Hello from Cardputer — seq {seq}"
+            content = make_poc_message(identity_hex, hello_text, timestamp=int(time.time() * 1000))
+
+            destination = None  # Broadcast by default
             if SERVER_IDENTITY_HASH is not None:
-                server_id = RNS.Identity.recall(SERVER_IDENTITY_HASH)
-                if server_id is not None:
-                    hello_text = f"Hello from Cardputer — seq {seq}"
-                    content = make_poc_message(identity_hex, hello_text, timestamp=time.ticks_ms())
-                    msg = LXMF.LXMessage(
-                        destination=server_id,
-                        source=identity,
-                        content=content,
-                        title="p:Envelope",
-                        desired_method=LXMF.LXMessage.OPPORTUNISTIC,
-                    )
-                    router.handle_outbound(msg)
-                    tft = log(f"Sent: {hello_text}", tft, status_lines)
+                destination = RNS.Identity.recall(SERVER_IDENTITY_HASH)
 
-            # If no server hash known, send as an opportunistic broadcast (POC approach)
-            # The server receives all LoRa packets in range
-            if SERVER_IDENTITY_HASH is None:
-                broadcast_text = f"Hello from Cardputer — seq {seq}"
-                # Create protobuf-encoded payload
-                content = make_poc_message(identity_hex, broadcast_text, timestamp=time.ticks_ms())
-                msg = LXMF.LXMessage(
-                    destination=None,  # Broadcast / opportunistic
-                    source=identity,
-                    content=content,
-                    title="p:Envelope",
-                    desired_method=LXMF.LXMessage.OPPORTUNISTIC,
-                )
-                router.handle_outbound(msg)
-                tft = log(f"Sent broadcast: {broadcast_text}", tft, status_lines)
+            msg = LXMF.LXMessage(
+                destination=destination,
+                source=identity,
+                content=content,
+                title="p:Envelope",
+                desired_method=LXMF.LXMessage.OPPORTUNISTIC,
+            )
+            router.handle_outbound(msg)
+            log_prefix = "Sent broadcast" if destination is None else "Sent"
+            tft = log(f"{log_prefix}: {hello_text}", tft, status_lines)
 
-            # Display last reply if any
-            if last_reply is not None:
-                tft = log(f"Reply: {last_reply}", tft, status_lines)
-                last_reply = None
+            # Drain all pending replies from the callback
+            for reply in pending_replies:
+                tft = log(f"Reply: {reply}", tft, status_lines)
+            pending_replies.clear()
 
             # Wait before next cycle (10 seconds for demo)
             time.sleep(10)
@@ -207,7 +212,13 @@ def main():
             log("Shutting down...", tft, status_lines)
             break
         except Exception as e:
-            tft = log(f"Loop error: {e}", tft, status_lines)
+            consecutive_errors += 1
+            import sys as _sys
+            _sys.print_exception(e)
+            tft = log(f"❗ Error ({consecutive_errors}): {e}", tft, status_lines)
+            if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+                log("FATAL: Too many consecutive errors, halting.", tft, status_lines)
+                break
             time.sleep(5)
 
 

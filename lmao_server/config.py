@@ -20,15 +20,11 @@ def _dict_to_ini(sections, interfaces):
     """
     lines = []
     for section, settings in sections.items():
-        if isinstance(settings, dict):
-            lines.append(f"[{section}]")
-            for key, value in settings.items():
-                if isinstance(value, bool):
-                    value = "yes" if value else "no"
-                lines.append(f"{key} = {value}")
-        else:
-            lines.append(f"[{section}]")
-            lines.append(f"{settings}")
+        lines.append(f"[{section}]")
+        for key, value in settings.items():
+            if isinstance(value, bool):
+                value = "yes" if value else "no"
+            lines.append(f"{key} = {value}")
     for name, settings in interfaces.items():
         lines.append(f"[[{name}]]")
         for key, value in settings.items():
