@@ -47,13 +47,36 @@ After flashing, verify:
 rnodeconf --port /dev/ttyUSB0 --info
 ```
 
-### 2. Install Server Dependencies
+### 2. Build & Install Server Dependencies
 
-On your Raspberry Pi:
+The canonical build system is [Bazel](https://bazel.build/) (see `.bazelversion` for the
+required version). Bazel generates protobuf stubs, resolves Python dependencies, and runs tests.
+
+**Option A — Bazel (recommended):**
 
 ```bash
-cd lmao_server
-pip3 install -r requirements.txt
+# Build everything (generates protobuf stubs, installs deps)
+bazel build //lmao_server
+
+# Run the server
+bazel run //lmao_server
+```
+
+**Option B — pip (no Bazel):**
+
+If you prefer to run without Bazel, you must first generate the protobuf stubs manually,
+then install dependencies with pip:
+
+```bash
+# Generate protobuf Python stubs (required by lma_core)
+protoc --python_out=. proto/lma.proto
+# The generated file will be at proto/lma_pb2.py
+
+# Install Python dependencies
+cd lmao_server && pip3 install -r requirements.txt
+
+# Run from repo root with PYTHONPATH set
+cd .. && PYTHONPATH="$PWD" python3 lmao_server/server.py
 ```
 
 ### 3. Configure the Server
@@ -78,11 +101,14 @@ Edit `lmao_server/config.py` to adjust radio parameters:
 ### 4. Start the Server
 
 ```bash
-cd lmao_server
-python3 server.py
+# Using Bazel (recommended)
+bazel run //lmao_server
+
+# Or without Bazel (from repo root, with PYTHONPATH set)
+PYTHONPATH="$PWD" python3 lmao_server/server.py
 ```
 
-Expected output:
+Expected output (same for both methods):
 
 ```
 Initializing Reticulum...
@@ -275,7 +301,7 @@ For the full system design, see [`ARCHITECTURE.md`](ARCHITECTURE.md).
 | No LoRa packets | Both devices on same frequency? In range? |
 | Cardputer display blank | ST7789 driver installed? SPI pins correct? |
 | "Permission denied" on serial | `sudo usermod -a -G dialout $USER` |
-| Protobuf import error | Run `pip3 install -r lmao_server/requirements.txt` |
+| Protobuf import error | Bazel: run `bazel build //proto:lma_py_proto`. Without Bazel: run `protoc --python_out=. proto/lma.proto` from repo root, then set `PYTHONPATH="$PWD"` when running the server. |
 
 ---
 

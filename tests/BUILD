@@ -15,7 +15,7 @@ py_test(
     name = "test_server_handler",
     srcs = ["test_server_handler.py"],
     deps = [
-        "//lmao_server:server",
+        "//lmao_server:server_lib",
         "@lmao_pip//protobuf",
         "@lmao_pip//pytest",
     ],
