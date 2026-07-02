@@ -164,7 +164,7 @@ class TestMain:
         """main() should exit(1) when RNS.Identity() fails."""
         server = server_with_main_mocks
 
-        sys.modules["RNS"].Identity.side_effect = Exception("OOM in crypto")
+        sys.modules["RNS"].Identity.side_effect = sys.modules["RNS"].RNSException("OOM in crypto")
 
         with patch.object(server.os.path, "exists", return_value=True), \
              patch.object(server.time, "sleep", side_effect=KeyboardInterrupt):
@@ -182,7 +182,7 @@ class TestMain:
         mock_identity = MagicMock()
         type(mock_identity).hash = PropertyMock(return_value=b'\x01' * 16)
         sys.modules["RNS"].Identity.return_value = mock_identity
-        sys.modules["LXMF"].LXMRouter.side_effect = Exception("Storage unwritable")
+        sys.modules["LXMF"].LXMRouter.side_effect = sys.modules["LXMF"].LXMFException("Storage unwritable")
 
         with patch.object(server.os.path, "exists", return_value=True), \
              patch.object(server.time, "sleep", side_effect=KeyboardInterrupt):
@@ -553,7 +553,6 @@ class TestSubscriberManagement:
         msg.content = b"fanout test message"
         msg.title_as_string.return_value = "p:Envelope"
 
-        from lmao_server import server as server_mod
         with patch.object(server, '_fanout_to_grpc_subscribers', wraps=server._fanout_to_grpc_subscribers) as spy:
             server.handle_lxmf_delivery(msg)
             spy.assert_called_once_with(msg)
@@ -604,7 +603,6 @@ class TestLMAOGrpcService:
         SendResponse = sys.modules["lma_core"].SendResponse
         SendResponse.side_effect = lambda **kw: MagicMock(**kw)
 
-        from lmao_server import server as server_mod
         response = await grpc_svc.Send(request, mock_context)
 
         # Verify destination was resolved
@@ -631,7 +629,7 @@ class TestLMAOGrpcService:
         request.envelope = b"\xff\xff\xff"
 
         mock_env = sys.modules["lma_core"].LMAOEnvelope.return_value
-        mock_env.ParseFromString.side_effect = Exception("invalid protobuf")
+        mock_env.ParseFromString.side_effect = DecodeError("invalid protobuf")
 
         await grpc_svc.Send(request, mock_context)
 
@@ -650,7 +648,7 @@ class TestLMAOGrpcService:
         request.destination_hash = "bad-hash"
 
         # from_hex raises
-        sys.modules["RNS"].Identity.from_hex.side_effect = Exception("bad hash")
+        sys.modules["RNS"].Identity.from_hex.side_effect = ValueError("bad hash")
 
         SendResponse = sys.modules["lma_core"].SendResponse
         SendResponse.side_effect = lambda **kw: MagicMock(**kw)

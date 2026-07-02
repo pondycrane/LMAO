@@ -320,8 +320,8 @@ class Client:
                 print(f"This is often caused by a misconfigured RNode on {rnode_port}.")
                 print("Check that:")
                 print(f"  1. The RNode is plugged in and on the correct port ({rnode_port})")
-                print(f"  2. You have permission: sudo usermod -a -G dialout $USER")
-                print(f"  3. The RNode firmware is flashed correctly")
+                print("  2. You have permission: sudo usermod -a -G dialout $USER")
+                print("  3. The RNode firmware is flashed correctly")
                 print("  See rnode_firmware/README.md and README Troubleshooting.")
             sys.exit(1)
         except Exception as e:
@@ -360,11 +360,11 @@ class Client:
         # Print startup banner
         rnode_status = f"RNode on {rnode_port}" if os.path.exists(rnode_port) else "⚠️  RNode not connected — WiFi only"
         print(f"\n{'='*50}")
-        print(f"LMAO Human Client — Ready")
+        print("LMAO Human Client — Ready")
         print(f"Node identity: {identity_hex}")
         print(f"  LoRa: {rnode_status}")
-        print(f"  WiFi: AutoInterface enabled")
-        print(f"  Title discriminator: p:Envelope")
+        print("  WiFi: AutoInterface enabled")
+        print("  Title discriminator: p:Envelope")
         print(f"{'='*50}")
         print("Type /help for commands, /quit to exit.\n")
 

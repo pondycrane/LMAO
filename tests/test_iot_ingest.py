@@ -1,6 +1,5 @@
 """Tests for k8s-app IoT ingest script."""
 import importlib.util
-import sys
 import pytest
 
 
