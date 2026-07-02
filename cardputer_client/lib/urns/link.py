@@ -85,6 +85,7 @@ class Link:
         self.remote_identified_callback = None
         self.packet_callback = None
         self.remote_identity = None
+        self.tags = {}  # Generic key-value store (replaces ad-hoc attributes like lxmf_source_hash)
         self.sdu = self.mtu - const.HEADER_MAXSIZE - const.IFAC_MIN_SIZE
 
         log("Link request on " + destination.hexhash[:8] + " link_id=" + self.link_id.hex()[:8] + " mtu=" + str(self.mtu)
@@ -277,6 +278,20 @@ class Link:
 
     def get_remote_identity(self):
         return self.remote_identity
+
+    def set_tag(self, key, value):
+        """Store a named tag on this link object.
+
+        Replaces ad-hoc attribute assignment (e.g., link.lxmf_source_hash = ...).
+        """
+        self.tags[key] = value
+
+    def get_tag(self, key, default=None):
+        """Retrieve a named tag from this link object.
+
+        Returns default if the tag has not been set.
+        """
+        return self.tags.get(key, default)
 
     def _handle_request(self, plaintext, packet):
         """Handle incoming request on established link."""
@@ -491,6 +506,7 @@ class OutgoingLink:
         self.remote_identified_callback = None
         self.packet_callback = None
         self.remote_identity = None
+        self.tags = {}  # Generic key-value store (replaces ad-hoc attributes like lxmf_source_hash)
 
         # Generate ephemeral X25519 keypair for ECDH
         gc.collect()
@@ -530,6 +546,14 @@ class OutgoingLink:
 
         request_packet.send()
         log("OutLink request to " + destination.hexhash[:8] + " link_id=" + self.link_id.hex()[:8], LOG_VERBOSE)
+
+    def set_tag(self, key, value):
+        """Store a named tag on this outgoing link object."""
+        self.tags[key] = value
+
+    def get_tag(self, key, default=None):
+        """Retrieve a named tag from this outgoing link object."""
+        return self.tags.get(key, default)
 
     def validate_proof(self, packet):
         """Validate server's link proof, complete ECDH handshake, send RTT."""
