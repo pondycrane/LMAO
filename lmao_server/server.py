@@ -126,7 +126,7 @@ class Server:
         for q in list(self._grpc_subscribers):
             try:
                 q.put_nowait(None)  # Sentinel to unblock subscribers
-            except (asyncio.QueueFull, Exception):
+            except Exception:
                 pass
         self._grpc_subscribers.clear()
 
@@ -136,9 +136,6 @@ class Server:
         for queue in self._grpc_subscribers:
             try:
                 queue.put_nowait(message)
-            except asyncio.QueueFull:
-                logger.warning("gRPC subscriber queue full — dropping subscriber")
-                dead.append(queue)
             except Exception:
                 logger.warning("gRPC subscriber error — dropping subscriber", exc_info=True)
                 dead.append(queue)

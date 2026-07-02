@@ -114,7 +114,7 @@ class Client:
         Returns:
             bool: True if the message was submitted successfully, False otherwise.
         """
-        if not content or not content.strip():
+        if not content.strip():
             logger.warning("Cannot send empty message.")
             print("Error: Message content cannot be empty.")
             return False

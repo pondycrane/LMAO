@@ -86,9 +86,9 @@ _grpc_request_types = [
     "TunnelRequest", "TunnelResponse",
     "GetIdentityRequest", "GetIdentityResponse",
 ]
-__all__ += [name for name in _grpc_request_types if name in dir()]
+__all__ += [name for name in _grpc_request_types if name in globals()]
 
 _grpc_service_types = [
     "LMAOStub", "LMAOServicer", "LMAO",
 ]
-__all__ += [name for name in _grpc_service_types if name in dir()]
+__all__ += [name for name in _grpc_service_types if name in globals()]
