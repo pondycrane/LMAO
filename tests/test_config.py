@@ -123,7 +123,8 @@ class TestGetConfigDir:
              patch.object(config, "CONFIG_CONTENT", "[test]\nkey = value\n"):
             result = config.get_configdir()
         config_file = os.path.join(result, "config")
-        content = open(config_file).read()
+        with open(config_file) as f:
+            content = f.read()
         assert "[test]\nkey = value\n" == content
 
     def test_prefix_is_lmao_rns(self):

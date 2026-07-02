@@ -54,6 +54,10 @@ def auto_discover_lib_files(client_root):
     ``lib/urns/__init__.py``) so that upload order is deterministic.
     """
     lib_dir = os.path.join(client_root, "lib")
+    if not os.path.isdir(lib_dir):
+        print(f"WARNING: Library directory not found: {lib_dir}")
+        print("         No library files will be uploaded.")
+        return []
     files = []
     for dirpath, _dirnames, filenames in os.walk(lib_dir):
         for f in filenames:
@@ -473,6 +477,8 @@ def main():
         print("Check the USB cable and try again.")
         sys.exit(1)
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         print(f"\nERROR: Unexpected error during flashing: {e}")
         sys.exit(1)
     finally:
