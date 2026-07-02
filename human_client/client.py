@@ -46,8 +46,10 @@ class Client:
 
     def handle_lxmf_delivery(self, message):
         """Decodes incoming content as a protobuf LMAOEnvelope. On success,
-        extracts TextMessage content and displays it to the user. Falls
-        back to raw UTF-8 text for backward compatibility with non-protobuf
+        extracts TextMessage content and displays it to the user. If the
+        envelope decodes but does not contain a TextMessage (e.g., a
+        SensorReport or Command), falls back to raw text. Falls back to
+        raw UTF-8 text for backward compatibility with non-protobuf
         senders. Does NOT send an ACK reply (unlike the server) — the
         human operator decides whether to respond.
 
@@ -149,7 +151,7 @@ class Client:
             logger.error("Failed to send message: %s", e, exc_info=True)
             print(f"Error sending message: {e}")
             return False
-        except Exception as e:
+        except OSError as e:
             logger.error("Unexpected error sending message: %s", e, exc_info=True)
             print(f"Unexpected error: {e}")
             return False
@@ -248,7 +250,7 @@ class Client:
             dest_bytes = bytes.fromhex(dest_str)
             try:
                 dest_identity = RNS.Identity.recall(dest_bytes)
-            except Exception as e:
+            except (RNS.RNSException, OSError, ValueError) as e:
                 logger.error("Failed to recall identity for %s: %s", dest_str, e, exc_info=True)
                 print(f"Error: Could not resolve destination {dest_str}. Have you heard from this node?")
                 return True
@@ -332,7 +334,7 @@ class Client:
         # Create identity for the client
         try:
             self.client_identity = RNS.Identity()
-        except Exception as e:
+        except (RNS.RNSException, OSError) as e:
             logger.critical("Failed to create client identity: %s", e, exc_info=True)
             print("FATAL: Failed to create client identity. See log for details.", file=sys.stderr)
             sys.exit(1)
@@ -343,7 +345,7 @@ class Client:
         try:
             self.router = LXMF.LXMRouter(identity=self.client_identity, storagepath="/tmp/lmao_human_client_lxmf")
             self.router.register_delivery_callback(self.handle_lxmf_delivery)
-        except Exception as e:
+        except (RNS.RNSException, LXMF.LXMFException, OSError) as e:
             logger.critical("Failed to start LXMF router: %s", e, exc_info=True)
             print("FATAL: Failed to start LXMF router. See log for details.", file=sys.stderr)
             sys.exit(1)
@@ -386,7 +388,6 @@ class Client:
 
         except KeyboardInterrupt:
             print("\nShutting down...")
-            sys.exit(0)
 
 
 def main():

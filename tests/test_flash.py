@@ -686,6 +686,33 @@ class TestExitRawRepl:
         cardputer_flash.exit_raw_repl(mock_ser)
 
 
+class TestVerifyFilesExist:
+    """Direct tests for _verify_files_exist()."""
+
+    def test_all_files_exist(self, tmp_path):
+        """All files exist — should return None (no error)."""
+        files = []
+        for i in range(3):
+            f = tmp_path / f"file{i}.py"
+            f.write_text("")
+            files.append(str(f))
+        result = cardputer_flash._verify_files_exist(str(tmp_path), files)
+        # _verify_files_exist doesn't return anything (returns None),
+        # it just raises on failure
+        assert result is None
+
+    def test_missing_file_raises_error(self, tmp_path):
+        """Missing file should raise FileNotFoundError."""
+        files = [str(tmp_path / "nonexistent.py")]
+        with pytest.raises(FileNotFoundError):
+            cardputer_flash._verify_files_exist(str(tmp_path), files)
+
+    def test_empty_list_passes(self, tmp_path):
+        """Empty file list should pass without error."""
+        result = cardputer_flash._verify_files_exist(str(tmp_path), [])
+        assert result is None
+
+
 if __name__ == "__main__":
     import pytest as _pytest
     import sys as _sys
