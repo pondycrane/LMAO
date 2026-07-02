@@ -5,8 +5,8 @@ and generate Reticulum INI-format configurations. Extracted from the
 originally duplicated config modules to eliminate maintenance drift.
 
 Module-level functions:
-    - _resolve_rnode_port() — env var, auto-detect, or default RNode port
-    - _dict_to_ini() — Python dict to Reticulum INI format
+    - resolve_rnode_port() — env var, auto-detect, or default RNode port
+    - dict_to_ini() — Python dict to Reticulum INI format
 
 Both are imported by component-specific config.py files that keep their
 own section/interface definitions (transport path, radio params, etc.).

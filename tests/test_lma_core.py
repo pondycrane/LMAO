@@ -6,7 +6,8 @@ Run with::
 """
 
 import sys
-from unittest.mock import patch
+import logging
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -43,6 +44,10 @@ class TestLmaCoreImportError:
 
     def test_import_succeeds_when_proto_present(self):
         """When proto.lma_pb2 is available, lma_core imports without error."""
+        # Clear any cached/mocked version of lma_core before importing
+        for mod in list(sys.modules.keys()):
+            if mod.startswith("lma_core") or mod.startswith("proto"):
+                del sys.modules[mod]
         # Module may already be cached; test that importing doesn't raise
         try:
             import lma_core
@@ -53,6 +58,10 @@ class TestLmaCoreImportError:
 
     def test_all_exports_are_importable(self):
         """All names in __all__ are present on the module when importable."""
+        # Clear any cached/mocked version of lma_core before importing
+        for mod in list(sys.modules.keys()):
+            if mod.startswith("lma_core") or mod.startswith("proto"):
+                del sys.modules[mod]
         try:
             import lma_core
         except ImportError:
@@ -63,8 +72,56 @@ class TestLmaCoreImportError:
                 f"__all__ lists '{name}' but it is not available on the module"
             )
 
+    def test_grpc_request_types_optional_fallback(self, caplog):
+        """Missing gRPC request types in proto.lma_pb2 should warn, not crash."""
+        # Clear cached modules to force fresh import
+        for mod in list(sys.modules.keys()):
+            if mod.startswith("lma_core") or mod.startswith("proto"):
+                del sys.modules[mod]
+
+        # Create mock proto.lma_pb2 that will raise ImportError on gRPC types
+        mock_pb2 = MagicMock()
+        mock_pb2.LMAOEnvelope = MagicMock()
+        mock_pb2.TextMessage = MagicMock()
+        mock_pb2.SensorReport = MagicMock()
+        mock_pb2.SensorReading = MagicMock()
+        mock_pb2.CommandRequest = MagicMock()
+        mock_pb2.CommandAck = MagicMock()
+        mock_pb2.AudioMessage = MagicMock()
+        mock_pb2.ImageMessage = MagicMock()
+        mock_pb2.CallSignal = MagicMock()
+        # Simulate gRPC types not being exported — removing them from mock
+        # so the try/except in lma_core triggers ImportError and logs WARNING
+        del mock_pb2.SendRequest
+        del mock_pb2.SendResponse
+        del mock_pb2.SubscribeRequest
+        del mock_pb2.SubscribeResponse
+        del mock_pb2.TunnelRequest
+        del mock_pb2.TunnelResponse
+        del mock_pb2.GetIdentityRequest
+        del mock_pb2.GetIdentityResponse
+        sys.modules["proto.lma_pb2"] = mock_pb2
+
+        # proto.lma_pb2_grpc is already not in sys.modules (we cleared it)
+
+        with caplog.at_level(logging.WARNING):
+            import importlib
+            # Re-import lma_core — the gRPC try/except should fire warnings
+            import lma_core as lma_core_mod
+            # Since lma_core is cached, reload it to trigger the import path
+            importlib.reload(lma_core_mod)
+
+        warning_messages = [r.message for r in caplog.records if r.levelname == "WARNING"]
+        assert len(warning_messages) >= 1, (
+            f"Should log at least one WARNING for missing gRPC types, got {len(warning_messages)}"
+        )
+
     def test_all_contains_expected_types(self):
         """__all__ should contain the core message types."""
+        # Clear any cached/mocked version of lma_core before importing
+        for mod in list(sys.modules.keys()):
+            if mod.startswith("lma_core") or mod.startswith("proto"):
+                del sys.modules[mod]
         try:
             import lma_core
         except ImportError:
