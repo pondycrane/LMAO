@@ -26,6 +26,7 @@ py_test(
     srcs = ["e2e/test_cardputer_flash.py"],
     main = "e2e/test_cardputer_flash.py",
     data = [
+        "//cardputer_client:boot.py",
         "//cardputer_client:config.py",
         "//cardputer_client:lora_boards.py",
         "//cardputer_client:main.py",
@@ -75,6 +76,42 @@ py_test(
     srcs = ["test_lma_core.py"],
     deps = [
         "//lma_core",
+        "@lmao_pip//pytest",
+    ],
+)
+
+py_test(
+    name = "test_urns_packet",
+    srcs = ["test_urns_packet.py"],
+    data = ["//cardputer_client:lib_files"],
+    deps = [
+        "@lmao_pip//pytest",
+    ],
+)
+
+py_test(
+    name = "test_urns_identity",
+    srcs = ["test_urns_identity.py"],
+    data = ["//cardputer_client:lib_files"],
+    deps = [
+        "@lmao_pip//pytest",
+    ],
+)
+
+py_test(
+    name = "test_urns_lxmf_message",
+    srcs = ["test_urns_lxmf_message.py"],
+    data = ["//cardputer_client:lib_files"],
+    deps = [
+        "@lmao_pip//pytest",
+    ],
+)
+
+py_test(
+    name = "test_urns_transport",
+    srcs = ["test_urns_transport.py"],
+    data = ["//cardputer_client:lib_files"],
+    deps = [
         "@lmao_pip//pytest",
     ],
 )

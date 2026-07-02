@@ -138,6 +138,16 @@ class TestHardwareDetection:
             full = os.path.join(root, rel)
             assert os.path.isfile(full), f"Missing lib file: {full}"
 
+    def test_boot_py_present(self):
+        """boot.py must exist in cardputer_client/."""
+        root = cardputer_flash.find_client_root()
+        assert root, "Cannot find cardputer_client/"
+        boot_path = os.path.join(root, "boot.py")
+        assert os.path.isfile(boot_path), f"Missing boot.py: {boot_path}"
+        with open(boot_path) as f:
+            content = f.read()
+        assert len(content) > 0, "boot.py is empty"
+
 
 class TestCardputerE2E:
     """Tests that require a physical Cardputer connected via USB."""
@@ -244,7 +254,9 @@ except:
         root = cardputer_flash.find_client_root()
         assert root, "Cannot find cardputer_client/ source directory"
 
-        # Upload each client file
+        # Upload each client file including boot.py (which must overwrite any
+        # pre-existing boot.py on the device that might reference non-existent
+        # files, e.g. /main2.py).
         for rel in cardputer_flash.FILES_TO_UPLOAD:
             local_path = os.path.join(root, rel)
             remote_path = rel

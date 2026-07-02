@@ -176,8 +176,8 @@ class LXMessage:
         self.signature = self._source.sign(signed_part)
         try:
             import gc; gc.collect()
-        except:
-            pass
+        except Exception as e:
+            log("gc.collect failed: " + str(e), LOG_DEBUG)
         self.signature_validated = True
 
         # Assemble packed message
@@ -494,7 +494,7 @@ class LXMRouter:
                 continue
             # Peer-initiated link: source_hash stamped on it when its first
             # LXMF message arrived.
-            if getattr(link, "lxmf_source_hash", None) == destination_hash:
+            if link.get_tag("lxmf_source_hash") == destination_hash:
                 return link
             # OutgoingLink we opened earlier to the same peer destination.
             if isinstance(link, OutgoingLink) and link.destination.hash == destination_hash:
@@ -601,7 +601,7 @@ class LXMRouter:
             from .transport import Transport
             for l in Transport.active_links:
                 if l.link_id == packet.destination_hash:
-                    l.lxmf_source_hash = message.source_hash
+                    l.set_tag("lxmf_source_hash", message.source_hash)
                     break
 
             # Dedup check
@@ -658,7 +658,7 @@ class LXMRouter:
             # Remember which LXMF peer this link carries (see _link_packet_received).
             link = getattr(resource, "link", None)
             if link is not None:
-                link.lxmf_source_hash = message.source_hash
+                link.set_tag("lxmf_source_hash", message.source_hash)
 
             # Dedup check
             if message.hash in self.delivered_ids:
@@ -709,8 +709,8 @@ class LXMRouter:
             # Send delivery proof (so sender knows we received it)
             try:
                 import gc; gc.collect()
-            except:
-                pass
+            except Exception as e:
+                log("gc.collect failed: " + str(e), LOG_DEBUG)
             packet.prove()
 
             # Deliver to application

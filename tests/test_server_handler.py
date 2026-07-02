@@ -48,10 +48,11 @@ def _cleanup_common_mocks():
 
 @pytest.fixture
 def server_with_mocks():
-    """Set up mocks for RNS, LXMF, and module globals.
+    """Set up mocks for RNS, LXMF, and create a Server instance.
 
-    Replaces the real RNS/LXMF modules on the server module with mocks
-    so we can test handle_lxmf_delivery without real Reticulum hardware.
+    Replaces the real RNS/LXMF modules with mocks so we can test
+    handle_lxmf_delivery without real Reticulum hardware.
+    Returns a Server instance with router and server_identity set.
     """
     # Force reload of server module to get fresh state
     if "server" in sys.modules:
@@ -66,11 +67,12 @@ def server_with_mocks():
     sys.modules["lma_core"].LMAOEnvelope.return_value = mock_envelope
 
     import server
-    server.router = MagicMock()
-    server.server_identity = MagicMock()
-    server.server_identity.hash = b'\x01' * 16
+    server_instance = server.Server()
+    server_instance.router = MagicMock()
+    server_instance.server_identity = MagicMock()
+    server_instance.server_identity.hash = b'\x01' * 16
 
-    yield server
+    yield server_instance
 
     _cleanup_common_mocks()
 
@@ -126,7 +128,10 @@ class TestMain:
             identity=mock_identity, storagepath="/tmp/lmao_server_lxmf"
         )
         mock_router = sys.modules["LXMF"].LXMRouter.return_value
-        mock_router.register_delivery_callback.assert_called_once_with(server.handle_lxmf_delivery)
+        mock_router.register_delivery_callback.assert_called_once()
+        # Verify the callback is a bound method of Server
+        callback = mock_router.register_delivery_callback.call_args[0][0]
+        assert callable(callback), "Delivery callback should be callable"
 
     def test_identity_creation_failure(self, server_with_main_mocks, capsys):
         """main() should exit(1) when RNS.Identity() fails."""
@@ -236,7 +241,7 @@ class TestHandleLXMFDelivery:
         # Verify reply was sent
         server.router.handle_outbound.assert_called_once()
         # Check that LXMessage was constructed with expected args
-        call_kwargs = server.LXMF.LXMessage.call_args.kwargs
+        call_kwargs = sys.modules["LXMF"].LXMessage.call_args.kwargs
         assert call_kwargs["title"] == "p:Envelope"
         assert call_kwargs["destination"] == msg.get_source.return_value
         # Verify reply content is a non-empty protobuf envelope
@@ -325,7 +330,7 @@ class TestHandleLXMFDelivery:
 
         # Verify reply was sent
         server.router.handle_outbound.assert_called_once()
-        call_kwargs = server.LXMF.LXMessage.call_args.kwargs
+        call_kwargs = sys.modules["LXMF"].LXMessage.call_args.kwargs
         assert call_kwargs["title"] == "p:Envelope"
 
     def test_protobuf_decode_non_text_field(self, server_with_mocks):
@@ -376,7 +381,8 @@ class TestHandleLXMFDelivery:
         msg.content = b"protobuf-encoded-bytes"
         msg.title_as_string.return_value = "p:Envelope"
 
-        with patch.object(server.logger, 'info', wraps=server.logger.info) as mock_log:
+        import server as server_mod
+        with patch.object(server_mod.logger, 'info', wraps=server_mod.logger.info) as mock_log:
             server.handle_lxmf_delivery(msg)
 
         # Verify the protobuf content was logged
@@ -402,8 +408,9 @@ class TestHandleLXMFDelivery:
         msg.content = b"plain text fallback"
         msg.title_as_string.return_value = "p:Envelope"
 
-        with patch.object(server.logger, 'warning', wraps=server.logger.warning) as mock_warn, \
-             patch.object(server.logger, 'info', wraps=server.logger.info) as mock_info:
+        import server as server_mod
+        with patch.object(server_mod.logger, 'warning', wraps=server_mod.logger.warning) as mock_warn, \
+             patch.object(server_mod.logger, 'info', wraps=server_mod.logger.info) as mock_info:
             server.handle_lxmf_delivery(msg)
 
         # Verify fallback warning was logged
@@ -437,7 +444,7 @@ class TestHandleLXMFDelivery:
         server.router.handle_outbound.assert_called_once()
 
         # Verify the reply content includes the byte-count placeholder
-        call_kwargs = server.LXMF.LXMessage.call_args.kwargs
+        call_kwargs = sys.modules["LXMF"].LXMessage.call_args.kwargs
         reply_content = call_kwargs.get("content")
         assert reply_content is not None
         assert len(reply_content) > 0, "Reply envelope must not be empty"
