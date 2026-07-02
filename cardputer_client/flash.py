@@ -35,6 +35,7 @@ except ImportError:
 #
 # Library files (urns/ and native .mpy modules) are uploaded to /lib/.
 FILES_TO_UPLOAD = [
+    "boot.py",
     "config.py",
     "main.py",
     "lora_boards.py",
@@ -287,14 +288,36 @@ print(_os.uname().machine)
     return False, f"Not an ESP32 device — platform={platform!r}, machine={machine!r}"
 
 
-def upload_file(ser, local_path, remote_path, chunk_size=2048):
+def upload_file(ser, local_path, remote_path, chunk_size=1024):
     """Upload a single file to the MicroPython device using raw REPL.
 
-    The file content is base64-encoded and sent in *chunk_size* byte pieces
-    (measured as raw bytes of the source file, not base64-encoded size)
-    to avoid hitting MicroPython parser limits.  The remote file is always
-    written to ``/`` (device flash root), with any missing sub-directories
-    created automatically.
+    The file content is sent in multiple small ``exec_raw`` calls rather
+    than one large script.  This works around MicroPython's heap memory
+    limit on ESP32-S3 (~6 KB for REPL paste compilation), which would
+    crash the device with ``MemoryError`` for files larger than a few KB
+    if sent as a single paste.
+
+    In raw REPL mode, variables defined at module scope persist between
+    consecutive paste blocks.  We exploit this to keep a single file
+    handle open across multiple ``exec_raw`` calls:
+
+      1. Create target directory (if needed)         — single exec_raw
+      2. Remove any existing file                     — single exec_raw
+      3. ``f = open(...)`` to open for writing        — single exec_raw
+      4. ``f.write(...)`` for each base64 chunk       — one exec_raw each
+      5. ``f.close()`` and print ``UPLOAD_OK``        — single exec_raw
+
+    Parameters
+    ----------
+    ser : serial.Serial
+        Open serial connection to the device (must be in raw REPL mode).
+    local_path : str
+        Path to the source file on the host.
+    remote_path : str
+        Destination path on the device (e.g. ``/main.py``).
+    chunk_size : int
+        Raw bytes per base64 chunk (default 1024).  Each chunk generates
+        a MicroPython script well under the device's heap/compile limit.
 
     Returns *True* on success.
     """
@@ -309,54 +332,78 @@ def upload_file(ser, local_path, remote_path, chunk_size=2048):
     remote_path = remote_path.replace("\\", "/")
     if not remote_path.startswith("/"):
         remote_path = "/" + remote_path
-    # Sanitize path for safe embedding in MicroPython string literals
-    remote_path = _sanitize_path_for_script(remote_path)
+    remote_path_esc = _sanitize_path_for_script(remote_path)
 
-    # Ensure the target directory exists (create all parent directories)
+    # Step 1 — create parent directories
     dirname = os.path.dirname(remote_path).replace("\\", "/")
-    mkdir_block = ""
     if dirname and dirname != "/":
-        # Sanitize dirname before embedding
         safe_dirname = _sanitize_path_for_script(dirname)
-        mkdir_block = f"""
-_parts = '{safe_dirname}'.strip('/').split('/')
-_path = ''
-for _p in _parts:
-    _path = _path + '/' + _p
-    try:
-        import os as _os
-        _os.mkdir(_path)
-    except OSError as _e:
-        if _e.args[0] != 17:  # EEXIST is benign
-            print('MKDIR_ERR:' + repr(_e))
-            raise
-"""
+        script = (
+            b"import os as _os\n"
+            b"_parts = '" + safe_dirname.encode("utf-8") + b"'.strip('/').split('/')\n"
+            b"_path = ''\n"
+            b"for _p in _parts:\n"
+            b"    _path = _path + '/' + _p\n"
+            b"    try:\n"
+            b"        _os.mkdir(_path)\n"
+            b"    except OSError as _e:\n"
+            b"        if _e.args[0] != 17:  # EEXIST\n"
+            b"            print('MKDIR_ERR:' + repr(_e))\n"
+            b"            raise\n"
+            b"print('DIR_OK')\n"
+        )
+        ok, _out = exec_raw(ser, script)
+        if not ok:
+            return False
 
-    # Build script: remove old file, open new, write in chunks, close
-    script = f"""import ubinascii as _b64
-{mkdir_block}
-try:
-    import os as _os
-    _os.remove('{remote_path}')
-except OSError as _e:
-    if _e.args[0] != 2:  # ENOENT — file not found, that's OK
-        print('REMOVE_ERR:' + repr(_e))
-        raise
-_f = open('{remote_path}', 'wb')
-"""
+    # Step 2 — remove existing file (ignore ENOENT)
+    script = (
+        b"import os as _os\n"
+        b"try:\n"
+        b"    _os.remove('" + remote_path_esc.encode("utf-8") + b"')\n"
+        b"except OSError as _e:\n"
+        b"    if _e.args[0] != 2:  # ENOENT\n"
+        b"        print('REMOVE_ERR:' + repr(_e))\n"
+        b"        raise\n"
+        b"print('RM_OK')\n"
+    )
+    ok, _out = exec_raw(ser, script)
+    if not ok:
+        return False
 
+    # Step 3 — open file, keep handle in global ``_lmao_f``
+    script = (
+        b"_lmao_f = open('" + remote_path_esc.encode("utf-8") + b"', 'wb')\n"
+        b"print('OPEN_OK')\n"
+    )
+    ok, _out = exec_raw(ser, script)
+    if not ok or "OPEN_OK" not in _out:
+        return False
+
+    # Step 4 — stream each chunk (one exec_raw per chunk)
     for offset in range(0, file_size, chunk_size):
-        chunk = content[offset:offset + chunk_size]
+        chunk = content[offset : offset + chunk_size]
         encoded = base64.b64encode(chunk).decode("ascii")
-        script += f"_f.write(_b64.a2b_base64('{encoded}'))\n"
+        chunk_script = (
+            b"import ubinascii as _b64\n"
+            b"_lmao_f.write(_b64.a2b_base64('" + encoded.encode("utf-8") + b"'))\n"
+            b"print('CHUNK_OK')\n"
+        )
+        ok, _out = exec_raw(ser, chunk_script)
+        if not ok or "CHUNK_OK" not in _out:
+            # Try to close the dangling handle
+            ser.write(b"_lmao_f.close()\n")
+            ser.write(b"\x04")
+            time.sleep(0.3)
+            ser.read(ser.in_waiting)
+            return False
 
-    script += "_f.close()\nprint('UPLOAD_OK')\n"
-
+    # Step 5 — close file and report success
+    script = b"_lmao_f.close()\nprint('UPLOAD_OK')\n"
     ok, out = exec_raw(ser, script)
     if ok and "UPLOAD_OK" in out:
         return True
 
-    # If we got OK but not UPLOAD_OK, the script may have errored
     if ok:
         print(f"  [raw output] {out[:300]}")
     return False

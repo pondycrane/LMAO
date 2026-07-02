@@ -26,6 +26,7 @@ py_test(
     srcs = ["e2e/test_cardputer_flash.py"],
     main = "e2e/test_cardputer_flash.py",
     data = [
+        "//cardputer_client:boot.py",
         "//cardputer_client:config.py",
         "//cardputer_client:lora_boards.py",
         "//cardputer_client:main.py",

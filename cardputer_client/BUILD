@@ -4,6 +4,7 @@ load("@rules_python//python:defs.bzl", "py_binary", "py_library")
 # data dependencies.  These files are NOT compiled by host Python — they
 # are only copied to the Cardputer device at flash time.
 exports_files([
+    "boot.py",
     "main.py",
     "config.py",
     "lora_boards.py",
@@ -25,6 +26,7 @@ filegroup(
 filegroup(
     name = "client_files",
     srcs = [
+        "boot.py",
         "config.py",
         "lora_boards.py",
         "main.py",
