@@ -77,12 +77,12 @@ def subscribe_example(stub: lma_pb2_grpc.LMAOStub, timeout: int = 5):
     print(f"=== Subscribe Example (listening for {timeout}s) ===")
     request = lma_pb2.SubscribeRequest(title_filter="")
     try:
-        for msg in stub.Subscribe(request):
+        for msg in stub.Subscribe(request, timeout=timeout):
             src = msg.source_hash or "<unknown>"
             print(f"  Received {len(msg.envelope)} bytes from {src}")
     except grpc.RpcError as e:
         if e.code() == grpc.StatusCode.CANCELLED:
-            pass
+            print("Subscribe stream ended (CANCELLED)")
         else:
             print(f"  Subscribe error: {e}")
     print()

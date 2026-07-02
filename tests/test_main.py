@@ -12,10 +12,8 @@ Run with::
     bazel test //tests:test_main --test_output=all
 """
 
-from unittest.mock import MagicMock, patch
-import sys
+from unittest.mock import MagicMock
 
-import pytest
 
 # Import the module under test (works when running under Bazel with proper deps)
 try:

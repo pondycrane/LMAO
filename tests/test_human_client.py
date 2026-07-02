@@ -111,12 +111,9 @@ class TestMain:
         type(mock_identity).hash = PropertyMock(return_value=b'\x01' * 16)
         sys.modules["RNS"].Identity.return_value = mock_identity
 
-        # Trigger KeyboardInterrupt to exit the infinite loop
+        # Trigger KeyboardInterrupt to exit the infinite loop (now uses break, not sys.exit)
         with patch.object(client, "input", side_effect=KeyboardInterrupt):
-            with pytest.raises(SystemExit) as exc:
-                client.main()
-
-        assert exc.value.code == 0, "Should exit with code 0 on KeyboardInterrupt"
+            client.main()
 
         # Verify Reticulum was initialized
         sys.modules["RNS"].Reticulum.assert_called_once()
@@ -138,10 +135,10 @@ class TestMain:
         mock_router.announce.assert_called_once()
 
     def test_identity_creation_failure(self, client_with_main_mocks, capsys):
-        """main() should exit(1) when RNS.Identity() fails."""
+        """main() should exit(1) when RNS.Identity() fails with RNSException."""
         client = client_with_main_mocks
 
-        sys.modules["RNS"].Identity.side_effect = Exception("OOM in crypto")
+        sys.modules["RNS"].Identity.side_effect = sys.modules["RNS"].RNSException("OOM in crypto")
 
         with patch.object(client.os.path, "exists", return_value=True):
             with pytest.raises(SystemExit) as exc:
@@ -152,13 +149,13 @@ class TestMain:
         assert "FATAL" in captured.out + captured.err, "Output should indicate FATAL error"
 
     def test_router_creation_failure(self, client_with_main_mocks, capsys):
-        """main() should exit(1) when LXMF.LXMRouter() fails."""
+        """main() should exit(1) when LXMF.LXMRouter() fails with LXMFException."""
         client = client_with_main_mocks
 
         mock_identity = MagicMock()
         type(mock_identity).hash = PropertyMock(return_value=b'\x01' * 16)
         sys.modules["RNS"].Identity.return_value = mock_identity
-        sys.modules["LXMF"].LXMRouter.side_effect = Exception("Storage unwritable")
+        sys.modules["LXMF"].LXMRouter.side_effect = sys.modules["LXMF"].LXMFException("Storage unwritable")
 
         with patch.object(client.os.path, "exists", return_value=True):
             with pytest.raises(SystemExit) as exc:
@@ -182,8 +179,7 @@ class TestMain:
 
         with patch.object(client.os.path, "exists", return_value=rnode_exists), \
              patch.object(client, "input", side_effect=KeyboardInterrupt):
-            with pytest.raises(SystemExit):
-                client.main()
+            client.main()
 
         captured = capsys.readouterr()
         assert expected_substr in captured.out, (
@@ -562,18 +558,18 @@ class TestSendMessage:
 
         assert result is False, "Send should return False on LXMFException"
 
-    def test_send_message_handles_generic_exception(self, client_with_mocks):
-        """Send should return False on unexpected exceptions."""
+    def test_send_message_handles_os_error(self, client_with_mocks):
+        """Send should return False on OSError during message dispatch."""
         client = client_with_mocks
 
-        client.router.handle_outbound.side_effect = RuntimeError("Unexpected")
+        client.router.handle_outbound.side_effect = OSError("Connection broken")
 
         dest_identity = MagicMock()
         dest_identity.hash = b'\x0c' * 16
 
         result = client._send_message(dest_identity, "Test message")
 
-        assert result is False, "Send should return False on unexpected exception"
+        assert result is False, "Send should return False on OSError"
 
 
 class TestInputParsing:
@@ -654,6 +650,19 @@ class TestInputParsing:
         assert result is True
         captured = capsys.readouterr()
         assert "Invalid" in captured.out or "32" in captured.out
+
+    def test_dest_command_no_args(self, client_parsed, capsys):
+        """/dest without argument should print error message."""
+        client = client_parsed
+
+        result = client._parse_input("/dest")
+
+        assert result is True  # Should NOT shut down
+        captured = capsys.readouterr()
+        output = captured.out + captured.err
+        assert "Usage" in output or "destination" in output.lower(), (
+            "Should display usage/error message"
+        )
 
     def test_send_command_no_args(self, client_parsed, capsys):
         """'/send' without args should show usage."""
@@ -843,8 +852,7 @@ class TestRNodeMissing:
         # RNode does NOT exist
         with patch.object(client.os.path, "exists", return_value=False), \
              patch.object(client, "input", side_effect=KeyboardInterrupt):
-            with pytest.raises(SystemExit):
-                client.main()
+            client.main()
 
         captured = capsys.readouterr()
         assert "RNode not connected" in captured.out or "not found" in captured.out, (
@@ -865,12 +873,30 @@ class TestRNodeMissing:
 
         with patch.object(client.os.path, "exists", return_value=True), \
              patch.object(client, "input", side_effect=KeyboardInterrupt):
-            with pytest.raises(SystemExit):
-                client.main()
+            client.main()
 
         # Should still have printed the banner
         captured = capsys.readouterr()
         assert "LMAO Human Client" in captured.out
+
+
+class TestReplInput:
+    """Tests for REPL input handling and shutdown behavior."""
+
+    def test_eof_error_handling(self, client_with_main_mocks, capsys):
+        """EOFError should print Shutting down and exit gracefully (no SystemExit)."""
+        client = client_with_main_mocks
+
+        mock_identity = MagicMock()
+        type(mock_identity).hash = PropertyMock(return_value=b'\x01' * 16)
+        sys.modules["RNS"].Identity.return_value = mock_identity
+
+        with patch.object(client.os.path, "exists", return_value=True), \
+             patch.object(client, "input", side_effect=EOFError()):
+            client.main()
+
+        captured = capsys.readouterr()
+        assert "Shutting down" in captured.out
 
 
 if __name__ == "__main__":

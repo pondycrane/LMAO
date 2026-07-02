@@ -2,13 +2,13 @@
 # Wire-compatible with reference LXMF for MeshChat/Sideband interop
 # Supports opportunistic (single-packet) and direct (link) message delivery
 
-import time, sys
+import time
+import sys
 from . import umsgpack
 from .identity import Identity
 from .destination import Destination
 from .packet import Packet
-from .transport import Transport
-from .log import log, LOG_VERBOSE, LOG_DEBUG, LOG_ERROR, LOG_NOTICE, LOG_INFO
+from .log import log, LOG_VERBOSE, LOG_DEBUG, LOG_ERROR, LOG_NOTICE
 from .crypto.hashes import sha256
 from .crypto import ed25519
 

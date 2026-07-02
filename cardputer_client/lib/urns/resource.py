@@ -6,7 +6,6 @@ import time
 from . import const, umsgpack
 from .log import log, LOG_VERBOSE, LOG_DEBUG, LOG_ERROR, LOG_NOTICE
 from .identity import Identity
-from .crypto.hashes import sha256
 
 
 # Constants (wire-compatible with reference RNS)

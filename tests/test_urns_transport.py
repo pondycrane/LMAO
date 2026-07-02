@@ -3,7 +3,7 @@
 import sys
 import os
 import hashlib
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 # Ensure the urns package is importable
 _urns_parent = os.path.join(os.path.dirname(__file__), "..", "cardputer_client", "lib")

@@ -58,9 +58,8 @@ sys.modules["ucryptolib"] = _mp_ucryptolib
 
 # Now import the urns modules under test
 from urns.const import (
-    HEADER_MINSIZE, HEADER_MAXSIZE, PKT_DATA, PKT_ANNOUNCE, PKT_LINKREQUEST,
-    PKT_PROOF, CTX_NONE, TRUNCATED_HASHLENGTH, HDR_1, HDR_2,
-    DEST_SINGLE, DEST_PLAIN,
+    HEADER_MINSIZE, PKT_DATA, PKT_ANNOUNCE, PKT_LINKREQUEST,
+    PKT_PROOF, TRUNCATED_HASHLENGTH, DEST_SINGLE,
 )  # noqa: E402
 from urns.packet import Packet  # noqa: E402
 

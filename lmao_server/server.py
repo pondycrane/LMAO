@@ -37,10 +37,9 @@ logger = logging.getLogger(__name__)
 try:
     import grpc
     from lma_core import (
-        SendRequest, SendResponse,
-        SubscribeRequest, SubscribeResponse,
-        TunnelRequest, TunnelResponse,
-        GetIdentityRequest, GetIdentityResponse,
+        SendResponse,
+        SubscribeResponse,
+        GetIdentityResponse,
         LMAOServicer,
     )
     GRPC_AVAILABLE = True
@@ -72,8 +71,8 @@ def _init_rns_and_lxmf(rnode_port, identity_storage_path="/tmp/lmao_server_lxmf"
         print(f"This is often caused by a missing or misconfigured RNode on {rnode_port}.")
         print("Check that:")
         print(f"  1. The RNode is plugged in and on the correct port ({rnode_port})")
-        print(f"  2. You have permission: sudo usermod -a -G dialout $USER")
-        print(f"  3. The RNode firmware is flashed correctly")
+        print("  2. You have permission: sudo usermod -a -G dialout $USER")
+        print("  3. The RNode firmware is flashed correctly")
         print("  See rnode_firmware/README.md and README Troubleshooting.")
         sys.exit(1)
     except Exception as e:
@@ -86,7 +85,7 @@ def _init_rns_and_lxmf(rnode_port, identity_storage_path="/tmp/lmao_server_lxmf"
     # Create server identity
     try:
         identity = RNS.Identity()
-    except Exception as e:
+    except (RNS.RNSException, OSError) as e:
         logger.critical("Failed to create identity: %s", e, exc_info=True)
         print("FATAL: Failed to create server identity. See log for details.", file=sys.stderr)
         sys.exit(1)
@@ -95,7 +94,7 @@ def _init_rns_and_lxmf(rnode_port, identity_storage_path="/tmp/lmao_server_lxmf"
     print("Starting LXMF router...")
     try:
         router = LXMF.LXMRouter(identity=identity, storagepath=identity_storage_path)
-    except Exception as e:
+    except (RNS.RNSException, LXMF.LXMFException, OSError) as e:
         logger.critical("Failed to start LXMF router: %s", e, exc_info=True)
         print("FATAL: Failed to start LXMF router. See log for details.", file=sys.stderr)
         sys.exit(1)
@@ -127,7 +126,7 @@ class Server:
         for q in list(self._grpc_subscribers):
             try:
                 q.put_nowait(None)  # Sentinel to unblock subscribers
-            except (asyncio.QueueFull, Exception):
+            except Exception:
                 pass
         self._grpc_subscribers.clear()
 
@@ -137,9 +136,6 @@ class Server:
         for queue in self._grpc_subscribers:
             try:
                 queue.put_nowait(message)
-            except asyncio.QueueFull:
-                logger.warning("gRPC subscriber queue full — dropping subscriber")
-                dead.append(queue)
             except Exception:
                 logger.warning("gRPC subscriber error — dropping subscriber", exc_info=True)
                 dead.append(queue)
@@ -260,12 +256,12 @@ class Server:
         identity_hex = RNS.hexrep(self.server_identity.hash, delimit=False)
         rnode_status = f"RNode on {rnode_port}" if os.path.exists(rnode_port) else "⚠️  RNode not connected — LoRa unavailable"
         print(f"\n{'='*50}")
-        print(f"LMAO Server POC — Running")
+        print("LMAO Server POC — Running")
         print(f"Node identity: {identity_hex}")
-        print(f"Listening for LXMF messages...")
+        print("Listening for LXMF messages...")
         print(f"  LoRa: {rnode_status}")
-        print(f"  WiFi: AutoInterface enabled")
-        print(f"  Title discriminator: p:Envelope")
+        print("  WiFi: AutoInterface enabled")
+        print("  Title discriminator: p:Envelope")
         print(f"{'='*50}\n")
 
         # Main event loop
@@ -274,7 +270,7 @@ class Server:
                 time.sleep(0.1)
         except KeyboardInterrupt:
             print("\nShutting down...")
-            sys.exit(0)
+            return
 
 
 # ──────────────────────────────────────────────────────────────
@@ -292,18 +288,17 @@ if GRPC_AVAILABLE:
 
         async def Send(self, request, context):
             """Handle a Send RPC: deserialize envelope and dispatch into LXMF."""
-            from lma_core import LMAOEnvelope as Envelope
-            envelope = Envelope()
+            envelope = LMAOEnvelope()
             try:
                 envelope.ParseFromString(request.envelope)
-            except Exception as e:
+            except (DecodeError, ValueError) as e:
                 await context.abort(grpc.StatusCode.INVALID_ARGUMENT, f"Bad envelope: {e}")
 
             # Resolve destination identity from the request hash
             dest_hash = request.destination_hash
             try:
                 dest = RNS.Identity.from_hex(dest_hash) if dest_hash else None
-            except Exception:
+            except (ValueError, RNS.RNSException, TypeError):
                 dest = None
             if not dest:
                 return SendResponse(
@@ -325,7 +320,7 @@ if GRPC_AVAILABLE:
                     destination_hash=dest_hash,
                     status="queued",
                 )
-            except Exception as e:
+            except (RNS.RNSException, LXMF.LXMFException, OSError) as e:
                 logger.error("Send RPC failed: %s", e, exc_info=True)
                 await context.abort(grpc.StatusCode.INTERNAL, f"Send failed: {e}")
 
@@ -340,6 +335,8 @@ if GRPC_AVAILABLE:
             try:
                 while True:
                     message = await queue.get()
+                    if message is None:  # Sentinel received during shutdown
+                        break
                     try:
                         # Apply optional title filter
                         title = getattr(message, 'title_as_string', lambda: "")()
@@ -432,14 +429,14 @@ async def async_main():
     identity_hex = RNS.hexrep(server_identity.hash, delimit=False)
     rnode_status = f"RNode on {rnode_port}" if os.path.exists(rnode_port) else "⚠️  RNode not connected — LoRa unavailable"
     print(f"\n{'='*50}")
-    print(f"LMAO Server — Running (async mode)")
+    print("LMAO Server — Running (async mode)")
     print(f"Node identity: {identity_hex}")
-    print(f"Listening for LXMF messages...")
+    print("Listening for LXMF messages...")
     print(f"  LoRa: {rnode_status}")
-    print(f"  WiFi: AutoInterface enabled")
-    print(f"  Title discriminator: p:Envelope")
+    print("  WiFi: AutoInterface enabled")
+    print("  Title discriminator: p:Envelope")
     if GRPC_AVAILABLE:
-        print(f"  gRPC: 0.0.0.0:50051")
+        print("  gRPC: 0.0.0.0:50051")
     print(f"{'='*50}\n")
 
     # Start gRPC server if available
