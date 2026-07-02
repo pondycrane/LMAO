@@ -26,8 +26,6 @@ logger = logging.getLogger(__name__)
 
 def handle_lxmf_delivery(message):
     """
-    Callback invoked when an LXMF message is received.
-
     Decodes incoming content as a protobuf LMAOEnvelope. The protocol uses
     title="p:Envelope" as a convention, but the handler attempts protobuf
     decode unconditionally and falls back to raw UTF-8 text for backward
@@ -122,11 +120,13 @@ def main():
     rnode_port = cfg_dict['interfaces']['RNode LoRa']['port']
     if not os.path.exists(rnode_port):
         logger.warning("RNode port %s not found. LoRa messaging will be unavailable.", rnode_port)
-        print(f"⚠️  RNode port {rnode_port} not found.")
-        print(f"   The server will start with WiFi AutoInterface only.")
-        print(f"   Set the LMAO_RNODE_PORT environment variable if your RNode is on a different port.")
-        print(f"   Example: LMAO_RNODE_PORT=/dev/ttyACM0 python3 server.py")
-        print(f"   LoRa messaging will be unavailable until an RNode is connected.\n")
+        print(
+            f"⚠️  RNode port {rnode_port} not found.\n"
+            f"   The server will start with WiFi AutoInterface only.\n"
+            f"   Set the LMAO_RNODE_PORT environment variable if your RNode is on a different port.\n"
+            f"   Example: LMAO_RNODE_PORT=/dev/ttyACM0 python3 server.py\n"
+            f"   LoRa messaging will be unavailable until an RNode is connected.\n"
+        )
 
     # Initialize Reticulum with our config
     print("Initializing Reticulum...")
