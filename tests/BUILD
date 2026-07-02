@@ -105,3 +105,12 @@ py_test(
         "@lmao_pip//pytest",
     ],
 )
+
+py_test(
+    name = "test_urns_transport",
+    srcs = ["test_urns_transport.py"],
+    data = ["//cardputer_client:lib_files"],
+    deps = [
+        "@lmao_pip//pytest",
+    ],
+)
