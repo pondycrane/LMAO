@@ -26,7 +26,7 @@ import LXMF
 
 # Local imports
 import config
-from lma_core import LMAOEnvelope, TextMessage
+from lma_core import LMAOEnvelope
 
 from google.protobuf.message import DecodeError
 
@@ -50,6 +50,10 @@ class Client:
         back to raw UTF-8 text for backward compatibility with non-protobuf
         senders. Does NOT send an ACK reply (unlike the server) — the
         human operator decides whether to respond.
+
+        Args:
+            message: An LXMF message object with get_source(), content,
+                and title_as_string() attributes.
         """
         try:
             source_identity = message.get_source()
@@ -100,6 +104,13 @@ class Client:
     def _send_message(self, dest_identity, content):
         """Build and send a protobuf-encoded TextMessage to the given
         destination identity via LXMF opportunistic delivery.
+
+        Args:
+            dest_identity: RNS.Identity of the destination node.
+            content: Text string to send.
+
+        Returns:
+            bool: True if the message was submitted successfully, False otherwise.
         """
         if not content or not content.strip():
             logger.warning("Cannot send empty message.")
@@ -174,6 +185,9 @@ class Client:
     def _parse_input(self, user_input):
         """Parse user input and dispatch commands.
 
+        Args:
+            user_input: Raw string from the REPL prompt.
+
         Returns:
             bool: False if the client should exit, True otherwise.
         """
@@ -207,10 +221,13 @@ class Client:
             dest_bytes = bytes.fromhex(dest_str)
             try:
                 self._default_dest_identity = RNS.Identity.recall(dest_bytes)
-            except Exception:
-                logger.warning("Could not recall identity for hash %s; will attempt on send.", dest_str)
+            except (RNS.RNSException, OSError) as e:
+                logger.error("Failed to recall identity for %s: %s", dest_str, e, exc_info=True)
+                print(f"Warning: Could not resolve destination identity for {dest_str}. "
+                      f"Hash saved, but send may fail until the identity is discoverable.")
                 self._default_dest_identity = None
-            print(f"Default destination set to: {dest_str}")
+            if self._default_dest_identity is not None:
+                print(f"Default destination set to: {dest_str}")
             return True
 
         # /send <dest_hash> <message>
@@ -232,7 +249,11 @@ class Client:
             try:
                 dest_identity = RNS.Identity.recall(dest_bytes)
             except Exception as e:
-                logger.error("Failed to recall identity for %s: %s", dest_str, e)
+                logger.error("Failed to recall identity for %s: %s", dest_str, e, exc_info=True)
+                print(f"Error: Could not resolve destination {dest_str}. Have you heard from this node?")
+                return True
+            if dest_identity is None:
+                logger.error("Identity recall returned None for %s", dest_str)
                 print(f"Error: Could not resolve destination {dest_str}. Have you heard from this node?")
                 return True
             self._send_message(dest_identity, content)
@@ -244,10 +265,13 @@ class Client:
                 dest_bytes = bytes.fromhex(self._default_dest_hash)
                 try:
                     self._default_dest_identity = RNS.Identity.recall(dest_bytes)
-                except Exception as e:
-                    logger.error("Failed to recall default identity: %s", e)
+                except (RNS.RNSException, OSError) as e:
+                    logger.error("Failed to recall default identity: %s", e, exc_info=True)
                     print(f"Error: Could not resolve default destination {self._default_dest_hash}.")
                     return True
+            if self._default_dest_identity is None:
+                print(f"Error: Could not resolve default destination {self._default_dest_hash}.")
+                return True
             self._send_message(self._default_dest_identity, stripped)
         else:
             print("No default destination set. Use /dest <hash> to set one, or /send <hash> <msg>.")
@@ -328,8 +352,8 @@ class Client:
         try:
             self.router.announce()
             logger.info("Announcement sent.")
-        except Exception as e:
-            logger.warning("Failed to announce presence: %s", e)
+        except (RNS.RNSException, LXMF.LXMFException) as e:
+            logger.warning("Failed to announce presence: %s", e, exc_info=True)
 
         # Print startup banner
         rnode_status = f"RNode on {rnode_port}" if os.path.exists(rnode_port) else "⚠️  RNode not connected — WiFi only"

@@ -446,6 +446,33 @@ class TestHandleLXMFDelivery:
         assert "MSG from" in captured.out
         assert "non-text" in captured.out
 
+    def test_handles_rns_exception(self, client_with_mocks):
+        """Handler should not crash when message triggers RNSException during processing."""
+        client = client_with_mocks
+
+        RNSException = sys.modules["RNS"].RNSException
+
+        msg = MagicMock()
+        # get_source raises RNSException (e.g., corrupted identity)
+        msg.get_source.side_effect = RNSException("Invalid identity")
+        msg.content = b"test"
+
+        # Should not raise
+        client.handle_lxmf_delivery(msg)
+        client.router.handle_outbound.assert_not_called()
+
+    def test_handles_generic_exception(self, client_with_mocks):
+        """Handler should not crash on unexpected exceptions during message processing."""
+        client = client_with_mocks
+
+        msg = MagicMock()
+        # Raise a completely unexpected exception
+        msg.get_source.side_effect = RuntimeError("Unexpected internal error")
+
+        # Should not raise
+        client.handle_lxmf_delivery(msg)
+        client.router.handle_outbound.assert_not_called()
+
 
 class TestSendMessage:
     """Tests for client message sending."""
@@ -520,6 +547,33 @@ class TestSendMessage:
         result = client._send_message(dest_identity, "Test")
 
         assert result is False, "Send should return False without identity"
+
+    def test_send_message_handles_lxmf_exception(self, client_with_mocks):
+        """Send should return False when LXMF raises LXMFException."""
+        client = client_with_mocks
+
+        LXMFException = sys.modules["LXMF"].LXMFException
+        client.router.handle_outbound.side_effect = LXMFException("Delivery failed")
+
+        dest_identity = MagicMock()
+        dest_identity.hash = b'\x0b' * 16
+
+        result = client._send_message(dest_identity, "Test message")
+
+        assert result is False, "Send should return False on LXMFException"
+
+    def test_send_message_handles_generic_exception(self, client_with_mocks):
+        """Send should return False on unexpected exceptions."""
+        client = client_with_mocks
+
+        client.router.handle_outbound.side_effect = RuntimeError("Unexpected")
+
+        dest_identity = MagicMock()
+        dest_identity.hash = b'\x0c' * 16
+
+        result = client._send_message(dest_identity, "Test message")
+
+        assert result is False, "Send should return False on unexpected exception"
 
 
 class TestInputParsing:
@@ -708,6 +762,72 @@ class TestInputParsing:
         assert err is not None
         assert "32" in err
 
+    def test_dest_command_recall_failure(self, client_parsed, capsys):
+        """'/dest <hash>' should warn when identity recall fails."""
+        client = client_parsed
+
+        valid_hash = "e" * 32
+        RNSException = sys.modules["RNS"].RNSException
+        sys.modules["RNS"].Identity.recall.side_effect = RNSException("Not found")
+
+        result = client._parse_input(f"/dest {valid_hash}")
+
+        assert result is True
+        assert client._default_dest_hash == valid_hash
+        assert client._default_dest_identity is None
+        captured = capsys.readouterr()
+        assert "Warning" in captured.out, "Should print warning on recall failure"
+        assert "Could not resolve" in captured.out
+
+    def test_plain_text_lazy_recall_success(self, client_parsed):
+        """Plain text should lazy-recall identity when _default_dest_identity is None."""
+        client = client_parsed
+
+        valid_hash = "f" * 32
+        client._default_dest_hash = valid_hash
+        client._default_dest_identity = None
+
+        mock_recalled = MagicMock()
+        mock_recalled.hash = bytes.fromhex(valid_hash)
+        sys.modules["RNS"].Identity.recall.return_value = mock_recalled
+
+        with patch.object(client, "_send_message", return_value=True) as mock_send:
+            result = client._parse_input("Lazy recall test")
+
+            assert result is True
+            assert client._default_dest_identity == mock_recalled, "Should cache recalled identity"
+            mock_send.assert_called_once_with(mock_recalled, "Lazy recall test")
+
+    def test_plain_text_lazy_recall_failure(self, client_parsed, capsys):
+        """Plain text should print error when lazy recall fails."""
+        client = client_parsed
+
+        valid_hash = "10" * 16
+        client._default_dest_hash = valid_hash
+        client._default_dest_identity = None
+
+        RNSException = sys.modules["RNS"].RNSException
+        sys.modules["RNS"].Identity.recall.side_effect = RNSException("Not reachable")
+
+        result = client._parse_input("This should fail")
+
+        assert result is True
+        captured = capsys.readouterr()
+        assert "Error" in captured.out, "Should print error on lazy recall failure"
+
+    def test_send_command_recall_returns_none(self, client_parsed, capsys):
+        """'/send <hash> <msg>' should handle recall returning None."""
+        client = client_parsed
+
+        valid_hash = "11" * 16
+        sys.modules["RNS"].Identity.recall.return_value = None
+
+        result = client._parse_input(f"/send {valid_hash} Test")
+
+        assert result is True
+        captured = capsys.readouterr()
+        assert "Error" in captured.out or "Could not resolve" in captured.out
+
 
 class TestRNodeMissing:
     """Tests for graceful handling of missing RNode."""
@@ -732,15 +852,16 @@ class TestRNodeMissing:
         )
 
     def test_announce_failure_not_fatal(self, client_with_main_mocks, capsys):
-        """If LXMF announce fails, client should still start."""
+        """If LXMF announce fails with RNSException, client should still start."""
         client = client_with_main_mocks
 
         mock_identity = MagicMock()
         type(mock_identity).hash = PropertyMock(return_value=b'\x01' * 16)
         sys.modules["RNS"].Identity.return_value = mock_identity
 
+        RNSException = sys.modules["RNS"].RNSException
         mock_router = sys.modules["LXMF"].LXMRouter.return_value
-        mock_router.announce.side_effect = Exception("Announce failed")
+        mock_router.announce.side_effect = RNSException("Announce failed")
 
         with patch.object(client.os.path, "exists", return_value=True), \
              patch.object(client, "input", side_effect=KeyboardInterrupt):

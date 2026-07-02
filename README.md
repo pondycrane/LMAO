@@ -203,6 +203,22 @@ bazel test //tests:test_cardputer_e2e --test_output=all
 
 The E2E test auto-skips when no Cardputer hardware is detected.
 
+### 8. Run the Human Client
+
+```bash
+# Using Bazel (recommended)
+bazel run //human_client:client
+
+# Or without Bazel (from repo root)
+PYTHONPATH="$PWD" python3 human_client/client.py
+
+# With a specific RNode port
+LMAO_RNODE_PORT=/dev/ttyACM0 bazel run //human_client:client
+```
+
+The Human Client starts with WiFi AutoInterface (no RNode required).
+If an RNode is connected, LoRa messaging is available.
+
 ---
 
 ## Project Structure
@@ -227,6 +243,11 @@ The E2E test auto-skips when no Cardputer hardware is detected.
 │   ├── requirements.txt               # Python dependencies (rns, lxmf, protobuf)
 │   ├── config.py                      # Reticulum config with RNode LoRa interface
 │   └── server.py                      # Main server: RNS + LXMF router + echo handler
+│
+├── human_client/                      # Python — runs on laptop/desktop
+│   ├── BUILD                          # Bazel: py_binary + py_library targets
+│   ├── config.py                      # Reticulum config (WiFi + optional RNode)
+│   └── client.py                      # Interactive REPL for human messaging
 │
 ├── cardputer_client/                  # MicroPython — runs on M5Stack Cardputer
 │   ├── config.py                      # µReticulum config for onboard LoRa
@@ -289,7 +310,7 @@ Typical wire size: **45 bytes** for "Hello from Cardputer" — well within LoRa'
 This POC intentionally limits scope to:
 
 - ✅ Direct LoRa communication (single-hop, no propagation)
-- ✅ Text messages between Cardputer and RPi server
+- ✅ Text messages between Cardputer, RPi server, and Human Client (Python CLI)
 - ✅ LXMF acknowledgements
 - ✅ Protobuf-encoded payloads
 - ❌ No multi-hop / store-and-forward
