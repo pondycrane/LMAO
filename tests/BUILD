@@ -115,3 +115,13 @@ py_test(
         "@lmao_pip//pytest",
     ],
 )
+
+py_test(
+    name = "test_human_client",
+    srcs = ["test_human_client.py"],
+    deps = [
+        "//human_client:client_lib",
+        "@lmao_pip//protobuf",
+        "@lmao_pip//pytest",
+    ],
+)

@@ -25,6 +25,7 @@ Interfaces    │  LoRa (RNode) · WiFi (AutoInterface) · TCP/UDP · Serial
 | **LMAO Camera node** | ESP32-S3-CAM + LoRa/WiFi | LoRa or WiFi | Same, but captures WebP image on command |
 | **RNode** | ESP32/RP2040 + LoRa radio | LoRa ↔ USB/WiFi | Transparent LoRa bridge |
 | **LMAO Server** | RPi/NUC | LoRa + WiFi + TCP | Propagation Node · IoT processor · Command scheduler · Human services |
+| **LMAO Human Client** | Laptop/Desktop (Python CLI) | WiFi + optional LoRa (RNode) | First-party terminal client for human messaging via LMAO protobuf protocol |
 | **Human nodes** | Phone (Sideband) / Laptop (NomadNet/MeshChat) | WiFi (preferred) | Person-to-person: text · images · audio clips · calls |
 | **Backbone** | Ubiquiti/MikroTik radios | Long-range WiFi | High-capacity between sites |
 
@@ -59,6 +60,49 @@ Interfaces    │  LoRa (RNode) · WiFi (AutoInterface) · TCP/UDP · Serial
 | **Voice clip / Image** | LXMF Resource (reliable transfer) | KB→MB → WiFi only |
 | **Real-time call** | Raw Reticulum Link (not LXMF) — stream Opus/H.264 frames | ~30-100 kbps → WiFi only |
 | **Location** | LXMF packet (opportunistic) | ~16 B → fits LoRa |
+
+## Human Client
+
+The `human_client/` package provides a first-party terminal CLI for human
+operators on laptops/desktops. It communicates using the same protobuf
+`LMAOEnvelope → TextMessage` protocol as the server, making it a drop-in
+replacement for third-party apps (Sideband, NomadNet).
+
+### Features
+
+- WiFi AutoInterface always enabled (works without LoRa hardware)
+- Optional RNode LoRa interface for mesh connectivity
+- Interactive REPL with `/send`, `/dest`, `/help`, `/quit` commands
+- Protobuf TextMessage encode/decode with raw UTF-8 fallback
+- Incoming message display with source hash
+- No auto-ACK (human decides whether to respond)
+
+### Key Targets
+
+| Target | Description |
+|--------|-------------|
+| `//human_client:client` | CLI binary — `bazel run //human_client:client` |
+| `//human_client:client_lib` | Shared library for tests |
+| `//tests:test_human_client` | Unit tests (mocked RNS/LXMF) |
+
+### Usage
+
+```bash
+# Start the client (WiFi-only, no RNode needed)
+bazel run //human_client:client
+
+# With a specific RNode port
+LMAO_RNODE_PORT=/dev/ttyACM0 bazel run //human_client:client
+```
+
+### Message Flow
+
+1. Client types message → protobuf LMAOEnvelope → LXMF → RNS → WiFi/LoRa
+2. Server receives → handler parses → sends ACK → client displays ACK
+3. Client displays incoming messages with `>>> MSG from <hex_hash>: <content>`
+
+The client does **not** send automatic ACK replies — the human operator
+chooses whether to respond. This prevents message loops.
 
 ## Protobuf Recommendation
 
@@ -144,8 +188,10 @@ proto code generation. See `.bazelversion` and `MODULE.bazel`.
 | `//proto:lma_py_proto` | Python generated protobuf stubs |
 | `//lma_core` | Shared Python wrapper re-exporting proto stubs |
 | `//lmao_server` | Server binary (RNode + LXMF) |
+| `//human_client:client` | Human CLI client (WiFi + optional RNode) |
 | `//tests:test_lma_encoder` | Encoder compatibility tests |
 | `//tests:test_server_handler` | Server handler tests |
+| `//tests:test_human_client` | Human client tests |
 
 #### Proto Schema
 
