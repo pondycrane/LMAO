@@ -1,8 +1,10 @@
 """
-Reticulum configuration for LMAO Server (Raspberry Pi + ESP32 RNode).
+Reticulum configuration for Human Client (laptop/desktop CLI).
 
-The RNode is connected via USB serial and provides a transparent LoRa bridge.
-WiFi AutoInterface is also enabled for local human-node communication.
+Provides WiFi AutoInterface (always enabled) and an optional RNode LoRa
+interface.  The RNode is optional — if the port is not found the client
+starts in WiFi-only mode with a warning, unlike the server which requires
+an RNode for its primary LoRa interface.
 
 Reticulum reads its configuration from a directory containing a 'config' file.
 Use get_configdir() to create a temporary config directory with this content.
@@ -24,7 +26,7 @@ _SECTIONS = {
         "loglevel": 4,
     },
     "transport": {
-        "path": "/tmp/lmao_server_rns_state",
+        "path": "/tmp/lmao_human_client_rns_state",
     },
 }
 
