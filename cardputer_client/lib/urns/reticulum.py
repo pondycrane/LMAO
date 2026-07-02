@@ -280,8 +280,8 @@ class Reticulum:
             if hasattr(iface, 'close'):
                 try:
                     iface.close()
-                except:
-                    pass
+                except Exception as e:
+                    log("Interface teardown error: " + str(e), LOG_DEBUG)
 
     @staticmethod
     def get_instance():

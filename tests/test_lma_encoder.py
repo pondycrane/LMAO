@@ -162,13 +162,22 @@ class TestCrossValidation:
 
 class TestEdgeCases:
     def test_decode_envelope_non_text_field(self):
-        """decode_envelope should return None for non-text (non-field-20) envelopes."""
-        # Encode a field with number != 20 (e.g., field 10 with empty bytes)
-        data = b""
-        # Field 10, wire type 2: tag = (10 << 3) | 2 = 0x52, then length 0
+        """decode_envelope dispatches correctly for non-text fields."""
+        # Field 10 (SensorReport), wire type 2: tag = (10 << 3) | 2 = 0x52, then length 0
         non_text_bytes = b"\x52\x00"
         result = enc.decode_envelope(non_text_bytes)
-        assert result is None, f"Expected None for non-text field, got {result}"
+        # Field 10 is now recognized as SensorReport; decoded dict should have expected keys
+        assert result is not None, "Should decode SensorReport, not return None"
+        assert result.get("node_id") == ""
+        assert result.get("seq") == 0
+
+    def test_decode_envelope_unknown_field_returns_none(self):
+        """decode_envelope returns None for unrecognized field numbers."""
+        # Field 99, wire type 2: tag = (99<<3)|2, then length 0
+        # varint for 99<<3|2 = 794 = 0x31a → bytes: 0x9a, 0x06
+        unknown_bytes = b"\x9a\x06\x00"
+        result = enc.decode_envelope(unknown_bytes)
+        assert result is None, f"Expected None for unknown field, got {result}"
 
     def test_decode_envelope_empty(self):
         """decode_envelope should return None for empty data."""
@@ -265,6 +274,229 @@ class TestEdgeCases:
         data = b"\x0d" + (b"\x00" * 4)
         with pytest.raises(ValueError, match="Unsupported wire type"):
             enc.decode_text_message(data)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Tests for newly added message types (Task 8)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestSensorReport:
+    def test_round_trip_minimal(self):
+        """Encode/decode SensorReport with no readings."""
+        encoded = enc.encode_sensor_report("sensor-1", 42, 3.7, [])
+        decoded = enc.decode_sensor_report(encoded)
+        assert decoded["node_id"] == "sensor-1"
+        assert decoded["seq"] == 42
+        assert decoded["readings"] == []
+
+    def test_round_trip_with_readings(self):
+        """Encode/decode SensorReport with multiple readings."""
+        readings = [
+            {"sensor_id": 1, "value": 23.5, "unit": "C", "timestamp_ms": 1000},
+            {"sensor_id": 2, "value": 65.0, "unit": "%", "timestamp_ms": 1001},
+        ]
+        encoded = enc.encode_sensor_report("node", 0, 4.2, readings)
+        decoded = enc.decode_sensor_report(encoded)
+        assert abs(decoded["battery"] - 4.2) < 0.001
+        assert len(decoded["readings"]) == 2
+        assert decoded["readings"][0]["sensor_id"] == 1
+        assert decoded["readings"][1]["unit"] == "%"
+
+    def test_envelope_dispatch(self):
+        """decode_envelope dispatches field 10 to SensorReport decoder."""
+        inner = enc.encode_sensor_report("n", 0, 0.0, [])
+        envelope = enc.encode_field(10, 2, enc.encode_length_delimited(inner))
+        result = enc.decode_envelope(envelope)
+        assert result is not None
+        assert result["node_id"] == "n"
+
+
+class TestCommandRequest:
+    def test_round_trip_simple(self):
+        """Encode/decode CommandRequest with no params."""
+        encoded = enc.encode_command_request("cmd1", "target1", "reboot", {}, 100, 200)
+        decoded = enc.decode_command_request(encoded)
+        assert decoded["cmd_id"] == "cmd1"
+        assert decoded["target"] == "target1"
+        assert decoded["action"] == "reboot"
+        assert decoded["params"] == {}
+        assert decoded["issued_ms"] == 100
+        assert decoded["expires_ms"] == 200
+
+    def test_round_trip_with_params(self):
+        """Encode/decode CommandRequest with map params."""
+        params = {"duration": "60", "valve": "open"}
+        encoded = enc.encode_command_request("c2", "t2", "spray", params, 0, 0)
+        decoded = enc.decode_command_request(encoded)
+        assert decoded["params"] == params
+
+    def test_envelope_dispatch(self):
+        """decode_envelope dispatches field 11 to CommandRequest decoder."""
+        inner = enc.encode_command_request("c", "t", "a", {}, 0, 0)
+        envelope = enc.encode_field(11, 2, enc.encode_length_delimited(inner))
+        result = enc.decode_envelope(envelope)
+        assert result is not None
+        assert result["cmd_id"] == "c"
+
+
+class TestCommandAck:
+    def test_round_trip_success(self):
+        """Encode/decode CommandAck with success=True."""
+        encoded = enc.encode_command_ack("cmd1", "node1", True, "OK")
+        decoded = enc.decode_command_ack(encoded)
+        assert decoded["cmd_id"] == "cmd1"
+        assert decoded["node_id"] == "node1"
+        assert decoded["success"] is True
+        assert decoded["message"] == "OK"
+
+    def test_round_trip_failure(self):
+        """Encode/decode CommandAck with success=False."""
+        encoded = enc.encode_command_ack("cmd2", "node2", False, "FAIL")
+        decoded = enc.decode_command_ack(encoded)
+        assert decoded["success"] is False
+        assert decoded["message"] == "FAIL"
+
+    def test_envelope_dispatch(self):
+        """decode_envelope dispatches field 12 to CommandAck decoder."""
+        inner = enc.encode_command_ack("c", "n", True, "m")
+        envelope = enc.encode_field(12, 2, enc.encode_length_delimited(inner))
+        result = enc.decode_envelope(envelope)
+        assert result is not None
+        assert result["cmd_id"] == "c"
+
+
+class TestAudioMessage:
+    def test_round_trip(self):
+        """Encode/decode AudioMessage with binary audio data."""
+        audio_data = b"\x00\x01\x02\x03"
+        encoded = enc.encode_audio_message("node-a", audio_data, "opus", 5000, 123456789)
+        decoded = enc.decode_audio_message(encoded)
+        assert decoded["node_id"] == "node-a"
+        assert decoded["audio_data"] == audio_data
+        assert decoded["codec"] == "opus"
+        assert decoded["duration_ms"] == 5000
+        assert decoded["timestamp"] == 123456789
+
+    def test_envelope_dispatch(self):
+        """decode_envelope dispatches field 21 to AudioMessage decoder."""
+        inner = enc.encode_audio_message("n", b"\x00", "opus", 0, 0)
+        envelope = enc.encode_field(21, 2, enc.encode_length_delimited(inner))
+        result = enc.decode_envelope(envelope)
+        assert result is not None
+        assert result["codec"] == "opus"
+
+
+class TestImageMessage:
+    def test_round_trip(self):
+        """Encode/decode ImageMessage."""
+        image_data = b"\xff\xd8\xff\xe0"  # JPEG header
+        encoded = enc.encode_image_message("cam-1", image_data, "jpeg", 640, 480, 100)
+        decoded = enc.decode_image_message(encoded)
+        assert decoded["node_id"] == "cam-1"
+        assert decoded["image_data"] == image_data
+        assert decoded["format"] == "jpeg"
+        assert decoded["width"] == 640
+        assert decoded["height"] == 480
+        assert decoded["timestamp"] == 100
+
+    def test_envelope_dispatch(self):
+        """decode_envelope dispatches field 22 to ImageMessage decoder."""
+        inner = enc.encode_image_message("n", b"\x00", "webp", 0, 0, 0)
+        envelope = enc.encode_field(22, 2, enc.encode_length_delimited(inner))
+        result = enc.decode_envelope(envelope)
+        assert result is not None
+        assert result["format"] == "webp"
+
+
+class TestCallSignal:
+    def test_round_trip(self):
+        """Encode/decode CallSignal."""
+        encoded = enc.encode_call_signal(enc.SIGNAL_OFFER, "sdp-data", "audio")
+        decoded = enc.decode_call_signal(encoded)
+        assert decoded["signal"] == enc.SIGNAL_OFFER
+        assert decoded["sdp_or_ice"] == "sdp-data"
+        assert decoded["media_type"] == "audio"
+
+    def test_all_signal_types(self):
+        """All CallSignal enum values round-trip correctly."""
+        for sig in [enc.SIGNAL_OFFER, enc.SIGNAL_ANSWER, enc.SIGNAL_ICE,
+                     enc.SIGNAL_HANGUP, enc.SIGNAL_KEEPALIVE]:
+            encoded = enc.encode_call_signal(sig, "", "")
+            decoded = enc.decode_call_signal(encoded)
+            assert decoded["signal"] == sig
+
+    def test_envelope_dispatch(self):
+        """decode_envelope dispatches field 30 to CallSignal decoder."""
+        inner = enc.encode_call_signal(enc.SIGNAL_HANGUP, "", "")
+        envelope = enc.encode_field(30, 2, enc.encode_length_delimited(inner))
+        result = enc.decode_envelope(envelope)
+        assert result is not None
+        assert result["signal"] == enc.SIGNAL_HANGUP
+
+
+class TestEnvelopeDispatch:
+    """Verify decode_envelope dispatches to the correct decoder for each field."""
+
+    def test_dispatch_sensor_report(self):
+        inner = enc.encode_sensor_report("s", 0, 0.0, [])
+        env = enc.encode_field(10, 2, enc.encode_length_delimited(inner))
+        result = enc.decode_envelope(env)
+        assert result is not None and "node_id" in result
+
+    def test_dispatch_command_request(self):
+        inner = enc.encode_command_request("c", "t", "a", {}, 0, 0)
+        env = enc.encode_field(11, 2, enc.encode_length_delimited(inner))
+        result = enc.decode_envelope(env)
+        assert result is not None and "cmd_id" in result
+
+    def test_dispatch_command_ack(self):
+        inner = enc.encode_command_ack("c", "n", True, "m")
+        env = enc.encode_field(12, 2, enc.encode_length_delimited(inner))
+        result = enc.decode_envelope(env)
+        assert result is not None and "success" in result
+
+    def test_dispatch_text_message(self):
+        inner = enc.encode_text_message("n", "txt", 1)
+        env = enc.encode_field(20, 2, enc.encode_length_delimited(inner))
+        result = enc.decode_envelope(env)
+        assert result is not None and "content" in result
+
+    def test_dispatch_audio_message(self):
+        inner = enc.encode_audio_message("n", b"a", "opus", 0, 0)
+        env = enc.encode_field(21, 2, enc.encode_length_delimited(inner))
+        result = enc.decode_envelope(env)
+        assert result is not None and "codec" in result
+
+    def test_dispatch_image_message(self):
+        inner = enc.encode_image_message("n", b"i", "webp", 0, 0, 0)
+        env = enc.encode_field(22, 2, enc.encode_length_delimited(inner))
+        result = enc.decode_envelope(env)
+        assert result is not None and "format" in result
+
+    def test_dispatch_call_signal(self):
+        inner = enc.encode_call_signal(enc.SIGNAL_OFFER, "", "")
+        env = enc.encode_field(30, 2, enc.encode_length_delimited(inner))
+        result = enc.decode_envelope(env)
+        assert result is not None and "signal" in result
+
+
+class TestBackwardCompatibility:
+    """Ensure POC convenience functions still work."""
+
+    def test_make_poc_message_still_works(self):
+        """make_poc_message must produce byte-identical output to before."""
+        payload = enc.make_poc_message("node", "hello", 1)
+        parsed = enc.parse_poc_message(payload)
+        assert parsed == "hello"
+
+    def test_known_answer_poc_message(self):
+        """Known-answer test for POC message unchanged."""
+        payload = enc.make_poc_message("a", "b", 1)
+        # This must match the pre-existing known answer
+        inner = enc.encode_text_message("a", "b", 1)
+        expected = b"\xa2\x01\x08" + inner
+        assert payload == expected
 
 
 if __name__ == "__main__":
