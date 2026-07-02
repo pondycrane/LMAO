@@ -46,8 +46,10 @@ class Client:
 
     def handle_lxmf_delivery(self, message):
         """Decodes incoming content as a protobuf LMAOEnvelope. On success,
-        extracts TextMessage content and displays it to the user. Falls
-        back to raw UTF-8 text for backward compatibility with non-protobuf
+        extracts TextMessage content and displays it to the user. If the
+        envelope decodes but does not contain a TextMessage (e.g., a
+        SensorReport or Command), falls back to raw text. Falls back to
+        raw UTF-8 text for backward compatibility with non-protobuf
         senders. Does NOT send an ACK reply (unlike the server) — the
         human operator decides whether to respond.
 
@@ -112,7 +114,7 @@ class Client:
         Returns:
             bool: True if the message was submitted successfully, False otherwise.
         """
-        if not content or not content.strip():
+        if not content.strip():
             logger.warning("Cannot send empty message.")
             print("Error: Message content cannot be empty.")
             return False
@@ -149,7 +151,7 @@ class Client:
             logger.error("Failed to send message: %s", e, exc_info=True)
             print(f"Error sending message: {e}")
             return False
-        except Exception as e:
+        except OSError as e:
             logger.error("Unexpected error sending message: %s", e, exc_info=True)
             print(f"Unexpected error: {e}")
             return False
@@ -248,7 +250,7 @@ class Client:
             dest_bytes = bytes.fromhex(dest_str)
             try:
                 dest_identity = RNS.Identity.recall(dest_bytes)
-            except Exception as e:
+            except (RNS.RNSException, OSError, ValueError) as e:
                 logger.error("Failed to recall identity for %s: %s", dest_str, e, exc_info=True)
                 print(f"Error: Could not resolve destination {dest_str}. Have you heard from this node?")
                 return True
@@ -318,8 +320,8 @@ class Client:
                 print(f"This is often caused by a misconfigured RNode on {rnode_port}.")
                 print("Check that:")
                 print(f"  1. The RNode is plugged in and on the correct port ({rnode_port})")
-                print(f"  2. You have permission: sudo usermod -a -G dialout $USER")
-                print(f"  3. The RNode firmware is flashed correctly")
+                print("  2. You have permission: sudo usermod -a -G dialout $USER")
+                print("  3. The RNode firmware is flashed correctly")
                 print("  See rnode_firmware/README.md and README Troubleshooting.")
             sys.exit(1)
         except Exception as e:
@@ -332,7 +334,7 @@ class Client:
         # Create identity for the client
         try:
             self.client_identity = RNS.Identity()
-        except Exception as e:
+        except (RNS.RNSException, OSError) as e:
             logger.critical("Failed to create client identity: %s", e, exc_info=True)
             print("FATAL: Failed to create client identity. See log for details.", file=sys.stderr)
             sys.exit(1)
@@ -343,7 +345,7 @@ class Client:
         try:
             self.router = LXMF.LXMRouter(identity=self.client_identity, storagepath="/tmp/lmao_human_client_lxmf")
             self.router.register_delivery_callback(self.handle_lxmf_delivery)
-        except Exception as e:
+        except (RNS.RNSException, LXMF.LXMFException, OSError) as e:
             logger.critical("Failed to start LXMF router: %s", e, exc_info=True)
             print("FATAL: Failed to start LXMF router. See log for details.", file=sys.stderr)
             sys.exit(1)
@@ -358,11 +360,11 @@ class Client:
         # Print startup banner
         rnode_status = f"RNode on {rnode_port}" if os.path.exists(rnode_port) else "⚠️  RNode not connected — WiFi only"
         print(f"\n{'='*50}")
-        print(f"LMAO Human Client — Ready")
+        print("LMAO Human Client — Ready")
         print(f"Node identity: {identity_hex}")
         print(f"  LoRa: {rnode_status}")
-        print(f"  WiFi: AutoInterface enabled")
-        print(f"  Title discriminator: p:Envelope")
+        print("  WiFi: AutoInterface enabled")
+        print("  Title discriminator: p:Envelope")
         print(f"{'='*50}")
         print("Type /help for commands, /quit to exit.\n")
 
@@ -386,7 +388,6 @@ class Client:
 
         except KeyboardInterrupt:
             print("\nShutting down...")
-            sys.exit(0)
 
 
 def main():

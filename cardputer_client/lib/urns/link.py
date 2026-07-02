@@ -367,7 +367,7 @@ class Link:
 
     def _handle_resource_adv(self, plaintext):
         """Handle incoming resource advertisement (receiver mode)."""
-        from .resource import Resource, MAX_RESOURCE_SIZE
+        from .resource import Resource
         if len(self.incoming_resources) >= const.MAX_INCOMING_RESOURCES:
             log("Link " + self.link_id.hex()[:8] + " too many incoming resources", LOG_DEBUG)
             return
@@ -489,7 +489,8 @@ class OutgoingLink:
     def __init__(self, destination, established_callback=None, closed_callback=None):
         from .identity import Identity
         from .crypto import X25519PrivateKey
-        import gc, os
+        import gc
+        import os
 
         self.destination = destination
         self.status = OutgoingLink.PENDING
@@ -558,7 +559,6 @@ class OutgoingLink:
     def validate_proof(self, packet):
         """Validate server's link proof, complete ECDH handshake, send RTT."""
         from .crypto import X25519PublicKey, Token, hkdf
-        from .identity import Identity
         import gc
 
         proof_data = packet.data
@@ -680,7 +680,7 @@ class OutgoingLink:
             log("OutLink " + self.link_id.hex()[:8] + " ctx=0x" + ("%02x" % packet.context), LOG_DEBUG)
 
     def _handle_resource_adv(self, plaintext):
-        from .resource import Resource, MAX_RESOURCE_SIZE
+        from .resource import Resource
         if len(self.incoming_resources) >= const.MAX_INCOMING_RESOURCES:
             return
         Resource.accept(plaintext, self)

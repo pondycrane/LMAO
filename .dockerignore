@@ -1,0 +1,14 @@
+.git/
+.gitignore
+**/__pycache__/
+**/*.pyc
+bazel-*/
+.archon/
+artifacts/
+tests/
+docs/
+human_client/
+cardputer_client/
+proto/__init__.py
+*.md
+Dockerfile

@@ -1,0 +1,206 @@
+"""Tests for k8s-app IoT ingest script."""
+import importlib.util
+from unittest.mock import MagicMock
+
+import pytest
+
+
+# Load k8s-app/iot_ingest.py via importlib (directory name has a hyphen,
+# so it's not a valid Python package name and can't be imported with
+# a regular 'from k8s_app import iot_ingest' statement).
+def _load_iot_ingest():
+    """Import k8s-app/iot_ingest.py as a module via importlib."""
+    spec = importlib.util.spec_from_file_location(
+        "iot_ingest", "k8s-app/iot_ingest.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+# Module-level import (cached after first load)
+iot_ingest = _load_iot_ingest()
+
+
+class TestBuildSensorEnvelope:
+    """Unit tests for build_sensor_envelope()."""
+
+    def test_returns_bytes(self):
+        """build_sensor_envelope should return serialized bytes."""
+        result = iot_ingest.build_sensor_envelope("test-node", 25.0, 60.0)
+        assert isinstance(result, bytes)
+        assert len(result) > 0
+
+    def test_envelope_roundtrip(self):
+        """Round-trip: build → parse should recover sensor data."""
+        node_id = "roundtrip-node-01"
+        temp = 23.5
+        humidity = 55.0
+
+        payload = iot_ingest.build_sensor_envelope(node_id, temp, humidity)
+
+        # Parse back
+        from proto import lma_pb2
+        envelope = lma_pb2.LMAOEnvelope()
+        envelope.ParseFromString(payload)
+
+        assert envelope.sensor.node_id == node_id
+        assert envelope.sensor.battery == pytest.approx(3.7)
+        assert len(envelope.sensor.readings) == 2
+
+    def test_sensor_readings_structure(self):
+        """Verify sensor readings have correct fields and types."""
+        payload = iot_ingest.build_sensor_envelope("struct-node", 30.0, 80.0)
+
+        from proto import lma_pb2
+        envelope = lma_pb2.LMAOEnvelope()
+        envelope.ParseFromString(payload)
+
+        readings = envelope.sensor.readings
+        assert len(readings) == 2
+
+        # First reading: temperature
+        temp_reading = readings[0]
+        assert temp_reading.sensor_id == 1
+        assert temp_reading.unit == "C"
+        assert temp_reading.value == pytest.approx(30.0)
+
+        # Second reading: humidity
+        hum_reading = readings[1]
+        assert hum_reading.sensor_id == 2
+        assert hum_reading.unit == "%"
+        assert hum_reading.value == pytest.approx(80.0)
+
+    def test_default_battery_value(self):
+        """Battery should default to 3.7V."""
+        payload = iot_ingest.build_sensor_envelope("batt-test", 20.0, 50.0)
+
+        from proto import lma_pb2
+        envelope = lma_pb2.LMAOEnvelope()
+        envelope.ParseFromString(payload)
+
+        assert envelope.sensor.battery == pytest.approx(3.7)
+
+    def test_negative_temperature(self):
+        """Should handle sub-zero temperatures."""
+        payload = iot_ingest.build_sensor_envelope("freezer", -15.0, 40.0)
+
+        from proto import lma_pb2
+        envelope = lma_pb2.LMAOEnvelope()
+        envelope.ParseFromString(payload)
+
+        assert envelope.sensor.readings[0].value == pytest.approx(-15.0)
+
+    def test_zero_humidity(self):
+        """Should handle zero humidity."""
+        payload = iot_ingest.build_sensor_envelope("dry", 30.0, 0.0)
+
+        from proto import lma_pb2
+        envelope = lma_pb2.LMAOEnvelope()
+        envelope.ParseFromString(payload)
+
+        assert envelope.sensor.readings[1].value == pytest.approx(0.0)
+
+
+class TestSubscribeExample:
+    """Tests for subscribe_example() timeout and CANCELLED wiring."""
+
+    def test_subscribe_passes_timeout_to_stub(self, capsys):
+        """subscribe_example should pass timeout parameter to stub.Subscribe."""
+        mock_stub = MagicMock()
+        # Make Subscribe return an empty iterator (no messages)
+        mock_stub.Subscribe.return_value = iter([])
+
+        iot_ingest.subscribe_example(mock_stub, timeout=10)
+
+        # Verify Subscribe was called with timeout=10
+        mock_stub.Subscribe.assert_called_once()
+        _, kwargs = mock_stub.Subscribe.call_args
+        assert kwargs.get("timeout") == 10
+
+    def test_subscribe_cancelled_logged(self, capsys):
+        """CANCELLED grpc.RpcError should print CANCELLED message."""
+        mock_stub = MagicMock()
+
+        # Create a mock RpcError with CANCELLED code (must inherit from grpc.RpcError
+        # to be caught by `except grpc.RpcError` in subscribe_example)
+        class FakeRpcError(iot_ingest.grpc.RpcError):
+            def code(self):
+                return iot_ingest.grpc.StatusCode.CANCELLED
+            def details(self):
+                return ""
+
+        mock_stub.Subscribe.side_effect = FakeRpcError()
+
+        iot_ingest.subscribe_example(mock_stub, timeout=5)
+
+        captured = capsys.readouterr()
+        assert "CANCELLED" in captured.out
+
+    def test_subscribe_other_error_logged(self, capsys):
+        """Non-CANCELLED grpc.RpcError should print the error message."""
+        mock_stub = MagicMock()
+
+        class FakeRpcError(iot_ingest.grpc.RpcError):
+            def code(self):
+                return iot_ingest.grpc.StatusCode.UNAVAILABLE
+            def __str__(self):
+                return "Service unavailable"
+
+        mock_stub.Subscribe.side_effect = FakeRpcError()
+
+        iot_ingest.subscribe_example(mock_stub, timeout=5)
+
+        captured = capsys.readouterr()
+        assert "Subscribe error" in captured.out
+
+    def test_subscribe_receives_message(self, capsys):
+        """subscribe_example should print received message bytes."""
+        mock_stub = MagicMock()
+
+        # Create a mock message
+        mock_msg = MagicMock()
+        mock_msg.source_hash = "abcdef1234"
+        mock_msg.envelope = b"test"
+
+        # Return one message then stop
+        mock_stub.Subscribe.return_value = iter([mock_msg])
+
+        iot_ingest.subscribe_example(mock_stub, timeout=5)
+
+        captured = capsys.readouterr()
+        assert "Received" in captured.out
+        assert "abcdef1234" in captured.out
+
+
+class TestSendExample:
+    """Tests for send_example()."""
+
+    def test_send_example_calls_stub(self, capsys):
+        """send_example should call stub.Send with a valid request."""
+        mock_stub = MagicMock()
+        mock_stub.Send.return_value = MagicMock(status="queued", destination_hash="abc123")
+
+        iot_ingest.send_example(mock_stub)
+
+        mock_stub.Send.assert_called_once()
+        captured = capsys.readouterr()
+        assert "queued" in captured.out
+
+
+class TestGetIdentityExample:
+    """Tests for get_identity_example()."""
+
+    def test_get_identity_calls_stub(self, capsys):
+        """get_identity_example should call stub.GetIdentity."""
+        mock_stub = MagicMock()
+        mock_stub.GetIdentity.return_value = MagicMock(
+            identity_hex="aaabbbccc", node_name="lmao-server"
+        )
+
+        iot_ingest.get_identity_example(mock_stub)
+
+        mock_stub.GetIdentity.assert_called_once()
+        captured = capsys.readouterr()
+        assert "aaabbbccc" in captured.out
+        assert "lmao-server" in captured.out

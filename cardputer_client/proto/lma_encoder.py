@@ -551,18 +551,6 @@ _DECODERS = {
     FIELD_CALL:    decode_call_signal,
 }
 
-# Encoder wrappers that produce envelope bytes
-_ENCODERS = {
-    FIELD_SENSOR:  lambda data: encode_field(FIELD_SENSOR, 2, encode_length_delimited(data)),
-    FIELD_COMMAND: lambda data: encode_field(FIELD_COMMAND, 2, encode_length_delimited(data)),
-    FIELD_ACK:     lambda data: encode_field(FIELD_ACK, 2, encode_length_delimited(data)),
-    FIELD_TEXT:    lambda data: encode_field(FIELD_TEXT, 2, encode_length_delimited(data)),
-    FIELD_AUDIO:   lambda data: encode_field(FIELD_AUDIO, 2, encode_length_delimited(data)),
-    FIELD_IMAGE:   lambda data: encode_field(FIELD_IMAGE, 2, encode_length_delimited(data)),
-    FIELD_CALL:    lambda data: encode_field(FIELD_CALL, 2, encode_length_delimited(data)),
-}
-
-
 def encode_envelope_text(textmessage_bytes):
     """Wrap a TextMessage in an LMAOEnvelope (field 20, wire type 2).
 
