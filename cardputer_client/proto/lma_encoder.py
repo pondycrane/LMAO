@@ -1,19 +1,25 @@
 """
-Minimal protobuf encoder/decoder for LMAO TextMessage on MicroPython.
+Minimal protobuf encoder/decoder for LMAO messages on MicroPython.
 
 µReticulum / Cardputer cannot use the full protobuf library (~2 MB).
-This hand-coded encoder handles only the TextMessage sub-message
-at field number 20 within LMAOEnvelope — enough for the POC.
+This hand-coded encoder handles all LMAOEnvelope payload types defined
+in proto/lma.proto.
 
 Wire format:
-  LMAOEnvelope:  field 20 (TextMessage), wire type 2 (length-delimited)
-    → bytes of TextMessage
+  LMAOEnvelope:  oneof payload → field number + wire type 2 (length-delimited)
+    → bytes of sub-message
 
-  TextMessage:
-    field 1: node_id   (string, wire type 2)
-    field 2: content   (string, wire type 2)
-    field 3: timestamp (uint64, wire type 0)
+Supported sub-messages:
+  SensorReport    (field 10)
+  CommandRequest  (field 11)
+  CommandAck      (field 12)
+  TextMessage     (field 20)
+  AudioMessage    (field 21)
+  ImageMessage    (field 22)
+  CallSignal      (field 30)
 """
+
+import struct as _struct
 
 
 def encode_varint(value):
@@ -48,10 +54,259 @@ def encode_field(field_number, wire_type, payload):
 
 
 def encode_length_delimited(data):
-    """Encode a length-delimited field (string or nested message)."""
+    """Encode a length-delimited field (string, bytes, or nested message)."""
     length = len(data)
     return encode_varint(length) + data
 
+
+def _encode_float(value):
+    """Encode a 32-bit float (wire type 5, little-endian)."""
+    return _struct.pack("<f", value)
+
+
+def _decode_float(data, offset=0):
+    """Decode a 32-bit float from 4 bytes at offset."""
+    return _struct.unpack("<f", data[offset:offset + 4])[0]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  SensorReport (field 10)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def encode_sensor_reading(sensor_id, value, unit, timestamp_ms):
+    """Encode a single SensorReading sub-message."""
+    result = bytearray()
+    result.extend(encode_field(1, 0, encode_varint(sensor_id)))           # uint32
+    result.extend(encode_field(2, 5, _encode_float(value)))                # float
+    result.extend(encode_field(3, 2, encode_length_delimited(unit.encode("utf-8"))))  # string
+    result.extend(encode_field(4, 0, encode_varint(timestamp_ms)))        # uint64
+    return bytes(result)
+
+
+def encode_sensor_report(node_id, seq, battery, readings):
+    """Encode a SensorReport protobuf message.
+
+    readings is a list of dicts: [{sensor_id, value, unit, timestamp_ms}, ...]
+    """
+    result = bytearray()
+    result.extend(encode_field(1, 2, encode_length_delimited(node_id.encode("utf-8"))))  # string
+    result.extend(encode_field(2, 0, encode_varint(seq)))                  # uint32
+    result.extend(encode_field(3, 5, _encode_float(battery)))             # float
+    for r in readings:
+        inner = encode_sensor_reading(
+            r["sensor_id"], r["value"], r["unit"], r["timestamp_ms"]
+        )
+        result.extend(encode_field(4, 2, encode_length_delimited(inner)))  # repeated SensorReading
+    return bytes(result)
+
+
+def decode_sensor_reading(data):
+    """Decode a single SensorReading from bytes. Returns dict or None."""
+    result = {"sensor_id": 0, "value": 0.0, "unit": "", "timestamp_ms": 0}
+    pos = 0
+    while pos < len(data):
+        tag, tag_len = decode_varint(data, pos)
+        pos += tag_len
+        field_number = tag >> 3
+        wire_type = tag & 0x07
+
+        if wire_type == 0:  # Varint
+            value, vlen = decode_varint(data, pos)
+            pos += vlen
+            if field_number == 1:
+                result["sensor_id"] = value
+            elif field_number == 4:
+                result["timestamp_ms"] = value
+        elif wire_type == 2:  # Length-delimited
+            length, llen = decode_varint(data, pos)
+            pos += llen
+            if field_number == 3:
+                result["unit"] = data[pos:pos + length].decode("utf-8", "replace")
+            pos += length
+        elif wire_type == 5:  # 32-bit float
+            if field_number == 2:
+                result["value"] = _decode_float(data, pos)
+            pos += 4
+        else:
+            raise ValueError(f"Unsupported wire type in SensorReading: {wire_type}")
+    return result
+
+
+def decode_sensor_report(data):
+    """Decode a SensorReport from protobuf bytes.
+
+    Returns dict with keys: node_id, seq, battery, readings (list of dicts).
+    """
+    result = {"node_id": "", "seq": 0, "battery": 0.0, "readings": []}
+    pos = 0
+    while pos < len(data):
+        tag, tag_len = decode_varint(data, pos)
+        pos += tag_len
+        field_number = tag >> 3
+        wire_type = tag & 0x07
+
+        if wire_type == 0:  # Varint
+            value, vlen = decode_varint(data, pos)
+            pos += vlen
+            if field_number == 2:
+                result["seq"] = value
+        elif wire_type == 2:  # Length-delimited
+            length, llen = decode_varint(data, pos)
+            pos += llen
+            value = data[pos:pos + length]
+            if field_number == 1:
+                result["node_id"] = value.decode("utf-8", "replace")
+            elif field_number == 4:
+                result["readings"].append(decode_sensor_reading(value))
+            pos += length
+        elif wire_type == 5:  # 32-bit float
+            if field_number == 3:
+                result["battery"] = _decode_float(data, pos)
+            pos += 4
+        else:
+            raise ValueError(f"Unsupported wire type in SensorReport: {wire_type}")
+    return result
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  CommandRequest (field 11)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def encode_command_request(cmd_id, target, action, params, issued_ms, expires_ms):
+    """Encode a CommandRequest protobuf message.
+
+    params is a dict of string→string.
+    """
+    result = bytearray()
+    result.extend(encode_field(1, 2, encode_length_delimited(cmd_id.encode("utf-8"))))     # string
+    result.extend(encode_field(2, 2, encode_length_delimited(target.encode("utf-8"))))     # string
+    result.extend(encode_field(3, 2, encode_length_delimited(action.encode("utf-8"))))     # string
+    # map<string, string> params = 4 — encoded as repeated length-delimited entries
+    # each entry is a sub-message: key (field 1) + value (field 2)
+    for k, v in params.items():
+        entry = bytearray()
+        entry.extend(encode_field(1, 2, encode_length_delimited(k.encode("utf-8"))))
+        entry.extend(encode_field(2, 2, encode_length_delimited(v.encode("utf-8"))))
+        result.extend(encode_field(4, 2, encode_length_delimited(bytes(entry))))
+    result.extend(encode_field(5, 0, encode_varint(issued_ms)))                            # uint64
+    result.extend(encode_field(6, 0, encode_varint(expires_ms)))                           # uint64
+    return bytes(result)
+
+
+def _decode_map_entry(data):
+    """Decode a protobuf map entry (field 1 = key, field 2 = value)."""
+    key = ""
+    value = ""
+    pos = 0
+    while pos < len(data):
+        tag, tag_len = decode_varint(data, pos)
+        pos += tag_len
+        field_number = tag >> 3
+        wire_type = tag & 0x07
+        if wire_type == 2:
+            length, llen = decode_varint(data, pos)
+            pos += llen
+            s = data[pos:pos + length].decode("utf-8", "replace")
+            if field_number == 1:
+                key = s
+            elif field_number == 2:
+                value = s
+            pos += length
+        else:
+            raise ValueError(f"Unsupported wire type in map entry: {wire_type}")
+    return key, value
+
+
+def decode_command_request(data):
+    """Decode a CommandRequest from protobuf bytes.
+
+    Returns dict with keys: cmd_id, target, action, params (dict), issued_ms, expires_ms.
+    """
+    result = {"cmd_id": "", "target": "", "action": "", "params": {}, "issued_ms": 0, "expires_ms": 0}
+    pos = 0
+    while pos < len(data):
+        tag, tag_len = decode_varint(data, pos)
+        pos += tag_len
+        field_number = tag >> 3
+        wire_type = tag & 0x07
+
+        if wire_type == 0:  # Varint
+            value, vlen = decode_varint(data, pos)
+            pos += vlen
+            if field_number == 5:
+                result["issued_ms"] = value
+            elif field_number == 6:
+                result["expires_ms"] = value
+        elif wire_type == 2:  # Length-delimited
+            length, llen = decode_varint(data, pos)
+            pos += llen
+            value = data[pos:pos + length]
+            if field_number == 1:
+                result["cmd_id"] = value.decode("utf-8", "replace")
+            elif field_number == 2:
+                result["target"] = value.decode("utf-8", "replace")
+            elif field_number == 3:
+                result["action"] = value.decode("utf-8", "replace")
+            elif field_number == 4:
+                k, v = _decode_map_entry(value)
+                result["params"][k] = v
+            pos += length
+        else:
+            raise ValueError(f"Unsupported wire type in CommandRequest: {wire_type}")
+    return result
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  CommandAck (field 12)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def encode_command_ack(cmd_id, node_id, success, message):
+    """Encode a CommandAck protobuf message."""
+    result = bytearray()
+    result.extend(encode_field(1, 2, encode_length_delimited(cmd_id.encode("utf-8"))))   # string
+    result.extend(encode_field(2, 2, encode_length_delimited(node_id.encode("utf-8"))))  # string
+    result.extend(encode_field(3, 0, encode_varint(1 if success else 0)))                 # bool (varint)
+    result.extend(encode_field(4, 2, encode_length_delimited(message.encode("utf-8"))))  # string
+    return bytes(result)
+
+
+def decode_command_ack(data):
+    """Decode a CommandAck from protobuf bytes.
+
+    Returns dict with keys: cmd_id, node_id, success (bool), message.
+    """
+    result = {"cmd_id": "", "node_id": "", "success": False, "message": ""}
+    pos = 0
+    while pos < len(data):
+        tag, tag_len = decode_varint(data, pos)
+        pos += tag_len
+        field_number = tag >> 3
+        wire_type = tag & 0x07
+
+        if wire_type == 0:  # Varint
+            value, vlen = decode_varint(data, pos)
+            pos += vlen
+            if field_number == 3:
+                result["success"] = bool(value)
+        elif wire_type == 2:  # Length-delimited
+            length, llen = decode_varint(data, pos)
+            pos += llen
+            value = data[pos:pos + length]
+            if field_number == 1:
+                result["cmd_id"] = value.decode("utf-8", "replace")
+            elif field_number == 2:
+                result["node_id"] = value.decode("utf-8", "replace")
+            elif field_number == 4:
+                result["message"] = value.decode("utf-8", "replace")
+            pos += length
+        else:
+            raise ValueError(f"Unsupported wire type in CommandAck: {wire_type}")
+    return result
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  TextMessage (field 20)
+# ═══════════════════════════════════════════════════════════════════════════════
 
 def encode_text_message(node_id, content, timestamp):
     """Encode a TextMessage protobuf message.
@@ -70,14 +325,6 @@ def encode_text_message(node_id, content, timestamp):
     result.extend(encode_field(3, 0, encode_varint(timestamp)))
 
     return bytes(result)
-
-
-def encode_envelope_text(textmessage_bytes):
-    """Wrap a TextMessage in an LMAOEnvelope (field 20, wire type 2).
-
-    Returns the full LMAOEnvelope bytes ready for LXMF Content.
-    """
-    return encode_field(20, 2, encode_length_delimited(textmessage_bytes))
 
 
 def decode_text_message(data):
@@ -113,10 +360,221 @@ def decode_text_message(data):
     return result
 
 
-def decode_envelope(data):
-    """Decode an LMAOEnvelope, returning the TextMessage dict if present.
+# ═══════════════════════════════════════════════════════════════════════════════
+#  AudioMessage (field 21)
+# ═══════════════════════════════════════════════════════════════════════════════
 
-    Returns None if the envelope does not contain a text message.
+def encode_audio_message(node_id, audio_data, codec, duration_ms, timestamp):
+    """Encode an AudioMessage protobuf message.
+
+    audio_data is bytes (not str).
+    """
+    result = bytearray()
+    result.extend(encode_field(1, 2, encode_length_delimited(node_id.encode("utf-8"))))      # string
+    result.extend(encode_field(2, 2, encode_length_delimited(audio_data)))                    # bytes
+    result.extend(encode_field(3, 2, encode_length_delimited(codec.encode("utf-8"))))        # string
+    result.extend(encode_field(4, 0, encode_varint(duration_ms)))                            # uint32
+    result.extend(encode_field(5, 0, encode_varint(timestamp)))                              # uint64
+    return bytes(result)
+
+
+def decode_audio_message(data):
+    """Decode an AudioMessage from protobuf bytes.
+
+    Returns dict with keys: node_id, audio_data (bytes), codec, duration_ms, timestamp.
+    """
+    result = {"node_id": "", "audio_data": b"", "codec": "", "duration_ms": 0, "timestamp": 0}
+    pos = 0
+    while pos < len(data):
+        tag, tag_len = decode_varint(data, pos)
+        pos += tag_len
+        field_number = tag >> 3
+        wire_type = tag & 0x07
+
+        if wire_type == 0:  # Varint
+            value, vlen = decode_varint(data, pos)
+            pos += vlen
+            if field_number == 4:
+                result["duration_ms"] = value
+            elif field_number == 5:
+                result["timestamp"] = value
+        elif wire_type == 2:  # Length-delimited
+            length, llen = decode_varint(data, pos)
+            pos += llen
+            value = data[pos:pos + length]
+            if field_number == 1:
+                result["node_id"] = value.decode("utf-8", "replace")
+            elif field_number == 2:
+                result["audio_data"] = value
+            elif field_number == 3:
+                result["codec"] = value.decode("utf-8", "replace")
+            pos += length
+        else:
+            raise ValueError(f"Unsupported wire type in AudioMessage: {wire_type}")
+    return result
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  ImageMessage (field 22)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def encode_image_message(node_id, image_data, fmt, width, height, timestamp):
+    """Encode an ImageMessage protobuf message.
+
+    image_data is bytes.
+    """
+    result = bytearray()
+    result.extend(encode_field(1, 2, encode_length_delimited(node_id.encode("utf-8"))))      # string
+    result.extend(encode_field(2, 2, encode_length_delimited(image_data)))                    # bytes
+    result.extend(encode_field(3, 2, encode_length_delimited(fmt.encode("utf-8"))))          # string
+    result.extend(encode_field(4, 0, encode_varint(width)))                                  # uint32
+    result.extend(encode_field(5, 0, encode_varint(height)))                                 # uint32
+    result.extend(encode_field(6, 0, encode_varint(timestamp)))                              # uint64
+    return bytes(result)
+
+
+def decode_image_message(data):
+    """Decode an ImageMessage from protobuf bytes.
+
+    Returns dict with keys: node_id, image_data (bytes), format, width, height, timestamp.
+    """
+    result = {"node_id": "", "image_data": b"", "format": "", "width": 0, "height": 0, "timestamp": 0}
+    pos = 0
+    while pos < len(data):
+        tag, tag_len = decode_varint(data, pos)
+        pos += tag_len
+        field_number = tag >> 3
+        wire_type = tag & 0x07
+
+        if wire_type == 0:  # Varint
+            value, vlen = decode_varint(data, pos)
+            pos += vlen
+            if field_number == 4:
+                result["width"] = value
+            elif field_number == 5:
+                result["height"] = value
+            elif field_number == 6:
+                result["timestamp"] = value
+        elif wire_type == 2:  # Length-delimited
+            length, llen = decode_varint(data, pos)
+            pos += llen
+            value = data[pos:pos + length]
+            if field_number == 1:
+                result["node_id"] = value.decode("utf-8", "replace")
+            elif field_number == 2:
+                result["image_data"] = value
+            elif field_number == 3:
+                result["format"] = value.decode("utf-8", "replace")
+            pos += length
+        else:
+            raise ValueError(f"Unsupported wire type in ImageMessage: {wire_type}")
+    return result
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  CallSignal (field 30)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Enum values for CallSignal.Signal
+SIGNAL_OFFER     = 0
+SIGNAL_ANSWER    = 1
+SIGNAL_ICE       = 2
+SIGNAL_HANGUP    = 3
+SIGNAL_KEEPALIVE = 4
+
+
+def encode_call_signal(signal, sdp_or_ice, media_type):
+    """Encode a CallSignal protobuf message.
+
+    signal is an int (0-4).
+    """
+    result = bytearray()
+    result.extend(encode_field(1, 0, encode_varint(signal)))                                 # enum (varint)
+    result.extend(encode_field(2, 2, encode_length_delimited(sdp_or_ice.encode("utf-8"))))  # string
+    result.extend(encode_field(3, 2, encode_length_delimited(media_type.encode("utf-8"))))  # string
+    return bytes(result)
+
+
+def decode_call_signal(data):
+    """Decode a CallSignal from protobuf bytes.
+
+    Returns dict with keys: signal (int), sdp_or_ice, media_type.
+    """
+    result = {"signal": 0, "sdp_or_ice": "", "media_type": ""}
+    pos = 0
+    while pos < len(data):
+        tag, tag_len = decode_varint(data, pos)
+        pos += tag_len
+        field_number = tag >> 3
+        wire_type = tag & 0x07
+
+        if wire_type == 0:  # Varint
+            value, vlen = decode_varint(data, pos)
+            pos += vlen
+            if field_number == 1:
+                result["signal"] = value
+        elif wire_type == 2:  # Length-delimited
+            length, llen = decode_varint(data, pos)
+            pos += llen
+            value = data[pos:pos + length]
+            if field_number == 2:
+                result["sdp_or_ice"] = value.decode("utf-8", "replace")
+            elif field_number == 3:
+                result["media_type"] = value.decode("utf-8", "replace")
+            pos += length
+        else:
+            raise ValueError(f"Unsupported wire type in CallSignal: {wire_type}")
+    return result
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Envelope (top-level wrapper)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Field numbers for oneof dispatch
+FIELD_SENSOR   = 10
+FIELD_COMMAND  = 11
+FIELD_ACK      = 12
+FIELD_TEXT     = 20
+FIELD_AUDIO    = 21
+FIELD_IMAGE    = 22
+FIELD_CALL     = 30
+
+# Decoder dispatch table: field_number → decoder function
+_DECODERS = {
+    FIELD_SENSOR:  decode_sensor_report,
+    FIELD_COMMAND: decode_command_request,
+    FIELD_ACK:     decode_command_ack,
+    FIELD_TEXT:    decode_text_message,
+    FIELD_AUDIO:   decode_audio_message,
+    FIELD_IMAGE:   decode_image_message,
+    FIELD_CALL:    decode_call_signal,
+}
+
+# Encoder wrappers that produce envelope bytes
+_ENCODERS = {
+    FIELD_SENSOR:  lambda data: encode_field(FIELD_SENSOR, 2, encode_length_delimited(data)),
+    FIELD_COMMAND: lambda data: encode_field(FIELD_COMMAND, 2, encode_length_delimited(data)),
+    FIELD_ACK:     lambda data: encode_field(FIELD_ACK, 2, encode_length_delimited(data)),
+    FIELD_TEXT:    lambda data: encode_field(FIELD_TEXT, 2, encode_length_delimited(data)),
+    FIELD_AUDIO:   lambda data: encode_field(FIELD_AUDIO, 2, encode_length_delimited(data)),
+    FIELD_IMAGE:   lambda data: encode_field(FIELD_IMAGE, 2, encode_length_delimited(data)),
+    FIELD_CALL:    lambda data: encode_field(FIELD_CALL, 2, encode_length_delimited(data)),
+}
+
+
+def encode_envelope_text(textmessage_bytes):
+    """Wrap a TextMessage in an LMAOEnvelope (field 20, wire type 2).
+
+    Returns the full LMAOEnvelope bytes ready for LXMF Content.
+    """
+    return encode_field(FIELD_TEXT, 2, encode_length_delimited(textmessage_bytes))
+
+
+def decode_envelope(data):
+    """Decode an LMAOEnvelope, dispatching to the correct sub-message decoder.
+
+    Returns the decoded sub-message dict, or None if no recognized field found.
     """
     pos = 0
     while pos < len(data):
@@ -130,14 +588,15 @@ def decode_envelope(data):
             pos += llen
             value = data[pos:pos + length]
             pos += length
-            if field_number == 20:  # TextMessage
-                return decode_text_message(value)
-            else:
-                # Skip unknown field
-                pass
+            decoder = _DECODERS.get(field_number)
+            if decoder is not None:
+                return decoder(value)
+            # Unknown field — skip
         elif wire_type == 0:  # Varint — skip
             _, vlen = decode_varint(data, pos)
             pos += vlen
+        elif wire_type == 5:  # Fixed32 — skip 4 bytes
+            pos += 4
         else:
             # Skip unknown wire type
             break
@@ -179,7 +638,7 @@ def parse_poc_message(data):
         result = None
     if result is not None:
         _debug("parse_poc_message — protobuf decode success")
-        return result["content"]
+        return result.get("content") if isinstance(result, dict) else None
     # Fallback: treat raw content as plain text
     print("WARNING: parse_poc_message — protobuf decode returned None, trying raw UTF-8 fallback")
     try:
