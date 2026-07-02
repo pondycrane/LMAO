@@ -78,3 +78,30 @@ py_test(
         "@lmao_pip//pytest",
     ],
 )
+
+py_test(
+    name = "test_urns_packet",
+    srcs = ["test_urns_packet.py"],
+    data = ["//cardputer_client:lib_files"],
+    deps = [
+        "@lmao_pip//pytest",
+    ],
+)
+
+py_test(
+    name = "test_urns_identity",
+    srcs = ["test_urns_identity.py"],
+    data = ["//cardputer_client:lib_files"],
+    deps = [
+        "@lmao_pip//pytest",
+    ],
+)
+
+py_test(
+    name = "test_urns_lxmf_message",
+    srcs = ["test_urns_lxmf_message.py"],
+    data = ["//cardputer_client:lib_files"],
+    deps = [
+        "@lmao_pip//pytest",
+    ],
+)
