@@ -10,11 +10,8 @@ Run with::
 """
 
 import os
-import sys
-import tempfile
 from unittest.mock import patch
 
-import pytest
 
 
 # Import the config module (available when running under Bazel via deps)

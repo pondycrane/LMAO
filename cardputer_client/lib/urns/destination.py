@@ -1,10 +1,9 @@
 # µReticulum Destination
 # Endpoint addressing and announce management
 
-import os
 import time
 from . import const
-from .log import log, LOG_VERBOSE, LOG_DEBUG, LOG_ERROR, LOG_EXTREME, LOG_NOTICE
+from .log import log, LOG_VERBOSE, LOG_DEBUG, LOG_ERROR
 from .identity import Identity
 from .crypto import Token
 
