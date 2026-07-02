@@ -2,37 +2,70 @@
 µReticulum configuration for M5Stack Cardputer ADV with LoRa antenna.
 
 The Cardputer uses its onboard SX1262 LoRa radio directly (via SPI)
-rather than an external RNode. This config is loaded by µReticulum
-when running on MicroPython.
+rather than an external RNode. This config is loaded by the urns
+µReticulum port when running on MicroPython.
 
-NOTE: This config targets the SX1262 (Cardputer ADV default).
-For SX1276-based boards, remove 'busy_pin' and adjust pin mappings.
+Edit WIFI_SSID and WIFI_PASS to match your network.
 """
 
-config = {
-    "interfaces": {
-        "LoRa": {
-            "type": "LoRaInterface",
-            "spi_bus": 0,                    # SPI bus (VSPI on Cardputer)
-            "cs_pin": 12,                    # NSS/CS pin
-            "reset_pin": 13,                 # RST pin
-            "dio0_pin": 14,                  # DIO0 / IRQ pin
-            "busy_pin": 15,                  # BUSY pin (SX1262)
-            "frequency": 868000000,           # 868 MHz (EU); use 915000000 for US
-            "bandwidth": 125000,              # 125 kHz
-            "spreadingfactor": 7,             # SF7 = fastest
-            "codingrate": 5,                 # 4:5
-            "txpower": 14,                    # 14 dBm (25 mW) — Cardputer typical max
-            "preamble": 8,                   # 8-symbol preamble
+from lora_boards import LORA_BOARDS
+
+# ---- Node settings ----
+WIFI_SSID = "YOUR_WIFI_SSID"
+WIFI_PASS = "YOUR_WIFI_PASSWORD"
+NODE_NAME = "LMAO_Cardputer"
+
+# DEBUG levels: 0 = silent, 1 = messages & announces, 2 = full debug
+DEBUG = 2
+
+# ---- Reticulum config ----
+CONFIG = {
+    "loglevel": 3,
+    "enable_transport": False,
+    "lora_boards": LORA_BOARDS,
+
+    "probe": {
+        "enabled": False,
+        "app_name": "urns",
+        "aspect": "probe",
+        "announce_interval": 60 * 60,
+    },
+
+    "time_sync": {
+        "enabled": True,
+        "trusted_nodes": [],
+        "min_sources": 2,
+        "tolerance": 120,
+    },
+
+    "interfaces": [
+
+        # ---- WiFi UDP (for setup / debugging) ----
+        # Comment out if using LoRa-only mode.
+        {
+            "type": "UDPInterface",
+            "name": "WiFi UDP",
+            "enabled": True,
+            "listen_ip": "0.0.0.0",
+            "listen_port": 4242,
+            "forward_ip": "255.255.255.255",
+            "forward_port": 4242,
         },
-    },
 
-    "transport": {
-        # µReticulum stores state in flash with limited writes
-        "path": "/flash/rns_state",
-    },
-
-    "logging": {
-        "loglevel": 3,  # INFO (1=DEBUG, 3=INFO, 5=ERROR)
-    },
+        # ---- Cardputer onboard SX1262 LoRa radio ----
+        {
+            "type": "LoRaInterface",
+            "board": "cardputer_adv",   # pinout preset in lora_boards.py
+            "name": "LoRa",
+            "enabled": True,
+            "freq_khz": 868000,         # 868 MHz (EU); 915000 for US
+            "sf": 7,                     # SF7 fastest
+            "bw": "125",                 # 125 kHz
+            "coding_rate": 5,           # 4:5
+            "tx_power": 14,             # dBm
+            "preamble_len": 8,
+            "crc_en": True,
+            "syncword": 0x1424,         # Reticulum default syncword
+        },
+    ],
 }
