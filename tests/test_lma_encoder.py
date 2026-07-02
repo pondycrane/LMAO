@@ -155,7 +155,7 @@ class TestCrossValidation:
             result = enc.parse_poc_message(payload)
             assert result == "hello"
             captured = capsys.readouterr()
-            assert "DEBUG" in captured.out
+            assert "protobuf decode success" in captured.out
         finally:
             enc.VERBOSE = orig
 

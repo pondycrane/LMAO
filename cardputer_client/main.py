@@ -80,6 +80,15 @@ def display_status(tft, lines):
         return None
 
 
+def _print_exception(e):
+    """Print exception traceback, with CPython fallback for MicroPython-only API."""
+    try:
+        sys.print_exception(e)
+    except AttributeError:
+        import traceback
+        traceback.print_exception(type(e), e, e.__traceback__)
+
+
 def log(msg, tft=None, status_lines=None):
     """Print to serial and optionally update display."""
     print(msg)
@@ -107,12 +116,7 @@ def handle_reply(message):
         content = message.content_as_string() or ""
     except Exception as e:
         print(f"handle_reply: content extraction failed: {e}")
-        # sys.print_exception is MicroPython-only; CPython fallback via traceback
-        try:
-            sys.print_exception(e)
-        except AttributeError:
-            import traceback
-            traceback.print_exception(type(e), e, e.__traceback__)
+        _print_exception(e)
 
     if content:
         print(f"\n>>> REPLY from server: {content}")
@@ -290,12 +294,7 @@ def main():
             break
         except Exception as e:
             consecutive_errors += 1
-            # sys.print_exception is MicroPython-only; CPython fallback
-            try:
-                sys.print_exception(e)
-            except AttributeError:
-                import traceback
-                traceback.print_exception(type(e), e, e.__traceback__)
+            _print_exception(e)
             tft = log(f"❗ Error ({consecutive_errors}): {e}", tft, status_lines)
             if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
                 log("FATAL: Too many consecutive errors, halting.", tft, status_lines)

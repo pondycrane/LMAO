@@ -71,6 +71,19 @@ def auto_discover_lib_files(client_root):
 # ---- Path helpers ----
 
 
+def _upload_files(ser, client_root, file_list):
+    """Upload a list of files to the device, exiting on failure."""
+    for rel in file_list:
+        local_path = os.path.join(client_root, rel)
+        print(f"  {rel:30s} … ", end="", flush=True)
+        if upload_file(ser, local_path, rel):
+            size = os.path.getsize(local_path)
+            print(f"OK  ({size} B)")
+        else:
+            print("FAILED")
+            sys.exit(1)
+
+
 def _sanitize_path_for_script(path: str) -> str:
     """Validate and escape a remote path for embedding in a MicroPython
     string literal.
@@ -171,13 +184,10 @@ def find_cardputer_port(preferred=None):
 
 
 def enter_raw_repl(ser):
-    """Enter MicroPython raw REPL mode.
+    """Sends Ctrl+C (twice) + Ctrl+A to enter MicroPython raw REPL mode.
 
-    Sends Ctrl+C (twice) to interrupt any running program, then Ctrl+A to
-    switch to raw REPL.  Blocks until the ``raw REPL; CTRL-B to exit`` banner
-    is received (or a 3-second timeout elapses).
-
-    Returns *True* on success.
+    Blocks until the ``raw REPL; CTRL-B to exit`` banner is received
+    (or a 3-second timeout elapses).
     """
     try:
         # Interrupt anything that may be running
@@ -208,7 +218,7 @@ def enter_raw_repl(ser):
 
 
 def exit_raw_repl(ser):
-    """Leave raw REPL and return to friendly REPL (Ctrl+B)."""
+    """Return to friendly REPL by sending Ctrl+B."""
     try:
         ser.write(b"\r\x02")
         time.sleep(0.2)
@@ -218,14 +228,11 @@ def exit_raw_repl(ser):
 
 
 def exec_raw(ser, code, timeout=15):
-    """Execute *code* (str) in raw REPL mode and return (ok, output).
+    """Send *code* in raw REPL mode and return (ok, output).
 
-    Sends the code followed by Ctrl+D, then reads until the terminating
-    ``\\x04>`` sequence (or *timeout* seconds elapse).  When the terminator
-    is never received (timeout) the output returned may be truncated.
-
-    Returns ``(True, output_string)`` when the response contains the ``OK``
-    marker, ``(False, reason_or_output)`` otherwise.
+    Sends the code followed by Ctrl+D, then reads until the ``\\x04>``
+    sequence or *timeout* expires.  Returns ``(True, output_string)`` when
+    the response contains ``OK``, ``(False, reason_or_output)`` otherwise.
     """
     if isinstance(code, str):
         code = code.encode("utf-8")
@@ -435,31 +442,11 @@ def main():
             print("Verification complete (--verify-only).")
             return
 
-        # — Upload client files —
+        # — Upload files —
         total_files = len(FILES_TO_UPLOAD) + len(lib_files)
         print(f"Uploading {total_files} file(s) …")
-        for rel in FILES_TO_UPLOAD:
-            local_path = os.path.join(client_root, rel)
-            remote_path = rel
-            print(f"  {rel:30s} … ", end="", flush=True)
-            if upload_file(ser, local_path, remote_path):
-                size = os.path.getsize(local_path)
-                print(f"OK  ({size} B)")
-            else:
-                print("FAILED")
-                sys.exit(1)
-
-        # — Upload library files (under /lib/) —
-        for rel in lib_files:
-            local_path = os.path.join(client_root, rel)
-            remote_path = rel  # preserves lib/ prefix → /lib/ on device
-            print(f"  {rel:30s} … ", end="", flush=True)
-            if upload_file(ser, local_path, remote_path):
-                size = os.path.getsize(local_path)
-                print(f"OK  ({size} B)")
-            else:
-                print("FAILED")
-                sys.exit(1)
+        _upload_files(ser, client_root, FILES_TO_UPLOAD)
+        _upload_files(ser, client_root, lib_files)
 
         # — Soft reset —
         print("\nFlash complete. Soft-resetting Cardputer …")
