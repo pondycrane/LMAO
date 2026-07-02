@@ -10,20 +10,34 @@ server and an M5Stack Cardputer ADV client using the
 ## Architecture
 
 ```
-┌─────────────────────┐         LoRa (868/915 MHz)        ┌──────────────────────┐
-│                     │ ◄────────────────────────────────── │                      │
-│  Raspberry Pi       │                                    │  M5Stack Cardputer   │
-│  ┌───────────────┐  │                                    │  ADV                 │
-│  │ LMAO Server   │  │                                    │  ┌────────────────┐  │
-│  │ (Python)      │  │                                    │  │ µReticulum     │  │
-│  │ RNS + LXMF    │  │                                    │  │ client         │  │
-│  └──────┬────────┘  │                                    │  └──────┬─────────┘  │
-│         │ USB       │                                    │         │ SPI         │
-│  ┌──────┴────────┐  │                                    │  ┌──────┴─────────┐  │
-│  │ ESP32 RNode   │  │                                    │  │ SX1262 LoRa    │  │
-│  │ (LoRa bridge) │──┼──────── LoRa RF ──────────────────┼──│ radio + ant    │  │
-│  └───────────────┘  │                                    │  └────────────────┘  │
-└─────────────────────┘                                    └──────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                              LoRa RF (868/915 MHz)                           │
+│  ┌───────────────┐  ┌──────────────────┐         ┌──────────────────────┐   │
+│  │  Laptop/Desktop│  │  Raspberry Pi    │         │  M5Stack Cardputer   │   │
+│  │  Human Client  │  │  ┌────────────┐  │         │  ADV                 │   │
+│  │  (Python CLI)  │  │  │ LMAO Server│  │         │  ┌────────────────┐  │   │
+│  │  WiFi/AutoIFace│──┤  │RNS+LXMF+   │──┤◄──LoRa─┼──┤ µReticulum     │  │   │
+│  │                │  │  │ gRPC API   │  │         │  │ client         │  │   │
+│  └────────────────┘  │  └─────┬──────┘  │         │  └──────┬─────────┘  │   │
+│                      │        │ USB      │         │         │ SPI         │   │
+│  ┌──────────────┐    │  ┌─────┴──────┐  │         │  ┌──────┴─────────┐  │   │
+│  │ Docker       │    │  │ ESP32 RNode│  │         │  │ SX1262 LoRa    │  │   │
+│  │ Container    │────┤  │ (LoRa br.) │──┼────LoRa─┼──│ radio + ant    │  │   │
+│  │ (gRPC client)│    │  └────────────┘  │         │  └────────────────┘  │   │
+│  └──────────────┘    └──────────────────┘         └──────────────────────┘   │
+│                                │ gRPC :50051                                 │
+│                    ┌───────────┴────────────┐                                │
+│                    │  K8s Cluster           │                                │
+│                    │  ┌───────────────────┐ │                                │
+│                    │  │ IoT Ingest Pod    │ │                                │
+│                    │  │ (gRPC client)     │ │                                │
+│                    │  └───────────────────┘ │                                │
+│                    │  ┌───────────────────┐ │                                │
+│                    │  │ Command Dispatch  │ │                                │
+│                    │  │ (gRPC client)     │ │                                │
+│                    │  └───────────────────┘ │                                │
+│                    └────────────────────────┘                                │
+└──────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ## Quickstart
@@ -37,6 +51,8 @@ server and an M5Stack Cardputer ADV client using the
 | Cardputer ADV | M5Stack Cardputer with LoRa antenna, MicroPython installed |
 | LoRa band | Matching frequency (868 MHz EU / 915 MHz US) |
 | Bazel | v7.4.1 (see `.bazelversion`) — use [bazelisk](https://github.com/bazelbuild/bazelisk) (auto-selects correct version via `.bazelversion`). Install: `npm install -g @bazel/bazelisk` ([other install methods](https://github.com/bazelbuild/bazelisk#installation)). Ensure `~/.npm-global/bin` (or your npm global bin dir) is in `PATH`. Verify with `bazel --version` (expected: `bazel 7.4.1`). |
+| Docker | For containerized deployment (optional) — `docker --version` |
+| kubectl | For K8s Service deployment (optional) — `kubectl version --client` |
 
 ### 1. Flash the ESP32 RNode
 
@@ -290,7 +306,7 @@ bazel test //tests:test_cardputer_e2e --test_output=all
 
 The E2E test auto-skips when no Cardputer hardware is detected.
 
-### 8. Run the Human Client
+### 11. Run the Human Client
 
 ```bash
 # Using Bazel (recommended)
@@ -313,6 +329,7 @@ If an RNode is connected, LoRa messaging is available.
 ```
 ├── README.md                          # This file
 ├── ARCHITECTURE.md                    # Full system architecture reference
+├── AGENTS.md                          # Project rules (E2E flash verification)
 ├── Dockerfile                         # Container build for server deployment
 ├── .bazelversion                      # Bazel version pin (7.4.1)
 ├── MODULE.bazel                       # Bazel module definition
@@ -320,8 +337,10 @@ If an RNode is connected, LoRa messaging is available.
 ├── proto/                             # Canonical protobuf schema (single source of truth)
 │                                     # (moved from lmao_server/proto/ — now generated by Bazel)
 │   ├── BUILD                          # Bazel: proto_library + py_proto_library targets
-│   ├── lma.proto                      # Protobuf schema (all message types)
-│   └── __init__.py                    # Package marker
+│   ├── lma.proto                      # Protobuf schema (all message types + gRPC service)
+│   ├── __init__.py                    # Package marker
+│   ├── lma_pb2.py                     # Generated protobuf Python stubs
+│   └── lma_pb2_grpc.py                # Generated gRPC Python stubs
 │
 ├── lma_core/                          # Shared Python wrapper library
 │   ├── BUILD                          # Bazel: py_library target
@@ -331,12 +350,14 @@ If an RNode is connected, LoRa messaging is available.
 ├── lmao_server/                       # Python — runs on Raspberry Pi
 │   ├── BUILD                          # Bazel: py_binary target
 │   ├── __init__.py                    # Package marker
-│   ├── requirements.txt               # Python dependencies (rns, lxmf, protobuf)
+│   ├── requirements.txt               # Python dependencies (rns, lxmf, protobuf, grpcio)
+│   ├── requirements_lock.txt          # Pinned pip dependencies for Bazel
 │   ├── config.py                      # Reticulum config with RNode LoRa interface
 │   └── server.py                      # Main server: RNS + LXMF router + gRPC API
 │
 ├── human_client/                      # Python — runs on laptop/desktop
 │   ├── BUILD                          # Bazel: py_binary + py_library targets
+│   ├── __init__.py                    # Package marker
 │   ├── config.py                      # Reticulum config (WiFi + optional RNode)
 │   └── client.py                      # Interactive REPL for human messaging
 │
@@ -347,8 +368,10 @@ If an RNode is connected, LoRa messaging is available.
 │   └── iot_ingest.py                  # gRPC client: Send + Subscribe + GetIdentity
 │
 ├── cardputer_client/                  # MicroPython — runs on M5Stack Cardputer
+│   ├── boot.py                        # MicroPython boot script (sets /lib in path)
 │   ├── config.py                      # µReticulum config for onboard LoRa
 │   ├── main.py                        # Client: periodic hello + reply display
+│   ├── lib/                           # Vendored µReticulum library (urns port)
 │   └── proto/
 │       ├── BUILD                      # Bazel: py_library for host-side tests
 │       ├── lma.proto                  # Same protobuf schema (reference)
@@ -379,26 +402,22 @@ Messages are [LXMF](https://github.com/markqvist/LXMF) packets with:
 | **Content** | Protobuf-encoded `LMAOEnvelope` bytes |
 | **Method** | Opportunistic (single-packet, best-effort) |
 
-The protobuf schema supports multiple message types (text, sensor, command, etc.).
-This POC uses only `TextMessage`:
+The protobuf schema supports multiple message types for different use cases.
+See [`proto/lma.proto`](proto/lma.proto) for the complete definitions.
 
-```protobuf
-message LMAOEnvelope {
-  oneof payload {
-    TextMessage text = 20;
-    // ... other types defined for future use
-  }
-}
+| Message Type | Field ID | Purpose | Wire Size (typical) |
+|-------------|----------|---------|---------------------|
+| `TextMessage` | 20 | Human-to-human text (node_id, content, timestamp) | ~45 B |
+| `SensorReport` | 10 | IoT sensor readings (node_id, seq, battery, readings[]) | ~30-150 B |
+| `CommandRequest` | 11 | Server-to-node commands (cmd_id, target, action, params) | ~50-200 B |
+| `CommandAck` | 12 | Node command acknowledgements (cmd_id, node_id, success, msg) | ~40 B |
+| `AudioMessage` | 21 | Voice clips (node_id, audio_data, codec, duration_ms) | varies (WiFi) |
+| `ImageMessage` | 22 | Image transfers (node_id, image_data, format, width, height) | varies (WiFi) |
+| `CallSignal` | 30 | WebRTC call signaling (OFFER/ANSWER/ICE/HANGUP/KEEPALIVE) | ~100-500 B |
 
-message TextMessage {
-  string node_id   = 1;
-  string content   = 2;
-  uint64 timestamp = 3;
-}
-```
-
-Typical wire size: **45 bytes** for "Hello from Cardputer" — well within LoRa's
-~200 B payload budget.
+> **Note:** Audio, image, and call signal payloads typically exceed LoRa's ~200 B
+> per-packet limit and are better suited for WiFi or other high-bandwidth
+> interfaces. Text, sensor, and command messages fit comfortably in LoRa packets.
 
 ---
 
