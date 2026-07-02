@@ -133,6 +133,32 @@ class TestCrossValidation:
         result = enc.parse_poc_message(b"\xff\xfe\xfd\xfc")
         assert result is None
 
+    def test_verbose_flag_suppresses_debug_output(self, capsys):
+        """When VERBOSE=False (default), debug prints are suppressed."""
+        orig = enc.VERBOSE
+        enc.VERBOSE = False
+        try:
+            payload = enc.make_poc_message("node", "hello")
+            result = enc.parse_poc_message(payload)
+            assert result == "hello"
+            captured = capsys.readouterr()
+            assert "DEBUG" not in captured.out
+        finally:
+            enc.VERBOSE = orig
+
+    def test_verbose_flag_enables_debug_output(self, capsys):
+        """When VERBOSE=True, debug prints appear."""
+        orig = enc.VERBOSE
+        enc.VERBOSE = True
+        try:
+            payload = enc.make_poc_message("node", "hello")
+            result = enc.parse_poc_message(payload)
+            assert result == "hello"
+            captured = capsys.readouterr()
+            assert "protobuf decode success" in captured.out
+        finally:
+            enc.VERBOSE = orig
+
 
 class TestEdgeCases:
     def test_decode_envelope_non_text_field(self):
@@ -217,6 +243,28 @@ class TestEdgeCases:
         result = enc.encode_field(1, 2, payload)
         expected = b"\x0a\x03abc"
         assert result == expected, f"Expected {expected.hex()}, got {result.hex()}"
+
+    def test_decode_text_message_unsupported_wire_type(self):
+        """decode_text_message raises ValueError for unsupported wire types."""
+        # Wire type 1 (fixed64): field 1, wire type 1, tag = (1<<3)|1 = 0x09
+        # Followed by 8 bytes of fixed64 data
+        data = b"\x09" + (b"\x00" * 8)
+        with pytest.raises(ValueError, match="Unsupported wire type"):
+            enc.decode_text_message(data)
+
+    def test_decode_text_message_wire_type_3_unsupported(self):
+        """Wire type 3 (start group) is deprecated and unsupported."""
+        # field 1, wire type 3: tag = (1<<3)|3 = 0x0b
+        data = b"\x0b"
+        with pytest.raises(ValueError, match="Unsupported wire type"):
+            enc.decode_text_message(data)
+
+    def test_decode_text_message_wire_type_5_unsupported(self):
+        """Wire type 5 (fixed32) is unsupported."""
+        # field 1, wire type 5: tag = (1<<3)|5 = 0x0d, then 4 bytes
+        data = b"\x0d" + (b"\x00" * 4)
+        with pytest.raises(ValueError, match="Unsupported wire type"):
+            enc.decode_text_message(data)
 
 
 if __name__ == "__main__":

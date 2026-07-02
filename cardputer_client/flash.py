@@ -44,49 +44,44 @@ FILES_TO_UPLOAD = [
 # Library files to upload under /lib/ (µReticulum urns port + native modules).
 # These are the .py files from the urns package and .mpy native crypto modules.
 #
-# CAUTION: When adding new files under lib/urns/, add them to this list so
-# they are uploaded to the device.  Files not listed here will not be available
-# at runtime.  (A future improvement could use os.walk() for auto-discovery.)
-LIB_FILES_TO_UPLOAD = [
-    "lib/urns/__init__.py",
-    "lib/urns/bz2dec.py",
-    "lib/urns/const.py",
-    "lib/urns/destination.py",
-    "lib/urns/identity.py",
-    "lib/urns/link.py",
-    "lib/urns/log.py",
-    "lib/urns/lxmf.py",
-    "lib/urns/packet.py",
-    "lib/urns/resource.py",
-    "lib/urns/reticulum.py",
-    "lib/urns/transport.py",
-    "lib/urns/umsgpack.py",
-    "lib/urns/crypto/__init__.py",
-    "lib/urns/crypto/aes.py",
-    "lib/urns/crypto/ed25519.py",
-    "lib/urns/crypto/hashes.py",
-    "lib/urns/crypto/hkdf.py",
-    "lib/urns/crypto/hmac.py",
-    "lib/urns/crypto/pkcs7.py",
-    "lib/urns/crypto/sha512.py",
-    "lib/urns/crypto/token.py",
-    "lib/urns/crypto/x25519.py",
-    "lib/urns/crypto/pure25519/__init__.py",
-    "lib/urns/crypto/pure25519/_ed25519.py",
-    "lib/urns/crypto/pure25519/basic.py",
-    "lib/urns/crypto/pure25519/ed25519_oop.py",
-    "lib/urns/crypto/pure25519/eddsa.py",
-    "lib/urns/interfaces/__init__.py",
-    "lib/urns/interfaces/e32.py",
-    "lib/urns/interfaces/lora.py",
-    "lib/urns/interfaces/serial.py",
-    "lib/urns/interfaces/tcp.py",
-    "lib/urns/interfaces/udp.py",
-    "lib/ed25519_fast_xtensawin.mpy",
-    "lib/bz2_fast_xtensawin.mpy",
-]
+# Auto-discovered via os.walk() — any new .py or .mpy file added to lib/
+# will be automatically included at the next flash.  No manual list updates
+# are needed.
+def auto_discover_lib_files(client_root):
+    """Walk the lib/ directory and return relative paths to all .py and .mpy files.
+
+    Returns a sorted list of paths relative to *client_root* (e.g.,
+    ``lib/urns/__init__.py``) so that upload order is deterministic.
+    """
+    lib_dir = os.path.join(client_root, "lib")
+    if not os.path.isdir(lib_dir):
+        print(f"WARNING: Library directory not found: {lib_dir}")
+        print("         No library files will be uploaded.")
+        return []
+    files = []
+    for dirpath, _dirnames, filenames in os.walk(lib_dir):
+        for f in filenames:
+            if f.endswith((".py", ".mpy")):
+                full = os.path.join(dirpath, f)
+                rel = os.path.relpath(full, client_root)
+                files.append(rel)
+    files.sort()
+    return files
 
 # ---- Path helpers ----
+
+
+def _upload_files(ser, client_root, file_list):
+    """Upload a list of files to the device, exiting on failure."""
+    for rel in file_list:
+        local_path = os.path.join(client_root, rel)
+        print(f"  {rel:30s} … ", end="", flush=True)
+        if upload_file(ser, local_path, rel):
+            size = os.path.getsize(local_path)
+            print(f"OK  ({size} B)")
+        else:
+            print("FAILED")
+            sys.exit(1)
 
 
 def _sanitize_path_for_script(path: str) -> str:
@@ -189,13 +184,10 @@ def find_cardputer_port(preferred=None):
 
 
 def enter_raw_repl(ser):
-    """Enter MicroPython raw REPL mode.
+    """Sends Ctrl+C (twice) + Ctrl+A to enter MicroPython raw REPL mode.
 
-    Sends Ctrl+C (twice) to interrupt any running program, then Ctrl+A to
-    switch to raw REPL.  Blocks until the ``raw REPL; CTRL-B to exit`` banner
-    is received (or a 3-second timeout elapses).
-
-    Returns *True* on success.
+    Blocks until the ``raw REPL; CTRL-B to exit`` banner is received
+    (or a 3-second timeout elapses).
     """
     try:
         # Interrupt anything that may be running
@@ -226,7 +218,7 @@ def enter_raw_repl(ser):
 
 
 def exit_raw_repl(ser):
-    """Leave raw REPL and return to friendly REPL (Ctrl+B)."""
+    """Return to friendly REPL by sending Ctrl+B."""
     try:
         ser.write(b"\r\x02")
         time.sleep(0.2)
@@ -236,14 +228,11 @@ def exit_raw_repl(ser):
 
 
 def exec_raw(ser, code, timeout=15):
-    """Execute *code* (str) in raw REPL mode and return (ok, output).
+    """Send *code* in raw REPL mode and return (ok, output).
 
-    Sends the code followed by Ctrl+D, then reads until the terminating
-    ``\\x04>`` sequence (or *timeout* seconds elapse).  When the terminator
-    is never received (timeout) the output returned may be truncated.
-
-    Returns ``(True, output_string)`` when the response contains the ``OK``
-    marker, ``(False, reason_or_output)`` otherwise.
+    Sends the code followed by Ctrl+D, then reads until the ``\\x04>``
+    sequence or *timeout* expires.  Returns ``(True, output_string)`` when
+    the response contains ``OK``, ``(False, reason_or_output)`` otherwise.
     """
     if isinstance(code, str):
         code = code.encode("utf-8")
@@ -302,6 +291,7 @@ def upload_file(ser, local_path, remote_path, chunk_size=2048):
     """Upload a single file to the MicroPython device using raw REPL.
 
     The file content is base64-encoded and sent in *chunk_size* byte pieces
+    (measured as raw bytes of the source file, not base64-encoded size)
     to avoid hitting MicroPython parser limits.  The remote file is always
     written to ``/`` (device flash root), with any missing sub-directories
     created automatically.
@@ -400,9 +390,12 @@ def main():
         print("Specify with: --client-root /path/to/cardputer_client")
         sys.exit(1)
 
+    # Auto-discover library files to upload (walks lib/ directory)
+    lib_files = auto_discover_lib_files(client_root)
+
     # Verify all files exist before opening the serial port
     try:
-        _verify_files_exist(client_root, FILES_TO_UPLOAD + LIB_FILES_TO_UPLOAD)
+        _verify_files_exist(client_root, FILES_TO_UPLOAD + lib_files)
     except FileNotFoundError as e:
         print(f"ERROR: {e}")
         sys.exit(1)
@@ -449,30 +442,11 @@ def main():
             print("Verification complete (--verify-only).")
             return
 
-        # — Upload client files —
-        print(f"Uploading {len(FILES_TO_UPLOAD) + len(LIB_FILES_TO_UPLOAD)} file(s) …")
-        for rel in FILES_TO_UPLOAD:
-            local_path = os.path.join(client_root, rel)
-            remote_path = rel
-            print(f"  {rel:30s} … ", end="", flush=True)
-            if upload_file(ser, local_path, remote_path):
-                size = os.path.getsize(local_path)
-                print(f"OK  ({size} B)")
-            else:
-                print("FAILED")
-                sys.exit(1)
-
-        # — Upload library files (under /lib/) —
-        for rel in LIB_FILES_TO_UPLOAD:
-            local_path = os.path.join(client_root, rel)
-            remote_path = rel  # preserves lib/ prefix → /lib/ on device
-            print(f"  {rel:30s} … ", end="", flush=True)
-            if upload_file(ser, local_path, remote_path):
-                size = os.path.getsize(local_path)
-                print(f"OK  ({size} B)")
-            else:
-                print("FAILED")
-                sys.exit(1)
+        # — Upload files —
+        total_files = len(FILES_TO_UPLOAD) + len(lib_files)
+        print(f"Uploading {total_files} file(s) …")
+        _upload_files(ser, client_root, FILES_TO_UPLOAD)
+        _upload_files(ser, client_root, lib_files)
 
         # — Soft reset —
         print("\nFlash complete. Soft-resetting Cardputer …")
@@ -480,7 +454,7 @@ def main():
         ser.write(b"\x04")  # Ctrl+D = soft reset in friendly REPL
 
         print(f"Done. The Cardputer will reboot and run the LMAO client automatically.")
-        print(f"Uploaded {len(FILES_TO_UPLOAD)} client + {len(LIB_FILES_TO_UPLOAD)} library file(s).")
+        print(f"Uploaded {len(FILES_TO_UPLOAD)} client + {len(lib_files)} library file(s).")
 
     except KeyboardInterrupt:
         print("\nAborted by user.")
@@ -490,6 +464,8 @@ def main():
         print("Check the USB cable and try again.")
         sys.exit(1)
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         print(f"\nERROR: Unexpected error during flashing: {e}")
         sys.exit(1)
     finally:

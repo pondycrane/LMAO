@@ -277,6 +277,8 @@ The E2E test auto-skips when no Cardputer hardware is detected.
 │
 ├── tests/                             # Host-side tests (Bazel py_test targets)
 │   ├── BUILD                          # Bazel: py_test targets
+│   ├── test_config.py                 # Config module unit tests (no hardware)
+│   ├── test_lma_core.py               # lma_core import error handling + exports
 │   ├── test_lma_encoder.py            # Encoder round-trip + cross-validation tests
 │   ├── test_server_handler.py         # Server handler unit tests (mocked RNS/LXMF)
 │   └── e2e/
