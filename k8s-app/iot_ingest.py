@@ -133,4 +133,11 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except grpc.RpcError as e:
+        print(f"ERROR: gRPC call failed: {e.code()} - {e.details()}", file=sys.stderr)
+        sys.exit(1)
+    except Exception as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(1)
