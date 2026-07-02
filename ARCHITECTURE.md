@@ -6,6 +6,10 @@
 
 ```
 Application   │  Chat · IoT Ingest · Command Dispatch · Call Signaling
+              │  K8s Pods (gRPC Clients)
+──────────────┼────────────────────────────────────────────────────────
+gRPC API      │  Send · Subscribe · Tunnel (planned) · GetIdentity
+              │  protobuf service on port 50051
 ──────────────┼────────────────────────────────────────────────────────
 LXMF          │  Message format: Dest|Src|Sig|Payload[Timestamp,Content,Title,Fields]
               │  Propagation Nodes (store-and-forward) · LXM Router (retries/ACKs)
@@ -24,7 +28,8 @@ Interfaces    │  LoRa (RNode) · WiFi (AutoInterface) · TCP/UDP · Serial
 | **LMAO IoT endpoint** | ESP32-S3 + LoRa + sensor | LoRa only | Sleep → read → send LXMF → brief command poll → sleep |
 | **LMAO Camera node** | ESP32-S3-CAM + LoRa/WiFi | LoRa or WiFi | Same, but captures WebP image on command |
 | **RNode** | ESP32/RP2040 + LoRa radio | LoRa ↔ USB/WiFi | Transparent LoRa bridge |
-| **LMAO Server** | RPi/NUC | LoRa + WiFi + TCP | Propagation Node · IoT processor · Command scheduler · Human services |
+| **LMAO Server** | RPi/NUC | LoRa + WiFi + TCP | Propagation Node · IoT processor · Command scheduler · Human services · **gRPC API (port 50051)** · **Docker container** |
+| **K8s Pod** | In-cluster container | TCP (gRPC) | Automated clients: IoT ingest, command dispatch, monitoring — reach server via K8s Service |
 | **LMAO Human Client** | Laptop/Desktop (Python CLI) | WiFi + optional LoRa (RNode) | First-party terminal client for human messaging via LMAO protobuf protocol |
 | **Human nodes** | Phone (Sideband) / Laptop (NomadNet/MeshChat) | WiFi (preferred) | Person-to-person: text · images · audio clips · calls |
 | **Backbone** | Ubiquiti/MikroTik radios | Long-range WiFi | High-capacity between sites |
@@ -33,14 +38,16 @@ Interfaces    │  LoRa (RNode) · WiFi (AutoInterface) · TCP/UDP · Serial
 
 ```
   Sensors ──LoRa──→ RNode ──USB/WiFi──→ Central Server ←──WiFi mesh── Humans
-  Actuators ←──LoRa── RNode                          ↕
-                                              Propagation Node
-                                            (store-and-forward)
+  Actuators ←──LoRa── RNode          │   (RPi/NUC)                 ↕
+                              K8s Pods (gRPC)           Propagation Node
+                         IoT Ingest · Cmd Dispatch      (store-and-forward)
+                         Monitoring · Automation
 ```
 
 - **LoRa leaf**: every device hears every packet; server moderates airtime
 - **WiFi mesh**: human communication, image/audio transfers, call streams
-- **Server bridges both worlds**: translates between high- and low-speed networks
+- **K8s pods**: automated clients communicate via gRPC on port 50051; the server bridges gRPC ↔ LXMF
+- **Server bridges all worlds**: translates between high- and low-speed networks
 
 ## IoT Data Flow
 
@@ -84,6 +91,20 @@ replacement for third-party apps (Sideband, NomadNet).
 | `//human_client:client` | CLI binary — `bazel run //human_client:client` |
 | `//human_client:client_lib` | Shared library for tests |
 | `//tests:test_human_client` | Unit tests (mocked RNS/LXMF) |
+
+### gRPC API
+
+A parallel API surface (alongside LXMF) for automated K8s pod clients.
+Defined in [`proto/lma.proto`](../proto/lma.proto) and served on port 50051.
+
+| RPC | Type | Purpose |
+|-----|------|---------|
+| `Send` | Unary | Inject protobuf envelope into LXMF mesh |
+| `Subscribe` | Server-streaming | Stream incoming LXMF messages (with optional title_filter) |
+| `Tunnel` | Bidirectional-streaming | Bidirectional raw packet relay (planned) |
+| `GetIdentity` | Unary | Return server Reticulum identity hex |
+
+See [`README.md`](../README.md#7-grpc-api-k8s-pod-integration) for usage examples.
 
 ### Usage
 

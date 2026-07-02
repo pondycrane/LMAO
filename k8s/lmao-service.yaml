@@ -1,8 +1,8 @@
-# LMAO Server — K8s ExternalName Service + Endpoints
+# LMAO Server — K8s Headless Service + Endpoints
 #
-# This manifest creates a Service and Endpoints that allow K8s pods
-# to reach the LMAO server running on a Raspberry Pi on the local
-# network at the configured IP address.
+# This manifest creates a headless Service with manually managed
+# Endpoints that allow K8s pods to reach the LMAO server running
+# on a Raspberry Pi on the local network at the configured IP address.
 #
 # Usage:
 #   kubectl apply -f k8s/lmao-service.yaml
@@ -21,8 +21,7 @@ metadata:
   name: lmao-server
   namespace: default
 spec:
-  type: ExternalName
-  externalName: lmao-server.local  # Adjust to your RPi's hostname or IP
+  clusterIP: None
   ports:
     - port: 50051
       targetPort: 50051
@@ -42,20 +41,3 @@ subsets:
     ports:
       - port: 50051
         name: grpc
-
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: lmao-server-headless
-  namespace: default
-spec:
-  clusterIP: None
-  selector:
-    # No selector — this is managed by Endpoints above
-    app: lmao-server
-  ports:
-    - port: 50051
-      targetPort: 50051
-      protocol: TCP
-      name: grpc
