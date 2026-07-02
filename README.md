@@ -36,7 +36,7 @@ server and an M5Stack Cardputer ADV client using the
 | ESP32 RNode | Flashed with RNode firmware |
 | Cardputer ADV | M5Stack Cardputer with LoRa antenna, MicroPython installed |
 | LoRa band | Matching frequency (868 MHz EU / 915 MHz US) |
-| Bazel | v7.4.1 (see `.bazelversion`) — [install guide](https://bazel.build/install) |
+| Bazel | v7.4.1 (see `.bazelversion`) — use [bazelisk](https://github.com/bazelbuild/bazelisk) (auto-selects correct version via `.bazelversion`). Install: `npm install -g @bazel/bazelisk` ([other install methods](https://github.com/bazelbuild/bazelisk#installation)). Ensure `~/.npm-global/bin` (or your npm global bin dir) is in `PATH`. Verify with `bazel --version` (expected: `bazel 7.4.1`). |
 
 ### 1. Flash the ESP32 RNode
 
@@ -57,10 +57,10 @@ required version). Bazel generates protobuf stubs, resolves Python dependencies,
 
 ```bash
 # Build everything (generates protobuf stubs, installs deps)
-bazel build //lmao_server
+bazel build //lmao_server:server
 
 # Run the server
-bazel run //lmao_server
+bazel run //lmao_server:server
 ```
 
 **Option B — pip (no Bazel):**
@@ -103,7 +103,7 @@ Edit `lmao_server/config.py` to adjust radio parameters:
 
 ```bash
 # Using Bazel (recommended)
-bazel run //lmao_server
+bazel run //lmao_server:server
 
 # Or without Bazel (from repo root, with PYTHONPATH including lmao_server/)
 PYTHONPATH="$PWD/lmao_server:$PWD" python3 lmao_server/server.py
@@ -125,7 +125,11 @@ Listening for LXMF messages...
 ==================================================
 ```
 
-### 5. Flash / Prepare the Cardputer
+### 5. Configure and Flash the Cardputer
+
+**Before flashing**, edit `cardputer_client/config.py`:
+- Set `WIFI_SSID` and `WIFI_PASS` to match your local network (required for UDP interface)
+- Optionally adjust `NODE_NAME` and `DEBUG` level
 
 **Option A — MicroPython + cardputer_client** (lighter weight, requires setup):
 
@@ -145,11 +149,19 @@ bazel run //cardputer_client:flash -- --verify-only
 **Or manually with ampy** (if you don't have Bazel):
 
 ```bash
-# Example using ampy
+# Upload client files
 ampy --port /dev/ttyUSB1 put cardputer_client/config.py
+ampy --port /dev/ttyUSB1 put cardputer_client/lora_boards.py
 ampy --port /dev/ttyUSB1 put cardputer_client/main.py main.py
 ampy --port /dev/ttyUSB1 put cardputer_client/proto/lma_encoder.py proto/lma_encoder.py
+
+# Upload µReticulum library (urns port) to /lib/
+for f in $(find cardputer_client/lib -name '*.py' -o -name '*.mpy'); do
+  ampy --port /dev/ttyUSB1 put "$f" "${f#cardputer_client/}"
+done
 ```
+> Pinout presets for different LoRa boards are defined in `cardputer_client/lora_boards.py`.
+> Add new presets there and reference them from `config.py` via the `board` key.
 
 The Cardputer will auto-run `main.py` on boot and display:
 
@@ -157,6 +169,13 @@ The Cardputer will auto-run `main.py` on boot and display:
 LMAO POC Ready
 ID: a1b2c3d4...
 ```
+
+**Option B — RNode LoRa bridge** (heavier, if you have an RNode):
+
+If you're using an external RNode LoRa radio instead of the Cardputer's
+onboard SX1262, connect it via USB and configure the serial interface in
+``config.py``. The RNode will appear as a standard serial port and handles
+LoRa modulation independently.
 
 **Option B — rsCardputer native firmware** (recommended, pre-built binary):
 

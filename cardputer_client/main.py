@@ -2,34 +2,42 @@
 LMAO Cardputer Client — µReticulum LoRa sender/receiver.
 
 Runs on M5Stack Cardputer ADV with onboard LoRa antenna.
+Uses the urns µReticulum port for MicroPython.
+
 Sends periodic "Hello" messages and displays received replies.
 """
 
 import time
+import sys
 
-# MicroPython hardware imports
+# µReticulum imports (urns MicroPython port)
+import gc
+gc.collect()
+
+# Try to import the urns library from /lib (where the flash tool places it)
+try:
+    sys.path.insert(0, "/lib")
+    from urns import Reticulum, Identity
+    from urns.lxmf import LXMRouter, LXMessage
+    from urns.log import LOG_NOTICE, LOG_INFO
+    HAS_URNS = True
+except ImportError:
+    HAS_URNS = False
+
+# Display support (if available)
 try:
     from machine import Pin, SPI
-    import st7789  # Cardputer display driver
+    import st7789
     HAS_DISPLAY = True
 except ImportError:
     HAS_DISPLAY = False
 
-# µReticulum imports (MicroPython port of RNS)
+# Proto encoder (optional — gracefully degrades if not on device)
 try:
-    import ureticulum as RNS
-    import ulxmf as LXMF
+    from proto.lma_encoder import make_poc_message
+    HAS_PROTO = True
 except ImportError:
-    # Fallback: µReticulum may be installed as 'RNS' on MicroPython
-    try:
-        import RNS
-        import LXMF
-    except ImportError:
-        RNS = None
-        LXMF = None
-
-import config
-from proto.lma_encoder import make_poc_message
+    HAS_PROTO = False
 
 
 # ---- Display helpers ----
@@ -38,9 +46,7 @@ def init_display():
     """Initialize the Cardputer ST7789 display."""
     if not HAS_DISPLAY:
         return None
-
     try:
-        # Cardputer uses VSPI for display
         spi = SPI(1, baudrate=40000000, polarity=1, phase=0,
                   sck=Pin(36), mosi=Pin(35), miso=Pin(37))
         tft = st7789.ST7789(
@@ -52,7 +58,7 @@ def init_display():
             rotation=1,
         )
         tft.init()
-        tft.fill(0x0000)  # Black
+        tft.fill(0x0000)
         return tft
     except Exception as e:
         print(f"Display init failed: {e}")
@@ -60,18 +66,13 @@ def init_display():
 
 
 def display_status(tft, lines):
-    """Write status lines to the Cardputer screen.
-
-    Returns tft on success, or None if display hardware has failed
-    (so the caller can disable future display calls).
-    """
     if tft is None:
         return None
     try:
         tft.fill(0x0000)
         y = 5
-        for line in lines[:10]:  # Max 10 lines at 13px each
-            tft.text(line, 5, y, 0xFFFF)  # White text
+        for line in lines[:10]:
+            tft.text(line, 5, y, 0xFFFF)
             y += 13
         return tft
     except Exception as e:
@@ -93,38 +94,31 @@ def log(msg, tft=None, status_lines=None):
 
 # ---- LXMF message handler ----
 
-# NOTE: This callback may be invoked from a separate execution context
-# (thread, uasyncio task, or interrupt handler). The reply is buffered
-# in `pending_replies` for the main loop to drain.
 def handle_reply(message):
-    """Callback invoked when an LXMF reply is received."""
-    # Extract title with individual error handling
-    try:
-        title = message.title_as_string() if hasattr(message, 'title_as_string') else ""
-    except Exception as e:
-        print(f"handle_reply: title extraction failed: {e}")
-        import sys as _sys
-        _sys.print_exception(e)
-        title = ""
+    """Callback invoked when an LXMF reply is received.
 
-    # Extract content with individual error handling
+    NOTE: This may be invoked from a separate execution context
+    (uasyncio task, callback handler, etc.). Replies are buffered
+    in ``pending_replies`` for the main loop to drain — do NOT
+    add blocking calls or locking here.
+    """
+    content = ""
     try:
-        if hasattr(message, 'content_as_string'):
-            content = message.content_as_string()
-        else:
-            content = str(message.content)
+        content = message.content_as_string() or ""
     except Exception as e:
         print(f"handle_reply: content extraction failed: {e}")
-        import sys as _sys
-        _sys.print_exception(e)
-        content = None
+        # sys.print_exception is MicroPython-only; CPython fallback via traceback
+        try:
+            sys.print_exception(e)
+        except AttributeError:
+            import traceback
+            traceback.print_exception(type(e), e, e.__traceback__)
 
-    if content is not None:
+    if content:
         print(f"\n>>> REPLY from server: {content}")
         pending_replies.append(content)
 
 
-# Queue of pending replies for the main loop to drain
 pending_replies = []
 
 
@@ -134,39 +128,72 @@ def main():
     global pending_replies
 
     status_lines = []
-
-    # Init display
     tft = init_display()
-    tft = log("LMAO Cardputer Client — Booting...", tft, status_lines)
+    tft = log("LMAO Cardputer — Booting...", tft, status_lines)
 
-    # Check µReticulum availability
-    if RNS is None:
-        log("ERROR: µReticulum not installed!", tft, status_lines)
-        log("Install ureticulum + ulxmf on your Cardputer.", tft, status_lines)
+    if not HAS_URNS:
+        log("ERROR: µReticulum (urns) not installed!", tft, status_lines)
+        log("Run: bazel run //cardputer_client:flash", tft, status_lines)
         while True:
             time.sleep(1)
 
-    # Initialize Reticulum
-    tft = log("Init Reticulum...", tft, status_lines)
-    reticulum = RNS.Reticulum(config=config.config)
-    tft = log("Reticulum OK.", tft, status_lines)
+    # ---- Load config (must be on device as /config.py) ----
+    try:
+        from config import WIFI_SSID, WIFI_PASS, NODE_NAME, DEBUG, CONFIG
+    except ImportError:
+        log("ERROR: Cannot import config — is config.py on device?", tft, status_lines)
+        while True:
+            time.sleep(1)
 
-    # Create ephemeral identity (new each boot for POC)
-    identity = RNS.Identity()
-    identity_hex = RNS.hexrep(identity.hash, delimit=False)
+    gc.collect()
+
+    # ---- Connect WiFi ----
+    if _needs_wifi(CONFIG):
+        tft = log("Connecting WiFi...", tft, status_lines)
+        try:
+            _connect_wifi(WIFI_SSID, WIFI_PASS, DEBUG)
+            tft = log("WiFi OK.", tft, status_lines)
+        except Exception as e:
+            log(f"WiFi failed: {e} — continuing without", tft, status_lines)
+
+    gc.collect()
+
+    # ---- Start µReticulum ----
+    tft = log("Init Reticulum...", tft, status_lines)
+    try:
+        rns = Reticulum(loglevel=3)
+        rns.config = CONFIG
+        rns.setup_interfaces()
+        tft = log("Reticulum OK.", tft, status_lines)
+    except Exception as e:
+        log(f"FATAL: Reticulum init failed: {e}", tft, status_lines)
+        while True:
+            time.sleep(1)
+
+    identity_hex = rns.identity.hexhash
     tft = log(f"ID: {identity_hex[:16]}...", tft, status_lines)
 
-    # Start LXMF router
-    router = LXMF.LXMRouter(identity=identity, storagepath="/flash/lxmf_state")
-    router.register_delivery_callback(handle_reply)
-    tft = log("LXMF router started.", tft, status_lines)
+    # ---- Start LXMF router ----
+    tft = log("Starting LXMF router...", tft, status_lines)
+    try:
+        router = LXMRouter(identity=rns.identity, storagepath="/flash/lxmf_state")
+        dest = router.register_delivery_identity(rns.identity, display_name=NODE_NAME)
+        router.register_delivery_callback(handle_reply)
+        tft = log("LXMF router OK.", tft, status_lines)
+    except Exception as e:
+        log(f"FATAL: LXMF router failed: {e}", tft, status_lines)
+        while True:
+            time.sleep(1)
 
-    # ---- Discovery: announce ourselves so server can find us ----
+    # ---- Announce ----
     tft = log("Announcing presence...", tft, status_lines)
-    router.announce()
-    tft = log("POC Ready.", tft, status_lines)
+    try:
+        router.announce()
+        tft = log("POC Ready.", tft, status_lines)
+    except Exception as e:
+        log(f"Announce failed: {e}", tft, status_lines)
 
-    # Display "LMAO POC Ready" prominently
+    # Display banner
     if tft is not None:
         tft = display_status(tft, ["LMAO POC Ready", f"ID: {identity_hex[:24]}"])
 
@@ -174,38 +201,37 @@ def main():
     seq = 0
     consecutive_errors = 0
     MAX_CONSECUTIVE_ERRORS = 10
-    SERVER_IDENTITY_HASH = None  # Set this to the server's 16-byte hash if known
+    DEST_HASH = None  # Set to server's 16-byte hash if known
 
     while True:
         try:
-            consecutive_errors = 0  # Reset error counter on successful iteration
+            consecutive_errors = 0
             seq += 1
-
-            # Send hello message — direct if destination hash known, else broadcast
             hello_text = f"Hello from Cardputer — seq {seq}"
-            content = make_poc_message(identity_hex, hello_text, timestamp=int(time.time() * 1000))
 
-            destination = None  # Broadcast by default
-            if SERVER_IDENTITY_HASH is not None:
-                destination = RNS.Identity.recall(SERVER_IDENTITY_HASH)
+            if not HAS_PROTO:
+                log("Proto encoder not available — cannot send", tft, status_lines)
+            elif DEST_HASH is None:
+                log("No destination configured — not sending", tft, status_lines)
+            else:
+                content = make_poc_message(identity_hex, hello_text,
+                                           timestamp=int(time.time() * 1000))
+                # Send via urns LXMF router
+                msg = router.send_message(
+                    destination_hash=DEST_HASH,
+                    content=content,
+                    title="p:Envelope",
+                )
+                if msg:
+                    log(f"Sent: {hello_text}", tft, status_lines)
+                else:
+                    log("Send returned None", tft, status_lines)
 
-            msg = LXMF.LXMessage(
-                destination=destination,
-                source=identity,
-                content=content,
-                title="p:Envelope",
-                desired_method=LXMF.LXMessage.OPPORTUNISTIC,
-            )
-            router.handle_outbound(msg)
-            log_prefix = "Sent broadcast" if destination is None else "Sent"
-            tft = log(f"{log_prefix}: {hello_text}", tft, status_lines)
-
-            # Drain all pending replies from the callback
+            # Drain pending replies
             for reply in pending_replies:
                 tft = log(f"Reply: {reply}", tft, status_lines)
             pending_replies.clear()
 
-            # Wait before next cycle (10 seconds for demo)
             time.sleep(10)
 
         except KeyboardInterrupt:
@@ -213,13 +239,67 @@ def main():
             break
         except Exception as e:
             consecutive_errors += 1
-            import sys as _sys
-            _sys.print_exception(e)
+            # sys.print_exception is MicroPython-only; CPython fallback
+            try:
+                sys.print_exception(e)
+            except AttributeError:
+                import traceback
+                traceback.print_exception(type(e), e, e.__traceback__)
             tft = log(f"❗ Error ({consecutive_errors}): {e}", tft, status_lines)
             if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
                 log("FATAL: Too many consecutive errors, halting.", tft, status_lines)
                 break
             time.sleep(5)
+
+
+def _needs_wifi(config):
+    """Check if any UDP or TCP interface is enabled in config."""
+    for iface in config.get("interfaces", []):
+        if iface.get("enabled", False) and iface.get("type", "") in (
+            "UDPInterface", "TCPClientInterface",
+        ):
+            return True
+    return False
+
+
+def _connect_wifi(ssid, password, debug=0, timeout=15):
+    """Connect to WiFi and return the assigned IP."""
+    import network
+
+    # Deactivate AP interface
+    ap = network.WLAN(network.AP_IF)
+    if ap.active():
+        ap.active(False)
+
+    wlan = network.WLAN(network.STA_IF)
+    wlan.active(True)
+    if not wlan.isconnected():
+        if debug >= 1:
+            print("Connecting to WiFi:", ssid)
+        wlan.connect(ssid, password)
+        start = time.time()
+        while not wlan.isconnected():
+            if time.time() - start > timeout:
+                raise RuntimeError("WiFi connection timed out")
+            time.sleep(0.5)
+
+    # Disable WiFi power management for reliable UDP broadcast
+    wlan.config(pm=0)
+
+    ip = wlan.ifconfig()[0]
+    if debug >= 1:
+        print("Connected! IP:", ip)
+
+    try:
+        import ntptime
+        ntptime.settime()
+        if debug >= 1:
+            print("NTP synced")
+    except Exception:
+        if debug >= 1:
+            print("NTP sync failed")
+
+    return ip
 
 
 # Auto-run when flashed to Cardputer
