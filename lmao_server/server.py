@@ -121,6 +121,7 @@ def main():
     cfg_dict = config.get_config_dict()
     rnode_port = cfg_dict['interfaces']['RNode LoRa']['port']
     if not os.path.exists(rnode_port):
+        logger.warning("RNode port %s not found. LoRa messaging will be unavailable.", rnode_port)
         print(f"⚠️  RNode port {rnode_port} not found.")
         print(f"   The server will start with WiFi AutoInterface only.")
         print(f"   Set the LMAO_RNODE_PORT environment variable if your RNode is on a different port.")
