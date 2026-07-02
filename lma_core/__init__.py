@@ -77,17 +77,18 @@ __all__ = [
     "AudioMessage",
     "ImageMessage",
     "CallSignal",
-    # gRPC request/response types
-    "SendRequest",
-    "SendResponse",
-    "SubscribeRequest",
-    "SubscribeResponse",
-    "TunnelRequest",
-    "TunnelResponse",
-    "GetIdentityRequest",
-    "GetIdentityResponse",
-    # gRPC service stubs
-    "LMAOStub",
-    "LMAOServicer",
-    "LMAO",
 ]
+
+# Conditionally add gRPC types to __all__ if they were imported
+_grpc_request_types = [
+    "SendRequest", "SendResponse",
+    "SubscribeRequest", "SubscribeResponse",
+    "TunnelRequest", "TunnelResponse",
+    "GetIdentityRequest", "GetIdentityResponse",
+]
+__all__ += [name for name in _grpc_request_types if name in dir()]
+
+_grpc_service_types = [
+    "LMAOStub", "LMAOServicer", "LMAO",
+]
+__all__ += [name for name in _grpc_service_types if name in dir()]

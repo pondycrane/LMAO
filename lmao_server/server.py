@@ -39,7 +39,6 @@ try:
     from lma_core import (
         SendResponse,
         SubscribeResponse,
-        TunnelResponse,
         GetIdentityResponse,
         LMAOServicer,
     )
@@ -274,7 +273,7 @@ class Server:
                 time.sleep(0.1)
         except KeyboardInterrupt:
             print("\nShutting down...")
-            sys.exit(0)
+            return
 
 
 # ──────────────────────────────────────────────────────────────
@@ -292,8 +291,7 @@ if GRPC_AVAILABLE:
 
         async def Send(self, request, context):
             """Handle a Send RPC: deserialize envelope and dispatch into LXMF."""
-            from lma_core import LMAOEnvelope as Envelope
-            envelope = Envelope()
+            envelope = LMAOEnvelope()
             try:
                 envelope.ParseFromString(request.envelope)
             except (DecodeError, ValueError) as e:
@@ -340,6 +338,8 @@ if GRPC_AVAILABLE:
             try:
                 while True:
                     message = await queue.get()
+                    if message is None:  # Sentinel received during shutdown
+                        break
                     try:
                         # Apply optional title filter
                         title = getattr(message, 'title_as_string', lambda: "")()
