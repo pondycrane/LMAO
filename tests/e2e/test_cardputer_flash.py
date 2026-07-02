@@ -127,12 +127,15 @@ class TestHardwareDetection:
         assert os.path.isdir(root), f"Not a directory: {root}"
 
     def test_required_files_exist(self):
-        """Every file in FILES_TO_UPLOAD must exist on disk."""
+        """Every file in FILES_TO_UPLOAD and LIB_FILES_TO_UPLOAD must exist."""
         root = cardputer_flash.find_client_root()
         assert root, "Cannot find cardputer_client/"
         for rel in cardputer_flash.FILES_TO_UPLOAD:
             full = os.path.join(root, rel)
-            assert os.path.isfile(full), f"Missing: {full}"
+            assert os.path.isfile(full), f"Missing client file: {full}"
+        for rel in cardputer_flash.LIB_FILES_TO_UPLOAD:
+            full = os.path.join(root, rel)
+            assert os.path.isfile(full), f"Missing lib file: {full}"
 
 
 class TestCardputerE2E:
@@ -225,11 +228,13 @@ except:
         cardputer_flash.exit_raw_repl(serial_conn)
 
     def test_flash_and_boot(self, serial_conn):
-        """Full flash cycle: upload all client files, soft-reset, validate banner.
+        """Full flash cycle: upload client files + representative lib subset, soft-reset, validate banner.
 
-        This is the principal E2E test.  It uploads the three MicroPython
-        files that constitute the Cardputer client, performs a soft reset,
-        and reads serial output for the expected ``LMAO`` boot banner.
+        This is the principal E2E test.  It uploads the MicroPython files
+        that constitute the Cardputer client plus a representative sample
+        of the urns library (4 files covering core, crypto, and interface
+        modules).  The full 36-file library upload takes 5-10 mins and is
+        covered by the ``bazel run //cardputer_client:flash`` command.
         """
         ok = cardputer_flash.enter_raw_repl(serial_conn)
         assert ok, "Cannot enter raw REPL"
@@ -238,13 +243,28 @@ except:
         root = cardputer_flash.find_client_root()
         assert root, "Cannot find cardputer_client/ source directory"
 
-        # Upload each file
+        # Upload each client file
         for rel in cardputer_flash.FILES_TO_UPLOAD:
             local_path = os.path.join(root, rel)
             remote_path = rel
             assert os.path.isfile(local_path), f"Missing source: {local_path}"
             uploaded = cardputer_flash.upload_file(serial_conn, local_path, remote_path)
             assert uploaded, f"Failed to upload {rel}"
+
+        # Upload a representative subset of library files (not all 36 — that would
+        # take 5-10 minutes over 115200 baud).  The full upload is performed by the
+        # ``bazel run //cardputer_client:flash`` command.
+        LIB_UPLOAD_SAMPLE = [
+            "lib/urns/__init__.py",
+            "lib/urns/crypto/ed25519.py",
+            "lib/urns/interfaces/lora.py",
+        ]
+        for rel in LIB_UPLOAD_SAMPLE:
+            local_path = os.path.join(root, rel)
+            remote_path = rel
+            assert os.path.isfile(local_path), f"Missing source: {local_path}"
+            uploaded = cardputer_flash.upload_file(serial_conn, local_path, remote_path)
+            assert uploaded, f"Failed to upload lib/{rel}"
 
         # Exit raw REPL and soft-reset
         cardputer_flash.exit_raw_repl(serial_conn)

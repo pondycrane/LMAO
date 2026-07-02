@@ -32,10 +32,58 @@ except ImportError:
 # MicroPython source files to upload (relative to cardputer_client/).
 # All files are uploaded to the device root (/), preserving the relative
 # directory structure (e.g., proto/lma_encoder.py → /proto/lma_encoder.py).
+#
+# Library files (urns/ and native .mpy modules) are uploaded to /lib/.
 FILES_TO_UPLOAD = [
     "config.py",
     "main.py",
+    "lora_boards.py",
     "proto/lma_encoder.py",
+]
+
+# Library files to upload under /lib/ (µReticulum urns port + native modules).
+# These are the .py files from the urns package and .mpy native crypto modules.
+#
+# CAUTION: When adding new files under lib/urns/, add them to this list so
+# they are uploaded to the device.  Files not listed here will not be available
+# at runtime.  (A future improvement could use os.walk() for auto-discovery.)
+LIB_FILES_TO_UPLOAD = [
+    "lib/urns/__init__.py",
+    "lib/urns/bz2dec.py",
+    "lib/urns/const.py",
+    "lib/urns/destination.py",
+    "lib/urns/identity.py",
+    "lib/urns/link.py",
+    "lib/urns/log.py",
+    "lib/urns/lxmf.py",
+    "lib/urns/packet.py",
+    "lib/urns/resource.py",
+    "lib/urns/reticulum.py",
+    "lib/urns/transport.py",
+    "lib/urns/umsgpack.py",
+    "lib/urns/crypto/__init__.py",
+    "lib/urns/crypto/aes.py",
+    "lib/urns/crypto/ed25519.py",
+    "lib/urns/crypto/hashes.py",
+    "lib/urns/crypto/hkdf.py",
+    "lib/urns/crypto/hmac.py",
+    "lib/urns/crypto/pkcs7.py",
+    "lib/urns/crypto/sha512.py",
+    "lib/urns/crypto/token.py",
+    "lib/urns/crypto/x25519.py",
+    "lib/urns/crypto/pure25519/__init__.py",
+    "lib/urns/crypto/pure25519/_ed25519.py",
+    "lib/urns/crypto/pure25519/basic.py",
+    "lib/urns/crypto/pure25519/ed25519_oop.py",
+    "lib/urns/crypto/pure25519/eddsa.py",
+    "lib/urns/interfaces/__init__.py",
+    "lib/urns/interfaces/e32.py",
+    "lib/urns/interfaces/lora.py",
+    "lib/urns/interfaces/serial.py",
+    "lib/urns/interfaces/tcp.py",
+    "lib/urns/interfaces/udp.py",
+    "lib/ed25519_fast_xtensawin.mpy",
+    "lib/bz2_fast_xtensawin.mpy",
 ]
 
 # ---- Path helpers ----
@@ -61,6 +109,18 @@ def _sanitize_path_for_script(path: str) -> str:
             f"Path contains non-printable characters: {path!r}"
         )
     return path
+
+
+def _verify_files_exist(client_root, file_list):
+    """Check that every file in *file_list* exists under *client_root*.
+
+    Raises:
+        FileNotFoundError: If any required file is missing.
+    """
+    for rel in file_list:
+        full = os.path.join(client_root, rel)
+        if not os.path.isfile(full):
+            raise FileNotFoundError(f"Required file not found: {full}")
 
 
 def find_client_root():
@@ -160,7 +220,7 @@ def enter_raw_repl(ser):
             time.sleep(0.05)
 
         return False
-    except serial.SerialException as e:
+    except (serial.SerialException, OSError) as e:
         print(f"ERROR: Serial communication lost while entering raw REPL: {e}")
         return False
 
@@ -171,7 +231,7 @@ def exit_raw_repl(ser):
         ser.write(b"\r\x02")
         time.sleep(0.2)
         ser.read(ser.in_waiting)
-    except serial.SerialException:
+    except (serial.SerialException, OSError):
         pass  # device may already be gone; nothing to recover
 
 
@@ -209,7 +269,7 @@ def exec_raw(ser, code, timeout=15):
         output = data.decode("utf-8", errors="replace")
         ok = "OK" in output
         return ok, output
-    except serial.SerialException as e:
+    except (serial.SerialException, OSError) as e:
         error_msg = f"Serial communication error during exec_raw: {e}"
         print(f"  ERROR: {error_msg}")
         return False, error_msg
@@ -248,8 +308,12 @@ def upload_file(ser, local_path, remote_path, chunk_size=2048):
 
     Returns *True* on success.
     """
-    with open(local_path, "rb") as fh:
-        content = fh.read()
+    try:
+        with open(local_path, "rb") as fh:
+            content = fh.read()
+    except OSError as e:
+        print(f"  ERROR: Cannot read {local_path}: {e}")
+        return False
 
     file_size = len(content)
     remote_path = remote_path.replace("\\", "/")
@@ -258,18 +322,24 @@ def upload_file(ser, local_path, remote_path, chunk_size=2048):
     # Sanitize path for safe embedding in MicroPython string literals
     remote_path = _sanitize_path_for_script(remote_path)
 
-    # Ensure the target directory exists
+    # Ensure the target directory exists (create all parent directories)
     dirname = os.path.dirname(remote_path).replace("\\", "/")
     mkdir_block = ""
     if dirname and dirname != "/":
         # Sanitize dirname before embedding
         safe_dirname = _sanitize_path_for_script(dirname)
         mkdir_block = f"""
-try:
-    import os as _os
-    _os.mkdir('{safe_dirname}')
-except:
-    pass  # Ignore — directory may already exist
+_parts = '{safe_dirname}'.strip('/').split('/')
+_path = ''
+for _p in _parts:
+    _path = _path + '/' + _p
+    try:
+        import os as _os
+        _os.mkdir(_path)
+    except OSError as _e:
+        if _e.args[0] != 17:  # EEXIST is benign
+            print('MKDIR_ERR:' + repr(_e))
+            raise
 """
 
     # Build script: remove old file, open new, write in chunks, close
@@ -278,8 +348,10 @@ except:
 try:
     import os as _os
     _os.remove('{remote_path}')
-except:
-    pass
+except OSError as _e:
+    if _e.args[0] != 2:  # ENOENT — file not found, that's OK
+        print('REMOVE_ERR:' + repr(_e))
+        raise
 _f = open('{remote_path}', 'wb')
 """
 
@@ -329,11 +401,11 @@ def main():
         sys.exit(1)
 
     # Verify all files exist before opening the serial port
-    for rel in FILES_TO_UPLOAD:
-        full = os.path.join(client_root, rel)
-        if not os.path.isfile(full):
-            print(f"ERROR: Required file not found: {full}")
-            sys.exit(1)
+    try:
+        _verify_files_exist(client_root, FILES_TO_UPLOAD + LIB_FILES_TO_UPLOAD)
+    except FileNotFoundError as e:
+        print(f"ERROR: {e}")
+        sys.exit(1)
 
     # Find the Cardputer serial port
     port = find_cardputer_port(args.port)
@@ -377,11 +449,23 @@ def main():
             print("Verification complete (--verify-only).")
             return
 
-        # — Upload files —
-        print(f"Uploading {len(FILES_TO_UPLOAD)} file(s) …")
+        # — Upload client files —
+        print(f"Uploading {len(FILES_TO_UPLOAD) + len(LIB_FILES_TO_UPLOAD)} file(s) …")
         for rel in FILES_TO_UPLOAD:
             local_path = os.path.join(client_root, rel)
             remote_path = rel
+            print(f"  {rel:30s} … ", end="", flush=True)
+            if upload_file(ser, local_path, remote_path):
+                size = os.path.getsize(local_path)
+                print(f"OK  ({size} B)")
+            else:
+                print("FAILED")
+                sys.exit(1)
+
+        # — Upload library files (under /lib/) —
+        for rel in LIB_FILES_TO_UPLOAD:
+            local_path = os.path.join(client_root, rel)
+            remote_path = rel  # preserves lib/ prefix → /lib/ on device
             print(f"  {rel:30s} … ", end="", flush=True)
             if upload_file(ser, local_path, remote_path):
                 size = os.path.getsize(local_path)
@@ -395,7 +479,8 @@ def main():
         exit_raw_repl(ser)
         ser.write(b"\x04")  # Ctrl+D = soft reset in friendly REPL
 
-        print("Done. The Cardputer will reboot and run the LMAO client automatically.")
+        print(f"Done. The Cardputer will reboot and run the LMAO client automatically.")
+        print(f"Uploaded {len(FILES_TO_UPLOAD)} client + {len(LIB_FILES_TO_UPLOAD)} library file(s).")
 
     except KeyboardInterrupt:
         print("\nAborted by user.")
