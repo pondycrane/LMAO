@@ -43,6 +43,10 @@ class TestLmaCoreImportError:
 
     def test_import_succeeds_when_proto_present(self):
         """When proto.lma_pb2 is available, lma_core imports without error."""
+        # Clear any cached/mocked version of lma_core before importing
+        for mod in list(sys.modules.keys()):
+            if mod.startswith("lma_core") or mod.startswith("proto"):
+                del sys.modules[mod]
         # Module may already be cached; test that importing doesn't raise
         try:
             import lma_core
@@ -53,6 +57,10 @@ class TestLmaCoreImportError:
 
     def test_all_exports_are_importable(self):
         """All names in __all__ are present on the module when importable."""
+        # Clear any cached/mocked version of lma_core before importing
+        for mod in list(sys.modules.keys()):
+            if mod.startswith("lma_core") or mod.startswith("proto"):
+                del sys.modules[mod]
         try:
             import lma_core
         except ImportError:
@@ -65,6 +73,10 @@ class TestLmaCoreImportError:
 
     def test_all_contains_expected_types(self):
         """__all__ should contain the core message types."""
+        # Clear any cached/mocked version of lma_core before importing
+        for mod in list(sys.modules.keys()):
+            if mod.startswith("lma_core") or mod.startswith("proto"):
+                del sys.modules[mod]
         try:
             import lma_core
         except ImportError:

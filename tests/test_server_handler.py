@@ -41,7 +41,7 @@ def _setup_common_mocks():
 
 def _cleanup_common_mocks():
     """Remove mocked modules from sys.modules to prevent test pollution."""
-    for mod in ["RNS", "LXMF", "config", "lma_core", "server"]:
+    for mod in ["RNS", "LXMF", "config", "lma_core", "server", "lmao_server", "lmao_server.server"]:
         if mod in sys.modules:
             del sys.modules[mod]
 
@@ -66,7 +66,7 @@ def server_with_mocks():
     mock_envelope.SerializeToString.return_value = b"mock-serialized-envelope"
     sys.modules["lma_core"].LMAOEnvelope.return_value = mock_envelope
 
-    import server
+    from lmao_server import server
     server_instance = server.Server()
     server_instance.router = MagicMock()
     server_instance.server_identity = MagicMock()
@@ -91,7 +91,7 @@ def server_with_main_mocks():
     _setup_common_mocks()
 
     # Import server after mocks are set up
-    import server
+    from lmao_server import server
 
     yield server
 
@@ -381,7 +381,7 @@ class TestHandleLXMFDelivery:
         msg.content = b"protobuf-encoded-bytes"
         msg.title_as_string.return_value = "p:Envelope"
 
-        import server as server_mod
+        from lmao_server import server as server_mod
         with patch.object(server_mod.logger, 'info', wraps=server_mod.logger.info) as mock_log:
             server.handle_lxmf_delivery(msg)
 
@@ -408,7 +408,7 @@ class TestHandleLXMFDelivery:
         msg.content = b"plain text fallback"
         msg.title_as_string.return_value = "p:Envelope"
 
-        import server as server_mod
+        from lmao_server import server as server_mod
         with patch.object(server_mod.logger, 'warning', wraps=server_mod.logger.warning) as mock_warn, \
              patch.object(server_mod.logger, 'info', wraps=server_mod.logger.info) as mock_info:
             server.handle_lxmf_delivery(msg)
