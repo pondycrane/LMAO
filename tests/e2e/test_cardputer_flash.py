@@ -127,12 +127,15 @@ class TestHardwareDetection:
         assert os.path.isdir(root), f"Not a directory: {root}"
 
     def test_required_files_exist(self):
-        """Every file in FILES_TO_UPLOAD must exist on disk."""
+        """Every file in FILES_TO_UPLOAD and LIB_FILES_TO_UPLOAD must exist."""
         root = cardputer_flash.find_client_root()
         assert root, "Cannot find cardputer_client/"
         for rel in cardputer_flash.FILES_TO_UPLOAD:
             full = os.path.join(root, rel)
-            assert os.path.isfile(full), f"Missing: {full}"
+            assert os.path.isfile(full), f"Missing client file: {full}"
+        for rel in cardputer_flash.LIB_FILES_TO_UPLOAD:
+            full = os.path.join(root, rel)
+            assert os.path.isfile(full), f"Missing lib file: {full}"
 
 
 class TestCardputerE2E:
@@ -225,11 +228,12 @@ except:
         cardputer_flash.exit_raw_repl(serial_conn)
 
     def test_flash_and_boot(self, serial_conn):
-        """Full flash cycle: upload all client files, soft-reset, validate banner.
+        """Full flash cycle: upload all client+lib files, soft-reset, validate banner.
 
         This is the principal E2E test.  It uploads the three MicroPython
-        files that constitute the Cardputer client, performs a soft reset,
-        and reads serial output for the expected ``LMAO`` boot banner.
+        files that constitute the Cardputer client, the full urns library,
+        and native .mpy modules, performs a soft reset, and reads serial
+        output for the expected ``LMAO`` boot banner.
         """
         ok = cardputer_flash.enter_raw_repl(serial_conn)
         assert ok, "Cannot enter raw REPL"
@@ -238,13 +242,21 @@ except:
         root = cardputer_flash.find_client_root()
         assert root, "Cannot find cardputer_client/ source directory"
 
-        # Upload each file
+        # Upload each client file
         for rel in cardputer_flash.FILES_TO_UPLOAD:
             local_path = os.path.join(root, rel)
             remote_path = rel
             assert os.path.isfile(local_path), f"Missing source: {local_path}"
             uploaded = cardputer_flash.upload_file(serial_conn, local_path, remote_path)
             assert uploaded, f"Failed to upload {rel}"
+
+        # Upload each library file
+        for rel in cardputer_flash.LIB_FILES_TO_UPLOAD:
+            local_path = os.path.join(root, rel)
+            remote_path = rel
+            assert os.path.isfile(local_path), f"Missing source: {local_path}"
+            uploaded = cardputer_flash.upload_file(serial_conn, local_path, remote_path)
+            assert uploaded, f"Failed to upload lib/{rel}"
 
         # Exit raw REPL and soft-reset
         cardputer_flash.exit_raw_repl(serial_conn)
