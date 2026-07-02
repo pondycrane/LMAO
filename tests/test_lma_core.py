@@ -16,6 +16,13 @@ class TestLmaCoreImportError:
 
     def test_import_error_when_proto_missing(self, caplog, monkeypatch):
         """Importing lma_core should raise ImportError when proto.lma_pb2 is missing."""
+        # Skip if proto stubs are available (generated via protoc)
+        try:
+            import proto.lma_pb2  # noqa: F401
+            pytest.skip("proto.lma_pb2 is available — cannot test import error path")
+        except ImportError:
+            pass
+
         # Remove proto.lma_pb2 from sys.modules if present
         if "proto.lma_pb2" in sys.modules:
             monkeypatch.delitem(sys.modules, "proto.lma_pb2", raising=False)

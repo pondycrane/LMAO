@@ -127,13 +127,14 @@ class TestHardwareDetection:
         assert os.path.isdir(root), f"Not a directory: {root}"
 
     def test_required_files_exist(self):
-        """Every file in FILES_TO_UPLOAD and LIB_FILES_TO_UPLOAD must exist."""
+        """Every file in FILES_TO_UPLOAD must exist."""
         root = cardputer_flash.find_client_root()
         assert root, "Cannot find cardputer_client/"
         for rel in cardputer_flash.FILES_TO_UPLOAD:
             full = os.path.join(root, rel)
             assert os.path.isfile(full), f"Missing client file: {full}"
-        for rel in cardputer_flash.LIB_FILES_TO_UPLOAD:
+        lib_files = cardputer_flash.auto_discover_lib_files(root)
+        for rel in lib_files:
             full = os.path.join(root, rel)
             assert os.path.isfile(full), f"Missing lib file: {full}"
 
