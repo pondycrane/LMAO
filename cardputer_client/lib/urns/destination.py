@@ -149,13 +149,13 @@ class Destination:
 
         try:
             import gc; gc.collect()
-        except:
-            pass
+        except Exception as e:
+            log("Destination sign error: " + str(e), LOG_DEBUG)
         signature = self.identity.sign(signed_data)
         try:
             gc.collect()
-        except:
-            pass
+        except Exception as e:
+            log("Destination announce construction error: " + str(e), LOG_DEBUG)
         announce_data = self.identity.get_public_key() + self.name_hash + random_hash + ratchet + signature
 
         if app_data is not None:
@@ -220,7 +220,8 @@ class Destination:
                         enforce_ratchets=self._enforce_ratchets,
                         ratchet_id_receiver=self,
                     )
-                except:
+                except Exception as e:
+                    log("Destination accept error: " + str(e), LOG_DEBUG)
                     return None
             else:
                 return self.identity.decrypt(
