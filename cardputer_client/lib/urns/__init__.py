@@ -25,5 +25,3 @@ def hexrep(data, delimit=True):
     return d.join("{:02x}".format(c) for c in data)
 
 
-def prettyhexrep(data):
-    return "<" + "".join("{:02x}".format(c) for c in data) + ">"
