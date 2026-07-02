@@ -1,5 +1,7 @@
 """Tests for k8s-app IoT ingest script."""
 import importlib.util
+from unittest.mock import MagicMock
+
 import pytest
 
 
@@ -98,3 +100,107 @@ class TestBuildSensorEnvelope:
         envelope.ParseFromString(payload)
 
         assert envelope.sensor.readings[1].value == pytest.approx(0.0)
+
+
+class TestSubscribeExample:
+    """Tests for subscribe_example() timeout and CANCELLED wiring."""
+
+    def test_subscribe_passes_timeout_to_stub(self, capsys):
+        """subscribe_example should pass timeout parameter to stub.Subscribe."""
+        mock_stub = MagicMock()
+        # Make Subscribe return an empty iterator (no messages)
+        mock_stub.Subscribe.return_value = iter([])
+
+        iot_ingest.subscribe_example(mock_stub, timeout=10)
+
+        # Verify Subscribe was called with timeout=10
+        mock_stub.Subscribe.assert_called_once()
+        _, kwargs = mock_stub.Subscribe.call_args
+        assert kwargs.get("timeout") == 10
+
+    def test_subscribe_cancelled_logged(self, capsys):
+        """CANCELLED grpc.RpcError should print CANCELLED message."""
+        mock_stub = MagicMock()
+
+        # Create a mock RpcError with CANCELLED code (must inherit from grpc.RpcError
+        # to be caught by `except grpc.RpcError` in subscribe_example)
+        class FakeRpcError(iot_ingest.grpc.RpcError):
+            def code(self):
+                return iot_ingest.grpc.StatusCode.CANCELLED
+            def details(self):
+                return ""
+
+        mock_stub.Subscribe.side_effect = FakeRpcError()
+
+        iot_ingest.subscribe_example(mock_stub, timeout=5)
+
+        captured = capsys.readouterr()
+        assert "CANCELLED" in captured.out
+
+    def test_subscribe_other_error_logged(self, capsys):
+        """Non-CANCELLED grpc.RpcError should print the error message."""
+        mock_stub = MagicMock()
+
+        class FakeRpcError(iot_ingest.grpc.RpcError):
+            def code(self):
+                return iot_ingest.grpc.StatusCode.UNAVAILABLE
+            def __str__(self):
+                return "Service unavailable"
+
+        mock_stub.Subscribe.side_effect = FakeRpcError()
+
+        iot_ingest.subscribe_example(mock_stub, timeout=5)
+
+        captured = capsys.readouterr()
+        assert "Subscribe error" in captured.out
+
+    def test_subscribe_receives_message(self, capsys):
+        """subscribe_example should print received message bytes."""
+        mock_stub = MagicMock()
+
+        # Create a mock message
+        mock_msg = MagicMock()
+        mock_msg.source_hash = "abcdef1234"
+        mock_msg.envelope = b"test"
+
+        # Return one message then stop
+        mock_stub.Subscribe.return_value = iter([mock_msg])
+
+        iot_ingest.subscribe_example(mock_stub, timeout=5)
+
+        captured = capsys.readouterr()
+        assert "Received" in captured.out
+        assert "abcdef1234" in captured.out
+
+
+class TestSendExample:
+    """Tests for send_example()."""
+
+    def test_send_example_calls_stub(self, capsys):
+        """send_example should call stub.Send with a valid request."""
+        mock_stub = MagicMock()
+        mock_stub.Send.return_value = MagicMock(status="queued", destination_hash="abc123")
+
+        iot_ingest.send_example(mock_stub)
+
+        mock_stub.Send.assert_called_once()
+        captured = capsys.readouterr()
+        assert "queued" in captured.out
+
+
+class TestGetIdentityExample:
+    """Tests for get_identity_example()."""
+
+    def test_get_identity_calls_stub(self, capsys):
+        """get_identity_example should call stub.GetIdentity."""
+        mock_stub = MagicMock()
+        mock_stub.GetIdentity.return_value = MagicMock(
+            identity_hex="aaabbbccc", node_name="lmao-server"
+        )
+
+        iot_ingest.get_identity_example(mock_stub)
+
+        mock_stub.GetIdentity.assert_called_once()
+        captured = capsys.readouterr()
+        assert "aaabbbccc" in captured.out
+        assert "lmao-server" in captured.out
