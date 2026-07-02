@@ -3,7 +3,6 @@
 
 import os
 import gc
-import time
 from . import const
 from .log import log, set_loglevel, LOG_VERBOSE, LOG_DEBUG, LOG_ERROR, LOG_NOTICE, LOG_INFO
 from .identity import Identity

@@ -4,11 +4,11 @@
 import os
 import time
 from . import const
-from .log import log, LOG_VERBOSE, LOG_DEBUG, LOG_ERROR, LOG_EXTREME, LOG_NOTICE
+from .log import log, LOG_VERBOSE, LOG_DEBUG, LOG_ERROR
 from .crypto import (
     X25519PrivateKey, X25519PublicKey,
     Ed25519PrivateKey, Ed25519PublicKey,
-    Token, sha256, sha512, hkdf,
+    Token, sha256, hkdf,
 )
 
 

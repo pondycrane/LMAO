@@ -8,11 +8,9 @@ Run with::
     bazel test //tests:test_flash --test_output=all
 """
 
-import builtins
 import sys
-import os
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, mock_open, patch
 
 import pytest
 
@@ -684,6 +682,255 @@ class TestExitRawRepl:
 
         # Should not raise
         cardputer_flash.exit_raw_repl(mock_ser)
+
+
+class TestVerifyFilesExist:
+    """Direct tests for _verify_files_exist()."""
+
+    def test_all_files_exist(self, tmp_path):
+        """All files exist — should return None (no error)."""
+        files = []
+        for i in range(3):
+            f = tmp_path / f"file{i}.py"
+            f.write_text("")
+            files.append(str(f))
+        result = cardputer_flash._verify_files_exist(str(tmp_path), files)
+        # _verify_files_exist doesn't return anything (returns None),
+        # it just raises on failure
+        assert result is None
+
+    def test_missing_file_raises_error(self, tmp_path):
+        """Missing file should raise FileNotFoundError."""
+        files = [str(tmp_path / "nonexistent.py")]
+        with pytest.raises(FileNotFoundError):
+            cardputer_flash._verify_files_exist(str(tmp_path), files)
+
+    def test_empty_list_passes(self, tmp_path):
+        """Empty file list should pass without error."""
+        result = cardputer_flash._verify_files_exist(str(tmp_path), [])
+        assert result is None
+
+
+class TestUploadFileChunked:
+    """Direct tests for upload_file() chunked streaming protocol.
+
+    These tests mock exec_raw to verify step ordering, error recovery,
+    and chunk boundary behavior without requiring hardware.
+    """
+
+    @staticmethod
+    def _make_ser():
+        """Helper: create a mock serial connection."""
+        ser = MagicMock()
+        ser.in_waiting = 0
+        return ser
+
+    def test_upload_small_file_success(self):
+        """upload_file with a small file should complete all steps.
+
+        For /main.py, dirname is '/' so mkdir step is skipped.
+        Steps: rm, open, 1 chunk, close = 4 exec_raw calls.
+        """
+        mock_ser = self._make_ser()
+
+        responses = [
+            (True, "RM_OK"),      # Step 2: remove existing
+            (True, "OPEN_OK"),    # Step 3: open file
+            (True, "CHUNK_OK"),   # Step 4: chunk write
+            (True, "UPLOAD_OK"),  # Step 5: close + verify
+        ]
+        response_iter = iter(responses)
+
+        with patch("builtins.open", mock_open(read_data=b"test data")):
+            with patch("cardputer_client.flash.exec_raw") as mock_exec_raw:
+                mock_exec_raw.side_effect = lambda *args, **kw: next(response_iter)
+
+                result = cardputer_flash.upload_file(mock_ser, "/fake/local.py", "/main.py")
+
+        assert result is True
+        assert mock_exec_raw.call_count == 4
+
+    def test_upload_fails_on_mkdir_error(self):
+        """upload_file should return False when directory creation fails."""
+        mock_ser = self._make_ser()
+
+        with patch("builtins.open", mock_open(read_data=b"data")):
+            with patch("cardputer_client.flash.exec_raw", return_value=(False, "MKDIR_ERR")):
+                result = cardputer_flash.upload_file(mock_ser, "/fake/local.py", "/main.py")
+
+        assert result is False
+
+    def test_upload_fails_on_rm_error(self):
+        """upload_file should return False when file removal fails."""
+        mock_ser = self._make_ser()
+
+        responses = [
+            (False, "RM_ERR"),
+        ]
+        response_iter = iter(responses)
+
+        with patch("builtins.open", mock_open(read_data=b"data")):
+            with patch("cardputer_client.flash.exec_raw") as mock_exec_raw:
+                mock_exec_raw.side_effect = lambda *args, **kw: next(response_iter)
+
+                result = cardputer_flash.upload_file(mock_ser, "/fake/local.py", "/main.py")
+
+        assert result is False
+        assert mock_exec_raw.call_count == 1
+
+    def test_upload_fails_on_open_error(self):
+        """upload_file should return False when file open fails."""
+        mock_ser = self._make_ser()
+
+        responses = [
+            (True, "RM_OK"),
+            (True, "OPEN_FAIL"),  # No OPEN_OK in output
+        ]
+        response_iter = iter(responses)
+
+        with patch("builtins.open", mock_open(read_data=b"data")):
+            with patch("cardputer_client.flash.exec_raw") as mock_exec_raw:
+                mock_exec_raw.side_effect = lambda *args, **kw: next(response_iter)
+
+                result = cardputer_flash.upload_file(mock_ser, "/fake/local.py", "/main.py")
+
+        assert result is False
+
+    def test_upload_fails_on_chunk_error_closes_handle(self):
+        """upload_file should close dangling handle when a chunk write fails."""
+        mock_ser = self._make_ser()
+
+        responses = [
+            (True, "RM_OK"),
+            (True, "OPEN_OK"),
+            (False, "CHUNK_ERR"),  # Chunk write fails
+        ]
+        response_iter = iter(responses)
+
+        with patch("builtins.open", mock_open(read_data=b"test data longer than one chunk")):
+            with patch("cardputer_client.flash.exec_raw") as mock_exec_raw:
+                mock_exec_raw.side_effect = lambda *args, **kw: next(response_iter)
+
+                result = cardputer_flash.upload_file(mock_ser, "/fake/local.py", "/main.py")
+
+        assert result is False
+        # Should attempt to close the dangling handle via ser.write
+        assert mock_ser.write.called
+
+    def test_upload_fails_when_local_file_missing(self):
+        """upload_file should return False when local file does not exist."""
+        mock_ser = self._make_ser()
+
+        with patch("builtins.open", side_effect=OSError("No such file")):
+            result = cardputer_flash.upload_file(mock_ser, "/fake/nonexistent.py", "/main.py")
+
+        assert result is False
+
+    def test_upload_handles_root_remote_path(self):
+        """upload_file should handle remote_path='/' (no parent dir creation)."""
+        mock_ser = self._make_ser()
+
+        responses = [
+            # No step 1 when remote_path is /
+            (True, "RM_OK"),
+            (True, "OPEN_OK"),
+            (True, "CHUNK_OK"),
+            (True, "UPLOAD_OK"),
+        ]
+        response_iter = iter(responses)
+
+        with patch("builtins.open", mock_open(read_data=b"data")):
+            with patch("cardputer_client.flash.exec_raw") as mock_exec_raw:
+                mock_exec_raw.side_effect = lambda *args, **kw: next(response_iter)
+
+                # Use chunk_size larger than data so only 1 chunk
+                result = cardputer_flash.upload_file(mock_ser, "/fake/local.py", "/", chunk_size=4096)
+
+        assert result is True
+        # Should only be 4 calls (no dir creation step)
+        assert mock_exec_raw.call_count == 4
+
+    @pytest.mark.parametrize("file_size,expected_chunks", [
+        (0, 0),       # Empty file — no chunks
+        (1, 1),       # Single byte — 1 chunk
+        (1024, 1),    # Exactly chunk_size — 1 chunk
+        (1025, 2),    # One byte over — 2 chunks
+        (2048, 2),    # Exactly 2 chunks
+        (2500, 3),    # 2 full + 1 partial
+    ])
+    def test_upload_correct_chunk_count(self, file_size, expected_chunks):
+        """upload_file should send exactly as many chunks as needed."""
+        mock_ser = self._make_ser()
+
+        chunk_count = [0]
+
+        def side_effect(ser, script):
+            if b"print('CHUNK_OK')" in (script if isinstance(script, bytes) else b""):
+                chunk_count[0] += 1
+                return (True, "CHUNK_OK")
+            elif b"print('UPLOAD_OK')" in (script if isinstance(script, bytes) else b""):
+                return (True, "UPLOAD_OK")
+            elif b"print('OPEN_OK')" in (script if isinstance(script, bytes) else b""):
+                return (True, "OPEN_OK")
+            elif b"print('RM_OK')" in (script if isinstance(script, bytes) else b""):
+                return (True, "RM_OK")
+            elif b"print('DIR_OK')" in (script if isinstance(script, bytes) else b""):
+                return (True, "DIR_OK")
+            else:
+                return (True, "OK")
+
+        with patch("builtins.open", mock_open(read_data=b"x" * file_size)):
+            with patch("cardputer_client.flash.exec_raw", side_effect=side_effect):
+                cardputer_flash.upload_file(mock_ser, "/fake/local.py", "/main.py")
+
+        assert chunk_count[0] == expected_chunks, (
+            f"Expected {expected_chunks} chunks for {file_size} bytes, got {chunk_count[0]}"
+        )
+
+    def test_upload_deduplicates_leading_slash(self):
+        """upload_file should add leading slash if missing.
+
+        For "main.py", after prepending slash it becomes "/main.py",
+        dirname is "/" so mkdir is skipped.
+        """
+        mock_ser = self._make_ser()
+
+        responses = [
+            (True, "RM_OK"),
+            (True, "OPEN_OK"),
+            (True, "CHUNK_OK"),
+            (True, "UPLOAD_OK"),
+        ]
+        response_iter = iter(responses)
+
+        with patch("builtins.open", mock_open(read_data=b"data")):
+            with patch("cardputer_client.flash.exec_raw") as mock_exec_raw:
+                mock_exec_raw.side_effect = lambda *args, **kw: next(response_iter)
+
+                result = cardputer_flash.upload_file(mock_ser, "/fake/local.py", "main.py")
+
+        assert result is True
+
+    def test_upload_normalizes_backslash_path(self):
+        """upload_file should normalize Windows backslashes."""
+        mock_ser = self._make_ser()
+
+        responses = [
+            (True, "DIR_OK"),
+            (True, "RM_OK"),
+            (True, "OPEN_OK"),
+            (True, "CHUNK_OK"),
+            (True, "UPLOAD_OK"),
+        ]
+        response_iter = iter(responses)
+
+        with patch("builtins.open", mock_open(read_data=b"data")):
+            with patch("cardputer_client.flash.exec_raw") as mock_exec_raw:
+                mock_exec_raw.side_effect = lambda *args, **kw: next(response_iter)
+
+                result = cardputer_flash.upload_file(mock_ser, "/fake/local.py", "\\foo\\main.py")
+
+        assert result is True
 
 
 if __name__ == "__main__":

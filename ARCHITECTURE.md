@@ -118,8 +118,13 @@ LMAO_RNODE_PORT=/dev/ttyACM0 bazel run //human_client:client
 
 ### Message Flow
 
+#### Sending
+
 1. Client types message → protobuf LMAOEnvelope → LXMF → RNS → WiFi/LoRa
 2. Server receives → handler parses → sends ACK → client displays ACK
+
+#### Receiving
+
 3. Client displays incoming messages with `>>> MSG from <hex_hash>: <content>`
 
 The client does **not** send automatic ACK replies — the human operator
