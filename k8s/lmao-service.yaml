@@ -1,0 +1,43 @@
+# LMAO Server — K8s Headless Service + Endpoints
+#
+# This manifest creates a headless Service with manually managed
+# Endpoints that allow K8s pods to reach the LMAO server running
+# on a Raspberry Pi on the local network at the configured IP address.
+#
+# Usage:
+#   kubectl apply -f k8s/lmao-service.yaml
+#
+# Then pods can connect via:
+#   lmao-server.default.svc.cluster.local:50051
+#
+# Note: This is NOT an in-cluster deployment — the LMAO server runs
+# on a physical RPi with LoRa RNode hardware. The K8s Service simply
+# provides a stable DNS name for pods to discover the external gRPC endpoint.
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: lmao-server
+  namespace: default
+spec:
+  clusterIP: None
+  ports:
+    - port: 50051
+      targetPort: 50051
+      protocol: TCP
+      name: grpc
+
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: lmao-server
+  namespace: default
+subsets:
+  - addresses:
+      # Replace with your RPi's actual LAN IP address
+      - ip: 192.168.1.100
+    ports:
+      - port: 50051
+        name: grpc

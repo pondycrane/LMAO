@@ -1,5 +1,7 @@
 """Tests for server message handler (with mocked RNS/LXMF)."""
-from unittest.mock import MagicMock, patch, PropertyMock
+import asyncio
+import logging
+from unittest.mock import MagicMock, AsyncMock, patch, PropertyMock
 import builtins
 import pytest
 import sys
@@ -10,7 +12,7 @@ def _setup_common_mocks():
     """Populate sys.modules with mocks for external dependencies.
 
     Must be called before importing the server module.
-    Sets up mocked RNS, LXMF, config, and lma_core modules
+    Sets up mocked RNS, LXMF, config, lma_core, grpc, and proto modules
     with default return values suitable for most tests.
     """
     sys.modules["RNS"] = MagicMock()
@@ -19,6 +21,30 @@ def _setup_common_mocks():
     sys.modules["lma_core"] = MagicMock()
     sys.modules["lma_core"].LMAOEnvelope = MagicMock()
     sys.modules["lma_core"].TextMessage = MagicMock()
+
+    # Mock gRPC types
+    grpc_mock = MagicMock()
+    grpc_mock.StatusCode.INVALID_ARGUMENT = MagicMock()
+    grpc_mock.StatusCode.INTERNAL = MagicMock()
+    grpc_mock.StatusCode.UNIMPLEMENTED = MagicMock()
+    sys.modules["grpc"] = grpc_mock
+
+    # Mock proto module
+    proto_grpc_mock = MagicMock()
+    sys.modules["proto"] = MagicMock()
+    sys.modules["proto.lma_pb2_grpc"] = proto_grpc_mock
+
+    # Mock gRPC request/response types on lma_core
+    sys.modules["lma_core"].SendRequest = MagicMock()
+    sys.modules["lma_core"].SendResponse = MagicMock()
+    sys.modules["lma_core"].SubscribeRequest = MagicMock()
+    sys.modules["lma_core"].SubscribeResponse = MagicMock()
+    sys.modules["lma_core"].TunnelRequest = MagicMock()
+    sys.modules["lma_core"].TunnelResponse = MagicMock()
+    sys.modules["lma_core"].GetIdentityRequest = MagicMock()
+    sys.modules["lma_core"].GetIdentityResponse = MagicMock()
+    # LMAOServicer must be a real class (used as base class for LMAOGrpcService)
+    sys.modules["lma_core"].LMAOServicer = type("LMAOServicer", (), {})
 
     # Mock RNS types
     sys.modules["RNS"].RNSException = type("RNSException", (Exception,), {})
@@ -41,7 +67,8 @@ def _setup_common_mocks():
 
 def _cleanup_common_mocks():
     """Remove mocked modules from sys.modules to prevent test pollution."""
-    for mod in ["RNS", "LXMF", "config", "lma_core", "server"]:
+    for mod in ["RNS", "LXMF", "config", "lma_core", "grpc", "proto",
+                "proto.lma_pb2_grpc", "server", "lmao_server", "lmao_server.server"]:
         if mod in sys.modules:
             del sys.modules[mod]
 
@@ -66,7 +93,7 @@ def server_with_mocks():
     mock_envelope.SerializeToString.return_value = b"mock-serialized-envelope"
     sys.modules["lma_core"].LMAOEnvelope.return_value = mock_envelope
 
-    import server
+    from lmao_server import server
     server_instance = server.Server()
     server_instance.router = MagicMock()
     server_instance.server_identity = MagicMock()
@@ -91,7 +118,7 @@ def server_with_main_mocks():
     _setup_common_mocks()
 
     # Import server after mocks are set up
-    import server
+    from lmao_server import server
 
     yield server
 
@@ -381,7 +408,7 @@ class TestHandleLXMFDelivery:
         msg.content = b"protobuf-encoded-bytes"
         msg.title_as_string.return_value = "p:Envelope"
 
-        import server as server_mod
+        from lmao_server import server as server_mod
         with patch.object(server_mod.logger, 'info', wraps=server_mod.logger.info) as mock_log:
             server.handle_lxmf_delivery(msg)
 
@@ -408,7 +435,7 @@ class TestHandleLXMFDelivery:
         msg.content = b"plain text fallback"
         msg.title_as_string.return_value = "p:Envelope"
 
-        import server as server_mod
+        from lmao_server import server as server_mod
         with patch.object(server_mod.logger, 'warning', wraps=server_mod.logger.warning) as mock_warn, \
              patch.object(server_mod.logger, 'info', wraps=server_mod.logger.info) as mock_info:
             server.handle_lxmf_delivery(msg)
@@ -448,6 +475,379 @@ class TestHandleLXMFDelivery:
         reply_content = call_kwargs.get("content")
         assert reply_content is not None
         assert len(reply_content) > 0, "Reply envelope must not be empty"
+
+
+class TestSubscriberManagement:
+    """Tests for gRPC subscriber queue management."""
+
+    def test_register_subscriber(self, server_with_mocks):
+        """register_grpc_subscriber should add queue to subscriber list."""
+        server = server_with_mocks
+        q = asyncio.Queue()
+        server.register_grpc_subscriber(q)
+        assert q in server._grpc_subscribers
+
+    def test_unregister_subscriber(self, server_with_mocks):
+        """unregister_grpc_subscriber should remove queue."""
+        server = server_with_mocks
+        q = asyncio.Queue()
+        server.register_grpc_subscriber(q)
+        server.unregister_grpc_subscriber(q)
+        assert q not in server._grpc_subscribers
+
+    def test_unregister_nonexistent_no_error(self, server_with_mocks):
+        """unregister_grpc_subscriber of non-existent queue should not raise."""
+        server = server_with_mocks
+        q = asyncio.Queue()
+        server.unregister_grpc_subscriber(q)  # Should not raise
+
+    def test_fanout_removes_full_queues(self, server_with_mocks):
+        """Fan-out should drop subscribers whose queues are full."""
+        server = server_with_mocks
+        q_full = asyncio.Queue(maxsize=1)
+        q_full.put_nowait(object())  # Fill it
+        q_ok = asyncio.Queue()
+        server.register_grpc_subscriber(q_full)
+        server.register_grpc_subscriber(q_ok)
+
+        server._fanout_to_grpc_subscribers("test-message")
+
+        assert q_full not in server._grpc_subscribers
+        assert q_ok in server._grpc_subscribers
+
+    def test_fanout_logs_exceptions(self, server_with_mocks, caplog):
+        """Fan-out should log a warning when subscriber raises."""
+        server = server_with_mocks
+        q_bad = MagicMock(spec=asyncio.Queue)
+        q_bad.put_nowait.side_effect = RuntimeError("queue closed")
+        q_ok = asyncio.Queue()
+        server.register_grpc_subscriber(q_bad)
+        server.register_grpc_subscriber(q_ok)
+
+        with caplog.at_level(logging.WARNING):
+            server._fanout_to_grpc_subscribers("test-message")
+
+        warning_messages = [r.message for r in caplog.records if r.levelname == "WARNING"]
+        assert len(warning_messages) >= 1, "Should log at least one warning for bad subscriber"
+        assert q_ok in server._grpc_subscribers, "Good subscriber should survive"
+
+    def test_clear_grpc_subscribers(self, server_with_mocks):
+        """clear_grpc_subscribers should drain and clear all queues."""
+        server = server_with_mocks
+        q1 = asyncio.Queue()
+        q2 = asyncio.Queue()
+        server.register_grpc_subscriber(q1)
+        server.register_grpc_subscriber(q2)
+
+        server.clear_grpc_subscribers()
+
+        assert len(server._grpc_subscribers) == 0
+
+    def test_handle_lxmf_fanout_called(self, server_with_mocks):
+        """handle_lxmf_delivery should call _fanout_to_grpc_subscribers."""
+        server = server_with_mocks
+
+        msg = MagicMock()
+        msg.get_source.return_value = MagicMock()
+        msg.get_source.return_value.hash = b'\x0a' * 16
+        msg.content = b"fanout test message"
+        msg.title_as_string.return_value = "p:Envelope"
+
+        from lmao_server import server as server_mod
+        with patch.object(server, '_fanout_to_grpc_subscribers', wraps=server._fanout_to_grpc_subscribers) as spy:
+            server.handle_lxmf_delivery(msg)
+            spy.assert_called_once_with(msg)
+
+
+@pytest.fixture
+def grpc_service_with_mocks():
+    """Set up mocks and create an LMAOGrpcService instance for testing."""
+    if "server" in sys.modules:
+        del sys.modules["server"]
+
+    _setup_common_mocks()
+
+    from lmao_server import server
+
+    # Ensure GRPC_AVAILABLE is True
+    assert server.GRPC_AVAILABLE, "GRPC_AVAILABLE must be True for gRPC tests"
+
+    server_instance = server.Server()
+    server_instance.router = MagicMock()
+    server_instance.server_identity = MagicMock()
+    server_instance.server_identity.hash = b'\x01' * 16
+
+    grpc_svc = server.LMAOGrpcService(server_instance)
+
+    yield grpc_svc, server_instance
+
+    _cleanup_common_mocks()
+
+
+class TestLMAOGrpcService:
+    """Tests for LMAOGrpcService RPC methods."""
+
+    @pytest.mark.asyncio
+    async def test_send_rpc_valid_envelope(self, grpc_service_with_mocks):
+        """Send with valid destination should dispatch LXMF message."""
+        grpc_svc, server_inst = grpc_service_with_mocks
+
+        mock_context = AsyncMock()
+        request = MagicMock()
+        request.envelope = b"valid-envelope"
+        request.destination_hash = "a1b2c3d4"
+
+        # Mock Identity.from_hex
+        mock_dest = MagicMock()
+        sys.modules["RNS"].Identity.from_hex.return_value = mock_dest
+
+        SendResponse = sys.modules["lma_core"].SendResponse
+        SendResponse.side_effect = lambda **kw: MagicMock(**kw)
+
+        from lmao_server import server as server_mod
+        response = await grpc_svc.Send(request, mock_context)
+
+        # Verify destination was resolved
+        sys.modules["RNS"].Identity.from_hex.assert_called_once_with("a1b2c3d4")
+
+        # Verify LXMF message was constructed with correct destination
+        call_kwargs = sys.modules["LXMF"].LXMessage.call_args.kwargs
+        assert call_kwargs["destination"] == mock_dest
+        assert call_kwargs["title"] == "p:Envelope"
+
+        # Verify router was called
+        server_inst.router.handle_outbound.assert_called_once()
+
+        # context.abort should NOT have been called
+        mock_context.abort.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_send_rpc_invalid_envelope(self, grpc_service_with_mocks):
+        """Send with bad envelope should abort with INVALID_ARGUMENT."""
+        grpc_svc, server_inst = grpc_service_with_mocks
+
+        mock_context = AsyncMock()
+        request = MagicMock()
+        request.envelope = b"\xff\xff\xff"
+
+        mock_env = sys.modules["lma_core"].LMAOEnvelope.return_value
+        mock_env.ParseFromString.side_effect = Exception("invalid protobuf")
+
+        await grpc_svc.Send(request, mock_context)
+
+        mock_context.abort.assert_called_once()
+        args, _ = mock_context.abort.call_args
+        assert args[0] == sys.modules["grpc"].StatusCode.INVALID_ARGUMENT
+
+    @pytest.mark.asyncio
+    async def test_send_rpc_invalid_destination(self, grpc_service_with_mocks):
+        """Send with invalid destination hash should return error status."""
+        grpc_svc, server_inst = grpc_service_with_mocks
+
+        mock_context = AsyncMock()
+        request = MagicMock()
+        request.envelope = b"valid"
+        request.destination_hash = "bad-hash"
+
+        # from_hex raises
+        sys.modules["RNS"].Identity.from_hex.side_effect = Exception("bad hash")
+
+        SendResponse = sys.modules["lma_core"].SendResponse
+        SendResponse.side_effect = lambda **kw: MagicMock(**kw)
+
+        response = await grpc_svc.Send(request, mock_context)
+
+        assert "error" in response.status
+
+    @pytest.mark.asyncio
+    async def test_send_rpc_empty_destination(self, grpc_service_with_mocks):
+        """Send with empty destination_hash should return error."""
+        grpc_svc, server_inst = grpc_service_with_mocks
+
+        mock_context = AsyncMock()
+        request = MagicMock()
+        request.envelope = b"valid"
+        request.destination_hash = ""
+
+        SendResponse = sys.modules["lma_core"].SendResponse
+        SendResponse.side_effect = lambda **kw: MagicMock(**kw)
+
+        response = await grpc_svc.Send(request, mock_context)
+
+        assert "error" in response.status
+
+    @pytest.mark.asyncio
+    async def test_send_rpc_dispatch_error(self, grpc_service_with_mocks):
+        """Send should abort with INTERNAL when LXMF dispatch fails."""
+        grpc_svc, server_inst = grpc_service_with_mocks
+
+        mock_context = AsyncMock()
+        request = MagicMock()
+        request.envelope = b"valid"
+        request.destination_hash = "a1b2c3d4"
+
+        mock_dest = MagicMock()
+        sys.modules["RNS"].Identity.from_hex.return_value = mock_dest
+
+        # Router throws
+        RNSException = sys.modules["RNS"].RNSException
+        server_inst.router.handle_outbound.side_effect = RNSException("dispatch failed")
+
+        await grpc_svc.Send(request, mock_context)
+
+        mock_context.abort.assert_called_once()
+        args, _ = mock_context.abort.call_args
+        assert args[0] == sys.modules["grpc"].StatusCode.INTERNAL
+
+    @pytest.mark.asyncio
+    async def test_get_identity(self, grpc_service_with_mocks):
+        """GetIdentity should return identity hex and node name."""
+        grpc_svc, server_inst = grpc_service_with_mocks
+
+        mock_context = AsyncMock()
+        request = MagicMock()
+
+        GetIdentityResponse = sys.modules["lma_core"].GetIdentityResponse
+        GetIdentityResponse.side_effect = lambda **kw: MagicMock(**kw)
+
+        response = await grpc_svc.GetIdentity(request, mock_context)
+
+        assert response.identity_hex == "testhash1234"
+        assert response.node_name == "lmao-server"
+
+    @pytest.mark.asyncio
+    async def test_subscribe_receives_messages(self, grpc_service_with_mocks):
+        """Subscribe should yield events from the message queue."""
+        grpc_svc, server_inst = grpc_service_with_mocks
+
+        mock_context = AsyncMock()
+        request = MagicMock()
+        request.title_filter = ""
+
+        SubscribeResponse = sys.modules["lma_core"].SubscribeResponse
+        SubscribeResponse.side_effect = lambda **kw: MagicMock(**kw)
+
+        # Start subscribe generator and advance to first await (blocks on queue.get)
+        gen = grpc_svc.Subscribe(request, mock_context)
+        recv_task = asyncio.ensure_future(gen.asend(None))
+        # Let the generator start executing so it registers its queue
+        await asyncio.sleep(0)
+
+        # Get the queue that Subscribe registered and put a message
+        q = server_inst._grpc_subscribers[0]
+        msg = MagicMock()
+        msg.content = b"hello"
+        msg.get_source.return_value = MagicMock()
+        msg.get_source.return_value.hash = b"\x01" * 16
+        await q.put(msg)
+
+        # Get first response
+        resp = await asyncio.wait_for(recv_task, timeout=1.0)
+        assert resp.envelope == b"hello"
+        assert resp.source_hash == "testhash1234"
+
+        # Cancel the generator to clean up
+        await gen.aclose()
+
+    @pytest.mark.asyncio
+    async def test_subscribe_title_filter(self, grpc_service_with_mocks):
+        """Subscribe with title_filter should only forward matching messages."""
+        grpc_svc, server_inst = grpc_service_with_mocks
+
+        mock_context = AsyncMock()
+        request = MagicMock()
+        request.title_filter = "p:Envelope"
+
+        SubscribeResponse = sys.modules["lma_core"].SubscribeResponse
+        SubscribeResponse.side_effect = lambda **kw: MagicMock(**kw)
+
+        # Start subscribe generator and advance to first await (blocks on queue.get)
+        gen = grpc_svc.Subscribe(request, mock_context)
+        recv_task = asyncio.ensure_future(gen.asend(None))
+        # Let the generator start executing so it registers its queue
+        await asyncio.sleep(0)
+
+        # Get the queue that Subscribe registered
+        q = server_inst._grpc_subscribers[0]
+
+        # Put a non-matching message first (will be filtered)
+        msg_nomatch = MagicMock()
+        msg_nomatch.content = b"nomatch"
+        msg_nomatch.get_source.return_value = MagicMock()
+        msg_nomatch.get_source.return_value.hash = b"\x02" * 16
+        msg_nomatch.title_as_string.return_value = "other:Stuff"
+        await q.put(msg_nomatch)
+
+        # Put a matching message (will be yielded after nomatch is filtered)
+        msg_match = MagicMock()
+        msg_match.content = b"match"
+        msg_match.get_source.return_value = MagicMock()
+        msg_match.get_source.return_value.hash = b"\x01" * 16
+        msg_match.title_as_string.return_value = "p:Envelope"
+        await q.put(msg_match)
+
+        # First yielded should be the match (nomatch is filtered)
+        resp = await asyncio.wait_for(recv_task, timeout=1.0)
+        assert resp.envelope == b"match"
+
+        # Cancel the generator to clean up
+        await gen.aclose()
+
+    @pytest.mark.asyncio
+    async def test_tunnel_returns_unimplemented(self, grpc_service_with_mocks):
+        """Tunnel should abort with UNIMPLEMENTED."""
+        grpc_svc, server_inst = grpc_service_with_mocks
+
+        mock_context = AsyncMock()
+
+        async def request_iter():
+            req = MagicMock()
+            req.packet = b"test"
+            yield req
+
+        gen = grpc_svc.Tunnel(request_iter(), mock_context)
+
+        # Tunnel aborts context then falls through (no yield in first iteration)
+        await gen.asend(None)
+
+        mock_context.abort.assert_called_once()
+        args, _ = mock_context.abort.call_args
+        assert args[0] == sys.modules["grpc"].StatusCode.UNIMPLEMENTED
+
+
+class TestAsyncMain:
+    """Tests for async_main() entry point."""
+
+    @pytest.mark.asyncio
+    async def test_async_main_grpc_disabled(self, capsys, caplog):
+        """async_main should run main loop even when gRPC is not available."""
+        if "server" in sys.modules:
+            del sys.modules["server"]
+
+        _setup_common_mocks()
+
+        # Force GRPC_AVAILABLE to False
+        from lmao_server import server as server_mod
+        original_grpc = server_mod.GRPC_AVAILABLE
+        server_mod.GRPC_AVAILABLE = False
+
+        # Make RNS init work
+        mock_identity = MagicMock()
+        type(mock_identity).hash = PropertyMock(return_value=b"\x01" * 16)
+        sys.modules["RNS"].Identity.return_value = mock_identity
+
+        # Make asyncio.sleep raise KeyboardInterrupt after one iteration
+        with patch.object(server_mod.asyncio, "sleep",
+                          side_effect=[None, KeyboardInterrupt]) as mock_sleep:
+            await server_mod.async_main()
+
+        captured = capsys.readouterr()
+        assert "Running (async mode)" in captured.out
+        assert "Reticulum initialized" in captured.out
+
+        # Restore GRPC_AVAILABLE
+        server_mod.GRPC_AVAILABLE = original_grpc
+        _cleanup_common_mocks()
 
 
 if __name__ == "__main__":

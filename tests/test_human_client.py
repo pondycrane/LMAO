@@ -42,7 +42,7 @@ def _setup_common_mocks():
 
 def _cleanup_common_mocks():
     """Remove mocked modules from sys.modules to prevent test pollution."""
-    for mod in ["RNS", "LXMF", "config", "lma_core", "client"]:
+    for mod in ["RNS", "LXMF", "config", "lma_core", "client", "human_client", "human_client.client"]:
         if mod in sys.modules:
             del sys.modules[mod]
 
@@ -67,7 +67,7 @@ def client_with_mocks():
     mock_envelope.SerializeToString.return_value = b"mock-serialized-envelope"
     sys.modules["lma_core"].LMAOEnvelope.return_value = mock_envelope
 
-    import client
+    from human_client import client
     client_instance = client.Client()
     client_instance.router = MagicMock()
     client_instance.client_identity = MagicMock()
@@ -92,7 +92,7 @@ def client_with_main_mocks():
     _setup_common_mocks()
 
     # Import client after mocks are set up
-    import client
+    from human_client import client
 
     yield client
 
