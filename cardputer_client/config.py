@@ -6,6 +6,10 @@ rather than an external RNode. This config is loaded by the urns
 µReticulum port when running on MicroPython.
 
 Edit WIFI_SSID and WIFI_PASS to match your network.
+
+For other SX1262/SX1276 boards, define a new pinout preset in
+``lora_boards.py`` and reference it via the ``board`` key in the
+interface config below.
 """
 
 from lora_boards import LORA_BOARDS

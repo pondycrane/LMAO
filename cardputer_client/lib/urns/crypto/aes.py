@@ -1,5 +1,16 @@
-# µReticulum AES
-# Uses ucryptolib (hardware AES on ESP32)
+"""
+µReticulum AES — CBC-mode encryption via MicroPython's ucryptolib.
+
+Supported key sizes:
+  - AES-128-CBC (16-byte key) via ``AES_128_CBC``
+  - AES-256-CBC (32-byte key) via ``AES_256_CBC``
+
+Relies on ``ucryptolib`` (hardware-accelerated AES on ESP32).
+Only CBC mode is implemented — no GCM, CTR, or other AEAD modes.
+
+Module-level constant ``AES = "AES"`` is provided for Token.py
+compatibility (auto-detects key size to choose 128 vs 256).
+"""
 
 from ucryptolib import aes as _aes_impl
 _MODE_CBC = 2
