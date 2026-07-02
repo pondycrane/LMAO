@@ -168,8 +168,7 @@ def _connect_wifi(ssid, password, debug=0, timeout=15):
         if debug >= 1:
             print("NTP synced")
     except Exception:
-        if debug >= 1:
-            print("NTP sync failed")
+        print("NTP sync failed")
 
     return ip
 

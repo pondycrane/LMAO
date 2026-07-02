@@ -133,6 +133,32 @@ class TestCrossValidation:
         result = enc.parse_poc_message(b"\xff\xfe\xfd\xfc")
         assert result is None
 
+    def test_verbose_flag_suppresses_debug_output(self, capsys):
+        """When VERBOSE=False (default), debug prints are suppressed."""
+        orig = enc.VERBOSE
+        enc.VERBOSE = False
+        try:
+            payload = enc.make_poc_message("node", "hello")
+            result = enc.parse_poc_message(payload)
+            assert result == "hello"
+            captured = capsys.readouterr()
+            assert "DEBUG" not in captured.out
+        finally:
+            enc.VERBOSE = orig
+
+    def test_verbose_flag_enables_debug_output(self, capsys):
+        """When VERBOSE=True, debug prints appear."""
+        orig = enc.VERBOSE
+        enc.VERBOSE = True
+        try:
+            payload = enc.make_poc_message("node", "hello")
+            result = enc.parse_poc_message(payload)
+            assert result == "hello"
+            captured = capsys.readouterr()
+            assert "DEBUG" in captured.out
+        finally:
+            enc.VERBOSE = orig
+
 
 class TestEdgeCases:
     def test_decode_envelope_non_text_field(self):

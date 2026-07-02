@@ -165,7 +165,7 @@ class TestMain:
         (True, "RNode on /dev/ttyUSB0"),
         (False, "RNode not connected"),
     ])
-    def test_banner_reflects_rnode_status(self, server_with_main_mocks, rnode_exists, expected_substr, capsys):
+    def test_banner_reflects_rnode_status(self, server_with_main_mocks, rnode_exists, expected_substr, capsys, caplog):
         """Banner should show RNode status or warning based on port existence."""
         server = server_with_main_mocks
 
@@ -186,6 +186,11 @@ class TestMain:
         # When RNode is missing, warning should be printed before banner
         if not rnode_exists:
             assert "not found" in captured.out, "Should print RNode-not-found warning"
+            # Verify logger.warning was also emitted
+            assert any(
+                record.levelname == "WARNING" and "not found" in record.message
+                for record in caplog.records
+            ), "logger.warning should contain RNode port not found message"
 
     @pytest.mark.parametrize("exc_cls_name,exc_msg,expected_err", [
         ("PermissionError", "Permission denied", "FATAL"),

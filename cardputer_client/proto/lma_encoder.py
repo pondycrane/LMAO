@@ -169,7 +169,7 @@ def parse_poc_message(data):
     """Parse a POC message, returning the text content string or None."""
     try:
         result = decode_envelope(data)
-    except (ValueError, UnicodeDecodeError):
+    except Exception:
         result = None
     if result is not None:
         if VERBOSE:

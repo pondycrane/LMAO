@@ -60,7 +60,7 @@ def handle_lxmf_delivery(message):
                     "Only text messages are supported in this POC. Falling back."
                 )
         except DecodeError:
-            logger.warning("Protobuf parse failed, falling back to raw text", exc_info=True)
+            logger.warning("Protobuf parse failed, falling back to raw text")
 
         if display_text is None:
             # Fallback: treat content as raw UTF-8 text (backward compat)
