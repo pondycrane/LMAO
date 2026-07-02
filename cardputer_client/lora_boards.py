@@ -28,6 +28,5 @@ LORA_BOARDS = {
         "dio2_rf_sw": True,
         "dio3_tcxo_millivolts": 1800,
         # No battery block — the Cardputer ADV doesn't have a battery ADC.
-        # TODO: Add battery ADC configuration when supported (see lora_boards.py docstring).
     },
 }
