@@ -168,11 +168,25 @@ bazel build //proto:lma_py_proto
 Multi-language stubs (Go, Kotlin, nanopb) are planned but not yet wired — see
 the placeholder comments in `proto/BUILD`.
 
+#### Vendored urns Library
+
+The Cardputer client bundles a vendored MicroPython port of µReticulum ("urns")
+at `cardputer_client/lib/urns/`.  This is the full µReticulum stack — identity,
+packet routing, LXMF, crypto (Ed25519, X25519, AES, hashes) — ported to
+MicroPython.  Native `.mpy` modules (`lib/ed25519_fast_xtensawin.mpy`,
+`lib/bz2_fast_xtensawin.mpy`) provide hardware-accelerated crypto on the
+Xtensa (ESP32-S3) architecture.
+
+Library files are auto-discovered by the flash tool (`os.walk()`) and uploaded
+to the Cardputer under `/lib/`.  No manual list updates are needed when new
+library files are added.
+
 ### Per-platform codegen
 
 | Platform | Tool | Notes |
 |----------|------|-------|
 | **LMAO Server (Python)** | Bazel + `py_proto_library` | Full `protobuf` library, stubs generated at build time |
+| **Cardputer (urns)** | Vendored MicroPython port in `cardputer_client/lib/urns/` | µReticulum MicroPython port; uploaded to device at flash time |
 | **LMAO IoT (µReticulum)** | **nanopb** compiled as native `.mpy` | <10 KB RAM, static buffers, no malloc |
 | **LMAO IoT (alt)** | Hand-written minimal encoder in MicroPython | Only encodes SensorReport, decodes CommandRequest |
 | **Android (optional fork)** | `protoc --kotlin_out=` | If you build a custom Sideband |

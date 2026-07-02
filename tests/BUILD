@@ -60,3 +60,21 @@ py_test(
         "@lmao_pip//pytest",
     ],
 )
+
+py_test(
+    name = "test_config",
+    srcs = ["test_config.py"],
+    deps = [
+        "//lmao_server:server_lib",
+        "@lmao_pip//pytest",
+    ],
+)
+
+py_test(
+    name = "test_lma_core",
+    srcs = ["test_lma_core.py"],
+    deps = [
+        "//lma_core",
+        "@lmao_pip//pytest",
+    ],
+)

@@ -31,6 +31,77 @@ def _make_port(device, vid, description):
     return SimpleNamespace(device=device, vid=vid, description=description)
 
 
+# ── Auto-discover lib files ──────────────────────────────────────────
+
+class TestAutoDiscoverLibFiles:
+    """Tests for auto_discover_lib_files() — mocked os.walk."""
+
+    def test_discovers_py_and_mpy_files(self):
+        """Returns sorted list of .py and .mpy files relative to client_root."""
+        fake_root = "/tmp/client"
+        mock_walk = [
+            ("/tmp/client/lib", ["urns"], ["__init__.py", "README.txt"]),
+            ("/tmp/client/lib/urns", ["crypto"], ["__init__.py", "reticulum.py"]),
+            ("/tmp/client/lib/urns/crypto", [], ["ed25519.py", "aes.py", "speed_test.mpy"]),
+        ]
+        with patch("os.path.isdir", return_value=True), \
+             patch("os.walk", return_value=mock_walk):
+            result = cardputer_flash.auto_discover_lib_files(fake_root)
+
+        expected = [
+            "lib/__init__.py",
+            "lib/urns/__init__.py",
+            "lib/urns/crypto/aes.py",
+            "lib/urns/crypto/ed25519.py",
+            "lib/urns/crypto/speed_test.mpy",
+            "lib/urns/reticulum.py",
+        ]
+        assert result == expected
+
+    def test_skips_non_py_mpy_files(self):
+        """Only .py and .mpy files are included."""
+        fake_root = "/tmp/client"
+        mock_walk = [
+            ("/tmp/client/lib", [], [".DS_Store", "README.md", "config.json", "main.py"]),
+        ]
+        with patch("os.path.isdir", return_value=True), \
+             patch("os.walk", return_value=mock_walk):
+            result = cardputer_flash.auto_discover_lib_files(fake_root)
+        assert result == ["lib/main.py"]
+
+    def test_returns_empty_list_when_no_files(self):
+        """Returns empty list when lib/ directory does not contain any files."""
+        fake_root = "/tmp/client"
+        mock_walk = [
+            ("/tmp/client/lib", [], []),
+        ]
+        with patch("os.path.isdir", return_value=True), \
+             patch("os.walk", return_value=mock_walk):
+            result = cardputer_flash.auto_discover_lib_files(fake_root)
+        assert result == []
+
+    def test_returns_sorted_results(self):
+        """Results are sorted alphabetically regardless of os.walk order."""
+        fake_root = "/tmp/client"
+        mock_walk = [
+            ("/tmp/client/lib", [], ["z.py", "a.py", "m.py"]),
+        ]
+        with patch("os.path.isdir", return_value=True), \
+             patch("os.walk", return_value=mock_walk):
+            result = cardputer_flash.auto_discover_lib_files(fake_root)
+        assert result == ["lib/a.py", "lib/m.py", "lib/z.py"]
+
+    def test_returns_empty_list_when_lib_dir_missing(self, capsys):
+        """Returns empty list and prints warning when lib/ directory doesn't exist."""
+        fake_root = "/tmp/client_without_lib"
+        with patch("os.path.isdir", return_value=False):
+            result = cardputer_flash.auto_discover_lib_files(fake_root)
+        assert result == []
+        captured = capsys.readouterr()
+        assert "WARNING" in captured.out
+        assert "Library directory not found" in captured.out
+
+
 # ── Path sanitization ───────────────────────────────────────────────
 
 class TestSanitizePath:
@@ -230,6 +301,28 @@ class TestMain:
                    return_value=(True, "ESP32 / esp32 / Cardputer")), \
              patch("cardputer_client.flash.upload_file", return_value=True), \
              patch("os.path.getsize", return_value=1234):
+            cardputer_flash.main()
+
+        captured = capsys.readouterr()
+        assert "Flash complete" in captured.out
+        mock_ser.close.assert_called_once()
+
+    def test_main_proceeds_with_empty_lib_files(self, capsys):
+        """main() succeeds when auto_discover_lib_files returns empty list."""
+        port = "/dev/ttyACM0"
+        fake_root = "/tmp/fake_cardputer_client"
+        mock_ser = MagicMock()
+
+        with patch("cardputer_client.flash.find_client_root", return_value=fake_root), \
+             patch("os.path.isfile", return_value=True), \
+             patch("cardputer_client.flash.find_cardputer_port", return_value=port), \
+             patch("serial.Serial", return_value=mock_ser), \
+             patch("cardputer_client.flash.enter_raw_repl", return_value=True), \
+             patch("cardputer_client.flash.verify_device",
+                   return_value=(True, "ESP32 / esp32 / Cardputer")), \
+             patch("cardputer_client.flash.upload_file", return_value=True), \
+             patch("os.path.getsize", return_value=1234), \
+             patch("cardputer_client.flash.auto_discover_lib_files", return_value=[]):
             cardputer_flash.main()
 
         captured = capsys.readouterr()
