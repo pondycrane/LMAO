@@ -10,6 +10,13 @@ server and an M5Stack Cardputer ADV client using the
 ## Architecture
 
 ```
+                    ┌──────────────────────┐
+                    │  Laptop/Desktop       │
+                    │  Human Client (CLI)   │
+                    │  WiFi (or RNode LoRa) │
+                    └──────────┬───────────┘
+                               │ WiFi
+                               ▼
 ┌─────────────────────┐         LoRa (868/915 MHz)        ┌──────────────────────┐
 │                     │ ◄────────────────────────────────── │                      │
 │  Raspberry Pi       │                                    │  M5Stack Cardputer   │
@@ -35,6 +42,7 @@ server and an M5Stack Cardputer ADV client using the
 | Raspberry Pi | Python 3.8+, USB port |
 | ESP32 RNode | Flashed with RNode firmware |
 | Cardputer ADV | M5Stack Cardputer with LoRa antenna, MicroPython installed |
+| Laptop/Desktop | Python 3.8+, optional RNode USB for LoRa |
 | LoRa band | Matching frequency (868 MHz EU / 915 MHz US) |
 | Bazel | v7.4.1 (see `.bazelversion`) — use [bazelisk](https://github.com/bazelbuild/bazelisk) (auto-selects correct version via `.bazelversion`). Install: `npm install -g @bazel/bazelisk` ([other install methods](https://github.com/bazelbuild/bazelisk#installation)). Ensure `~/.npm-global/bin` (or your npm global bin dir) is in `PATH`. Verify with `bazel --version` (expected: `bazel 7.4.1`). |
 

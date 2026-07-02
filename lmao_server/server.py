@@ -86,7 +86,7 @@ def _init_rns_and_lxmf(rnode_port, identity_storage_path="/tmp/lmao_server_lxmf"
     # Create server identity
     try:
         identity = RNS.Identity()
-    except Exception as e:
+    except (RNS.RNSException, OSError) as e:
         logger.critical("Failed to create identity: %s", e, exc_info=True)
         print("FATAL: Failed to create server identity. See log for details.", file=sys.stderr)
         sys.exit(1)
@@ -95,7 +95,7 @@ def _init_rns_and_lxmf(rnode_port, identity_storage_path="/tmp/lmao_server_lxmf"
     print("Starting LXMF router...")
     try:
         router = LXMF.LXMRouter(identity=identity, storagepath=identity_storage_path)
-    except Exception as e:
+    except (RNS.RNSException, LXMF.LXMFException, OSError) as e:
         logger.critical("Failed to start LXMF router: %s", e, exc_info=True)
         print("FATAL: Failed to start LXMF router. See log for details.", file=sys.stderr)
         sys.exit(1)
@@ -296,14 +296,14 @@ if GRPC_AVAILABLE:
             envelope = Envelope()
             try:
                 envelope.ParseFromString(request.envelope)
-            except Exception as e:
+            except (DecodeError, ValueError) as e:
                 await context.abort(grpc.StatusCode.INVALID_ARGUMENT, f"Bad envelope: {e}")
 
             # Resolve destination identity from the request hash
             dest_hash = request.destination_hash
             try:
                 dest = RNS.Identity.from_hex(dest_hash) if dest_hash else None
-            except Exception:
+            except (ValueError, RNS.RNSException, TypeError):
                 dest = None
             if not dest:
                 return SendResponse(
@@ -325,7 +325,7 @@ if GRPC_AVAILABLE:
                     destination_hash=dest_hash,
                     status="queued",
                 )
-            except Exception as e:
+            except (RNS.RNSException, LXMF.LXMFException, OSError) as e:
                 logger.error("Send RPC failed: %s", e, exc_info=True)
                 await context.abort(grpc.StatusCode.INTERNAL, f"Send failed: {e}")
 

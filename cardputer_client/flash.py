@@ -316,8 +316,10 @@ def upload_file(ser, local_path, remote_path, chunk_size=1024):
     remote_path : str
         Destination path on the device (e.g. ``/main.py``).
     chunk_size : int
-        Raw bytes per base64 chunk (default 1024).  Each chunk generates
-        a MicroPython script well under the device's heap/compile limit.
+        Raw bytes per base64 chunk (default 1024), before base64 encoding.
+        Base64 adds ~33% overhead (1024 raw bytes → ~1366 over-the-wire
+        bytes).  Each chunk generates a MicroPython script well under
+        the device's heap/compile limit.
 
     Returns *True* on success.
     """
