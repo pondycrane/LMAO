@@ -8,9 +8,7 @@ Run with::
     bazel test //tests:test_flash --test_output=all
 """
 
-import builtins
 import sys
-import os
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 

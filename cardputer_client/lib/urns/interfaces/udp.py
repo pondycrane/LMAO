@@ -9,7 +9,7 @@
 import socket
 import time
 from . import Interface
-from ..log import log, LOG_VERBOSE, LOG_DEBUG, LOG_WARNING, LOG_ERROR, LOG_NOTICE, LOG_EXTREME
+from ..log import log, LOG_VERBOSE, LOG_DEBUG, LOG_WARNING, LOG_ERROR, LOG_NOTICE
 
 import gc
 

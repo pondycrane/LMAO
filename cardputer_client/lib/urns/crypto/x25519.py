@@ -4,7 +4,6 @@
 # Adapted for MicroPython timing
 
 import os
-import sys
 
 try:
     from micropython import native

@@ -279,7 +279,7 @@ print(_os.uname().machine)
     if not ok:
         return False, f"exec_raw failed: {out[:200]}"
 
-    lines = [l for l in out.split("\n") if l and l != "OK"]
+    lines = [line for line in out.split("\n") if line and line != "OK"]
     platform = lines[0] if lines else ""
     machine = lines[1] if len(lines) > 1 else ""
 
@@ -502,7 +502,7 @@ def main():
         exit_raw_repl(ser)
         ser.write(b"\x04")  # Ctrl+D = soft reset in friendly REPL
 
-        print(f"Done. The Cardputer will reboot and run the LMAO client automatically.")
+        print("Done. The Cardputer will reboot and run the LMAO client automatically.")
         print(f"Uploaded {len(FILES_TO_UPLOAD)} client + {len(lib_files)} library file(s).")
 
     except KeyboardInterrupt:

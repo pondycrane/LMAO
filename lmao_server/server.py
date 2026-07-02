@@ -37,10 +37,10 @@ logger = logging.getLogger(__name__)
 try:
     import grpc
     from lma_core import (
-        SendRequest, SendResponse,
-        SubscribeRequest, SubscribeResponse,
-        TunnelRequest, TunnelResponse,
-        GetIdentityRequest, GetIdentityResponse,
+        SendResponse,
+        SubscribeResponse,
+        TunnelResponse,
+        GetIdentityResponse,
         LMAOServicer,
     )
     GRPC_AVAILABLE = True
@@ -72,8 +72,8 @@ def _init_rns_and_lxmf(rnode_port, identity_storage_path="/tmp/lmao_server_lxmf"
         print(f"This is often caused by a missing or misconfigured RNode on {rnode_port}.")
         print("Check that:")
         print(f"  1. The RNode is plugged in and on the correct port ({rnode_port})")
-        print(f"  2. You have permission: sudo usermod -a -G dialout $USER")
-        print(f"  3. The RNode firmware is flashed correctly")
+        print("  2. You have permission: sudo usermod -a -G dialout $USER")
+        print("  3. The RNode firmware is flashed correctly")
         print("  See rnode_firmware/README.md and README Troubleshooting.")
         sys.exit(1)
     except Exception as e:
@@ -260,12 +260,12 @@ class Server:
         identity_hex = RNS.hexrep(self.server_identity.hash, delimit=False)
         rnode_status = f"RNode on {rnode_port}" if os.path.exists(rnode_port) else "⚠️  RNode not connected — LoRa unavailable"
         print(f"\n{'='*50}")
-        print(f"LMAO Server POC — Running")
+        print("LMAO Server POC — Running")
         print(f"Node identity: {identity_hex}")
-        print(f"Listening for LXMF messages...")
+        print("Listening for LXMF messages...")
         print(f"  LoRa: {rnode_status}")
-        print(f"  WiFi: AutoInterface enabled")
-        print(f"  Title discriminator: p:Envelope")
+        print("  WiFi: AutoInterface enabled")
+        print("  Title discriminator: p:Envelope")
         print(f"{'='*50}\n")
 
         # Main event loop
@@ -432,14 +432,14 @@ async def async_main():
     identity_hex = RNS.hexrep(server_identity.hash, delimit=False)
     rnode_status = f"RNode on {rnode_port}" if os.path.exists(rnode_port) else "⚠️  RNode not connected — LoRa unavailable"
     print(f"\n{'='*50}")
-    print(f"LMAO Server — Running (async mode)")
+    print("LMAO Server — Running (async mode)")
     print(f"Node identity: {identity_hex}")
-    print(f"Listening for LXMF messages...")
+    print("Listening for LXMF messages...")
     print(f"  LoRa: {rnode_status}")
-    print(f"  WiFi: AutoInterface enabled")
-    print(f"  Title discriminator: p:Envelope")
+    print("  WiFi: AutoInterface enabled")
+    print("  Title discriminator: p:Envelope")
     if GRPC_AVAILABLE:
-        print(f"  gRPC: 0.0.0.0:50051")
+        print("  gRPC: 0.0.0.0:50051")
     print(f"{'='*50}\n")
 
     # Start gRPC server if available
