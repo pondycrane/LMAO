@@ -43,6 +43,15 @@ py_test(
 )
 
 py_test(
+    name = "test_main",
+    srcs = ["test_main.py"],
+    deps = [
+        "//cardputer_client:main_lib",
+        "@lmao_pip//pytest",
+    ],
+)
+
+py_test(
     name = "test_flash",
     srcs = ["test_flash.py"],
     deps = [

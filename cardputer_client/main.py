@@ -32,7 +32,12 @@ try:
 except ImportError:
     HAS_DISPLAY = False
 
-from proto.lma_encoder import make_poc_message
+# Proto encoder (optional — gracefully degrades if not on device)
+try:
+    from proto.lma_encoder import make_poc_message
+    HAS_PROTO = True
+except ImportError:
+    HAS_PROTO = False
 
 
 # ---- Display helpers ----
@@ -90,12 +95,24 @@ def log(msg, tft=None, status_lines=None):
 # ---- LXMF message handler ----
 
 def handle_reply(message):
-    """Callback invoked when an LXMF reply is received."""
+    """Callback invoked when an LXMF reply is received.
+
+    NOTE: This may be invoked from a separate execution context
+    (uasyncio task, callback handler, etc.). Replies are buffered
+    in ``pending_replies`` for the main loop to drain — do NOT
+    add blocking calls or locking here.
+    """
     content = ""
     try:
         content = message.content_as_string() or ""
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"handle_reply: content extraction failed: {e}")
+        # sys.print_exception is MicroPython-only; CPython fallback via traceback
+        try:
+            sys.print_exception(e)
+        except AttributeError:
+            import traceback
+            traceback.print_exception(type(e), e, e.__traceback__)
 
     if content:
         print(f"\n>>> REPLY from server: {content}")
@@ -191,12 +208,14 @@ def main():
             consecutive_errors = 0
             seq += 1
             hello_text = f"Hello from Cardputer — seq {seq}"
-            content = make_poc_message(identity_hex, hello_text,
-                                       timestamp=int(time.time() * 1000))
 
-            if DEST_HASH is None:
+            if not HAS_PROTO:
+                log("Proto encoder not available — cannot send", tft, status_lines)
+            elif DEST_HASH is None:
                 log("No destination configured — not sending", tft, status_lines)
             else:
+                content = make_poc_message(identity_hex, hello_text,
+                                           timestamp=int(time.time() * 1000))
                 # Send via urns LXMF router
                 msg = router.send_message(
                     destination_hash=DEST_HASH,
@@ -220,7 +239,12 @@ def main():
             break
         except Exception as e:
             consecutive_errors += 1
-            sys.print_exception(e)
+            # sys.print_exception is MicroPython-only; CPython fallback
+            try:
+                sys.print_exception(e)
+            except AttributeError:
+                import traceback
+                traceback.print_exception(type(e), e, e.__traceback__)
             tft = log(f"❗ Error ({consecutive_errors}): {e}", tft, status_lines)
             if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
                 log("FATAL: Too many consecutive errors, halting.", tft, status_lines)

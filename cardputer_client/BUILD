@@ -34,6 +34,19 @@ filegroup(
     visibility = ["//visibility:public"],
 )
 
+# ── Client library (reusable by unit tests) ────────────────────────
+# Exposes ``cardputer_client.main`` for host-side unit testing of
+# pure-logic helpers (``_needs_wifi``, ``handle_reply``, ``log``).
+# MicroPython-only imports are wrapped in try/except at module level
+# so the module loads cleanly on CPython.
+
+py_library(
+    name = "main_lib",
+    srcs = ["main.py"],
+    imports = ["."],
+    visibility = ["//visibility:public"],
+)
+
 # ── Flash library (reusable by e2e tests) ──────────────────────────
 
 py_library(

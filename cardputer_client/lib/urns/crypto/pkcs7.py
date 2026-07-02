@@ -1,4 +1,11 @@
-# µReticulum PKCS7 padding
+"""
+µReticulum PKCS7 padding for AES-CBC.
+
+Blocksize defaults to 16 bytes (AES block size).
+Padding is deterministic: value = number of pad bytes (1-16).
+Unpadded data with an invalid padding value raises ``ValueError``.
+"""
+
 
 class PKCS7:
     BLOCKSIZE = 16

@@ -28,24 +28,6 @@ LORA_BOARDS = {
         "dio2_rf_sw": True,
         "dio3_tcxo_millivolts": 1800,
         # No battery block — the Cardputer ADV doesn't have a battery ADC.
+        # TODO: Add battery ADC configuration when supported (see lora_boards.py docstring).
     },
 }
-
-def battery_config(config):
-    """Battery ADC params for the active board, or None."""
-    name = config.get("board")
-    if not name:
-        for iface in config.get("interfaces", []):
-            if iface.get("board"):
-                name = iface["board"]
-                break
-    preset = config.get("lora_boards", {}).get(name, {}).get("battery") if name else None
-    inline = config.get("battery")
-    if not preset and not inline:
-        return None
-    merged = {}
-    if preset:
-        merged.update(preset)
-    if inline:
-        merged.update(inline)
-    return merged

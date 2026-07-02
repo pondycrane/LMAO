@@ -43,6 +43,10 @@ FILES_TO_UPLOAD = [
 
 # Library files to upload under /lib/ (µReticulum urns port + native modules).
 # These are the .py files from the urns package and .mpy native crypto modules.
+#
+# CAUTION: When adding new files under lib/urns/, add them to this list so
+# they are uploaded to the device.  Files not listed here will not be available
+# at runtime.  (A future improvement could use os.walk() for auto-discovery.)
 LIB_FILES_TO_UPLOAD = [
     "lib/urns/__init__.py",
     "lib/urns/bz2dec.py",
@@ -108,12 +112,15 @@ def _sanitize_path_for_script(path: str) -> str:
 
 
 def _verify_files_exist(client_root, file_list):
-    """Check that every file in *file_list* exists under *client_root*."""
+    """Check that every file in *file_list* exists under *client_root*.
+
+    Raises:
+        FileNotFoundError: If any required file is missing.
+    """
     for rel in file_list:
         full = os.path.join(client_root, rel)
         if not os.path.isfile(full):
-            print(f"ERROR: Required file not found: {full}")
-            sys.exit(1)
+            raise FileNotFoundError(f"Required file not found: {full}")
 
 
 def find_client_root():
@@ -213,7 +220,7 @@ def enter_raw_repl(ser):
             time.sleep(0.05)
 
         return False
-    except serial.SerialException as e:
+    except (serial.SerialException, OSError) as e:
         print(f"ERROR: Serial communication lost while entering raw REPL: {e}")
         return False
 
@@ -224,7 +231,7 @@ def exit_raw_repl(ser):
         ser.write(b"\r\x02")
         time.sleep(0.2)
         ser.read(ser.in_waiting)
-    except serial.SerialException:
+    except (serial.SerialException, OSError):
         pass  # device may already be gone; nothing to recover
 
 
@@ -262,7 +269,7 @@ def exec_raw(ser, code, timeout=15):
         output = data.decode("utf-8", errors="replace")
         ok = "OK" in output
         return ok, output
-    except serial.SerialException as e:
+    except (serial.SerialException, OSError) as e:
         error_msg = f"Serial communication error during exec_raw: {e}"
         print(f"  ERROR: {error_msg}")
         return False, error_msg
@@ -301,8 +308,12 @@ def upload_file(ser, local_path, remote_path, chunk_size=2048):
 
     Returns *True* on success.
     """
-    with open(local_path, "rb") as fh:
-        content = fh.read()
+    try:
+        with open(local_path, "rb") as fh:
+            content = fh.read()
+    except OSError as e:
+        print(f"  ERROR: Cannot read {local_path}: {e}")
+        return False
 
     file_size = len(content)
     remote_path = remote_path.replace("\\", "/")
@@ -325,8 +336,10 @@ for _p in _parts:
     try:
         import os as _os
         _os.mkdir(_path)
-    except:
-        pass
+    except OSError as _e:
+        if _e.args[0] != 17:  # EEXIST is benign
+            print('MKDIR_ERR:' + repr(_e))
+            raise
 """
 
     # Build script: remove old file, open new, write in chunks, close
@@ -335,8 +348,10 @@ for _p in _parts:
 try:
     import os as _os
     _os.remove('{remote_path}')
-except:
-    pass
+except OSError as _e:
+    if _e.args[0] != 2:  # ENOENT — file not found, that's OK
+        print('REMOVE_ERR:' + repr(_e))
+        raise
 _f = open('{remote_path}', 'wb')
 """
 
@@ -386,7 +401,11 @@ def main():
         sys.exit(1)
 
     # Verify all files exist before opening the serial port
-    _verify_files_exist(client_root, FILES_TO_UPLOAD + LIB_FILES_TO_UPLOAD)
+    try:
+        _verify_files_exist(client_root, FILES_TO_UPLOAD + LIB_FILES_TO_UPLOAD)
+    except FileNotFoundError as e:
+        print(f"ERROR: {e}")
+        sys.exit(1)
 
     # Find the Cardputer serial port
     port = find_cardputer_port(args.port)
