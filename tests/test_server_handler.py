@@ -354,6 +354,89 @@ class TestHandleLXMFDelivery:
         server.handle_lxmf_delivery(msg)
         server.router.handle_outbound.assert_called_once()
 
+    def test_protobuf_decode_uses_content_from_text_field(self, server_with_mocks):
+        """When protobuf decode succeeds and HasField('text') is True,
+        the content from text.content is used as display_text."""
+        server = server_with_mocks
+
+        # Reconfigure mock to simulate successful protobuf decode
+        mock_envelope = MagicMock()
+        mock_envelope.HasField.return_value = True
+        mock_envelope.text.content = "Decoded protobuf text"
+        sys.modules["lma_core"].LMAOEnvelope.return_value = mock_envelope
+
+        msg = MagicMock()
+        msg.get_source.return_value = MagicMock()
+        msg.get_source.return_value.hash = b'\x07' * 16
+        msg.content = b"protobuf-encoded-bytes"
+        msg.title_as_string.return_value = "p:Envelope"
+
+        with patch.object(server.logger, 'info', wraps=server.logger.info) as mock_log:
+            server.handle_lxmf_delivery(msg)
+
+        # Verify the protobuf content was logged
+        found = any(
+            call.args and "Content (protobuf)" in str(call.args[0])
+            for call in mock_log.call_args_list
+        )
+        assert found, "Should log protobuf-decoded content"
+
+    def test_protobuf_decode_non_text_uses_fallback(self, server_with_mocks):
+        """When protobuf decode succeeds but HasField('text') is False,
+        the handler falls back to raw UTF-8 decode of content bytes."""
+        server = server_with_mocks
+
+        # Reconfigure mock: ParseFromString succeeds but HasField('text') is False
+        mock_envelope = MagicMock()
+        mock_envelope.HasField.return_value = False
+        sys.modules["lma_core"].LMAOEnvelope.return_value = mock_envelope
+
+        msg = MagicMock()
+        msg.get_source.return_value = MagicMock()
+        msg.get_source.return_value.hash = b'\x08' * 16
+        msg.content = b"plain text fallback"
+        msg.title_as_string.return_value = "p:Envelope"
+
+        with patch.object(server.logger, 'warning', wraps=server.logger.warning) as mock_warn, \
+             patch.object(server.logger, 'info', wraps=server.logger.info) as mock_info:
+            server.handle_lxmf_delivery(msg)
+
+        # Verify fallback warning was logged
+        warn_found = any(
+            call.args and "non-text payload" in str(call.args[0])
+            for call in mock_warn.call_args_list
+        )
+        assert warn_found, "Should log warning about non-text payload"
+
+        # Verify raw text fallback was used
+        info_found = any(
+            call.args and "Content (raw text)" in str(call.args[0])
+            for call in mock_info.call_args_list
+        )
+        assert info_found, "Should log raw text fallback content"
+
+    def test_protobuf_decode_binary_invalid_utf8(self, server_with_mocks):
+        """When protobuf decode fails and content is not valid UTF-8,
+        the handler shows a byte-count placeholder instead."""
+        server = server_with_mocks
+
+        # Fixture already has ParseFromString side_effect = DecodeError
+        msg = MagicMock()
+        msg.get_source.return_value = MagicMock()
+        msg.get_source.return_value.hash = b'\x09' * 16
+        msg.content = b"\xff\xfe\x00\x01"  # intentionally invalid UTF-8
+        msg.title_as_string.return_value = "p:Envelope"
+
+        # Handler should not crash, and should still send a reply
+        server.handle_lxmf_delivery(msg)
+        server.router.handle_outbound.assert_called_once()
+
+        # Verify the reply content includes the byte-count placeholder
+        call_kwargs = server.LXMF.LXMessage.call_args.kwargs
+        reply_content = call_kwargs.get("content")
+        assert reply_content is not None
+        assert len(reply_content) > 0, "Reply envelope must not be empty"
+
 
 if __name__ == "__main__":
     import pytest

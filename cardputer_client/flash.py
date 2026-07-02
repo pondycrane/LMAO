@@ -44,47 +44,25 @@ FILES_TO_UPLOAD = [
 # Library files to upload under /lib/ (µReticulum urns port + native modules).
 # These are the .py files from the urns package and .mpy native crypto modules.
 #
-# CAUTION: When adding new files under lib/urns/, add them to this list so
-# they are uploaded to the device.  Files not listed here will not be available
-# at runtime.  (A future improvement could use os.walk() for auto-discovery.)
-LIB_FILES_TO_UPLOAD = [
-    "lib/urns/__init__.py",
-    "lib/urns/bz2dec.py",
-    "lib/urns/const.py",
-    "lib/urns/destination.py",
-    "lib/urns/identity.py",
-    "lib/urns/link.py",
-    "lib/urns/log.py",
-    "lib/urns/lxmf.py",
-    "lib/urns/packet.py",
-    "lib/urns/resource.py",
-    "lib/urns/reticulum.py",
-    "lib/urns/transport.py",
-    "lib/urns/umsgpack.py",
-    "lib/urns/crypto/__init__.py",
-    "lib/urns/crypto/aes.py",
-    "lib/urns/crypto/ed25519.py",
-    "lib/urns/crypto/hashes.py",
-    "lib/urns/crypto/hkdf.py",
-    "lib/urns/crypto/hmac.py",
-    "lib/urns/crypto/pkcs7.py",
-    "lib/urns/crypto/sha512.py",
-    "lib/urns/crypto/token.py",
-    "lib/urns/crypto/x25519.py",
-    "lib/urns/crypto/pure25519/__init__.py",
-    "lib/urns/crypto/pure25519/_ed25519.py",
-    "lib/urns/crypto/pure25519/basic.py",
-    "lib/urns/crypto/pure25519/ed25519_oop.py",
-    "lib/urns/crypto/pure25519/eddsa.py",
-    "lib/urns/interfaces/__init__.py",
-    "lib/urns/interfaces/e32.py",
-    "lib/urns/interfaces/lora.py",
-    "lib/urns/interfaces/serial.py",
-    "lib/urns/interfaces/tcp.py",
-    "lib/urns/interfaces/udp.py",
-    "lib/ed25519_fast_xtensawin.mpy",
-    "lib/bz2_fast_xtensawin.mpy",
-]
+# Auto-discovered via os.walk() — any new .py or .mpy file added to lib/
+# will be automatically included at the next flash.  No manual list updates
+# are needed.
+def auto_discover_lib_files(client_root):
+    """Walk the lib/ directory and return relative paths to all .py and .mpy files.
+
+    Returns a sorted list of paths relative to *client_root* (e.g.,
+    ``lib/urns/__init__.py``) so that upload order is deterministic.
+    """
+    lib_dir = os.path.join(client_root, "lib")
+    files = []
+    for dirpath, _dirnames, filenames in os.walk(lib_dir):
+        for f in filenames:
+            if f.endswith((".py", ".mpy")):
+                full = os.path.join(dirpath, f)
+                rel = os.path.relpath(full, client_root)
+                files.append(rel)
+    files.sort()
+    return files
 
 # ---- Path helpers ----
 
@@ -302,6 +280,7 @@ def upload_file(ser, local_path, remote_path, chunk_size=2048):
     """Upload a single file to the MicroPython device using raw REPL.
 
     The file content is base64-encoded and sent in *chunk_size* byte pieces
+    (measured as raw bytes of the source file, not base64-encoded size)
     to avoid hitting MicroPython parser limits.  The remote file is always
     written to ``/`` (device flash root), with any missing sub-directories
     created automatically.
@@ -400,9 +379,12 @@ def main():
         print("Specify with: --client-root /path/to/cardputer_client")
         sys.exit(1)
 
+    # Auto-discover library files to upload (walks lib/ directory)
+    lib_files = auto_discover_lib_files(client_root)
+
     # Verify all files exist before opening the serial port
     try:
-        _verify_files_exist(client_root, FILES_TO_UPLOAD + LIB_FILES_TO_UPLOAD)
+        _verify_files_exist(client_root, FILES_TO_UPLOAD + lib_files)
     except FileNotFoundError as e:
         print(f"ERROR: {e}")
         sys.exit(1)
@@ -450,7 +432,8 @@ def main():
             return
 
         # — Upload client files —
-        print(f"Uploading {len(FILES_TO_UPLOAD) + len(LIB_FILES_TO_UPLOAD)} file(s) …")
+        total_files = len(FILES_TO_UPLOAD) + len(lib_files)
+        print(f"Uploading {total_files} file(s) …")
         for rel in FILES_TO_UPLOAD:
             local_path = os.path.join(client_root, rel)
             remote_path = rel
@@ -463,7 +446,7 @@ def main():
                 sys.exit(1)
 
         # — Upload library files (under /lib/) —
-        for rel in LIB_FILES_TO_UPLOAD:
+        for rel in lib_files:
             local_path = os.path.join(client_root, rel)
             remote_path = rel  # preserves lib/ prefix → /lib/ on device
             print(f"  {rel:30s} … ", end="", flush=True)
@@ -480,7 +463,7 @@ def main():
         ser.write(b"\x04")  # Ctrl+D = soft reset in friendly REPL
 
         print(f"Done. The Cardputer will reboot and run the LMAO client automatically.")
-        print(f"Uploaded {len(FILES_TO_UPLOAD)} client + {len(LIB_FILES_TO_UPLOAD)} library file(s).")
+        print(f"Uploaded {len(FILES_TO_UPLOAD)} client + {len(lib_files)} library file(s).")
 
     except KeyboardInterrupt:
         print("\nAborted by user.")

@@ -122,6 +122,58 @@ def handle_reply(message):
 pending_replies = []
 
 
+# ---- Helpers ----
+
+def _needs_wifi(config):
+    """Check if any UDP or TCP interface is enabled in config."""
+    for iface in config.get("interfaces", []):
+        if iface.get("enabled", False) and iface.get("type", "") in (
+            "UDPInterface", "TCPClientInterface",
+        ):
+            return True
+    return False
+
+
+def _connect_wifi(ssid, password, debug=0, timeout=15):
+    """Connect to WiFi and return the assigned IP."""
+    import network
+
+    # Deactivate AP interface
+    ap = network.WLAN(network.AP_IF)
+    if ap.active():
+        ap.active(False)
+
+    wlan = network.WLAN(network.STA_IF)
+    wlan.active(True)
+    if not wlan.isconnected():
+        if debug >= 1:
+            print("Connecting to WiFi:", ssid)
+        wlan.connect(ssid, password)
+        start = time.time()
+        while not wlan.isconnected():
+            if time.time() - start > timeout:
+                raise RuntimeError("WiFi connection timed out")
+            time.sleep(0.5)
+
+    # Disable WiFi power management for reliable UDP broadcast
+    wlan.config(pm=0)
+
+    ip = wlan.ifconfig()[0]
+    if debug >= 1:
+        print("Connected! IP:", ip)
+
+    try:
+        import ntptime
+        ntptime.settime()
+        if debug >= 1:
+            print("NTP synced")
+    except Exception:
+        if debug >= 1:
+            print("NTP sync failed")
+
+    return ip
+
+
 # ---- Main ----
 
 def main():
@@ -250,56 +302,6 @@ def main():
                 log("FATAL: Too many consecutive errors, halting.", tft, status_lines)
                 break
             time.sleep(5)
-
-
-def _needs_wifi(config):
-    """Check if any UDP or TCP interface is enabled in config."""
-    for iface in config.get("interfaces", []):
-        if iface.get("enabled", False) and iface.get("type", "") in (
-            "UDPInterface", "TCPClientInterface",
-        ):
-            return True
-    return False
-
-
-def _connect_wifi(ssid, password, debug=0, timeout=15):
-    """Connect to WiFi and return the assigned IP."""
-    import network
-
-    # Deactivate AP interface
-    ap = network.WLAN(network.AP_IF)
-    if ap.active():
-        ap.active(False)
-
-    wlan = network.WLAN(network.STA_IF)
-    wlan.active(True)
-    if not wlan.isconnected():
-        if debug >= 1:
-            print("Connecting to WiFi:", ssid)
-        wlan.connect(ssid, password)
-        start = time.time()
-        while not wlan.isconnected():
-            if time.time() - start > timeout:
-                raise RuntimeError("WiFi connection timed out")
-            time.sleep(0.5)
-
-    # Disable WiFi power management for reliable UDP broadcast
-    wlan.config(pm=0)
-
-    ip = wlan.ifconfig()[0]
-    if debug >= 1:
-        print("Connected! IP:", ip)
-
-    try:
-        import ntptime
-        ntptime.settime()
-        if debug >= 1:
-            print("NTP synced")
-    except Exception:
-        if debug >= 1:
-            print("NTP sync failed")
-
-    return ip
 
 
 # Auto-run when flashed to Cardputer
