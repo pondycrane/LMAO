@@ -90,3 +90,77 @@ message CallSignal {
   string sdp_or_ice    = 2;
   string media_type    = 3;
 }
+
+// ============================================================
+// gRPC API — K8s Integration
+// ============================================================
+
+// --- Request / Response Messages ---
+
+message SendRequest {
+  // Serialized LMAOEnvelope to dispatch into the LXMF mesh.
+  bytes envelope = 1;
+}
+
+message SendResponse {
+  // Hex-encoded destination identity hash, if resolved.
+  string destination_hash = 1;
+  // Human-readable status message.
+  string status = 2;
+}
+
+message SubscribeRequest {
+  // Optional filter — only forward messages matching this LXMF title prefix.
+  // Empty string means forward everything.
+  string title_filter = 1;
+}
+
+message SubscribeResponse {
+  // Serialized LMAOEnvelope received from the LXMF mesh.
+  bytes envelope = 1;
+  // Hex-encoded source identity hash.
+  string source_hash = 2;
+}
+
+message TunnelRequest {
+  // Raw LXMF packet bytes to send as-is.
+  bytes packet = 1;
+  // Hex-encoded destination identity hash.
+  string destination_hash = 2;
+}
+
+message TunnelResponse {
+  // Raw LXMF packet bytes received as-is.
+  bytes packet = 1;
+  // Hex-encoded source identity hash.
+  string source_hash = 2;
+  // Human-readable status message.
+  string status = 3;
+}
+
+message GetIdentityRequest {
+  // Empty — the server returns its own identity.
+}
+
+message GetIdentityResponse {
+  // Hex-encoded Reticulum identity hash.
+  string identity_hex = 1;
+  // Human-readable node name, if configured.
+  string node_name = 2;
+}
+
+// --- Service Definition ---
+
+service LMAO {
+  // Send an envelope into the LXMF mesh.
+  rpc Send(SendRequest) returns (SendResponse);
+
+  // Subscribe to incoming LXMF messages as a server-stream.
+  rpc Subscribe(SubscribeRequest) returns (stream SubscribeResponse);
+
+  // Bidirectional tunnel for raw LXMF packets.
+  rpc Tunnel(stream TunnelRequest) returns (stream TunnelResponse);
+
+  // Get the server's Reticulum identity hash.
+  rpc GetIdentity(GetIdentityRequest) returns (GetIdentityResponse);
+}
