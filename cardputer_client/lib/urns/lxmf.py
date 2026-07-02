@@ -176,8 +176,8 @@ class LXMessage:
         self.signature = self._source.sign(signed_part)
         try:
             import gc; gc.collect()
-        except:
-            pass
+        except Exception as e:
+            log("gc.collect failed: " + str(e), LOG_DEBUG)
         self.signature_validated = True
 
         # Assemble packed message
@@ -709,8 +709,8 @@ class LXMRouter:
             # Send delivery proof (so sender knows we received it)
             try:
                 import gc; gc.collect()
-            except:
-                pass
+            except Exception as e:
+                log("gc.collect failed: " + str(e), LOG_DEBUG)
             packet.prove()
 
             # Deliver to application

@@ -181,8 +181,8 @@ class Identity:
             sig_valid = announced_identity.validate(signature, signed_data)
             try:
                 import gc; gc.collect()
-            except:
-                pass
+            except Exception as e:
+                log("Announce sig validation error: " + str(e), LOG_DEBUG)
             log("Announce sig_valid=" + str(sig_valid), LOG_DEBUG)
 
             # Fallback: if verification failed, try opposite ratchet assumption.
@@ -211,8 +211,8 @@ class Identity:
                     sig_valid = announced_identity.validate(signature, signed_data)
                     try:
                         import gc; gc.collect()
-                    except:
-                        pass
+                    except Exception as e:
+                        log("Signature validation error: " + str(e), LOG_DEBUG)
                     if sig_valid:
                         log("Announce verified with alternate layout", LOG_DEBUG)
                 if not len(packet.data) > keysize + name_hash_len + 10 + sig_len:
@@ -405,8 +405,8 @@ class Identity:
             ephemeral_pub_bytes = ephemeral_key.public_key().public_bytes()
             try:
                 import gc; gc.collect()
-            except:
-                pass
+            except Exception as e:
+                log("Identity encrypt error: " + str(e), LOG_DEBUG)
 
             if ratchet is not None:
                 target_public_key = X25519PublicKey.from_public_bytes(ratchet)
@@ -416,8 +416,8 @@ class Identity:
             shared_key = ephemeral_key.exchange(target_public_key)
             try:
                 import gc; gc.collect()
-            except:
-                pass
+            except Exception as e:
+                log("Identity encrypt error: " + str(e), LOG_DEBUG)
             derived_key = hkdf(
                 length=Identity.DERIVED_KEY_LENGTH,
                 derive_from=shared_key,
@@ -427,8 +427,8 @@ class Identity:
             token = Token(derived_key)
             try:
                 import gc; gc.collect()
-            except:
-                pass
+            except Exception as e:
+                log("Identity encrypt error: " + str(e), LOG_DEBUG)
             ciphertext = token.encrypt(plaintext)
             return ephemeral_pub_bytes + ciphertext
         else:
@@ -464,8 +464,8 @@ class Identity:
                                 if ratchet_id_receiver:
                                     ratchet_id_receiver.latest_ratchet_id = ratchet_id
                                 break
-                            except:
-                                pass
+                            except Exception as e:
+                                log("Identity ratchet error: " + str(e), LOG_DEBUG)
 
                     if enforce_ratchets and plaintext is None:
                         if ratchet_id_receiver:

@@ -724,8 +724,8 @@ class OutgoingLink:
         if self.status == OutgoingLink.ACTIVE:
             try:
                 self.send(self.link_id, const.CTX_LINKCLOSE)
-            except:
-                pass
+            except Exception as e:
+                log("Link close error: " + str(e), LOG_DEBUG)
         self._close()
 
     def _close(self):
@@ -735,8 +735,8 @@ class OutgoingLink:
             if self.closed_callback:
                 try:
                     self.closed_callback(self)
-                except:
-                    pass
+                except Exception as e:
+                    log("Link delete error: " + str(e), LOG_DEBUG)
 
     def __repr__(self):
         states = {0: "PENDING", 1: "ACTIVE", 2: "CLOSED"}

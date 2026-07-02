@@ -258,8 +258,8 @@ class Packet:
             signature = self.destination.identity.sign(self.packet_hash)
             try:
                 import gc; gc.collect()
-            except:
-                pass
+            except Exception as e:
+                log("Packet prove error: " + str(e), LOG_DEBUG)
             # Implicit proof: just the signature
             proof_data = signature
 
@@ -270,8 +270,8 @@ class Packet:
                            attached_interface=self.receiving_interface)
             try:
                 import gc; gc.collect()
-            except:
-                pass
+            except Exception as e:
+                log("Proof send error: " + str(e), LOG_DEBUG)
             proof.send()
             log("Proof sent for " + self.packet_hash.hex()[:8], LOG_DEBUG)
         else:
@@ -384,8 +384,8 @@ class PacketReceipt:
             if self.timeout_callback:
                 try:
                     self.timeout_callback(self)
-                except:
-                    pass
+                except Exception as e:
+                    log("Packet unpack error: " + str(e), LOG_DEBUG)
 
     def set_timeout(self, timeout):
         self.timeout = float(timeout)
