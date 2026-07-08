@@ -14,9 +14,12 @@ from unittest.mock import patch
 
 import pytest
 
+# Import shared config utilities directly (replacing the old _-prefixed aliases)
+from lma_core.config_utils import dict_to_ini, resolve_rnode_port
+
 
 class TestDictToINI:
-    """Tests for _dict_to_ini() — converts Python dicts to INI format."""
+    """Tests for dict_to_ini() — converts Python dicts to INI format."""
 
     @pytest.fixture
     def config_module(self):
@@ -27,7 +30,7 @@ class TestDictToINI:
     def test_simple_section(self, config_module):
         """Single section with one key-value pair."""
         sections = {"logging": {"loglevel": 4}}
-        result = config_module._dict_to_ini(sections, {})
+        result = dict_to_ini(sections, {})
         assert result == "[logging]\nloglevel = 4\n"
 
     def test_multiple_sections(self, config_module):
@@ -36,13 +39,13 @@ class TestDictToINI:
             "logging": {"loglevel": 4},
             "transport": {"path": "/tmp/rns"},
         }
-        result = config_module._dict_to_ini(sections, {})
+        result = dict_to_ini(sections, {})
         assert "[logging]\nloglevel = 4\n" in result
         assert "[transport]\npath = /tmp/rns\n" in result
 
     def test_simple_interface(self, config_module):
         """Single interface with one setting."""
-        result = config_module._dict_to_ini({}, {"RNode LoRa": {"type": "RNodeInterface"}})
+        result = dict_to_ini({}, {"RNode LoRa": {"type": "RNodeInterface"}})
         assert result == "[[RNode LoRa]]\ntype = RNodeInterface\n"
 
     def test_multiple_interfaces(self, config_module):
@@ -51,7 +54,7 @@ class TestDictToINI:
             "RNode LoRa": {"type": "RNodeInterface", "port": "/dev/ttyUSB0"},
             "WiFi": {"type": "AutoInterface", "enabled": True},
         }
-        result = config_module._dict_to_ini({}, interfaces)
+        result = dict_to_ini({}, interfaces)
         assert "[[RNode LoRa]]\n" in result
         assert "type = RNodeInterface\n" in result
         assert "port = /dev/ttyUSB0\n" in result
@@ -62,32 +65,32 @@ class TestDictToINI:
     def test_boolean_true(self, config_module):
         """Boolean True becomes 'yes'."""
         sections = {"logging": {"debug": True}}
-        result = config_module._dict_to_ini(sections, {})
+        result = dict_to_ini(sections, {})
         assert "debug = yes\n" in result
 
     def test_boolean_false(self, config_module):
         """Boolean False becomes 'no'."""
         sections = {"logging": {"debug": False}}
-        result = config_module._dict_to_ini(sections, {})
+        result = dict_to_ini(sections, {})
         assert "debug = no\n" in result
 
     def test_empty_sections_and_interfaces(self, config_module):
         """Empty dicts produce a single trailing newline."""
-        result = config_module._dict_to_ini({}, {})
+        result = dict_to_ini({}, {})
         assert result == "\n"
 
     def test_mixed_sections_and_interfaces(self, config_module):
         """Sections appear before interfaces."""
         sections = {"logging": {"loglevel": 4}}
         interfaces = {"WiFi": {"type": "AutoInterface"}}
-        result = config_module._dict_to_ini(sections, interfaces)
+        result = dict_to_ini(sections, interfaces)
         # Sections must appear before interfaces
         assert result.index("[logging]") < result.index("[[WiFi]]")
 
     def test_trailing_newline(self, config_module):
         """Output always ends with a newline."""
         sections = {"logging": {"loglevel": 4}}
-        result = config_module._dict_to_ini(sections, {})
+        result = dict_to_ini(sections, {})
         assert result.endswith("\n")
 
 
@@ -205,7 +208,7 @@ class TestGetConfigDict:
 
 
 class TestResolveRNodePort:
-    """Tests for _resolve_rnode_port() — port detection logic."""
+    """Tests for resolve_rnode_port() — port detection logic."""
 
     @pytest.fixture
     def config_module(self):
@@ -216,14 +219,14 @@ class TestResolveRNodePort:
     def test_env_var_overrides(self, config_module):
         """LMAO_RNODE_PORT env var takes priority."""
         with patch.dict(os.environ, {"LMAO_RNODE_PORT": "/dev/ttySpecial"}, clear=False):
-            result = config_module._resolve_rnode_port()
+            result = resolve_rnode_port()
         assert result == "/dev/ttySpecial"
 
     def test_auto_detect_first_match(self, config_module):
         """First existing port in common_ports list is returned."""
         with patch.dict(os.environ, {}, clear=True), \
              patch("os.path.exists", side_effect=lambda p: p == "/dev/ttyUSB0"):
-            result = config_module._resolve_rnode_port()
+            result = resolve_rnode_port()
         assert result == "/dev/ttyUSB0"
 
     def test_auto_detect_second_match(self, config_module):
@@ -232,7 +235,7 @@ class TestResolveRNodePort:
             return p == "/dev/ttyACM0"
         with patch.dict(os.environ, {}, clear=True), \
              patch("os.path.exists", side_effect=fake_exists):
-            result = config_module._resolve_rnode_port()
+            result = resolve_rnode_port()
         assert result == "/dev/ttyACM0"
 
     def test_auto_detect_multiple_ports(self, config_module):
@@ -241,14 +244,14 @@ class TestResolveRNodePort:
             return p in ("/dev/ttyUSB0", "/dev/ttyACM0", "/dev/ttyACM1")
         with patch.dict(os.environ, {}, clear=True), \
              patch("os.path.exists", side_effect=fake_exists):
-            result = config_module._resolve_rnode_port()
+            result = resolve_rnode_port()
         assert result == "/dev/ttyUSB0"
 
     def test_fallback_to_default(self, config_module):
         """When no port exists, fall back to /dev/ttyUSB0."""
         with patch.dict(os.environ, {}, clear=True), \
              patch("os.path.exists", return_value=False):
-            result = config_module._resolve_rnode_port()
+            result = resolve_rnode_port()
         assert result == "/dev/ttyUSB0"
 
     def test_env_var_empty_string(self, config_module):
@@ -256,7 +259,7 @@ class TestResolveRNodePort:
         with patch.dict(os.environ, {"LMAO_RNODE_PORT": ""}, clear=False):
             # Empty string is falsy, so should fall through to auto-detect
             with patch("os.path.exists", return_value=False):
-                result = config_module._resolve_rnode_port()
+                result = resolve_rnode_port()
             assert result == "/dev/ttyUSB0"
 
 
