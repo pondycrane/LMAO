@@ -45,40 +45,6 @@ def _find_port():
     return cardputer_flash.find_cardputer_port()
 
 
-# Import shared RNode port finder from e2e_helpers if available.
-# Falls back to inline logic when the helper module is missing (e.g. running
-# the script directly without Bazel).
-try:
-    from e2e_helpers import find_rnode_port
-except ImportError:
-    # Inline fallback — mirrors e2e_helpers.find_rnode_port() exactly.
-    _RNODE_VIDS = {0x303A, 0x10C4, 0x1A86}
-
-    def find_rnode_port():
-        """Return the device path of a connected Heltec/ESP32 RNode, or *None*."""
-        if not HAS_PYSERIAL:
-            return None
-        try:
-            ports = serial.tools.list_ports.comports()
-        except Exception as exc:
-            print(f"WARNING: Could not enumerate serial ports: {exc}",
-                  file=sys.stderr)
-            return None
-        for p in ports:
-            try:
-                if p.vid in _RNODE_VIDS:
-                    return p.device
-            except (TypeError, AttributeError):
-                pass
-            try:
-                desc = (p.description or "").lower()
-            except (TypeError, AttributeError):
-                desc = ""
-            if "rnode" in desc:
-                return p.device
-        return None
-
-
 # Resolve hardware presence once at collection time so skips are fast.
 _CARDCOMPUTER_PORT = _find_port() if HAS_FLASH_LIB and HAS_PYSERIAL else None
 _HARDWARE_CHECKED = False

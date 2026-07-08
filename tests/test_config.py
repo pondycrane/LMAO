@@ -241,7 +241,7 @@ class TestCardputerConfigStructure:
         config_path = os.path.join(
             os.path.dirname(__file__), "..", "cardputer_client", "config.py"
         )
-        with open(config_path) as f:
+        with open(config_path, encoding="utf-8") as f:
             code = f.read()
         # Must compile cleanly
         compile(code, config_path, "exec")
@@ -251,7 +251,7 @@ class TestCardputerConfigStructure:
         config_path = os.path.join(
             os.path.dirname(__file__), "..", "cardputer_client", "config.py"
         )
-        with open(config_path) as f:
+        with open(config_path, encoding="utf-8") as f:
             code = f.read()
         tree = ast.parse(code)
         top_level_names = set()
@@ -275,7 +275,7 @@ class TestCardputerConfigStructure:
         config_path = os.path.join(
             os.path.dirname(__file__), "..", "cardputer_client", "config.py"
         )
-        with open(config_path) as f:
+        with open(config_path, encoding="utf-8") as f:
             code = f.read()
         tree = ast.parse(code)
         top_level_names = set()
@@ -302,7 +302,7 @@ class TestCardputerConfigStructure:
         config_path = os.path.join(
             os.path.dirname(__file__), "..", "cardputer_client", "config.py"
         )
-        with open(config_path) as f:
+        with open(config_path, encoding="utf-8") as f:
             code = f.read()
         tree = ast.parse(code)
         for node in ast.walk(tree):
