@@ -45,44 +45,38 @@ def _find_port():
     return cardputer_flash.find_cardputer_port()
 
 
-def _find_rnode_port():
-    """Return the device path of a connected Heltec/ESP32 RNode, or *None*.
+# Import shared RNode port finder from e2e_helpers if available.
+# Falls back to inline logic when the helper module is missing (e.g. running
+# the script directly without Bazel).
+try:
+    from e2e_helpers import find_rnode_port
+except ImportError:
+    # Inline fallback — mirrors e2e_helpers.find_rnode_port() exactly.
+    _RNODE_VIDS = {0x303A, 0x10C4, 0x1A86}
 
-    RNode devices appear as USB serial (CP210x, CH340, or Espressif USB).
-    This helper can be shared with the LoRa E2E test.
-    """
-    if not HAS_PYSERIAL:
+    def find_rnode_port():
+        """Return the device path of a connected Heltec/ESP32 RNode, or *None*."""
+        if not HAS_PYSERIAL:
+            return None
+        try:
+            ports = serial.tools.list_ports.comports()
+        except Exception as exc:
+            print(f"WARNING: Could not enumerate serial ports: {exc}",
+                  file=sys.stderr)
+            return None
+        for p in ports:
+            try:
+                if p.vid in _RNODE_VIDS:
+                    return p.device
+            except (TypeError, AttributeError):
+                pass
+            try:
+                desc = (p.description or "").lower()
+            except (TypeError, AttributeError):
+                desc = ""
+            if "rnode" in desc:
+                return p.device
         return None
-
-    try:
-        ports = serial.tools.list_ports.comports()
-    except Exception:
-        return None
-
-    for p in ports:
-        try:
-            if p.vid in (0x303A,):  # Espressif
-                return p.device
-        except (TypeError, AttributeError):
-            pass
-        try:
-            if p.vid in (0x10C4,):  # CP210x (Silicon Labs)
-                return p.device
-        except (TypeError, AttributeError):
-            pass
-        try:
-            if p.vid in (0x1A86,):  # CH340
-                return p.device
-        except (TypeError, AttributeError):
-            pass
-        try:
-            desc = (p.description or "").lower()
-        except (TypeError, AttributeError):
-            desc = ""
-        if "rnode" in desc:
-            return p.device
-
-    return None
 
 
 # Resolve hardware presence once at collection time so skips are fast.
