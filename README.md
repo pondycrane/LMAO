@@ -146,6 +146,11 @@ Listening for LXMF messages...
 
 **Before flashing**, edit `cardputer_client/config.py`:
 - Set `WIFI_SSID` and `WIFI_PASS` to match your local network (required for UDP interface)
+- Optionally set `DEST_HASH` to the server's Reticulum identity hex (32 hex chars).
+  Leave as `None` (default) to skip sending. The E2E test injects this
+  automatically — you only need to set it for manual testing without the
+  automated flash+test workflow. Obtain the server identity from its startup
+  log (`Node identity: ...`).
 - Optionally adjust `NODE_NAME` and `DEBUG` level
 
 **Option A — MicroPython + cardputer_client** (lighter weight, requires setup):
@@ -303,9 +308,12 @@ bazel test //tests:test_lma_encoder --test_output=all
 
 # Run the E2E flash test (requires physical Cardputer hardware)
 bazel test //tests:test_cardputer_e2e --test_output=all
+
+# Run the LoRa E2E test (requires Cardputer + Heltec RNode)
+bazel test //tests:test_cardputer_lora_e2e --test_output=all
 ```
 
-The E2E test auto-skips when no Cardputer hardware is detected.
+The E2E tests auto-skip when the required hardware is not detected.
 
 ### 11. Run the Human Client
 

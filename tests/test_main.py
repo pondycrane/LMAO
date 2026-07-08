@@ -138,6 +138,51 @@ class TestHandleReply:
         assert lmao_client.pending_replies == ["First", "Second"]
 
 
+# ── DEST_HASH conversion ───────────────────────────────────────────
+
+class TestConvertDestHash:
+    """Tests for _convert_dest_hash() — pure function, no mocking needed."""
+
+    def _convert_dest_hash(self, hex_val):
+        return lmao_client._convert_dest_hash(hex_val)
+
+    def test_converts_valid_hex_string_to_bytes(self):
+        result = self._convert_dest_hash("aabb")
+        assert result == b"\xaa\xbb"
+
+    def test_converts_hex_with_uppercase(self):
+        result = self._convert_dest_hash("AAFF")
+        assert result == b"\xaa\xff"
+
+    def test_converts_mixed_case_hex(self):
+        result = self._convert_dest_hash("AaBb")
+        assert result == b"\xaa\xbb"
+
+    def test_passes_through_bytes_values(self):
+        input_bytes = b"\x01\x02"
+        result = self._convert_dest_hash(input_bytes)
+        assert result is input_bytes
+
+    def test_returns_none_when_dest_hash_is_none(self):
+        result = self._convert_dest_hash(None)
+        assert result is None
+
+    def test_raises_valueerror_on_invalid_hex_string(self):
+        import pytest
+        with pytest.raises(ValueError):
+            self._convert_dest_hash("not-hex!!")
+
+    def test_raises_valueerror_on_odd_length_hex(self):
+        import pytest
+        with pytest.raises(ValueError):
+            self._convert_dest_hash("abc")
+
+    def test_raises_valueerror_on_non_string_non_bytes_non_none(self):
+        import pytest
+        with pytest.raises(ValueError):
+            self._convert_dest_hash(42)
+
+
 # ── Module-level helpers ────────────────────────────────────────────
 
 class TestModuleFunctions:
