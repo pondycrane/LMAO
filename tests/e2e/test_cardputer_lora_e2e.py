@@ -348,6 +348,7 @@ class TestCardputerLoRaE2E:
             with open(config_path, "w") as f:
                 f.write(patched_config)
 
+            cardputer_ser = None
             try:
                 # Flash the Cardputer with client files
                 cardputer_ser = serial.Serial(_CARDCOMPUTER_PORT, 115200, timeout=1)
@@ -429,8 +430,6 @@ class TestCardputerLoRaE2E:
                 print(f"\n[Cardputer serial output — {len(cardputer_output)} bytes]")
                 print(captured[:2000])
 
-                cardputer_ser.close()
-
                 # ── Assertions ──
                 assert found_banner, (
                     "Cardputer did not display LMAO banner after flashing.\n"
@@ -464,9 +463,14 @@ class TestCardputerLoRaE2E:
                 print(f"   Messages received by server: {len(received_messages)}")
 
             finally:
-                # Restore original config.py
+                # Restore original config.py and close serial port
                 with open(config_path, "w") as f:
                     f.write(original_config)
+                if cardputer_ser is not None:
+                    try:
+                        cardputer_ser.close()
+                    except Exception:
+                        pass
 
         finally:
             shutil.rmtree(configdir, ignore_errors=True)
