@@ -15,10 +15,6 @@ import tempfile
 
 from lma_core.config_utils import resolve_rnode_port, dict_to_ini
 
-# Backward-compatible re-exports (used by tests)
-_resolve_rnode_port = resolve_rnode_port
-_dict_to_ini = dict_to_ini
-
 
 # Single source of truth for all config values
 _SECTIONS = {
