@@ -122,11 +122,11 @@ class TestGetConfigDir:
         assert os.path.isfile(config_file), f"Expected config file at {config_file}"
 
     def test_config_content_is_ini_format(self, config_module, tmp_path):
-        """The config file content matches _dict_to_ini output."""
+        """The config file content matches dict_to_ini output."""
         configdir_path = str(tmp_path / "lmao_config")
         os.makedirs(configdir_path, exist_ok=True)
         with patch("tempfile.mkdtemp", return_value=configdir_path), \
-             patch.object(config_module, "CONFIG_CONTENT", "[test]\nkey = value\n"):
+             patch.object(config_module._cfg, "CONFIG_CONTENT", "[test]\nkey = value\n"):
             result = config_module.get_configdir()
         config_file = os.path.join(result, "config")
         with open(config_file) as f:
