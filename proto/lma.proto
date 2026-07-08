@@ -159,7 +159,8 @@ service LMAO {
   rpc Subscribe(SubscribeRequest) returns (stream SubscribeResponse);
 
   // Bidirectional tunnel for raw LXMF packets.
-  rpc Tunnel(stream TunnelRequest) returns (stream TunnelResponse);
+  // NOT YET IMPLEMENTED — will be added in v0.2
+  // rpc Tunnel(stream TunnelRequest) returns (stream TunnelResponse);
 
   // Get the server's Reticulum identity hash.
   rpc GetIdentity(GetIdentityRequest) returns (GetIdentityResponse);

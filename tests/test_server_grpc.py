@@ -244,27 +244,6 @@ class TestLMAOGrpcService:
         # Cancel the generator to clean up
         await gen.aclose()
 
-    @pytest.mark.asyncio
-    async def test_tunnel_returns_unimplemented(self, grpc_service_with_mocks):
-        """Tunnel should abort with UNIMPLEMENTED."""
-        grpc_svc, server_inst = grpc_service_with_mocks
-
-        mock_context = AsyncMock()
-
-        async def request_iter():
-            req = MagicMock()
-            req.packet = b"test"
-            yield req
-
-        gen = grpc_svc.Tunnel(request_iter(), mock_context)
-
-        # Tunnel aborts context then falls through (no yield in first iteration)
-        await gen.asend(None)
-
-        mock_context.abort.assert_called_once()
-        args, _ = mock_context.abort.call_args
-        assert args[0] == sys.modules["grpc"].StatusCode.UNIMPLEMENTED
-
 
 
 

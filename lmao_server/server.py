@@ -8,7 +8,6 @@ When gRPC is enabled (default), also serves the LMAO gRPC API on port 50051
 for K8s pod integration. The gRPC service provides:
   - Send:     Inject LMAOEnvelope into the LXMF mesh
   - Subscribe: Stream incoming LXMF messages to gRPC clients
-  - Tunnel:   Bidirectional raw LXMF packet tunnel
   - GetIdentity: Return the server's Reticulum identity hex
 """
 
@@ -338,18 +337,6 @@ if GRPC_AVAILABLE:
                 pass
             finally:
                 self._server.unregister_grpc_subscriber(queue)
-
-        async def Tunnel(self, request_iterator, context):
-            """Bidirectional tunnel — NOT YET IMPLEMENTED.
-
-            This RPC is a placeholder. A full implementation would reconstruct
-            LXMF messages from raw packet bytes and forward them bidirectionally.
-            """
-            async for request in request_iterator:
-                # Not implemented — abort the stream
-                logger.error("Tunnel RPC called but not yet implemented")
-                await context.abort(grpc.StatusCode.UNIMPLEMENTED, "Tunnel not yet implemented")
-            yield  # Unreachable — keeps function as async generator for gRPC
 
         async def GetIdentity(self, request, context):
             """Return the server's Reticulum identity hex."""

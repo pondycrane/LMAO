@@ -43,8 +43,6 @@ try:
         SendResponse,
         SubscribeRequest,
         SubscribeResponse,
-        TunnelRequest,
-        TunnelResponse,
         GetIdentityRequest,
         GetIdentityResponse,
     )
@@ -84,7 +82,6 @@ __all__ = [
 _GRPC_TYPES = [
     "SendRequest", "SendResponse",
     "SubscribeRequest", "SubscribeResponse",
-    "TunnelRequest", "TunnelResponse",
     "GetIdentityRequest", "GetIdentityResponse",
     "LMAOStub", "LMAOServicer", "LMAO",
     "add_LMAOServicer_to_server",
