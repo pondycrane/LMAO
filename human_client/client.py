@@ -29,8 +29,6 @@ import config
 from lma_core import LMAOEnvelope
 from lma_core.message_utils import decode_lmao_message
 
-from google.protobuf.message import DecodeError
-
 logger = logging.getLogger(__name__)
 
 
