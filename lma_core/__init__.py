@@ -59,6 +59,7 @@ try:
         LMAOStub,
         LMAOServicer,
         LMAO,
+        add_LMAOServicer_to_server,
     )
 except ImportError:
     _logger.warning(
@@ -86,5 +87,6 @@ _GRPC_TYPES = [
     "TunnelRequest", "TunnelResponse",
     "GetIdentityRequest", "GetIdentityResponse",
     "LMAOStub", "LMAOServicer", "LMAO",
+    "add_LMAOServicer_to_server",
 ]
 __all__ += [name for name in _GRPC_TYPES if name in globals()]

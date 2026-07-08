@@ -875,9 +875,9 @@ class TestAsyncMain:
         sys.modules["grpc"].aio = MagicMock()
         sys.modules["grpc"].aio.server.return_value = mock_grpc_server
 
-        # Mock add_LMAOServicer_to_server on proto module (local import inside async_main)
+        # Mock add_LMAOServicer_to_server on lma_core (local import inside async_main)
         mock_add = MagicMock()
-        sys.modules["proto.lma_pb2_grpc"].add_LMAOServicer_to_server = mock_add
+        sys.modules["lma_core"].add_LMAOServicer_to_server = mock_add
 
         # Make asyncio.sleep raise KeyboardInterrupt to exit
         with patch.object(server_mod.asyncio, "sleep",
