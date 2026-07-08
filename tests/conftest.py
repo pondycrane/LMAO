@@ -91,8 +91,6 @@ def setup_common_mocks(with_grpc=True):
         sys.modules["lma_core"].SendResponse = MagicMock()
         sys.modules["lma_core"].SubscribeRequest = MagicMock()
         sys.modules["lma_core"].SubscribeResponse = MagicMock()
-        sys.modules["lma_core"].TunnelRequest = MagicMock()
-        sys.modules["lma_core"].TunnelResponse = MagicMock()
         sys.modules["lma_core"].GetIdentityRequest = MagicMock()
         sys.modules["lma_core"].GetIdentityResponse = MagicMock()
         # LMAOServicer must be a real class (used as base class for LMAOGrpcService)
