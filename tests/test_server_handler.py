@@ -7,79 +7,7 @@ import pytest
 import sys
 from google.protobuf.message import DecodeError
 
-
-def _setup_common_mocks():
-    """Populate sys.modules with mocks for external dependencies.
-
-    Must be called before importing the server module.
-    Sets up mocked RNS, LXMF, config, lma_core, grpc, and proto modules
-    with default return values suitable for most tests.
-    """
-    sys.modules["RNS"] = MagicMock()
-    sys.modules["LXMF"] = MagicMock()
-    sys.modules["config"] = MagicMock()
-
-    # Import the real message_utils module BEFORE mocking lma_core
-    # so that server.py's ``from lma_core.message_utils import ...`` resolves.
-    # The lazy import of LMAOEnvelope inside decode_lmao_message picks up
-    # the mock configured below at call time.
-    import lma_core.message_utils as _real_msg_utils
-
-    sys.modules["lma_core"] = MagicMock()
-    sys.modules["lma_core"].LMAOEnvelope = MagicMock()
-    sys.modules["lma_core"].TextMessage = MagicMock()
-    sys.modules["lma_core.message_utils"] = _real_msg_utils
-
-    # Mock gRPC types
-    grpc_mock = MagicMock()
-    grpc_mock.StatusCode.INVALID_ARGUMENT = MagicMock()
-    grpc_mock.StatusCode.INTERNAL = MagicMock()
-    grpc_mock.StatusCode.UNIMPLEMENTED = MagicMock()
-    sys.modules["grpc"] = grpc_mock
-
-    # Mock proto module
-    proto_grpc_mock = MagicMock()
-    sys.modules["proto"] = MagicMock()
-    sys.modules["proto.lma_pb2_grpc"] = proto_grpc_mock
-
-    # Mock gRPC request/response types on lma_core
-    sys.modules["lma_core"].SendRequest = MagicMock()
-    sys.modules["lma_core"].SendResponse = MagicMock()
-    sys.modules["lma_core"].SubscribeRequest = MagicMock()
-    sys.modules["lma_core"].SubscribeResponse = MagicMock()
-    sys.modules["lma_core"].TunnelRequest = MagicMock()
-    sys.modules["lma_core"].TunnelResponse = MagicMock()
-    sys.modules["lma_core"].GetIdentityRequest = MagicMock()
-    sys.modules["lma_core"].GetIdentityResponse = MagicMock()
-    # LMAOServicer must be a real class (used as base class for LMAOGrpcService)
-    sys.modules["lma_core"].LMAOServicer = type("LMAOServicer", (), {})
-
-    # Mock RNS types
-    sys.modules["RNS"].RNSException = type("RNSException", (Exception,), {})
-    sys.modules["RNS"].hexrep = MagicMock(return_value="testhash1234")
-    sys.modules["RNS"].Identity = MagicMock()
-    sys.modules["RNS"].Reticulum = MagicMock()
-
-    # Mock LXMF types
-    sys.modules["LXMF"].LXMFException = type("LXMFException", (Exception,), {})
-    sys.modules["LXMF"].LXMessage = MagicMock()
-    sys.modules["LXMF"].LXMessage.OPPORTUNISTIC = 1
-    sys.modules["LXMF"].LXMRouter = MagicMock()
-
-    # Mock config module
-    sys.modules["config"].get_configdir = MagicMock(return_value="/tmp/test_config")
-    sys.modules["config"].get_config_dict = MagicMock(return_value={
-        "interfaces": {"RNode LoRa": {"port": "/dev/ttyUSB0"}},
-    })
-
-
-def _cleanup_common_mocks():
-    """Remove mocked modules from sys.modules to prevent test pollution."""
-    for mod in ["RNS", "LXMF", "config", "lma_core", "lma_core.message_utils",
-                "grpc", "proto", "proto.lma_pb2_grpc",
-                "server", "lmao_server", "lmao_server.server"]:
-        if mod in sys.modules:
-            del sys.modules[mod]
+from conftest import setup_common_mocks, cleanup_common_mocks
 
 
 @pytest.fixture
@@ -94,7 +22,7 @@ def server_with_mocks():
     if "server" in sys.modules:
         del sys.modules["server"]
 
-    _setup_common_mocks()
+    setup_common_mocks(with_grpc=True)
 
     # Configure mock envelope so protobuf decode raises DecodeError (triggering fallback)
     mock_envelope = MagicMock()
@@ -110,7 +38,7 @@ def server_with_mocks():
 
     yield server_instance
 
-    _cleanup_common_mocks()
+    cleanup_common_mocks()
 
 
 @pytest.fixture
@@ -124,14 +52,14 @@ def server_with_main_mocks():
     if "server" in sys.modules:
         del sys.modules["server"]
 
-    _setup_common_mocks()
+    setup_common_mocks(with_grpc=True)
 
     # Import server after mocks are set up
     from lmao_server import server
 
     yield server
 
-    _cleanup_common_mocks()
+    cleanup_common_mocks()
 
 
 class TestMain:
@@ -568,7 +496,7 @@ def grpc_service_with_mocks():
     if "server" in sys.modules:
         del sys.modules["server"]
 
-    _setup_common_mocks()
+    setup_common_mocks(with_grpc=True)
 
     from lmao_server import server
 
@@ -584,7 +512,7 @@ def grpc_service_with_mocks():
 
     yield grpc_svc, server_instance
 
-    _cleanup_common_mocks()
+    cleanup_common_mocks()
 
 
 class TestLMAOGrpcService:
@@ -826,7 +754,7 @@ class TestAsyncMain:
         if "server" in sys.modules:
             del sys.modules["server"]
 
-        _setup_common_mocks()
+        setup_common_mocks(with_grpc=True)
 
         # Force GRPC_AVAILABLE to False
         from lmao_server import server as server_mod
@@ -849,7 +777,7 @@ class TestAsyncMain:
 
         # Restore GRPC_AVAILABLE
         server_mod.GRPC_AVAILABLE = original_grpc
-        _cleanup_common_mocks()
+        cleanup_common_mocks()
 
     @pytest.mark.asyncio
     async def test_async_main_grpc_enabled(self, capsys, caplog):
@@ -857,7 +785,7 @@ class TestAsyncMain:
         if "server" in sys.modules:
             del sys.modules["server"]
 
-        _setup_common_mocks()
+        setup_common_mocks(with_grpc=True)
 
         from lmao_server import server as server_mod
         # GRPC_AVAILABLE is True by default with these mocks
@@ -897,7 +825,7 @@ class TestAsyncMain:
         # Verify cleanup on shutdown
         mock_grpc_server.stop.assert_awaited_once_with(5)
 
-        _cleanup_common_mocks()
+        cleanup_common_mocks()
 
 
 class TestInitRnsAndLxmf:
@@ -908,10 +836,10 @@ class TestInitRnsAndLxmf:
         """Import server module with mocked dependencies."""
         if "server" in sys.modules:
             del sys.modules["server"]
-        _setup_common_mocks()
+        setup_common_mocks(with_grpc=True)
         from lmao_server import server as mod
         yield mod
-        _cleanup_common_mocks()
+        cleanup_common_mocks()
 
     def test_init_success_returns_identity_and_router(self, server_mod):
         """_init_rns_and_lxmf should return (identity, router) on success."""
@@ -990,7 +918,7 @@ class TestServerStart:
         """Create a Server instance with mocked dependencies."""
         if "server" in sys.modules:
             del sys.modules["server"]
-        _setup_common_mocks()
+        setup_common_mocks(with_grpc=True)
         from lmao_server import server as mod
 
         # Configure mocks for happy path
@@ -1003,7 +931,7 @@ class TestServerStart:
         })
 
         yield server_instance, mod
-        _cleanup_common_mocks()
+        cleanup_common_mocks()
 
     def test_start_initializes_and_loops(self, server_and_mod, capsys):
         """start() should initialize Reticulum/LXMF and loop until KeyboardInterrupt."""

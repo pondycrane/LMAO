@@ -5,55 +5,7 @@ import pytest
 import sys
 from google.protobuf.message import DecodeError
 
-
-def _setup_common_mocks():
-    """Populate sys.modules with mocks for external dependencies.
-
-    Must be called before importing the client module.
-    Sets up mocked RNS, LXMF, config, and lma_core modules
-    with default return values suitable for most tests.
-    """
-    sys.modules["RNS"] = MagicMock()
-    sys.modules["LXMF"] = MagicMock()
-    sys.modules["config"] = MagicMock()
-
-    # Import the real message_utils module BEFORE mocking lma_core
-    # so that client.py's ``from lma_core.message_utils import ...`` resolves.
-    # The lazy import of LMAOEnvelope inside decode_lmao_message picks up
-    # the mock configured below at call time.
-    import lma_core.message_utils as _real_msg_utils
-
-    sys.modules["lma_core"] = MagicMock()
-    sys.modules["lma_core"].LMAOEnvelope = MagicMock()
-    sys.modules["lma_core"].TextMessage = MagicMock()
-    sys.modules["lma_core.message_utils"] = _real_msg_utils
-
-    # Mock RNS types
-    sys.modules["RNS"].RNSException = type("RNSException", (Exception,), {})
-    sys.modules["RNS"].hexrep = MagicMock(return_value="testhash1234")
-    sys.modules["RNS"].Identity = MagicMock()
-    sys.modules["RNS"].Identity.recall = MagicMock()
-    sys.modules["RNS"].Reticulum = MagicMock()
-
-    # Mock LXMF types
-    sys.modules["LXMF"].LXMFException = type("LXMFException", (Exception,), {})
-    sys.modules["LXMF"].LXMessage = MagicMock()
-    sys.modules["LXMF"].LXMessage.OPPORTUNISTIC = 1
-    sys.modules["LXMF"].LXMRouter = MagicMock()
-
-    # Mock config module
-    sys.modules["config"].get_configdir = MagicMock(return_value="/tmp/test_config")
-    sys.modules["config"].get_config_dict = MagicMock(return_value={
-        "interfaces": {"RNode LoRa": {"port": "/dev/ttyUSB0"}},
-    })
-
-
-def _cleanup_common_mocks():
-    """Remove mocked modules from sys.modules to prevent test pollution."""
-    for mod in ["RNS", "LXMF", "config", "lma_core", "lma_core.message_utils",
-                "client", "human_client", "human_client.client"]:
-        if mod in sys.modules:
-            del sys.modules[mod]
+from conftest import setup_common_mocks, cleanup_common_mocks
 
 
 @pytest.fixture
@@ -68,7 +20,7 @@ def client_with_mocks():
     if "client" in sys.modules:
         del sys.modules["client"]
 
-    _setup_common_mocks()
+    setup_common_mocks(with_grpc=False)
 
     # Configure mock envelope so protobuf decode raises DecodeError (triggering fallback)
     mock_envelope = MagicMock()
@@ -84,7 +36,7 @@ def client_with_mocks():
 
     yield client_instance
 
-    _cleanup_common_mocks()
+    cleanup_common_mocks()
 
 
 @pytest.fixture
@@ -98,14 +50,14 @@ def client_with_main_mocks():
     if "client" in sys.modules:
         del sys.modules["client"]
 
-    _setup_common_mocks()
+    setup_common_mocks(with_grpc=False)
 
     # Import client after mocks are set up
     from human_client import client
 
     yield client
 
-    _cleanup_common_mocks()
+    cleanup_common_mocks()
 
 
 class TestMain:
