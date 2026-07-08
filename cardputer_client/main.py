@@ -195,6 +195,18 @@ def main():
     # ---- Load config (must be on device as /config.py) ----
     try:
         from config import WIFI_SSID, WIFI_PASS, NODE_NAME, DEBUG, CONFIG
+        try:
+            from config import DEST_HASH
+            # Convert hex string to bytes for urns LXMF router
+            if DEST_HASH is not None and isinstance(DEST_HASH, str):
+                try:
+                    import ubinascii
+                    DEST_HASH = ubinascii.unhexlify(DEST_HASH)
+                except ImportError:
+                    import binascii
+                    DEST_HASH = binascii.unhexlify(DEST_HASH)
+        except ImportError:
+            DEST_HASH = None  # Legacy config without DEST_HASH
     except ImportError:
         log("ERROR: Cannot import config — is config.py on device?", tft, status_lines)
         while True:
@@ -256,8 +268,6 @@ def main():
     seq = 0
     consecutive_errors = 0
     MAX_CONSECUTIVE_ERRORS = 10
-    DEST_HASH = None  # Set to server's 16-byte hash if known
-
     while True:
         try:
             consecutive_errors = 0
