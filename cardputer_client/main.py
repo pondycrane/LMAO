@@ -342,7 +342,12 @@ def main():
         except Exception as e:
             consecutive_errors += 1
             _print_exception(e)
-            tft = log(f"❗ Error ({consecutive_errors}): {e}", tft, status_lines)
+            tft = log(
+                f"❗ Error in main loop "
+                f"({consecutive_errors}/{MAX_CONSECUTIVE_ERRORS}): "
+                f"{type(e).__name__}: {e}",
+                tft, status_lines,
+            )
             if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
                 log("FATAL: Too many consecutive errors, halting.", tft, status_lines)
                 break

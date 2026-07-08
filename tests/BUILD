@@ -24,7 +24,10 @@ py_test(
 
 py_test(
     name = "test_cardputer_e2e",
-    srcs = ["e2e/test_cardputer_flash.py"],
+    srcs = [
+        "e2e/test_cardputer_flash.py",
+        "e2e/e2e_helpers.py",
+    ],
     main = "e2e/test_cardputer_flash.py",
     data = [
         "//cardputer_client:boot.py",
@@ -66,6 +69,9 @@ py_test(
 py_test(
     name = "test_config",
     srcs = ["test_config.py"],
+    data = [
+        "//cardputer_client:config.py",
+    ],
     deps = [
         "//lmao_server:server_lib",
         "@lmao_pip//pytest",
@@ -129,7 +135,10 @@ py_test(
 
 py_test(
     name = "test_cardputer_lora_e2e",
-    srcs = ["e2e/test_cardputer_lora_e2e.py"],
+    srcs = [
+        "e2e/test_cardputer_lora_e2e.py",
+        "e2e/e2e_helpers.py",
+    ],
     main = "e2e/test_cardputer_lora_e2e.py",
     data = [
         "//cardputer_client:boot.py",
@@ -141,9 +150,12 @@ py_test(
     ],
     deps = [
         "//cardputer_client:flash_lib",
+        "//lma_core",
         "//lmao_server:server_lib",
+        "@lmao_pip//lxmf",
         "@lmao_pip//pyserial",
         "@lmao_pip//pytest",
+        "@lmao_pip//rns",
     ],
     # E2E test requires physical Cardputer hardware AND a Heltec RNode
     # connected via USB.  The test auto-skips when hardware is not detected.

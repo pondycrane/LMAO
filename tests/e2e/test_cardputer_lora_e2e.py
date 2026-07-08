@@ -16,6 +16,7 @@ Run with::
 """
 
 import os
+import sys
 import time
 import threading
 
@@ -34,48 +35,49 @@ try:
 except ImportError:
     HAS_FLASH_LIB = False
 
+try:
+    from lmao_server.config import get_config_dict
+    HAS_SERVER_CONFIG = True
+except ImportError:
+    HAS_SERVER_CONFIG = False
+    get_config_dict = None
+
 
 # ── helpers ─────────────────────────────────────────────────────────
 
 
-def _find_rnode_port():
-    """Return the device path of a connected Heltec/ESP32 RNode, or *None*.
+# Import shared RNode port finder from e2e_helpers if available.
+# Falls back to inline logic when the helper module is missing (e.g. running
+# the script directly without Bazel).
+try:
+    from e2e_helpers import find_rnode_port
+except ImportError:
+    # Inline fallback — mirrors e2e_helpers.find_rnode_port() exactly.
+    _RNODE_VIDS = {0x303A, 0x10C4, 0x1A86}
 
-    RNode devices appear as USB serial (CP210x, CH340, or Espressif USB).
-    We also check for "RNode" in the description string.
-    """
-    if not HAS_PYSERIAL:
+    def find_rnode_port():
+        """Return the device path of a connected Heltec/ESP32 RNode, or *None*."""
+        if not HAS_PYSERIAL:
+            return None
+        try:
+            ports = serial.tools.list_ports.comports()
+        except Exception as exc:
+            print(f"WARNING: Could not enumerate serial ports: {exc}",
+                  file=sys.stderr)
+            return None
+        for p in ports:
+            try:
+                if p.vid in _RNODE_VIDS:
+                    return p.device
+            except (TypeError, AttributeError):
+                pass
+            try:
+                desc = (p.description or "").lower()
+            except (TypeError, AttributeError):
+                desc = ""
+            if "rnode" in desc:
+                return p.device
         return None
-
-    try:
-        ports = serial.tools.list_ports.comports()
-    except Exception:
-        return None
-
-    for p in ports:
-        try:
-            if p.vid in (0x303A,):  # Espressif
-                return p.device
-        except (TypeError, AttributeError):
-            pass
-        try:
-            if p.vid in (0x10C4,):  # CP210x (Silicon Labs)
-                return p.device
-        except (TypeError, AttributeError):
-            pass
-        try:
-            if p.vid in (0x1A86,):  # CH340
-                return p.device
-        except (TypeError, AttributeError):
-            pass
-        try:
-            desc = (p.description or "").lower()
-        except (TypeError, AttributeError):
-            desc = ""
-        if "rnode" in desc:
-            return p.device
-
-    return None
 
 
 def _find_cardputer_port():
@@ -86,7 +88,7 @@ def _find_cardputer_port():
 
 
 # Resolve hardware presence once at collection time so skips are fast.
-_RNODE_PORT = _find_rnode_port() if HAS_PYSERIAL else None
+_RNODE_PORT = find_rnode_port() if HAS_PYSERIAL else None
 _CARDCOMPUTER_PORT = _find_cardputer_port() if HAS_FLASH_LIB and HAS_PYSERIAL else None
 _HARDWARE_CHECKED = False
 _HARDWARE_READY = False
@@ -229,13 +231,19 @@ class TestCardputerLoRaE2E:
         assert os.path.exists(_RNODE_PORT), f"RNode port {_RNODE_PORT} does not exist"
 
     def test_radio_params_match(self):
-        """Server and Cardputer config must use identical radio parameters."""
-        from lmao_server import config as server_config
-        server_ifaces = server_config.get_config_dict()["interfaces"]
+        """Server and Cardputer config must use identical radio parameters.
+
+        Cardputer config.py uses kHz/MHz units while the server uses Hz.
+        All values must match for LoRa communication to succeed.
+        """
+        server_ifaces = get_config_dict()["interfaces"]
         server_lora = server_ifaces["RNode LoRa"]
 
-        # Cardputer client frequency: 868000 kHz = 868 MHz
-        assert server_lora["frequency"] == 868000000, (
+        # Cardputer client parameters (from config.py):
+        #   freq_khz: 868000, bandwidth: "125", sf: 7, coding_rate: 5
+        # Must match the server exactly for bidirectional LoRa communication.
+        server_freq_mhz = server_lora["frequency"] / 1_000_000
+        assert server_freq_mhz == 868.0, (
             f"Server freq {server_lora['frequency']} Hz != 868 MHz"
         )
         assert server_lora["bandwidth"] == 125000, (
@@ -263,7 +271,6 @@ class TestCardputerLoRaE2E:
         5. Verifies the message arrives over LoRa on the server side
         6. Optionally checks for ACK reply on Cardputer serial output
         """
-        from lmao_server.config import get_config_dict
         import tempfile
         import shutil
         import RNS
@@ -330,23 +337,25 @@ class TestCardputerLoRaE2E:
             router.register_delivery_callback(capture_delivery)
 
             # ── Prepare and flash the Cardputer ──
+            import binascii
+
             root = cardputer_flash.find_client_root()
             assert root, "Cannot find cardputer_client/ source directory"
 
             config_path = os.path.join(root, "config.py")
             assert os.path.isfile(config_path), f"config.py not found: {config_path}"
 
+            # Read the config once — we will upload it unmodified and then
+            # overwrite /config.py on the device with the patched content
+            # via exec_raw.  This avoids modifying the source tree in place,
+            # which would leave config.py dirty if the test is interrupted.
             with open(config_path) as f:
                 original_config = f.read()
 
-            # Inject the server hash into config.py
             patched_config = original_config.replace(
                 "DEST_HASH = None",
                 f'DEST_HASH = "{server_hash}"',
             )
-
-            with open(config_path, "w") as f:
-                f.write(patched_config)
 
             cardputer_ser = None
             try:
@@ -357,14 +366,7 @@ class TestCardputerLoRaE2E:
                 ok = cardputer_flash.enter_raw_repl(cardputer_ser)
                 assert ok, "Cannot enter raw REPL on Cardputer"
 
-                # Verify the hash is present in the config before uploading
-                ok, out = cardputer_flash.exec_raw(
-                    cardputer_ser,
-                    f"import os; print(os.path.getsize('/config.py') if os.path.exists('/config.py') else -1)",
-                )
-                assert ok, f"exec_raw failed: {out[:200]}"
-
-                # Upload all client files
+                # Upload all client files (config.py uploaded with DEST_HASH = None)
                 for rel in cardputer_flash.FILES_TO_UPLOAD:
                     local_path = os.path.join(root, rel)
                     remote_path = rel
@@ -386,6 +388,33 @@ class TestCardputerLoRaE2E:
                         cardputer_ser, local_path, remote_path
                     )
                     assert uploaded, f"Failed to upload lib/{rel}"
+
+                # Overwrite /config.py on the device with the patched version
+                # containing the server hash.  Use hex encoding to avoid
+                # MicroPython quoting issues with special characters.
+                hex_content = binascii.hexlify(
+                    patched_config.encode("utf-8")
+                ).decode("ascii")
+                ok, out = cardputer_flash.exec_raw(
+                    cardputer_ser,
+                    f"exec(bytes.fromhex('{hex_content}'))",
+                )
+                # A clean exec of config.py returns b'' (no print output).
+                # If exec fails, the raw REPL returns the traceback.
+                assert ok, (
+                    f"Failed to write patched config to device: {out[:500]}"
+                )
+
+                # Verify the hash is present in the config on the device
+                ok, out = cardputer_flash.exec_raw(
+                    cardputer_ser,
+                    "import config; print(config.DEST_HASH)",
+                )
+                assert ok, f"exec_raw failed: {out[:200]}"
+                assert server_hash in out.decode("utf-8", errors="replace"), (
+                    f"Server hash {server_hash} not found in device config output: "
+                    f"{out[:200]}"
+                )
 
                 # Soft-reset to boot the Cardputer with new code
                 cardputer_flash.exit_raw_repl(cardputer_ser)
@@ -463,9 +492,9 @@ class TestCardputerLoRaE2E:
                 print(f"   Messages received by server: {len(received_messages)}")
 
             finally:
-                # Restore original config.py and close serial port
-                with open(config_path, "w") as f:
-                    f.write(original_config)
+                # Close serial port (note: we no longer modify config.py on
+                # disk — the patched config is written directly to the device
+                # via exec_raw, so there is nothing to restore).
                 if cardputer_ser is not None:
                     try:
                         cardputer_ser.close()
