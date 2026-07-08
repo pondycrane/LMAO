@@ -31,11 +31,12 @@ def find_rnode_port():
         try:
             if p.vid in RNODE_VIDS:
                 return p.device
-        except (TypeError, AttributeError):
-            pass
+        except (TypeError, AttributeError) as exc:
+            print(f"DEBUG: skipping port {getattr(p, 'device', '<unknown>')}: {exc}")
         try:
             desc = (p.description or "").lower()
-        except (TypeError, AttributeError):
+        except (TypeError, AttributeError) as exc:
+            print(f"DEBUG: could not read description for {getattr(p, 'device', '<unknown>')}: {exc}")
             desc = ""
         if "rnode" in desc:
             return p.device

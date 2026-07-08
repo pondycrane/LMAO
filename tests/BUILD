@@ -23,6 +23,19 @@ py_test(
 )
 
 py_test(
+    name = "test_e2e_helpers",
+    srcs = [
+        "e2e/test_e2e_helpers.py",
+        "e2e/e2e_helpers.py",
+    ],
+    main = "e2e/test_e2e_helpers.py",
+    deps = [
+        "@lmao_pip//pyserial",
+        "@lmao_pip//pytest",
+    ],
+)
+
+py_test(
     name = "test_cardputer_e2e",
     srcs = [
         "e2e/test_cardputer_flash.py",

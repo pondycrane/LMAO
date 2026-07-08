@@ -46,38 +46,10 @@ except ImportError:
 # ── helpers ─────────────────────────────────────────────────────────
 
 
-# Import shared RNode port finder from e2e_helpers if available.
-# Falls back to inline logic when the helper module is missing (e.g. running
-# the script directly without Bazel).
-try:
-    from e2e_helpers import find_rnode_port
-except ImportError:
-    # Inline fallback — mirrors e2e_helpers.find_rnode_port() exactly.
-    _RNODE_VIDS = {0x303A, 0x10C4, 0x1A86}
-
-    def find_rnode_port():
-        """Return the device path of a connected Heltec/ESP32 RNode, or *None*."""
-        if not HAS_PYSERIAL:
-            return None
-        try:
-            ports = serial.tools.list_ports.comports()
-        except Exception as exc:
-            print(f"WARNING: Could not enumerate serial ports: {exc}",
-                  file=sys.stderr)
-            return None
-        for p in ports:
-            try:
-                if p.vid in _RNODE_VIDS:
-                    return p.device
-            except (TypeError, AttributeError):
-                pass
-            try:
-                desc = (p.description or "").lower()
-            except (TypeError, AttributeError):
-                desc = ""
-            if "rnode" in desc:
-                return p.device
-        return None
+# Ensure e2e_helpers is importable when running the script directly
+# (Bazel already adds the e2e/ directory to sys.path).
+sys.path.insert(0, os.path.dirname(__file__))
+from e2e_helpers import find_rnode_port
 
 
 def _find_cardputer_port():
@@ -110,6 +82,12 @@ def _probe_hardware():
         return
     if not HAS_FLASH_LIB:
         _HARDWARE_REASON = "cardputer_client.flash library not importable"
+        return
+    if not HAS_SERVER_CONFIG:
+        _HARDWARE_REASON = (
+            "lmao_server.config module not importable. "
+            "Check that server dependencies are declared in tests/BUILD."
+        )
         return
 
     # Probe Heltec RNode
@@ -324,7 +302,8 @@ class TestCardputerLoRaE2E:
                         display_text = envelope.text.content
                     else:
                         display_text = content_bytes.decode("utf-8", errors="replace")
-                except Exception:
+                except Exception as exc:
+                    print(f"WARNING: capture_delivery: envelope parse failed: {exc}")
                     display_text = content_bytes.decode("utf-8", errors="replace")
 
                 received_messages.append({
@@ -337,7 +316,6 @@ class TestCardputerLoRaE2E:
             router.register_delivery_callback(capture_delivery)
 
             # ── Prepare and flash the Cardputer ──
-            import binascii
 
             root = cardputer_flash.find_client_root()
             assert root, "Cannot find cardputer_client/ source directory"
@@ -347,7 +325,7 @@ class TestCardputerLoRaE2E:
 
             # Read the config once — we will upload it unmodified and then
             # overwrite /config.py on the device with the patched content
-            # via exec_raw.  This avoids modifying the source tree in place,
+            # via upload_file.  This avoids modifying the source tree in place,
             # which would leave config.py dirty if the test is interrupted.
             with open(config_path) as f:
                 original_config = f.read()
@@ -390,20 +368,26 @@ class TestCardputerLoRaE2E:
                     assert uploaded, f"Failed to upload lib/{rel}"
 
                 # Overwrite /config.py on the device with the patched version
-                # containing the server hash.  Use hex encoding to avoid
-                # MicroPython quoting issues with special characters.
-                hex_content = binascii.hexlify(
-                    patched_config.encode("utf-8")
-                ).decode("ascii")
-                ok, out = cardputer_flash.exec_raw(
-                    cardputer_ser,
-                    f"exec(bytes.fromhex('{hex_content}'))",
-                )
-                # A clean exec of config.py returns b'' (no print output).
-                # If exec fails, the raw REPL returns the traceback.
-                assert ok, (
-                    f"Failed to write patched config to device: {out[:500]}"
-                )
+                # containing the server hash.  Write to a temp file on the host
+                # and upload via upload_file() so the change persists on the
+                # device's flash filesystem (exec() only modifies the in-memory
+                # namespace and is lost on soft reset).
+                import tempfile
+                with tempfile.NamedTemporaryFile(
+                    mode="w", suffix=".py", delete=False
+                ) as tmp:
+                    tmp.write(patched_config)
+                    tmp_path = tmp.name
+                try:
+                    uploaded = cardputer_flash.upload_file(
+                        cardputer_ser, tmp_path, "config.py"
+                    )
+                    assert uploaded, "Failed to upload patched config.py"
+                finally:
+                    try:
+                        os.unlink(tmp_path)
+                    except OSError:
+                        pass
 
                 # Verify the hash is present in the config on the device
                 ok, out = cardputer_flash.exec_raw(
