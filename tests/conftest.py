@@ -8,9 +8,14 @@ duplicate the ~75-line sys.modules mock configuration.
 dependencies needed to import ``lmao_server.server`` or
 ``human_client.client``.  Call ``cleanup_common_mocks()`` in a
 fixture teardown to prevent cross-test pollution.
+
+RNS and LXMF are exposed through ``lma_core.rns_di`` (a
+Dependency-Injection wrapper) so that production code imports
+from a single point that can be monkeypatched in tests.
 """
 
 import sys
+import types
 from unittest.mock import MagicMock
 
 
@@ -25,8 +30,17 @@ def setup_common_mocks(with_grpc=True):
     ``decode_lmao_message`` import resolves, but the ``LMAOEnvelope``
     inside the function body is picked up lazily from the mock below.
     """
+    # Create mock RNS and LXMF modules
     sys.modules["RNS"] = MagicMock()
     sys.modules["LXMF"] = MagicMock()
+
+    # Wire the same mocks through lma_core.rns_di so that
+    # ``from lma_core.rns_di import RNS, LXMF`` resolves.
+    _rns_di = types.ModuleType("lma_core.rns_di")
+    _rns_di.RNS = sys.modules["RNS"]
+    _rns_di.LXMF = sys.modules["LXMF"]
+    sys.modules["lma_core.rns_di"] = _rns_di
+
     sys.modules["config"] = MagicMock()
 
     # Import the real message_utils module BEFORE mocking lma_core
@@ -89,6 +103,7 @@ def cleanup_common_mocks():
     """Remove mocked modules from sys.modules to prevent test pollution."""
     for mod in [
         "RNS", "LXMF", "config", "lma_core", "lma_core.message_utils",
+        "lma_core.rns_di",
         "grpc", "proto", "proto.lma_pb2_grpc",
         "server", "lmao_server", "lmao_server.server",
         "client", "human_client", "human_client.client",

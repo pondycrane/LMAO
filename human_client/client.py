@@ -21,8 +21,7 @@ import time
 import atexit
 import shutil
 
-import RNS
-import LXMF
+from lma_core.rns_di import RNS, LXMF
 
 # Local imports
 import config
