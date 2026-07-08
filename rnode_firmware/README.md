@@ -159,6 +159,39 @@ If successful, you'll see log output showing the RNode interface coming online.
 
 ---
 
+## Step 6: Verify E2E Test Readiness
+
+Before running the full E2E LoRa test, confirm the Heltec RNode is
+properly detected and configured:
+
+```bash
+# Verify RNode is detectable and configured for 868 MHz
+rnodeconf --port /dev/ttyUSB0 --info
+```
+
+Expected output should show:
+- Frequency: 868.0 MHz
+- Bandwidth: 125 kHz
+- SF: 7
+- CR: 5
+
+Once confirmed, connect both the Heltec RNode and the Cardputer ADV
+(via USB) and run the E2E LoRa verification test:
+
+```bash
+# Run the LoRa E2E communication test
+bazel test //tests:test_cardputer_lora_e2e --test_output=all
+```
+
+The test will:
+1. Probe for both the RNode and Cardputer
+2. Flash the Cardputer with the client code + server identity
+3. Start a temporary LMAO server on the host
+4. Verify bidirectional LoRa message delivery
+
+If hardware is not detected, the test skips gracefully with a clear message.
+
+
 ## Troubleshooting
 
 | Symptom | Likely Cause | Fix |

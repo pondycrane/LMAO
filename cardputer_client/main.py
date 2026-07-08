@@ -177,6 +177,40 @@ def _connect_wifi(ssid, password, debug=0, timeout=15):
     return ip
 
 
+# ---- Config helpers ----
+
+def _convert_dest_hash(hex_val):
+    """Convert a DEST_HASH hex string to bytes for the urns LXMF router.
+
+    Args:
+        hex_val: A hex string (e.g. "a1b2c3d4e5f6..."), bytes, or None.
+
+    Returns:
+        bytes: The decoded byte sequence, or the original bytes passed
+               through unchanged, or None if None was passed.
+
+    Raises:
+        ValueError: hex_val is a string but not valid hex, or an
+                    unsupported type.
+    """
+    if hex_val is None:
+        return None
+    if isinstance(hex_val, bytes):
+        return hex_val
+    if not isinstance(hex_val, str):
+        raise ValueError(
+            f"DEST_HASH must be a hex string, bytes, or None, "
+            f"got {type(hex_val).__name__}"
+        )
+    try:
+        import ubinascii
+        unhex = ubinascii.unhexlify
+    except ImportError:
+        import binascii
+        unhex = binascii.unhexlify
+    return unhex(hex_val)
+
+
 # ---- Main ----
 
 def main():
@@ -195,6 +229,21 @@ def main():
     # ---- Load config (must be on device as /config.py) ----
     try:
         from config import WIFI_SSID, WIFI_PASS, NODE_NAME, DEBUG, CONFIG
+        try:
+            from config import DEST_HASH
+            raw_dest = DEST_HASH  # captured for error messages
+            DEST_HASH = _convert_dest_hash(DEST_HASH)
+        except ImportError:
+            DEST_HASH = None  # Legacy config without DEST_HASH
+        except ValueError:
+            log(
+                f"ERROR: DEST_HASH is not a valid hex string: {raw_dest!r}. "
+                "Expected 32 hex characters (e.g. 'a1b2c3d4e5f6...'). "
+                "Set DEST_HASH = None in config.py to disable sending.",
+                tft, status_lines,
+            )
+            while True:
+                time.sleep(1)
     except ImportError:
         log("ERROR: Cannot import config — is config.py on device?", tft, status_lines)
         while True:
@@ -256,8 +305,6 @@ def main():
     seq = 0
     consecutive_errors = 0
     MAX_CONSECUTIVE_ERRORS = 10
-    DEST_HASH = None  # Set to server's 16-byte hash if known
-
     while True:
         try:
             consecutive_errors = 0

@@ -22,6 +22,15 @@ NODE_NAME = "LMAO_Cardputer"
 # DEBUG levels: 0 = silent, 1 = messages & announces, 2 = full debug
 DEBUG = 2
 
+# Destination server identity hash (hex string of 16-byte hash).
+# Set to None (default) to skip sending.  The E2E test or flash tool
+# can inject the server hash before uploading so the Cardputer knows
+# where to send messages.
+#
+# Format: hex string, e.g. "a1b2c3d4e5f6..." (32 hex chars).
+# main.py converts this to bytes at runtime for the urns LXMF router.
+DEST_HASH = None
+
 # ---- Reticulum config ----
 CONFIG = {
     "loglevel": 3,
