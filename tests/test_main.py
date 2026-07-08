@@ -12,7 +12,7 @@ Run with::
     bazel test //tests:test_main --test_output=all
 """
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 
 # Import the module under test (works when running under Bazel with proper deps)
@@ -118,8 +118,9 @@ class TestHandleReply:
         msg = MagicMock()
         msg.content_as_string.side_effect = Exception("parse error")
 
-        # Should not raise
-        lmao_client.handle_reply(msg)
+        # Mock sys.print_exception for CPython (MicroPython has it built-in)
+        with patch.object(lmao_client.sys, "print_exception", create=True):
+            lmao_client.handle_reply(msg)
 
         assert lmao_client.pending_replies == []
 

@@ -69,6 +69,72 @@ def _decode_float(data, offset=0):
     return _struct.unpack("<f", data[offset:offset + 4])[0]
 
 
+def _decode_proto_message(data, field_map):
+    """Generic protobuf wire-format decoder for simple non-nested messages.
+
+    Interprets varint (wire type 0) and length-delimited (wire type 2) fields
+    according to *field_map*.  Unknown fields and mismatched wire types are
+    silently skipped when the wire type is 0 or 2; any other wire type raises
+    ``ValueError`` (preserving the original per-decoder behaviour).
+
+    Args:
+        data: Bytes to decode.
+        field_map: Dict mapping *field_number* to *(wire_type, attr_name,
+                   transform_fn, default_value)*.  *transform_fn* receives
+                   the raw decoded value (int or bytes) and returns the value
+                   to store in the result dict.  Pass ``None`` to keep the
+                   raw value unchanged.
+
+    Returns:
+        dict with keys from ``field_map`` initialised to their defaults.
+    """
+    result = {info[1]: info[3] for info in field_map.values()}
+    pos = 0
+    while pos < len(data):
+        tag, tag_len = decode_varint(data, pos)
+        pos += tag_len
+        field_number = tag >> 3
+        wire_type = tag & 0x07
+        info = field_map.get(field_number)
+        if info is None:
+            # Unknown field — skip if wire type 0 or 2, raise otherwise
+            if wire_type == 0:
+                _, vlen = decode_varint(data, pos)
+                pos += vlen
+            elif wire_type == 2:
+                length, llen = decode_varint(data, pos)
+                pos += llen + length
+            else:
+                raise ValueError(f"Unsupported wire type: {wire_type}")
+            continue
+        expected_wire, attr_name, xform, _default = info
+        if wire_type != expected_wire:
+            # Mismatched wire type — skip if 0 or 2, raise otherwise
+            if wire_type == 0:
+                _, vlen = decode_varint(data, pos)
+                pos += vlen
+            elif wire_type == 2:
+                length, llen = decode_varint(data, pos)
+                pos += llen + length
+            else:
+                raise ValueError(f"Unsupported wire type: {wire_type}")
+            continue
+        if wire_type == 0:  # Varint
+            value, vlen = decode_varint(data, pos)
+            pos += vlen
+        elif wire_type == 2:  # Length-delimited
+            length, llen = decode_varint(data, pos)
+            pos += llen
+            value = data[pos:pos + length]
+            pos += length
+        else:
+            raise ValueError(f"Unsupported wire type: {wire_type}")
+        if xform is not None:
+            value = xform(value)
+        result[attr_name] = value
+    return result
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 #  SensorReport (field 10)
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -275,33 +341,12 @@ def decode_command_ack(data):
 
     Returns dict with keys: cmd_id, node_id, success (bool), message.
     """
-    result = {"cmd_id": "", "node_id": "", "success": False, "message": ""}
-    pos = 0
-    while pos < len(data):
-        tag, tag_len = decode_varint(data, pos)
-        pos += tag_len
-        field_number = tag >> 3
-        wire_type = tag & 0x07
-
-        if wire_type == 0:  # Varint
-            value, vlen = decode_varint(data, pos)
-            pos += vlen
-            if field_number == 3:
-                result["success"] = bool(value)
-        elif wire_type == 2:  # Length-delimited
-            length, llen = decode_varint(data, pos)
-            pos += llen
-            value = data[pos:pos + length]
-            if field_number == 1:
-                result["cmd_id"] = value.decode("utf-8", "replace")
-            elif field_number == 2:
-                result["node_id"] = value.decode("utf-8", "replace")
-            elif field_number == 4:
-                result["message"] = value.decode("utf-8", "replace")
-            pos += length
-        else:
-            raise ValueError(f"Unsupported wire type in CommandAck: {wire_type}")
-    return result
+    return _decode_proto_message(data, {
+        1: (2, "cmd_id", lambda b: b.decode("utf-8", "replace"), ""),
+        2: (2, "node_id", lambda b: b.decode("utf-8", "replace"), ""),
+        3: (0, "success", bool, False),
+        4: (2, "message", lambda b: b.decode("utf-8", "replace"), ""),
+    })
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -332,32 +377,11 @@ def decode_text_message(data):
 
     Returns dict with keys: node_id, content, timestamp.
     """
-    result = {"node_id": "", "content": "", "timestamp": 0}
-    pos = 0
-    while pos < len(data):
-        tag, tag_len = decode_varint(data, pos)
-        pos += tag_len
-        field_number = tag >> 3
-        wire_type = tag & 0x07
-
-        if wire_type == 0:  # Varint
-            value, vlen = decode_varint(data, pos)
-            pos += vlen
-            if field_number == 3:
-                result["timestamp"] = value
-        elif wire_type == 2:  # Length-delimited
-            length, llen = decode_varint(data, pos)
-            pos += llen
-            value = data[pos:pos + length]
-            pos += length
-            if field_number == 1:
-                result["node_id"] = value.decode("utf-8")
-            elif field_number == 2:
-                result["content"] = value.decode("utf-8")
-        else:
-            raise ValueError(f"Unsupported wire type: {wire_type}")
-
-    return result
+    return _decode_proto_message(data, {
+        1: (2, "node_id", lambda b: b.decode("utf-8"), ""),
+        2: (2, "content", lambda b: b.decode("utf-8"), ""),
+        3: (0, "timestamp", int, 0),
+    })
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -383,35 +407,13 @@ def decode_audio_message(data):
 
     Returns dict with keys: node_id, audio_data (bytes), codec, duration_ms, timestamp.
     """
-    result = {"node_id": "", "audio_data": b"", "codec": "", "duration_ms": 0, "timestamp": 0}
-    pos = 0
-    while pos < len(data):
-        tag, tag_len = decode_varint(data, pos)
-        pos += tag_len
-        field_number = tag >> 3
-        wire_type = tag & 0x07
-
-        if wire_type == 0:  # Varint
-            value, vlen = decode_varint(data, pos)
-            pos += vlen
-            if field_number == 4:
-                result["duration_ms"] = value
-            elif field_number == 5:
-                result["timestamp"] = value
-        elif wire_type == 2:  # Length-delimited
-            length, llen = decode_varint(data, pos)
-            pos += llen
-            value = data[pos:pos + length]
-            if field_number == 1:
-                result["node_id"] = value.decode("utf-8", "replace")
-            elif field_number == 2:
-                result["audio_data"] = value
-            elif field_number == 3:
-                result["codec"] = value.decode("utf-8", "replace")
-            pos += length
-        else:
-            raise ValueError(f"Unsupported wire type in AudioMessage: {wire_type}")
-    return result
+    return _decode_proto_message(data, {
+        1: (2, "node_id", lambda b: b.decode("utf-8", "replace"), ""),
+        2: (2, "audio_data", None, b""),
+        3: (2, "codec", lambda b: b.decode("utf-8", "replace"), ""),
+        4: (0, "duration_ms", int, 0),
+        5: (0, "timestamp", int, 0),
+    })
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -438,37 +440,14 @@ def decode_image_message(data):
 
     Returns dict with keys: node_id, image_data (bytes), format, width, height, timestamp.
     """
-    result = {"node_id": "", "image_data": b"", "format": "", "width": 0, "height": 0, "timestamp": 0}
-    pos = 0
-    while pos < len(data):
-        tag, tag_len = decode_varint(data, pos)
-        pos += tag_len
-        field_number = tag >> 3
-        wire_type = tag & 0x07
-
-        if wire_type == 0:  # Varint
-            value, vlen = decode_varint(data, pos)
-            pos += vlen
-            if field_number == 4:
-                result["width"] = value
-            elif field_number == 5:
-                result["height"] = value
-            elif field_number == 6:
-                result["timestamp"] = value
-        elif wire_type == 2:  # Length-delimited
-            length, llen = decode_varint(data, pos)
-            pos += llen
-            value = data[pos:pos + length]
-            if field_number == 1:
-                result["node_id"] = value.decode("utf-8", "replace")
-            elif field_number == 2:
-                result["image_data"] = value
-            elif field_number == 3:
-                result["format"] = value.decode("utf-8", "replace")
-            pos += length
-        else:
-            raise ValueError(f"Unsupported wire type in ImageMessage: {wire_type}")
-    return result
+    return _decode_proto_message(data, {
+        1: (2, "node_id", lambda b: b.decode("utf-8", "replace"), ""),
+        2: (2, "image_data", None, b""),
+        3: (2, "format", lambda b: b.decode("utf-8", "replace"), ""),
+        4: (0, "width", int, 0),
+        5: (0, "height", int, 0),
+        6: (0, "timestamp", int, 0),
+    })
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -500,31 +479,11 @@ def decode_call_signal(data):
 
     Returns dict with keys: signal (int), sdp_or_ice, media_type.
     """
-    result = {"signal": 0, "sdp_or_ice": "", "media_type": ""}
-    pos = 0
-    while pos < len(data):
-        tag, tag_len = decode_varint(data, pos)
-        pos += tag_len
-        field_number = tag >> 3
-        wire_type = tag & 0x07
-
-        if wire_type == 0:  # Varint
-            value, vlen = decode_varint(data, pos)
-            pos += vlen
-            if field_number == 1:
-                result["signal"] = value
-        elif wire_type == 2:  # Length-delimited
-            length, llen = decode_varint(data, pos)
-            pos += llen
-            value = data[pos:pos + length]
-            if field_number == 2:
-                result["sdp_or_ice"] = value.decode("utf-8", "replace")
-            elif field_number == 3:
-                result["media_type"] = value.decode("utf-8", "replace")
-            pos += length
-        else:
-            raise ValueError(f"Unsupported wire type in CallSignal: {wire_type}")
-    return result
+    return _decode_proto_message(data, {
+        1: (0, "signal", int, 0),
+        2: (2, "sdp_or_ice", lambda b: b.decode("utf-8", "replace"), ""),
+        3: (2, "media_type", lambda b: b.decode("utf-8", "replace"), ""),
+    })
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

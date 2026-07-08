@@ -25,13 +25,27 @@ except ImportError:
     print("ERROR: grpcio is required. Install with: pip install grpcio grpcio-tools")
     sys.exit(1)
 
-# The proto/ directory must be on PYTHONPATH, or run from repo root
+# Use lma_core to import proto stubs (single import point)
 try:
-    from proto import lma_pb2, lma_pb2_grpc
+    from lma_core import (
+        LMAOEnvelope,
+        SendRequest,
+        SubscribeRequest,
+        GetIdentityRequest,
+        LMAOStub,
+        LMAOServicer,
+    )
 except ImportError:
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
     try:
-        from proto import lma_pb2, lma_pb2_grpc
+        from lma_core import (
+            LMAOEnvelope,
+            SendRequest,
+            SubscribeRequest,
+            GetIdentityRequest,
+            LMAOStub,
+            LMAOServicer,
+        )
     except ImportError:
         print(
             "ERROR: Cannot import gRPC stubs. "
@@ -42,7 +56,7 @@ except ImportError:
 
 def build_sensor_envelope(node_id: str, temperature: float, humidity: float) -> bytes:
     """Build a serialized LMAOEnvelope containing a SensorReport."""
-    envelope = lma_pb2.LMAOEnvelope()
+    envelope = LMAOEnvelope()
     envelope.sensor.node_id = node_id
     envelope.sensor.seq = int(time.time())
     envelope.sensor.battery = 3.7
@@ -62,20 +76,20 @@ def build_sensor_envelope(node_id: str, temperature: float, humidity: float) -> 
     return envelope.SerializeToString()
 
 
-def send_example(stub: lma_pb2_grpc.LMAOStub):
+def send_example(stub: LMAOStub):
     """Send a sensor reading via gRPC."""
     print("=== Send Example ===")
     payload = build_sensor_envelope("k8s-sensor-01", 22.5, 68.0)
-    request = lma_pb2.SendRequest(envelope=payload)
+    request = SendRequest(envelope=payload)
     response = stub.Send(request)
     print(f"Send response: status={response.status}, dest={response.destination_hash}")
     print()
 
 
-def subscribe_example(stub: lma_pb2_grpc.LMAOStub, timeout: int = 5):
+def subscribe_example(stub: LMAOStub, timeout: int = 5):
     """Subscribe to incoming messages for 'timeout' seconds."""
     print(f"=== Subscribe Example (listening for {timeout}s) ===")
-    request = lma_pb2.SubscribeRequest(title_filter="")
+    request = SubscribeRequest(title_filter="")
     try:
         for msg in stub.Subscribe(request, timeout=timeout):
             src = msg.source_hash or "<unknown>"
@@ -88,10 +102,10 @@ def subscribe_example(stub: lma_pb2_grpc.LMAOStub, timeout: int = 5):
     print()
 
 
-def get_identity_example(stub: lma_pb2_grpc.LMAOStub):
+def get_identity_example(stub: LMAOStub):
     """Fetch the server's identity."""
     print("=== GetIdentity Example ===")
-    response = stub.GetIdentity(lma_pb2.GetIdentityRequest())
+    response = stub.GetIdentity(GetIdentityRequest())
     print(f"Server identity: {response.identity_hex}")
     print(f"Node name:       {response.node_name}")
     print()
@@ -116,7 +130,7 @@ def main():
         args.get_identity = True
 
     channel = grpc.insecure_channel(args.server)
-    stub = lma_pb2_grpc.LMAOStub(channel)
+    stub = LMAOStub(channel)
 
     print(f"Connected to LMAO server at {args.server}")
     print()
