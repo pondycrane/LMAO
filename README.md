@@ -204,6 +204,18 @@ LoRa modulation independently.
 
 ### 6. Test Communication
 
+An automated E2E test can verify the full LoRa communication path with
+both devices connected:
+
+```bash
+bazel test //tests:test_cardputer_lora_e2e --test_output=all
+```
+
+The test auto-skips when hardware is not detected.  See
+[Section 10](#10-run-tests) for all test targets.
+
+Manual verification steps:
+
 1. Both devices powered on and within LoRa range
 2. Cardputer sends "Hello from Cardputer — seq 1" every 10 seconds
 3. Server displays: `MSG from <hash>: Hello from Cardputer`

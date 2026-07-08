@@ -1,14 +1,18 @@
-"""Tests for server config — no RNode required.
+"""Tests for config modules — no RNode required.
 
-These tests cover config module functions: _dict_to_ini(), get_configdir(),
-get_config_dict(), and _resolve_rnode_port().  All tests mock the filesystem
-and environment so they run without real hardware.
+Tests cover:
+  * lmao_server.config: _dict_to_ini(), get_configdir(), get_config_dict(),
+    and _resolve_rnode_port()
+  * cardputer_client.config: structural validation (importable, expected keys)
+
+All tests mock the filesystem and environment so they run without real hardware.
 
 Run with::
 
     bazel test //tests:test_config --test_output=all
 """
 
+import ast
 import os
 from unittest.mock import patch
 
@@ -223,6 +227,103 @@ class TestResolveRNodePort:
             with patch("os.path.exists", return_value=False):
                 result = config._resolve_rnode_port()
             assert result == "/dev/ttyUSB0"
+
+
+class TestCardputerConfigStructure:
+    """Verify cardputer_client/config.py compiles and exports expected keys.
+
+    A typo in config.py is only caught during hardware E2E tests currently.
+    These unit tests catch import/structural errors immediately.
+    """
+
+    def test_config_module_compile(self):
+        """config.py must be syntactically valid and compilable."""
+        config_path = os.path.join(
+            os.path.dirname(__file__), "..", "cardputer_client", "config.py"
+        )
+        with open(config_path, encoding="utf-8") as f:
+            code = f.read()
+        # Must compile cleanly
+        compile(code, config_path, "exec")
+
+    def test_config_exports_dest_hash(self):
+        """config.py must define DEST_HASH at module level."""
+        config_path = os.path.join(
+            os.path.dirname(__file__), "..", "cardputer_client", "config.py"
+        )
+        with open(config_path, encoding="utf-8") as f:
+            code = f.read()
+        tree = ast.parse(code)
+        top_level_names = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        top_level_names.add(target.id)
+            elif isinstance(node, ast.ImportFrom):
+                for alias in node.names:
+                    top_level_names.add(alias.asname or alias.name)
+            elif isinstance(node, ast.Import):
+                for alias in node.names:
+                    top_level_names.add(alias.asname or alias.name)
+        assert "DEST_HASH" in top_level_names, (
+            "config.py does not define DEST_HASH"
+        )
+
+    def test_config_exports_expected_keys(self):
+        """config.py must define all expected module-level names."""
+        config_path = os.path.join(
+            os.path.dirname(__file__), "..", "cardputer_client", "config.py"
+        )
+        with open(config_path, encoding="utf-8") as f:
+            code = f.read()
+        tree = ast.parse(code)
+        top_level_names = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        top_level_names.add(target.id)
+            elif isinstance(node, ast.ImportFrom):
+                for alias in node.names:
+                    top_level_names.add(alias.asname or alias.name)
+            elif isinstance(node, ast.Import):
+                for alias in node.names:
+                    top_level_names.add(alias.asname or alias.name)
+        expected = {"WIFI_SSID", "WIFI_PASS", "NODE_NAME", "DEBUG",
+                     "DEST_HASH", "CONFIG"}
+        missing = expected - top_level_names
+        assert not missing, (
+            f"config.py is missing expected names: {missing}"
+        )
+
+    def test_dest_hash_default_is_none(self):
+        """DEST_HASH must default to None (no server target until configured)."""
+        config_path = os.path.join(
+            os.path.dirname(__file__), "..", "cardputer_client", "config.py"
+        )
+        with open(config_path, encoding="utf-8") as f:
+            code = f.read()
+        tree = ast.parse(code)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if (isinstance(target, ast.Name) and
+                            target.id == "DEST_HASH"):
+                        # The value should be None (ast.NameConstant or
+                        # ast.Constant depending on Python version)
+                        if isinstance(node.value, ast.Constant):
+                            assert node.value.value is None, (
+                                f"DEST_HASH should default to None, "
+                                f"got {node.value.value!r}"
+                            )
+                        elif hasattr(ast, "NameConstant"):
+                            assert isinstance(node.value, ast.NameConstant), (
+                                f"Unexpected DEST_HASH value: {ast.dump(node.value)}"
+                            )
+                            assert node.value.value is None
+                        return
+        raise AssertionError("DEST_HASH assignment not found in config.py")
 
 
 if __name__ == "__main__":

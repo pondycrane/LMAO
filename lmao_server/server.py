@@ -48,6 +48,20 @@ except ImportError:
     logger.info("gRPC not available — K8s integration features disabled.")
 
 
+def _warn_if_rnode_missing(rnode_port):
+    """Warn if the RNode port does not exist."""
+    if os.path.exists(rnode_port):
+        return
+    logger.warning("RNode port %s not found. LoRa messaging will be unavailable.", rnode_port)
+    print(
+        f"\u26a0\ufe0f  RNode port {rnode_port} not found.\n"
+        f"   The server will start with WiFi AutoInterface only.\n"
+        f"   Set the LMAO_RNODE_PORT environment variable if your RNode is on a different port.\n"
+        f"   Example: LMAO_RNODE_PORT=/dev/ttyACM0 python3 server.py\n"
+        f"   LoRa messaging will be unavailable until an RNode is connected.\n"
+    )
+
+
 def _init_rns_and_lxmf(rnode_port, identity_storage_path="/tmp/lmao_server_lxmf"):
     """Shared Reticulum + LXMF initialization returning (identity, router).
 
@@ -234,17 +248,8 @@ class Server:
         )
 
         cfg_dict = self._config_dict if self._config_dict is not None else config.get_config_dict()
-        # Check if the RNode port exists before initializing
         rnode_port = cfg_dict['interfaces']['RNode LoRa']['port']
-        if not os.path.exists(rnode_port):
-            logger.warning("RNode port %s not found. LoRa messaging will be unavailable.", rnode_port)
-            print(
-                f"⚠️  RNode port {rnode_port} not found.\n"
-                f"   The server will start with WiFi AutoInterface only.\n"
-                f"   Set the LMAO_RNODE_PORT environment variable if your RNode is on a different port.\n"
-                f"   Example: LMAO_RNODE_PORT=/dev/ttyACM0 python3 server.py\n"
-                f"   LoRa messaging will be unavailable until an RNode is connected.\n"
-            )
+        _warn_if_rnode_missing(rnode_port)
 
         # Use shared initialization helper
         self.server_identity, self.router = _init_rns_and_lxmf(rnode_port)
@@ -404,15 +409,7 @@ async def async_main():
 
     cfg_dict = config.get_config_dict()
     rnode_port = cfg_dict['interfaces']['RNode LoRa']['port']
-
-    if not os.path.exists(rnode_port):
-        logger.warning("RNode port %s not found. LoRa messaging will be unavailable.", rnode_port)
-        print(
-            f"⚠️  RNode port {rnode_port} not found.\n"
-            f"   The server will start with WiFi AutoInterface only.\n"
-            f"   Set the LMAO_RNODE_PORT environment variable if your RNode is on a different port.\n"
-            f"   LoRa messaging will be unavailable until an RNode is connected.\n"
-        )
+    _warn_if_rnode_missing(rnode_port)
 
     # Use shared initialization helper (handles specific exception types)
     server_identity, router = _init_rns_and_lxmf(rnode_port)
