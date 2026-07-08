@@ -8,7 +8,6 @@ When gRPC is enabled (default), also serves the LMAO gRPC API on port 50051
 for K8s pod integration. The gRPC service provides:
   - Send:     Inject LMAOEnvelope into the LXMF mesh
   - Subscribe: Stream incoming LXMF messages to gRPC clients
-  - Tunnel:   Bidirectional raw LXMF packet tunnel
   - GetIdentity: Return the server's Reticulum identity hex
 """
 
@@ -20,12 +19,12 @@ import asyncio
 import atexit
 import shutil
 
-import RNS
-import LXMF
+from lma_core.rns_di import RNS, LXMF
 
 # Local imports
 import config
 from lma_core import LMAOEnvelope
+from lma_core.message_utils import decode_lmao_message
 
 from google.protobuf.message import DecodeError
 
@@ -174,33 +173,8 @@ class Server:
             logger.info("Message received — From: %s  Title: %s  Content length: %d bytes",
                          source_hash, title, len(content_bytes))
 
-            # Try protobuf decode first (matching the documented protocol)
-            display_text = None
-            envelope = LMAOEnvelope()
-            try:
-                envelope.ParseFromString(content_bytes)
-                if envelope.HasField('text'):
-                    text_msg = envelope.text
-                    display_text = text_msg.content
-                    logger.info("Content (protobuf): %s", display_text)
-                else:
-                    # Envelope decoded but contains a non-text payload.
-                    # Only text messages are supported in this POC.
-                    logger.warning(
-                        "Envelope contains non-text payload. "
-                        "Only text messages are supported in this POC. Falling back."
-                    )
-            except DecodeError:
-                logger.warning("Protobuf parse failed, falling back to raw text")
-
-            if display_text is None:
-                # Fallback: treat content as raw UTF-8 text (backward compat)
-                try:
-                    display_text = content_bytes.decode("utf-8")
-                    logger.info("Content (raw text): %s", display_text)
-                except UnicodeDecodeError:
-                    display_text = f"<non-text: {len(content_bytes)} bytes>"
-                    logger.info("Content: %s", display_text)
+            # Decode content (protobuf first, UTF-8 fallback, byte-count placeholder)
+            display_text = decode_lmao_message(content_bytes)
 
             # Build and send a protobuf-encoded ACK reply
             reply_text = f"ACK from LMAO Server — received your message ({len(content_bytes)} bytes)"
@@ -364,18 +338,6 @@ if GRPC_AVAILABLE:
             finally:
                 self._server.unregister_grpc_subscriber(queue)
 
-        async def Tunnel(self, request_iterator, context):
-            """Bidirectional tunnel — NOT YET IMPLEMENTED.
-
-            This RPC is a placeholder. A full implementation would reconstruct
-            LXMF messages from raw packet bytes and forward them bidirectionally.
-            """
-            async for request in request_iterator:
-                # Not implemented — abort the stream
-                logger.error("Tunnel RPC called but not yet implemented")
-                await context.abort(grpc.StatusCode.UNIMPLEMENTED, "Tunnel not yet implemented")
-            yield  # Unreachable — keeps function as async generator for gRPC
-
         async def GetIdentity(self, request, context):
             """Return the server's Reticulum identity hex."""
             identity_hex = RNS.hexrep(self._server.server_identity.hash, delimit=False)
@@ -441,7 +403,7 @@ async def async_main():
     if GRPC_AVAILABLE:
         grpc_service = LMAOGrpcService(lmao_server)
         grpc_server = grpc.aio.server()
-        from proto.lma_pb2_grpc import add_LMAOServicer_to_server
+        from lma_core import add_LMAOServicer_to_server
         add_LMAOServicer_to_server(grpc_service, grpc_server)
         grpc_server.add_insecure_port("0.0.0.0:50051")
         await grpc_server.start()

@@ -43,8 +43,6 @@ try:
         SendResponse,
         SubscribeRequest,
         SubscribeResponse,
-        TunnelRequest,
-        TunnelResponse,
         GetIdentityRequest,
         GetIdentityResponse,
     )
@@ -59,6 +57,7 @@ try:
         LMAOStub,
         LMAOServicer,
         LMAO,
+        add_LMAOServicer_to_server,
     )
 except ImportError:
     _logger.warning(
@@ -83,8 +82,8 @@ __all__ = [
 _GRPC_TYPES = [
     "SendRequest", "SendResponse",
     "SubscribeRequest", "SubscribeResponse",
-    "TunnelRequest", "TunnelResponse",
     "GetIdentityRequest", "GetIdentityResponse",
     "LMAOStub", "LMAOServicer", "LMAO",
+    "add_LMAOServicer_to_server",
 ]
 __all__ += [name for name in _GRPC_TYPES if name in globals()]

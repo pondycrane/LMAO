@@ -8,7 +8,7 @@
 Application   │  Chat · IoT Ingest · Command Dispatch · Call Signaling
               │  K8s Pods (gRPC Clients)
 ──────────────┼────────────────────────────────────────────────────────
-gRPC API      │  Send · Subscribe · Tunnel (planned) · GetIdentity
+gRPC API      │  Send · Subscribe · GetIdentity
               │  protobuf service on port 50051
 ──────────────┼────────────────────────────────────────────────────────
 LXMF          │  Message format: Dest|Src|Sig|Payload[Timestamp,Content,Title,Fields]
@@ -101,8 +101,9 @@ Defined in [`proto/lma.proto`](../proto/lma.proto) and served on port 50051.
 |-----|------|---------|
 | `Send` | Unary | Inject protobuf envelope into LXMF mesh |
 | `Subscribe` | Server-streaming | Stream incoming LXMF messages (with optional title_filter) |
-| `Tunnel` | Bidirectional-streaming | Bidirectional raw packet relay (planned) |
 | `GetIdentity` | Unary | Return server Reticulum identity hex |
+
+*The `Tunnel` RPC is commented out in the .proto — planned for v0.2.*
 
 See [`README.md`](../README.md#7-grpc-api-k8s-pod-integration) for usage examples.
 
@@ -270,3 +271,52 @@ library files are added.
 - **`oneof` dispatch** means receiver knows the message type in 1 byte
 - **Backward compatible** — new fields don't break old nodes (protobuf preserves unknown fields)
 - **Cross-platform out of the box** — `protoc` generates stubs for every language you'll touch
+
+## Post-Simplification (2026-07-08)
+
+A structural refactor eliminated duplicated code, dead imports, and
+layering violations across the host-side codebase.  No behaviour was
+changed — every change is revertible in a single `git revert`.
+
+### New / changed modules
+
+| Module | Change |
+|--------|--------|
+| `lma_core/message_utils.py` | **New** — shared `decode_lmao_message()` extracted from server + client handlers (~150 lines deduplicated) |
+| `lma_core/rns_di.py` | **New** — DI wrapper for RNS/LXMF; tests monkeypatch attributes instead of `sys.modules` |
+| `lma_core/config_utils.py` | Added `RnsConfig` factory (was only free functions) |
+| `lma_core/__init__.py` | Now exports `add_LMAOServicer_to_server`; removed `TunnelRequest`/`TunnelResponse` |
+| `lmao_server/config.py` | Reduced from ~75 to ~20 lines (uses `RnsConfig`) |
+| `human_client/config.py` | Same reduction |
+| `lmao_server/server.py` | Removed Tunnel handler; import path changes |
+| `human_client/client.py` | Removed unused `DecodeError` import |
+| `k8s-app/iot_ingest.py` | Imports proto stubs from `lma_core` instead of `proto.*` directly |
+| `cardputer_client/proto/lma_encoder.py` | Extracted `_decode_proto_message()` generic helper; 5 decode functions simplified |
+| `cardputer_client/main.py` | Removed `_print_exception` CPython shim |
+| `proto/lma.proto` | Commented out `Tunnel` RPC (TODO v0.2) |
+
+### Test infrastructure
+
+| File | Change |
+|------|--------|
+| `tests/conftest.py` | **New** — shared `setup_common_mocks()` / `cleanup_common_mocks()` (~75 lines deduplicated from 2 files) |
+| `tests/test_server_handler.py` | Split into `test_server_handler.py` (353 lines), `test_server_grpc.py` (274 lines), `test_server_startup.py` (405 lines) |
+| `tests/test_human_client.py` | Split into `test_human_client.py` (397 lines), `test_client_repl.py` (314 lines), `test_client_startup.py` (223 lines) |
+
+### Line-count impact
+
+| Before | After | Δ |
+|--------|-------|---|
+| 2 config modules, ~150 lines total | 2 config modules, ~40 lines total | −110 |
+| 2 handler decode blocks, ~150 lines total | 0 (shared `message_utils.py`) | −150 |
+| 2 mock-setup blocks, ~150 lines total | 1 (`conftest.py`) | −70 |
+| Largest test file: 991 lines | Largest test file: 405 lines | −59% |
+| `Tunnel` RPC placeholder | Removed | −30 lines |
+| `_print_exception` shim | Removed | −10 lines |
+
+### Deferred
+
+- **Task 10 (Split Transport god object):** The 1,487-line `cardputer_client/lib/urns/transport.py`
+  was not split because the refactor requires Cardputer hardware testing to validate
+  MicroPython compatibility, memory overhead, and import behaviour. This should be
+  done as part of a dedicated hardware testing session.
