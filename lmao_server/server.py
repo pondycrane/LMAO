@@ -26,6 +26,7 @@ import LXMF
 # Local imports
 import config
 from lma_core import LMAOEnvelope
+from lma_core.message_utils import decode_lmao_message
 
 from google.protobuf.message import DecodeError
 
@@ -174,33 +175,8 @@ class Server:
             logger.info("Message received — From: %s  Title: %s  Content length: %d bytes",
                          source_hash, title, len(content_bytes))
 
-            # Try protobuf decode first (matching the documented protocol)
-            display_text = None
-            envelope = LMAOEnvelope()
-            try:
-                envelope.ParseFromString(content_bytes)
-                if envelope.HasField('text'):
-                    text_msg = envelope.text
-                    display_text = text_msg.content
-                    logger.info("Content (protobuf): %s", display_text)
-                else:
-                    # Envelope decoded but contains a non-text payload.
-                    # Only text messages are supported in this POC.
-                    logger.warning(
-                        "Envelope contains non-text payload. "
-                        "Only text messages are supported in this POC. Falling back."
-                    )
-            except DecodeError:
-                logger.warning("Protobuf parse failed, falling back to raw text")
-
-            if display_text is None:
-                # Fallback: treat content as raw UTF-8 text (backward compat)
-                try:
-                    display_text = content_bytes.decode("utf-8")
-                    logger.info("Content (raw text): %s", display_text)
-                except UnicodeDecodeError:
-                    display_text = f"<non-text: {len(content_bytes)} bytes>"
-                    logger.info("Content: %s", display_text)
+            # Decode content (protobuf first, UTF-8 fallback, byte-count placeholder)
+            display_text = decode_lmao_message(content_bytes)
 
             # Build and send a protobuf-encoded ACK reply
             reply_text = f"ACK from LMAO Server — received your message ({len(content_bytes)} bytes)"

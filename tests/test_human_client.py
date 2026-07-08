@@ -16,9 +16,17 @@ def _setup_common_mocks():
     sys.modules["RNS"] = MagicMock()
     sys.modules["LXMF"] = MagicMock()
     sys.modules["config"] = MagicMock()
+
+    # Import the real message_utils module BEFORE mocking lma_core
+    # so that client.py's ``from lma_core.message_utils import ...`` resolves.
+    # The lazy import of LMAOEnvelope inside decode_lmao_message picks up
+    # the mock configured below at call time.
+    import lma_core.message_utils as _real_msg_utils
+
     sys.modules["lma_core"] = MagicMock()
     sys.modules["lma_core"].LMAOEnvelope = MagicMock()
     sys.modules["lma_core"].TextMessage = MagicMock()
+    sys.modules["lma_core.message_utils"] = _real_msg_utils
 
     # Mock RNS types
     sys.modules["RNS"].RNSException = type("RNSException", (Exception,), {})
@@ -42,7 +50,8 @@ def _setup_common_mocks():
 
 def _cleanup_common_mocks():
     """Remove mocked modules from sys.modules to prevent test pollution."""
-    for mod in ["RNS", "LXMF", "config", "lma_core", "client", "human_client", "human_client.client"]:
+    for mod in ["RNS", "LXMF", "config", "lma_core", "lma_core.message_utils",
+                "client", "human_client", "human_client.client"]:
         if mod in sys.modules:
             del sys.modules[mod]
 

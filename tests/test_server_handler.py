@@ -18,9 +18,17 @@ def _setup_common_mocks():
     sys.modules["RNS"] = MagicMock()
     sys.modules["LXMF"] = MagicMock()
     sys.modules["config"] = MagicMock()
+
+    # Import the real message_utils module BEFORE mocking lma_core
+    # so that server.py's ``from lma_core.message_utils import ...`` resolves.
+    # The lazy import of LMAOEnvelope inside decode_lmao_message picks up
+    # the mock configured below at call time.
+    import lma_core.message_utils as _real_msg_utils
+
     sys.modules["lma_core"] = MagicMock()
     sys.modules["lma_core"].LMAOEnvelope = MagicMock()
     sys.modules["lma_core"].TextMessage = MagicMock()
+    sys.modules["lma_core.message_utils"] = _real_msg_utils
 
     # Mock gRPC types
     grpc_mock = MagicMock()
@@ -67,8 +75,9 @@ def _setup_common_mocks():
 
 def _cleanup_common_mocks():
     """Remove mocked modules from sys.modules to prevent test pollution."""
-    for mod in ["RNS", "LXMF", "config", "lma_core", "grpc", "proto",
-                "proto.lma_pb2_grpc", "server", "lmao_server", "lmao_server.server"]:
+    for mod in ["RNS", "LXMF", "config", "lma_core", "lma_core.message_utils",
+                "grpc", "proto", "proto.lma_pb2_grpc",
+                "server", "lmao_server", "lmao_server.server"]:
         if mod in sys.modules:
             del sys.modules[mod]
 
@@ -389,7 +398,7 @@ class TestHandleLXMFDelivery:
         server.handle_lxmf_delivery(msg)
         server.router.handle_outbound.assert_called_once()
 
-    def test_protobuf_decode_uses_content_from_text_field(self, server_with_mocks):
+    def test_protobuf_decode_uses_content_from_text_field(self, server_with_mocks, caplog):
         """When protobuf decode succeeds and HasField('text') is True,
         the content from text.content is used as display_text."""
         server = server_with_mocks
@@ -406,18 +415,17 @@ class TestHandleLXMFDelivery:
         msg.content = b"protobuf-encoded-bytes"
         msg.title_as_string.return_value = "p:Envelope"
 
-        from lmao_server import server as server_mod
-        with patch.object(server_mod.logger, 'info', wraps=server_mod.logger.info) as mock_log:
+        with caplog.at_level(logging.INFO, logger="lma_core.message_utils"):
             server.handle_lxmf_delivery(msg)
 
         # Verify the protobuf content was logged
         found = any(
-            call.args and "Content (protobuf)" in str(call.args[0])
-            for call in mock_log.call_args_list
+            "Content (protobuf)" in record.message
+            for record in caplog.records
         )
         assert found, "Should log protobuf-decoded content"
 
-    def test_protobuf_decode_non_text_uses_fallback(self, server_with_mocks):
+    def test_protobuf_decode_non_text_uses_fallback(self, server_with_mocks, caplog):
         """When protobuf decode succeeds but HasField('text') is False,
         the handler falls back to raw UTF-8 decode of content bytes."""
         server = server_with_mocks
@@ -433,22 +441,20 @@ class TestHandleLXMFDelivery:
         msg.content = b"plain text fallback"
         msg.title_as_string.return_value = "p:Envelope"
 
-        from lmao_server import server as server_mod
-        with patch.object(server_mod.logger, 'warning', wraps=server_mod.logger.warning) as mock_warn, \
-             patch.object(server_mod.logger, 'info', wraps=server_mod.logger.info) as mock_info:
+        with caplog.at_level(logging.INFO, logger="lma_core.message_utils"):
             server.handle_lxmf_delivery(msg)
 
         # Verify fallback warning was logged
         warn_found = any(
-            call.args and "non-text payload" in str(call.args[0])
-            for call in mock_warn.call_args_list
+            "non-text payload" in record.message
+            for record in caplog.records
         )
         assert warn_found, "Should log warning about non-text payload"
 
         # Verify raw text fallback was used
         info_found = any(
-            call.args and "Content (raw text)" in str(call.args[0])
-            for call in mock_info.call_args_list
+            "Content (raw text)" in record.message
+            for record in caplog.records
         )
         assert info_found, "Should log raw text fallback content"
 
