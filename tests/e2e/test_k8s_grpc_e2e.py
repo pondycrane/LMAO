@@ -6,8 +6,10 @@ Validates the complete gRPC communication chain:
 The test:
   1. Detects a reachable K8s cluster via ``kubectl cluster-info``
   2. Starts a temporary LMAO server with gRPC on the host
-  3. Deploys a test pod running ``k8s-app/iot_ingest.py``
-  4. Verifies Send, Subscribe, and GetIdentity RPCs end-to-end
+  3. Deploys a K8s pod that runs an inline Python script to exercise gRPC RPCs
+     (avoids needing a custom container image; the script builds protobuf
+     descriptors dynamically and calls the gRPC endpoints directly)
+  4. Verifies GetIdentity and Send RPCs end-to-end
   5. Cleans up all K8s resources
 
 When no K8s cluster is reachable the test skips gracefully (same pattern
@@ -19,15 +21,17 @@ Run with::
 """
 
 import json
+import logging
 import os
 import subprocess
 import sys
 import time
-import traceback
 
 import pytest
 
 from conftest import setup_common_mocks, cleanup_common_mocks
+
+logger = logging.getLogger(__name__)
 
 # ── probe globals ───────────────────────────────────────────────────
 
@@ -141,30 +145,47 @@ def _cluster_required():
     return _CLUSTER_REASON
 
 
-def _kubectl(*args: str, timeout: int = 30) -> subprocess.CompletedProcess:
+def _kubectl(
+    *args: str,
+    timeout: int = 30,
+    input: str | None = None,
+) -> subprocess.CompletedProcess:
     """Run kubectl with the given arguments and return the result."""
-    return subprocess.run(
-        ["kubectl", *args],
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
+    try:
+        return subprocess.run(
+            ["kubectl", *args],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            input=input,
+        )
+    except FileNotFoundError:
+        logger.warning("kubectl not found in PATH")
+        raise
+    except subprocess.TimeoutExpired:
+        logger.warning("kubectl command timed out after %ds: %s", timeout, args)
+        raise
 
 
 def _cleanup_resources():
     """Delete K8s resources created by the test.  Best-effort."""
     resource_types = ["pod", "service", "endpoints"]
     for rtype in resource_types:
-        try:
-            _kubectl("delete", rtype, "lmao-e2e-server", "--ignore-not-found",
-                      timeout=10)
-        except Exception:
-            pass
-        try:
-            _kubectl("delete", rtype, "lmao-e2e-test", "--ignore-not-found",
-                      timeout=10)
-        except Exception:
-            pass
+        for name in ("lmao-e2e-server", "lmao-e2e-test"):
+            try:
+                _kubectl("delete", rtype, name, "--ignore-not-found",
+                          timeout=10)
+            except subprocess.TimeoutExpired:
+                logger.warning("Cleanup timeout deleting %s/%s", rtype, name)
+            except FileNotFoundError:
+                logger.warning(
+                    "kubectl not found during cleanup of %s/%s", rtype, name
+                )
+            except Exception:
+                logger.warning(
+                    "Unexpected error deleting %s/%s", rtype, name,
+                    exc_info=True,
+                )
 
 
 # ── tests ───────────────────────────────────────────────────────────
@@ -236,15 +257,14 @@ class TestK8sGrpcE2E:
         Steps:
           1. Start a temporary LMAO server with gRPC on localhost:50051
           2. Create K8s headless Service + Endpoints pointing to host IP
-          3. Deploy a test pod running k8s-app/iot_ingest.py
+          3. Deploys a K8s pod that runs an inline Python script to exercise
+             gRPC RPCs (avoids needing a custom container image)
           4. Verify GetIdentity RPC returns identity hex
           5. Verify Send RPC returns "queued" status
           6. Clean up all K8s resources (finally block)
         """
         import sys as _sys
         from unittest.mock import MagicMock
-
-        test_failed = False
 
         # ── 1. Start temporary LMAO server ─────────────────────────
         # Clean stale sys.modules from prior test runs.
@@ -288,7 +308,12 @@ class TestK8sGrpcE2E:
                 grpc_server.add_insecure_port(f"0.0.0.0:{server_port}")
                 grpc_server.start()
                 grpc_ready.set()
-                grpc_server.wait_for_termination()
+                try:
+                    grpc_server.wait_for_termination()
+                except Exception as post_exc:
+                    logger.warning(
+                        "gRPC server error after startup: %s", post_exc
+                    )
             except Exception as exc:
                 grpc_error = exc
                 grpc_ready.set()
@@ -474,35 +499,20 @@ print("Send: OK")
 channel.close()
 print("__E2E_SUCCESS__")
 '''
-            # Write the inline script to a temporary file on the host
-            # that we can pipe via kubectl
-            import tempfile
-            with tempfile.NamedTemporaryFile(
-                mode="w", suffix=".py", delete=False
-            ) as tmp:
-                tmp.write(inline_script)
-                script_path = tmp.name
-
-            try:
-                # Create pod with the test script
-                pod_result = _kubectl(
-                    "run", "lmao-e2e-test",
-                    "--rm",
-                    "-i",
-                    "--restart=Never",
-                    "--image=python:3.12-slim",
-                    f"--command",
-                    "--",
-                    "bash", "-c",
-                    "pip install -q grpcio protobuf 2>/dev/null && python3 -",
-                    timeout=120,
-                    input=inline_script,
-                )
-            finally:
-                try:
-                    os.unlink(script_path)
-                except OSError:
-                    pass
+            # Create pod with the inline test script passed via stdin
+            pod_result = _kubectl(
+                "run", "lmao-e2e-test",
+                "--rm",
+                "-i",
+                "--restart=Never",
+                "--image=python:3.12-slim",
+                "--command",
+                "--",
+                "bash", "-c",
+                "pip install -q grpcio protobuf 2>/dev/null && python3 -",
+                timeout=120,
+                input=inline_script,
+            )
 
             stdout = pod_result.stdout
             stderr = pod_result.stderr
@@ -515,8 +525,6 @@ print("__E2E_SUCCESS__")
 
             # ── 4. Assertions ─────────────────────────────────────
             if pod_result.returncode != 0:
-                # Check if the pod just failed to start (image pull, etc.)
-                test_failed = True
                 pytest.fail(
                     f"Test pod exited with code {pod_result.returncode}.\n"
                     f"stdout: {stdout[:2000]}\n"
@@ -534,13 +542,13 @@ print("__E2E_SUCCESS__")
                 f"stdout: {stdout[:2000]}"
             )
 
+            # All checks passed - print success before cleanup
+            print("\n✅ K8s gRPC E2E test passed!")
+
         finally:
             # ── 5. Cleanup ────────────────────────────────────────
             _cleanup_resources()
             cleanup_common_mocks()
-
-        if not test_failed:
-            print("\n✅ K8s gRPC E2E test passed!")
 
 
 if __name__ == "__main__":

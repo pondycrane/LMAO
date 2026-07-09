@@ -171,6 +171,9 @@ class TestSubscribeExample:
             def code(self):
                 return iot_ingest.grpc.StatusCode.UNAVAILABLE
 
+            def details(self):
+                return "Service unavailable"
+
             def __str__(self):
                 return "Service unavailable"
 

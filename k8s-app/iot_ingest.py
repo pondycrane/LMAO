@@ -8,7 +8,7 @@ This script demonstrates how to use the LMAO gRPC API from within a K8s pod:
   3. GetIdentity: Read the server's Reticulum identity
 
 Usage:
-  python k8s-app/iot_ingest.py [--server SERVER] [--send] [--subscribe] [--get-identity]
+  python k8s-app/iot_ingest.py [--server SERVER] [--send] [--subscribe] [--subscribe-timeout SECONDS] [--get-identity]
 
 Environment Variables:
   LMAO_SERVER  gRPC target (default: lmao-server.default.svc.cluster.local:50051)
@@ -22,7 +22,8 @@ import sys
 try:
     import grpc
 except ImportError:
-    print("ERROR: grpcio is required. Install with: pip install grpcio grpcio-tools")
+    print("ERROR: grpcio is required. Install with: pip install grpcio grpcio-tools",
+          file=sys.stderr)
     sys.exit(1)
 
 # Use lma_core to import proto stubs (single import point)
@@ -47,7 +48,8 @@ except ImportError:
             LMAOServicer,  # noqa: F401
         )
     except ImportError:
-        print("ERROR: Cannot import gRPC stubs. Run from repo root or set PYTHONPATH.")
+        print("ERROR: Cannot import gRPC stubs. Run from repo root or set PYTHONPATH.",
+              file=sys.stderr)
         sys.exit(1)
 
 
@@ -95,7 +97,7 @@ def subscribe_example(stub: LMAOStub, timeout: int = 5):
         if e.code() == grpc.StatusCode.CANCELLED:
             print("Subscribe stream ended (CANCELLED)")
         else:
-            print(f"  Subscribe error: {e}")
+            print(f"  Subscribe error: code={e.code()} details={e.details()}")
     print()
 
 
