@@ -23,6 +23,8 @@ import argparse
 import asyncio
 import logging
 import os
+
+logger = logging.getLogger(__name__)
 import time
 import sys
 
@@ -126,13 +128,16 @@ def subscribe_example(stub: LMAOStub, timeout: int = 5):
     except grpc.RpcError as e:
         if e.code() == grpc.StatusCode.CANCELLED:
             print("Subscribe stream ended (CANCELLED)")
+            logger.info("gRPC subscribe stream cancelled")
         elif e.code() == grpc.StatusCode.UNAVAILABLE:
             print(f"  Subscribe error: server unavailable — {e.details()}")
-            logging.warning("gRPC subscribe failed (UNAVAILABLE): %s", e.details())
+            logger.warning("gRPC subscribe failed (UNAVAILABLE): %s", e.details())
         elif e.code() == grpc.StatusCode.DEADLINE_EXCEEDED:
             print(f"  Subscribe timeout: {e.details()}")
+            logger.warning("gRPC subscribe timeout (DEADLINE_EXCEEDED): %s", e.details())
         else:
             print(f"  Subscribe error: code={e.code()} details={e.details()}")
+            logger.warning("gRPC subscribe error: code=%s details=%s", e.code(), e.details())
     print()
 
 
@@ -246,7 +251,7 @@ def main():
             print(f"ERROR: {e}", file=sys.stderr)
             sys.exit(1)
         except Exception:
-            logging.exception("NATS operation failed")
+            logger.exception("NATS operation failed")
             sys.exit(1)
 
         print("Done.")
@@ -277,5 +282,5 @@ if __name__ == "__main__":
         print(f"ERROR: gRPC call failed: {e.code()} - {e.details()}", file=sys.stderr)
         sys.exit(1)
     except Exception:
-        logging.exception("Unhandled error in main()")
+        logger.exception("Unhandled error in main()")
         sys.exit(1)
