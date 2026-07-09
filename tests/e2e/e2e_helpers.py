@@ -4,7 +4,9 @@ These helpers are imported by individual E2E test files to avoid code
 duplication.  They require pyserial and physical hardware to be connected.
 """
 
+import subprocess
 import sys
+import traceback
 
 import serial
 import serial.tools.list_ports
@@ -41,6 +43,7 @@ def find_rnode_port():
         ports = serial.tools.list_ports.comports()
     except Exception as exc:
         print(f"WARNING: Could not enumerate serial ports: {exc}", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
         return None
 
     for p in ports:
@@ -60,3 +63,121 @@ def find_rnode_port():
             return p.device
 
     return None
+
+
+def check_rnode_firmware(port: str, timeout: int = 15) -> bool:
+    """Check whether a Heltec on *port* is running RNode firmware.
+
+    Calls ``python -m RNS.Utilities.rnodeconf --port PORT --info`` and
+    inspects the output for tell-tale signs of RNode firmware.
+
+    Args:
+        port: Device path (e.g. ``/dev/ttyUSB0``).
+        timeout: Seconds to wait for the subprocess to complete.
+
+    Returns:
+        ``True`` if the port responds as an RNode, ``False`` otherwise
+        (including when ``rnodeconf`` is not importable or the subprocess
+        times out).
+    """
+    try:
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "RNS.Utilities.rnodeconf",
+                "--port",
+                port,
+                "--info",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except FileNotFoundError:
+        print(
+            "WARNING: Cannot run rnodeconf -- python interpreter not found.",
+            file=sys.stderr,
+        )
+        return False
+    except subprocess.TimeoutExpired as exc:
+        print(
+            f"WARNING: rnodeconf --info timed out after {timeout}s: {exc}",
+            file=sys.stderr,
+        )
+        return False
+    except Exception as exc:
+        print(
+            f"WARNING: rnodeconf --info failed for {port}: {exc}",
+            file=sys.stderr,
+        )
+        traceback.print_exc(file=sys.stderr)
+        return False
+
+    if result.returncode != 0:
+        return False
+
+    # A successful rnodeconf --info prints device details; look for
+    # expected firmware signature strings.
+    combined = (result.stdout + result.stderr).lower()
+    return "rnode firmware" in combined or "lora:" in combined
+
+
+def flash_rnode_firmware(port: str, timeout: int = 120) -> tuple[bool, str]:
+    """Flash RNode firmware onto the Heltec at *port* via ``rnodeconf --autoinstall``.
+
+    Performs an automated firmware install that erases and re-flashes the
+    ESP32.  This can take 60-90 seconds; the default timeout is 120 s.
+
+    Args:
+        port: Device path (e.g. ``/dev/ttyUSB0``).
+        timeout: Seconds to wait for flashing to complete.
+
+    Returns:
+        A ``(success, message)`` tuple.  *success* is ``True`` when the
+        subprocess exits 0; *message* contains the captured output or the
+        error summary.
+    """
+    print(f"\nAuto-flashing RNode firmware on {port} ...", flush=True)
+    try:
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "RNS.Utilities.rnodeconf",
+                "--port",
+                port,
+                "--autoinstall",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except FileNotFoundError:
+        msg = "Cannot run rnodeconf -- python interpreter not found. Is rns installed?"
+        print(f"WARNING: {msg}", file=sys.stderr)
+        return (False, msg)
+    except subprocess.TimeoutExpired as exc:
+        msg = (
+            f"rnodeconf --autoinstall timed out after {timeout}s. "
+            f"The Heltec may be stuck in bootloader mode: {exc}"
+        )
+        print(f"WARNING: {msg}", file=sys.stderr)
+        return (False, msg)
+    except Exception as exc:
+        msg = f"rnodeconf --autoinstall on {port} failed: {exc}"
+        print(f"WARNING: {msg}", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
+        return (False, msg)
+
+    if result.returncode != 0:
+        stderr_tail = [line for line in result.stderr.strip().split("\n") if line][-5:]
+        if stderr_tail:
+            msg = "Flash failed: " + "\n".join(stderr_tail)
+        else:
+            msg = f"rnodeconf exited {result.returncode}"
+        print(f"WARNING: {msg}", file=sys.stderr)
+        return (False, msg)
+
+    print("Flash successful.", flush=True)
+    return (True, "Flash successful")
