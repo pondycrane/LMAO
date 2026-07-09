@@ -2,6 +2,7 @@
 
 import asyncio
 import importlib.util
+import inspect
 import sys
 import types
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -384,7 +385,10 @@ class TestSubscribeExampleNats:
             msg = MagicMock()
             msg.data = b"hello"
             msg.subject = "lmao.messages.env"
-            callback(msg)
+            if inspect.iscoroutinefunction(callback):
+                await callback(msg)
+            else:
+                callback(msg)
             # Simulate long-running subscription
             while True:
                 await asyncio.sleep(0.1)
@@ -420,7 +424,10 @@ class TestSubscribeExampleNats:
                 msg = MagicMock()
                 msg.data = f"msg{i}".encode()
                 msg.subject = f"lmao.messages.{i}"
-                callback(msg)
+                if inspect.iscoroutinefunction(callback):
+                    await callback(msg)
+                else:
+                    callback(msg)
             while True:
                 await asyncio.sleep(0.1)
 
@@ -474,3 +481,279 @@ class TestMainFunction:
         assert "Send response" in captured.out
         assert "Subscribe Example" in captured.out
         assert "Server identity" in captured.out
+
+
+# ---------------------------------------------------------------------------
+# Fixture — mock DuckDB storage for DuckDB integration tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def mock_duckdb_store():
+    """Mock DuckDbStore so iot_ingest DuckDB integration tests run without real duckdb."""
+    mock_store = MagicMock()
+    mock_store.store_sensor_report = AsyncMock()
+    mock_store.query = AsyncMock()
+    mock_store.initialize = MagicMock()
+    mock_store.close = MagicMock()
+    return mock_store
+
+
+class TestSubscribeExampleNatsWithStore:
+    """Tests for subscribe_example_nats() with DuckDB store_path."""
+
+    @staticmethod
+    async def _awaiting_fake_subscribe(subject, durable, callback):
+        """Fake subscribe that properly awaits async callbacks."""
+        while True:
+            await asyncio.sleep(0.1)
+
+    @pytest.mark.asyncio
+    async def test_store_initialized_when_store_path_provided(
+        self, mock_nats_for_iot, mock_duckdb_store, capsys
+    ):
+        """subscribe_example_nats should initialize DuckDbStore when store_path is set."""
+        from lma_core.queue import NatsQueue
+
+        nq = NatsQueue(name="iot-ingest-subscriber")
+        nq.connect = AsyncMock()
+        nq.ensure_stream = AsyncMock()
+        nq.close = AsyncMock()
+        nq.subscribe = self._awaiting_fake_subscribe
+
+        with patch("lma_core.queue.NatsQueue", return_value=nq):
+            with patch(
+                "lma_core.storage.DuckDbStore", return_value=mock_duckdb_store
+            ):
+                await iot_ingest.subscribe_example_nats(
+                    "nats://test:4222",
+                    timeout=1,
+                    store_path="/tmp/test.db",
+                )
+
+        mock_duckdb_store.initialize.assert_called_once_with("/tmp/test.db")
+        mock_duckdb_store.close.assert_called_once()
+        captured = capsys.readouterr()
+        assert "DuckDB store initialized" in captured.out
+
+    @pytest.mark.asyncio
+    async def test_store_and_ack_calls_store_sensor_report(
+        self, mock_nats_for_iot, mock_duckdb_store
+    ):
+        """_store_and_ack should call store.store_sensor_report with message bytes."""
+        from lma_core.queue import NatsQueue
+
+        nq = NatsQueue(name="iot-ingest-subscriber")
+        nq.connect = AsyncMock()
+        nq.ensure_stream = AsyncMock()
+        nq.close = AsyncMock()
+
+        async def fake_subscribe(subject, durable, callback):
+            msg = MagicMock()
+            msg.data = b"test_sensor_data"
+            msg.subject = "lmao.messages.env"
+            await callback(msg)
+            while True:
+                await asyncio.sleep(0.1)
+
+        nq.subscribe = fake_subscribe
+
+        with patch("lma_core.queue.NatsQueue", return_value=nq):
+            with patch(
+                "lma_core.storage.DuckDbStore", return_value=mock_duckdb_store
+            ):
+                await iot_ingest.subscribe_example_nats(
+                    "nats://test:4222",
+                    timeout=1,
+                    store_path="/tmp/test.db",
+                )
+
+        mock_duckdb_store.store_sensor_report.assert_called_once_with(
+            b"test_sensor_data"
+        )
+
+    @pytest.mark.asyncio
+    async def test_store_failure_raises_for_nak(
+        self, mock_nats_for_iot, mock_duckdb_store
+    ):
+        """_store_and_ack should raise when store_sensor_report fails, triggering NAK."""
+        from lma_core.queue import NatsQueue
+
+        nq = NatsQueue(name="iot-ingest-subscriber")
+        nq.connect = AsyncMock()
+        nq.ensure_stream = AsyncMock()
+        nq.close = AsyncMock()
+
+        mock_duckdb_store.store_sensor_report.side_effect = RuntimeError(
+            "disk full"
+        )
+
+        callback_raised = []
+
+        async def fake_subscribe(subject, durable, callback):
+            msg = MagicMock()
+            msg.data = b"bad_data"
+            msg.subject = "lmao.messages.env"
+            try:
+                await callback(msg)
+            except RuntimeError:
+                callback_raised.append(True)
+            while True:
+                await asyncio.sleep(0.1)
+
+        nq.subscribe = fake_subscribe
+
+        with patch("lma_core.queue.NatsQueue", return_value=nq):
+            with patch(
+                "lma_core.storage.DuckDbStore", return_value=mock_duckdb_store
+            ):
+                await iot_ingest.subscribe_example_nats(
+                    "nats://test:4222",
+                    timeout=1,
+                    store_path="/tmp/test.db",
+                )
+
+        # The callback should have raised (which triggers NAK in subscribe loop)
+        assert len(callback_raised) == 1
+        mock_duckdb_store.store_sensor_report.assert_called_once()
+
+
+class TestQueryOnlyMode:
+    """Tests for --query flag (query-only mode)."""
+
+    def test_query_flag_runs_query_and_prints(self, mock_duckdb_store, capsys):
+        """main() with --query should run SQL query and print results."""
+        mock_duckdb_store.query.return_value = [("node-1", 5), ("node-2", 3)]
+
+        test_args = [
+            "iot_ingest.py",
+            "--query",
+            "SELECT node_id, count(*) FROM sensor_readings GROUP BY node_id",
+        ]
+
+        with patch.object(sys, "argv", test_args):
+            with patch(
+                "lma_core.storage.DuckDbStore", return_value=mock_duckdb_store
+            ):
+                iot_ingest.main()
+
+        mock_duckdb_store.initialize.assert_called_once()
+        assert mock_duckdb_store.query.call_count >= 1
+        # First query call should be the user's SQL
+        first_query_call = mock_duckdb_store.query.call_args_list[0]
+        assert "SELECT node_id, count(*)" in str(first_query_call)
+        mock_duckdb_store.close.assert_called_once()
+        captured = capsys.readouterr()
+        assert "Done." in captured.out
+
+    def test_query_flag_import_error_exits_cleanly(self, capsys):
+        """main() with --query should print clean error and exit when DuckDbStore
+        cannot be imported."""
+        test_args = ["iot_ingest.py", "--query", "SELECT 1"]
+
+        with patch.object(sys, "argv", test_args):
+            with patch(
+                "lma_core.storage.DuckDbStore",
+                side_effect=ImportError("duckdb is not installed"),
+            ):
+                with pytest.raises(SystemExit) as exc_info:
+                    iot_ingest.main()
+
+        assert exc_info.value.code == 1
+
+    def test_query_constructor_import_error_exits_cleanly(self, capsys):
+        """main() with --query should handle ImportError from DuckDbStore constructor."""
+        test_args = ["iot_ingest.py", "--query", "SELECT 1"]
+
+        mock_store_class = MagicMock(
+            side_effect=ImportError("duckdb not available")
+        )
+
+        with patch.object(sys, "argv", test_args):
+            with patch(
+                "lma_core.storage.DuckDbStore", mock_store_class
+            ):
+                with pytest.raises(SystemExit) as exc_info:
+                    iot_ingest.main()
+
+        assert exc_info.value.code == 1
+        captured = capsys.readouterr()
+        assert "ERROR:" in captured.err
+
+    def test_query_empty_result(self, mock_duckdb_store, capsys):
+        """main() with --query should print '(no rows returned)' for empty results."""
+        mock_duckdb_store.query.return_value = []
+
+        test_args = ["iot_ingest.py", "--query", "SELECT * FROM sensor_readings WHERE 1=0"]
+
+        with patch.object(sys, "argv", test_args):
+            with patch(
+                "lma_core.storage.DuckDbStore", return_value=mock_duckdb_store
+            ):
+                iot_ingest.main()
+
+        captured = capsys.readouterr()
+        assert "(no rows returned)" in captured.out
+
+
+class TestStoreCliParsing:
+    """Tests for --store and --db-path CLI argument parsing."""
+
+    def test_store_flag_passes_db_path_to_subscribe(self):
+        """--store --subscribe --use-nats should pass db_path to subscribe_example_nats."""
+        test_args = [
+            "iot_ingest.py",
+            "--use-nats",
+            "--subscribe",
+            "--store",
+            "--subscribe-timeout", "1",
+        ]
+
+        with patch.object(sys, "argv", test_args):
+            with patch.object(iot_ingest, "subscribe_example_nats") as mock_sub:
+                with patch.object(
+                    iot_ingest, "logger", "exception"
+                ) as mock_logger_exc:
+                    # Should not raise — subscribe_example_nats is mocked
+                    iot_ingest.main()
+
+        mock_sub.assert_called_once()
+        _, kwargs = mock_sub.call_args
+        assert kwargs["store_path"] == "/data/sensors.db"  # default
+
+    def test_custom_db_path_passed_to_subscribe(self):
+        """--db-path custom value should be passed to subscribe_example_nats."""
+        test_args = [
+            "iot_ingest.py",
+            "--use-nats",
+            "--subscribe",
+            "--store",
+            "--db-path", "/custom/path/sensors.db",
+            "--subscribe-timeout", "1",
+        ]
+
+        with patch.object(sys, "argv", test_args):
+            with patch.object(iot_ingest, "subscribe_example_nats") as mock_sub:
+                iot_ingest.main()
+
+        mock_sub.assert_called_once()
+        _, kwargs = mock_sub.call_args
+        assert kwargs["store_path"] == "/custom/path/sensors.db"
+
+    def test_store_without_subscribe_calls_subscribe_via_default(self):
+        """--store without --subscribe defaults to subscribe=True, so store_path is set."""
+        test_args = [
+            "iot_ingest.py",
+            "--use-nats",
+            "--store",
+        ]
+
+        with patch.object(sys, "argv", test_args):
+            with patch.object(iot_ingest, "subscribe_example_nats") as mock_sub:
+                with patch.object(iot_ingest, "send_example_nats") as mock_send:
+                    iot_ingest.main()
+
+        # subscribe_example_nats should be called with store_path set
+        mock_sub.assert_called_once()
+        _, kwargs = mock_sub.call_args
+        assert kwargs["store_path"] is not None

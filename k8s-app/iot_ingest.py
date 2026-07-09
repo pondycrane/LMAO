@@ -267,12 +267,6 @@ def main():
     )
     args = parser.parse_args()
 
-    if not (args.send or args.subscribe or args.get_identity):
-        # Default: run all examples
-        args.send = True
-        args.subscribe = True
-        args.get_identity = True
-
     # ── Query-only mode (DuckDB read, no NATS) ──────────────────
     if args.query and not (args.send or args.subscribe):
         try:
@@ -281,15 +275,23 @@ def main():
             print(f"ERROR: {e}", file=sys.stderr)
             sys.exit(1)
 
-        store = DuckDbStore(name="iot-ingest-query")
-        store.initialize(args.db_path)
+        try:
+            store = DuckDbStore(name="iot-ingest-query")
+        except ImportError as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            sys.exit(1)
+
+        try:
+            store.initialize(args.db_path, read_only=True)
+        except ImportError as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            sys.exit(1)
+
         try:
             rows = asyncio.run(store.query(args.query))
             if rows:
-                # Try duckdb's own pretty-print; fall back to repr
+                # Fetch column names for a header row
                 try:
-                    import duckdb as _duckdb_query
-                    # Fetch column names
                     col_rows = asyncio.run(
                         store.query(
                             f"SELECT column_name FROM information_schema.columns "
@@ -302,7 +304,10 @@ def main():
                         print("  ".join(cols))
                         print("-" * 60)
                 except Exception:
-                    pass
+                    logger.debug(
+                        "Could not fetch column names for query output",
+                        exc_info=True,
+                    )
                 for row in rows:
                     print(row)
             else:
@@ -311,6 +316,12 @@ def main():
             store.close()
         print("Done.")
         return
+
+    if not (args.send or args.subscribe or args.get_identity):
+        # Default: run all examples
+        args.send = True
+        args.subscribe = True
+        args.get_identity = True
 
     # ── NATS path ───────────────────────────────────────────────────
     if args.use_nats:
