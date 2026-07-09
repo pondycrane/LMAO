@@ -6,6 +6,7 @@ duplication.  They require pyserial and physical hardware to be connected.
 
 import subprocess
 import sys
+import traceback
 
 import serial
 import serial.tools.list_ports
@@ -42,6 +43,7 @@ def find_rnode_port():
         ports = serial.tools.list_ports.comports()
     except Exception as exc:
         print(f"WARNING: Could not enumerate serial ports: {exc}", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
         return None
 
     for p in ports:
@@ -106,9 +108,10 @@ def check_rnode_firmware(port: str, timeout: int = 15) -> bool:
         return False
     except Exception as exc:
         print(
-            f"WARNING: rnodeconf --info failed: {exc}",
+            f"WARNING: rnodeconf --info failed for {port}: {exc}",
             file=sys.stderr,
         )
+        traceback.print_exc(file=sys.stderr)
         return False
 
     if result.returncode != 0:
@@ -162,8 +165,9 @@ def flash_rnode_firmware(port: str, timeout: int = 120) -> tuple[bool, str]:
         print(f"WARNING: {msg}", file=sys.stderr)
         return (False, msg)
     except Exception as exc:
-        msg = f"rnodeconf --autoinstall failed: {exc}"
+        msg = f"rnodeconf --autoinstall on {port} failed: {exc}"
         print(f"WARNING: {msg}", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
         return (False, msg)
 
     if result.returncode != 0:

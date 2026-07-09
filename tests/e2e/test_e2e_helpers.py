@@ -253,6 +253,11 @@ class TestCheckRNodeFirmware:
         with patch("subprocess.run", side_effect=FileNotFoundError()):
             assert check_rnode_firmware("/dev/ttyUSB0") is False
 
+    def test_unexpected_exception(self):
+        """Returns False when an unexpected exception occurs (e.g. PermissionError)."""
+        with patch("subprocess.run", side_effect=PermissionError("denied")):
+            assert check_rnode_firmware("/dev/ttyUSB0") is False
+
     def test_empty_output_success(self):
         """Returns False when exit 0 but no firmware signature in output."""
         mock_result = SimpleNamespace(returncode=0, stdout="", stderr="")
@@ -321,6 +326,13 @@ class TestFlashRNodeFirmware:
             ok, msg = flash_rnode_firmware("/dev/ttyUSB0")
         assert ok is False
         assert "Cannot run rnodeconf" in msg
+
+    def test_unexpected_exception(self):
+        """Returns (False, ...) when an unexpected exception occurs (e.g. OSError)."""
+        with patch("subprocess.run", side_effect=OSError("disk full")):
+            ok, msg = flash_rnode_firmware("/dev/ttyUSB0")
+        assert ok is False
+        assert "autoinstall" in msg
 
     def test_tuple_return_type(self):
         """Return type is always tuple[bool, str] regardless of path."""
