@@ -6,6 +6,7 @@ py_library(
         "__init__.py",
         "config_utils.py",
         "message_utils.py",
+        "queue.py",
         "rns_di.py",
     ],
     visibility = ["//visibility:public"],
