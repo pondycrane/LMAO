@@ -16,7 +16,7 @@ import logging
 _logger = logging.getLogger(__name__)
 
 try:
-    from proto.lma_pb2 import (
+    from proto.lma_pb2 import (  # type: ignore[attr-defined]
         LMAOEnvelope,
         TextMessage,
         SensorReport,
@@ -38,7 +38,7 @@ except ImportError:
     raise
 
 try:
-    from proto.lma_pb2 import (
+    from proto.lma_pb2 import (  # noqa: F401  # type: ignore[attr-defined]
         SendRequest,
         SendResponse,
         SubscribeRequest,
@@ -53,7 +53,7 @@ except ImportError:
     )
 
 try:
-    from proto.lma_pb2_grpc import (
+    from proto.lma_pb2_grpc import (  # noqa: F401  # type: ignore[attr-defined]
         LMAOStub,
         LMAOServicer,
         LMAO,
@@ -80,10 +80,15 @@ __all__ = [
 
 # Conditionally add gRPC types to __all__ if they were imported
 _GRPC_TYPES = [
-    "SendRequest", "SendResponse",
-    "SubscribeRequest", "SubscribeResponse",
-    "GetIdentityRequest", "GetIdentityResponse",
-    "LMAOStub", "LMAOServicer", "LMAO",
+    "SendRequest",
+    "SendResponse",
+    "SubscribeRequest",
+    "SubscribeResponse",
+    "GetIdentityRequest",
+    "GetIdentityResponse",
+    "LMAOStub",
+    "LMAOServicer",
+    "LMAO",
     "add_LMAOServicer_to_server",
 ]
 __all__ += [name for name in _GRPC_TYPES if name in globals()]

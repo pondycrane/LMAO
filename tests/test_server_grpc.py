@@ -1,9 +1,6 @@
 """Tests for server gRPC service (with mocked RNS/LXMF)."""
-"""Tests for server message handler (with mocked RNS/LXMF)."""
 import asyncio
-import logging
-from unittest.mock import MagicMock, AsyncMock, patch, PropertyMock
-import builtins
+from unittest.mock import MagicMock, AsyncMock
 import pytest
 import sys
 from google.protobuf.message import DecodeError
@@ -27,7 +24,7 @@ def grpc_service_with_mocks():
     server_instance = server.Server()
     server_instance.router = MagicMock()
     server_instance.server_identity = MagicMock()
-    server_instance.server_identity.hash = b'\x01' * 16
+    server_instance.server_identity.hash = b"\x01" * 16
 
     grpc_svc = server.LMAOGrpcService(server_instance)
 
@@ -56,7 +53,7 @@ class TestLMAOGrpcService:
         SendResponse = sys.modules["lma_core"].SendResponse
         SendResponse.side_effect = lambda **kw: MagicMock(**kw)
 
-        response = await grpc_svc.Send(request, mock_context)
+        await grpc_svc.Send(request, mock_context)
 
         # Verify destination was resolved
         sys.modules["RNS"].Identity.from_hex.assert_called_once_with("a1b2c3d4")
@@ -245,9 +242,8 @@ class TestLMAOGrpcService:
         await gen.aclose()
 
 
-
-
 if __name__ == "__main__":
     import pytest
     import sys
+
     sys.exit(pytest.main([__file__] + sys.argv[1:]))

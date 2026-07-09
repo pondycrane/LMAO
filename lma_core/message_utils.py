@@ -39,15 +39,14 @@ def decode_lmao_message(content_bytes: bytes) -> str:
     envelope = LMAOEnvelope()
     try:
         envelope.ParseFromString(content_bytes)
-        if envelope.HasField('text'):
+        if envelope.HasField("text"):
             text = envelope.text.content
             _logger.info("Content (protobuf): %s", text)
             return text
-        else:
-            _logger.warning(
-                "Envelope contains non-text payload. "
-                "Only text messages are supported in this POC. Falling back."
-            )
+        _logger.warning(
+            "Envelope contains non-text payload. "
+            "Only text messages are supported in this POC. Falling back."
+        )
     except DecodeError:
         _logger.warning("Protobuf parse failed, falling back to raw text")
 

@@ -17,6 +17,7 @@ if _urns_parent not in sys.path:
 
 # ── Mock MicroPython dependencies before importing any urns module ──────────
 
+
 class _MockMicroPython:
     """Provides micropython.const() as a no-op passthrough and native decorator."""
 
@@ -35,6 +36,7 @@ sys.modules["micropython"] = _MockMicroPython()
 _mp_uhashlib = MagicMock()
 _mp_uhashlib.sha256 = hashlib.sha256
 sys.modules["uhashlib"] = _mp_uhashlib
+
 
 # ucryptolib — mock AES that passes plaintext through (no real crypto)
 class _MockAESCipher:
@@ -58,13 +60,19 @@ sys.modules["ucryptolib"] = _mp_ucryptolib
 
 # Now import the urns modules under test
 from urns.const import (
-    HEADER_MINSIZE, PKT_DATA, PKT_ANNOUNCE, PKT_LINKREQUEST,
-    PKT_PROOF, TRUNCATED_HASHLENGTH, DEST_SINGLE,
+    HEADER_MINSIZE,
+    PKT_DATA,
+    PKT_ANNOUNCE,
+    PKT_LINKREQUEST,
+    PKT_PROOF,
+    TRUNCATED_HASHLENGTH,
+    DEST_SINGLE,
 )  # noqa: E402
 from urns.packet import Packet  # noqa: E402
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
+
 
 def _make_mock_destination(hash_bytes=None, dest_type=None):
     """Create a minimal mock destination with .hash and .encrypt."""
@@ -79,6 +87,7 @@ def _make_mock_destination(hash_bytes=None, dest_type=None):
 
 
 # ── Tests ───────────────────────────────────────────────────────────────────
+
 
 class TestPacketRoundTrip:
     """Round-trip pack/unpack for each packet type."""

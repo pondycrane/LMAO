@@ -1,4 +1,5 @@
 """Test suite for lma_encoder — protobuf compatibility tests."""
+
 import logging
 import pytest
 
@@ -9,6 +10,7 @@ _logger = logging.getLogger(__name__)
 # Reference protobuf-generated encoder (only available with protobuf installed)
 try:
     from lma_core import LMAOEnvelope
+
     HAS_PROTOBUF = True
 except ImportError:
     _logger.warning(
@@ -38,7 +40,7 @@ class TestVarint:
 
     def test_truncated_varint_raises(self):
         """Decoding truncated varint should raise ValueError."""
-        data = b'\x80\x80\x80\x80\x80\x80\x80\x80\x80\x80\x01'  # 10 continuation bytes
+        data = b"\x80\x80\x80\x80\x80\x80\x80\x80\x80\x80\x01"  # 10 continuation bytes
         with pytest.raises(ValueError, match="Truncated varint"):
             enc.decode_varint(data[:1])  # Only one byte
 
@@ -370,7 +372,9 @@ class TestAudioMessage:
     def test_round_trip(self):
         """Encode/decode AudioMessage with binary audio data."""
         audio_data = b"\x00\x01\x02\x03"
-        encoded = enc.encode_audio_message("node-a", audio_data, "opus", 5000, 123456789)
+        encoded = enc.encode_audio_message(
+            "node-a", audio_data, "opus", 5000, 123456789
+        )
         decoded = enc.decode_audio_message(encoded)
         assert decoded["node_id"] == "node-a"
         assert decoded["audio_data"] == audio_data
@@ -420,8 +424,13 @@ class TestCallSignal:
 
     def test_all_signal_types(self):
         """All CallSignal enum values round-trip correctly."""
-        for sig in [enc.SIGNAL_OFFER, enc.SIGNAL_ANSWER, enc.SIGNAL_ICE,
-                     enc.SIGNAL_HANGUP, enc.SIGNAL_KEEPALIVE]:
+        for sig in [
+            enc.SIGNAL_OFFER,
+            enc.SIGNAL_ANSWER,
+            enc.SIGNAL_ICE,
+            enc.SIGNAL_HANGUP,
+            enc.SIGNAL_KEEPALIVE,
+        ]:
             encoded = enc.encode_call_signal(sig, "", "")
             decoded = enc.decode_call_signal(encoded)
             assert decoded["signal"] == sig
@@ -502,4 +511,5 @@ class TestBackwardCompatibility:
 if __name__ == "__main__":
     import pytest
     import sys
+
     sys.exit(pytest.main([__file__] + sys.argv[1:]))
