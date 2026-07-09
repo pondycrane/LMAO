@@ -49,7 +49,7 @@ except ImportError as exc:
         "nats-py is not installed. NATS queue features will be unavailable. "
         "Install with: pip install nats-py"
     )
-    _logger.warning(_NATS_IMPORT_ERROR)
+    _logger.warning("%s: %s", _NATS_IMPORT_ERROR, exc)
 
 
 # ---------------------------------------------------------------------------
@@ -137,6 +137,9 @@ class NatsQueue:
         if not _NATS_AVAILABLE:
             raise ImportError(_NATS_IMPORT_ERROR)
 
+        if self._nc is not None:
+            await self.close()
+
         _logger.info("Connecting to NATS at %s ...", servers)
         try:
             self._nc = await nats.connect(
@@ -178,8 +181,9 @@ class NatsQueue:
         """Idempotent stream creation / update.
 
         If the stream already exists its configuration is updated
-        to match the supplied subjects and defaults.  A no-op when
-        the existing stream config is already correct.
+        to match the supplied subjects and defaults.  This always
+        performs network I/O — it calls add_stream() first, then
+        falls back to update_stream() if the stream already exists.
 
         Parameters
         ----------
@@ -284,8 +288,9 @@ class NatsQueue:
         subject: str,
         durable_name: str,
         callback: Callable[[Any], Any],
+        fetch_timeout: int = 5,
         **kwargs: Any,
-    ) -> Any:
+    ) -> None:
         """Create a durable pull consumer and invoke *callback* for every
         message received.  Messages are explicitly acknowledged after
         the callback returns; unhandled exceptions trigger a negative
@@ -311,13 +316,21 @@ class NatsQueue:
             across client restarts.
         callback:
             Async or sync callable invoked with each ``nats.aio.msg.Msg``.
-            Return ``None`` to auto-ACK; raise to trigger NAK.
+            Return to auto-ACK (sync callbacks implicitly return None);
+            raise to trigger NAK.
         **kwargs:
             Passed to ``JetStreamContext.pull_subscribe()``
             (e.g. ``stream``, ``flow_control``).
-        Returns
-        -------
-            The ``JetStreamContext.PullSubscription`` object.
+        fetch_timeout:
+            Timeout in seconds passed to ``psub.fetch()``.
+            Default is 5.
+
+        Note
+        ----
+        This method loops forever processing messages and only returns
+        when cancelled.  Run as a background task (``asyncio.create_task``
+        or ``asyncio.ensure_future``).  The ``PullSubscription`` is
+        obtained internally and never returned to the caller.
         """
         self._check_connected()
 
@@ -338,7 +351,7 @@ class NatsQueue:
         try:
             while True:
                 try:
-                    msgs = await psub.fetch(1, timeout=5)
+                    msgs = await psub.fetch(1, timeout=fetch_timeout)
                 except TimeoutError:
                     # No messages available — keep waiting
                     continue
@@ -379,8 +392,6 @@ class NatsQueue:
             _logger.info("Subscribe cancelled for '%s'", subject)
             raise
 
-        return psub
-
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
@@ -391,19 +402,3 @@ class NatsQueue:
             raise RuntimeError(
                 "Not connected to NATS. Call `await nq.connect(...)` first."
             )
-
-
-# ---------------------------------------------------------------------------
-# Module-level factory (mirrors lma_core/config_utils.py pattern)
-# ---------------------------------------------------------------------------
-
-def create_queue(
-    servers: str = "nats://localhost:4222",
-    name: str = "lmao-queue",
-) -> NatsQueue:
-    """Create a ``NatsQueue`` instance (synchronous factory).
-
-    The returned instance must still be connected via
-    ``await nq.connect(servers)``.
-    """
-    return NatsQueue(name=name)
