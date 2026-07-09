@@ -122,6 +122,12 @@ def main():
     parser.add_argument(
         "--get-identity", action="store_true", help="Run GetIdentity example"
     )
+    parser.add_argument(
+        "--subscribe-timeout",
+        type=int,
+        default=5,
+        help="Seconds to listen on subscribe stream (default: 5)",
+    )
     args = parser.parse_args()
 
     if not (args.send or args.subscribe or args.get_identity):
@@ -141,7 +147,7 @@ def main():
     if args.send:
         send_example(stub)
     if args.subscribe:
-        subscribe_example(stub, timeout=5)
+        subscribe_example(stub, timeout=args.subscribe_timeout)
 
     channel.close()
     print("Done.")
