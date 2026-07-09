@@ -13,7 +13,13 @@ from unittest.mock import patch
 
 # Ensure the e2e/ directory is on sys.path for sibling imports
 sys.path.insert(0, os.path.dirname(__file__))
-from e2e_helpers import RNODE_VIDS, find_rnode_port, case_insensitive_contains
+from e2e_helpers import (
+    RNODE_VIDS,
+    find_rnode_port,
+    case_insensitive_contains,
+    check_rnode_firmware,
+    flash_rnode_firmware,
+)
 
 
 def _make_port(device, vid, description):
@@ -199,6 +205,144 @@ class TestRNODEVIDS:
         assert 0x303A in RNODE_VIDS  # Espressif
         assert 0x10C4 in RNODE_VIDS  # CP210x (Silicon Labs)
         assert 0x1A86 in RNODE_VIDS  # CH340
+
+
+class TestCheckRNodeFirmware:
+    """Tests for check_rnode_firmware() — mocked subprocess calls."""
+
+    def test_firmware_detected(self):
+        """Returns True when rnodeconf --info exits 0 with RNode output."""
+        mock_result = SimpleNamespace(
+            returncode=0,
+            stdout="RNode Firmware v1.73\nLoRa: ON\n",
+            stderr="",
+        )
+        with patch("subprocess.run", return_value=mock_result):
+            assert check_rnode_firmware("/dev/ttyUSB0") is True
+
+    def test_firmware_detected_lora_keyword(self):
+        """Returns True when output contains 'LoRa:' but not 'RNode Firmware'."""
+        mock_result = SimpleNamespace(
+            returncode=0,
+            stdout="Device: Heltec\nLoRa: SX1262\n",
+            stderr="",
+        )
+        with patch("subprocess.run", return_value=mock_result):
+            assert check_rnode_firmware("/dev/ttyUSB0") is True
+
+    def test_nonzero_returncode(self):
+        """Returns False when subprocess exits non-zero."""
+        mock_result = SimpleNamespace(
+            returncode=1,
+            stdout="",
+            stderr="Error: could not open port",
+        )
+        with patch("subprocess.run", return_value=mock_result):
+            assert check_rnode_firmware("/dev/ttyUSB0") is False
+
+    def test_timeout(self):
+        """Returns False (does not crash) when subprocess times out."""
+        with patch(
+            "subprocess.run",
+            side_effect=__import__("subprocess").TimeoutExpired("cmd", 15),
+        ):
+            assert check_rnode_firmware("/dev/ttyUSB0") is False
+
+    def test_filenotfound(self):
+        """Returns False when python interpreter is not found."""
+        with patch("subprocess.run", side_effect=FileNotFoundError()):
+            assert check_rnode_firmware("/dev/ttyUSB0") is False
+
+    def test_unexpected_exception(self):
+        """Returns False when an unexpected exception occurs (e.g. PermissionError)."""
+        with patch("subprocess.run", side_effect=PermissionError("denied")):
+            assert check_rnode_firmware("/dev/ttyUSB0") is False
+
+    def test_empty_output_success(self):
+        """Returns False when exit 0 but no firmware signature in output."""
+        mock_result = SimpleNamespace(returncode=0, stdout="", stderr="")
+        with patch("subprocess.run", return_value=mock_result):
+            assert check_rnode_firmware("/dev/ttyUSB0") is False
+
+    def test_firmware_in_stderr(self):
+        """Returns True when firmware signature appears in stderr."""
+        mock_result = SimpleNamespace(
+            returncode=0,
+            stdout="Probing /dev/ttyUSB0...",
+            stderr="RNode Firmware v1.73 detected",
+        )
+        with patch("subprocess.run", return_value=mock_result):
+            assert check_rnode_firmware("/dev/ttyUSB0") is True
+
+
+class TestFlashRNodeFirmware:
+    """Tests for flash_rnode_firmware() — mocked subprocess calls."""
+
+    def test_flash_succeeds(self):
+        """Returns (True, ...) when subprocess exits 0."""
+        mock_result = SimpleNamespace(
+            returncode=0,
+            stdout="Flashing...\nDone.\n",
+            stderr="",
+        )
+        with patch("subprocess.run", return_value=mock_result):
+            ok, msg = flash_rnode_firmware("/dev/ttyUSB0")
+        assert ok is True
+        assert "success" in msg.lower()
+
+    def test_flash_fails_with_stderr(self):
+        """Returns (False, error_msg) when subprocess exits non-zero."""
+        mock_result = SimpleNamespace(
+            returncode=1,
+            stdout="",
+            stderr="esptool.FatalError: Failed to connect",
+        )
+        with patch("subprocess.run", return_value=mock_result):
+            ok, msg = flash_rnode_firmware("/dev/ttyUSB0")
+        assert ok is False
+        assert "Flash failed" in msg
+
+    def test_flash_fails_no_stderr(self):
+        """Returns (False, ...) with exit code when stderr is empty."""
+        mock_result = SimpleNamespace(returncode=2, stdout="", stderr="")
+        with patch("subprocess.run", return_value=mock_result):
+            ok, msg = flash_rnode_firmware("/dev/ttyUSB0")
+        assert ok is False
+        assert "rnodeconf exited 2" in msg
+
+    def test_timeout(self):
+        """Returns (False, ...) when autoinstall times out."""
+        with patch(
+            "subprocess.run",
+            side_effect=__import__("subprocess").TimeoutExpired("cmd", 120),
+        ):
+            ok, msg = flash_rnode_firmware("/dev/ttyUSB0")
+        assert ok is False
+        assert "timed out" in msg
+
+    def test_filenotfound(self):
+        """Returns (False, ...) when python interpreter is not found."""
+        with patch("subprocess.run", side_effect=FileNotFoundError()):
+            ok, msg = flash_rnode_firmware("/dev/ttyUSB0")
+        assert ok is False
+        assert "Cannot run rnodeconf" in msg
+
+    def test_unexpected_exception(self):
+        """Returns (False, ...) when an unexpected exception occurs (e.g. OSError)."""
+        with patch("subprocess.run", side_effect=OSError("disk full")):
+            ok, msg = flash_rnode_firmware("/dev/ttyUSB0")
+        assert ok is False
+        assert "autoinstall" in msg
+
+    def test_tuple_return_type(self):
+        """Return type is always tuple[bool, str] regardless of path."""
+        mock_result = SimpleNamespace(returncode=0, stdout="ok", stderr="")
+        with patch("subprocess.run", return_value=mock_result):
+            result = flash_rnode_firmware("/dev/ttyUSB0")
+        assert isinstance(result, tuple)
+        assert len(result) == 2
+        assert isinstance(result[0], bool)
+        assert isinstance(result[1], str)
 
 
 if __name__ == "__main__":
