@@ -600,9 +600,7 @@ class TestNatsQueueSubscribe:
         task = asyncio.ensure_future(
             nq.subscribe("fatal.>", "pod-fatal", callback)
         )
-        # Wait long enough for all retries (backoff: 1, 2, 4, 8, 16, 32, 60, 60, 60… ~303s total)
-        # but we cancel after a few seconds; the task should have raised by then
-        # Actually the retries take too long — let's just check it keeps retrying
+        # Allow enough time for at least a few retry attempts before cancelling
         await asyncio.sleep(2)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
