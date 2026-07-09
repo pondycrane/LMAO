@@ -44,6 +44,35 @@ py_test(
 )
 
 py_test(
+    name = "test_iot_ingest",
+    srcs = ["test_iot_ingest.py"],
+    data = ["//k8s-app:iot_ingest.py"],
+    deps = [
+        "//lma_core",
+        "//proto:lma_py_proto",
+        "@lmao_pip//pytest",
+    ],
+)
+
+py_test(
+    name = "test_k8s_grpc_e2e",
+    srcs = [
+        "e2e/test_k8s_grpc_e2e.py",
+        "conftest.py",
+    ],
+    main = "e2e/test_k8s_grpc_e2e.py",
+    imports = ["."],
+    deps = [
+        "//lmao_server:server_lib",
+        "@lmao_pip//protobuf",
+        "@lmao_pip//pytest",
+    ],
+    # E2E test requires a reachable K8s cluster (kubectl).
+    # The test auto-skips when kubectl cluster-info fails.
+    tags = ["e2e", "requires_k8s"],
+)
+
+py_test(
     name = "test_cardputer_e2e",
     srcs = [
         "e2e/test_cardputer_flash.py",
