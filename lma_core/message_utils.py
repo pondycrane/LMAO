@@ -39,7 +39,7 @@ def decode_lmao_message(content_bytes: bytes) -> str:
     envelope = LMAOEnvelope()
     try:
         envelope.ParseFromString(content_bytes)
-        if envelope.HasField('text'):
+        if envelope.HasField("text"):
             text = envelope.text.content
             _logger.info("Content (protobuf): %s", text)
             return text

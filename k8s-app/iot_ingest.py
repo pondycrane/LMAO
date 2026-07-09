@@ -44,13 +44,10 @@ except ImportError:
             SubscribeRequest,
             GetIdentityRequest,
             LMAOStub,
-            LMAOServicer,
+            LMAOServicer,  # noqa: F401
         )
     except ImportError:
-        print(
-            "ERROR: Cannot import gRPC stubs. "
-            "Run from repo root or set PYTHONPATH."
-        )
+        print("ERROR: Cannot import gRPC stubs. Run from repo root or set PYTHONPATH.")
         sys.exit(1)
 
 
@@ -119,8 +116,12 @@ def main():
         help="gRPC server address",
     )
     parser.add_argument("--send", action="store_true", help="Run Send example")
-    parser.add_argument("--subscribe", action="store_true", help="Run Subscribe example")
-    parser.add_argument("--get-identity", action="store_true", help="Run GetIdentity example")
+    parser.add_argument(
+        "--subscribe", action="store_true", help="Run Subscribe example"
+    )
+    parser.add_argument(
+        "--get-identity", action="store_true", help="Run GetIdentity example"
+    )
     args = parser.parse_args()
 
     if not (args.send or args.subscribe or args.get_identity):

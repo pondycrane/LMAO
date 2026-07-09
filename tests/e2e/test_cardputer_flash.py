@@ -23,6 +23,7 @@ import pytest
 try:
     import serial
     import serial.tools.list_ports
+
     HAS_PYSERIAL = True
 except ImportError:
     HAS_PYSERIAL = False
@@ -31,12 +32,14 @@ except ImportError:
 # Import the flash library (available when running under Bazel via deps)
 try:
     from cardputer_client import flash as cardputer_flash
+
     HAS_FLASH_LIB = True
 except ImportError:
     HAS_FLASH_LIB = False
 
 
 # ── helpers ─────────────────────────────────────────────────────────
+
 
 def _find_port():
     """Return the device path of a connected Cardputer, or *None*."""
@@ -95,6 +98,7 @@ def _hardware_required():
 
 
 # ── tests ───────────────────────────────────────────────────────────
+
 
 class TestHardwareDetection:
     """Tests that do NOT require a physical Cardputer."""
@@ -203,7 +207,9 @@ class TestCardputerE2E:
         assert ok, "Cannot enter raw REPL"
 
         # Write a small temporary file to the device
-        ok, out = cardputer_flash.exec_raw(serial_conn, """
+        ok, out = cardputer_flash.exec_raw(
+            serial_conn,
+            """
 try:
     import os as _os
     _os.remove('/__e2e_test__.py')
@@ -213,28 +219,35 @@ _f = open('/__e2e_test__.py', 'w')
 _f.write('ANSWER = 42\\n')
 _f.close()
 print('WRITE_OK')
-""")
+""",
+        )
         assert ok and "WRITE_OK" in out, f"Write failed: {out[:200]}"
 
         # Read back the file
-        ok, out = cardputer_flash.exec_raw(serial_conn, """
+        ok, out = cardputer_flash.exec_raw(
+            serial_conn,
+            """
 try:
     _f = open('/__e2e_test__.py', 'r')
     print(_f.read())
     _f.close()
 except Exception as _e:
     print('READ_ERR:' + str(_e))
-""")
+""",
+        )
         assert ok and "ANSWER = 42" in out, f"Read-back failed: {out[:200]}"
 
         # Clean up
-        cardputer_flash.exec_raw(serial_conn, """
+        cardputer_flash.exec_raw(
+            serial_conn,
+            """
 try:
     import os as _os
     _os.remove('/__e2e_test__.py')
 except:
     pass
-""")
+""",
+        )
 
         cardputer_flash.exit_raw_repl(serial_conn)
 
@@ -308,4 +321,5 @@ except:
 if __name__ == "__main__":
     import pytest
     import sys
+
     sys.exit(pytest.main([__file__] + sys.argv[1:]))

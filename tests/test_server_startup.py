@@ -1,12 +1,10 @@
 """Tests for server startup and lifecycle (with mocked RNS/LXMF)."""
+
 """Tests for server message handler (with mocked RNS/LXMF)."""
-import asyncio
-import logging
 from unittest.mock import MagicMock, AsyncMock, patch, PropertyMock
 import builtins
 import pytest
 import sys
-from google.protobuf.message import DecodeError
 
 from conftest import setup_common_mocks, cleanup_common_mocks
 
@@ -41,7 +39,7 @@ class TestMain:
 
         # Configure mocks for happy path
         mock_identity = MagicMock()
-        type(mock_identity).hash = PropertyMock(return_value=b'\x01' * 16)
+        type(mock_identity).hash = PropertyMock(return_value=b"\x01" * 16)
         sys.modules["RNS"].Identity.return_value = mock_identity
 
         # Trigger KeyboardInterrupt to exit the infinite loop
@@ -69,50 +67,71 @@ class TestMain:
         """main() should exit(1) when RNS.Identity() fails."""
         server = server_with_main_mocks
 
-        sys.modules["RNS"].Identity.side_effect = sys.modules["RNS"].RNSException("OOM in crypto")
+        sys.modules["RNS"].Identity.side_effect = sys.modules["RNS"].RNSException(
+            "OOM in crypto"
+        )
 
-        with patch.object(server.os.path, "exists", return_value=True), \
-             patch.object(server.time, "sleep", side_effect=KeyboardInterrupt):
+        with (
+            patch.object(server.os.path, "exists", return_value=True),
+            patch.object(server.time, "sleep", side_effect=KeyboardInterrupt),
+        ):
             with pytest.raises(SystemExit) as exc:
                 server.main()
 
-        assert exc.value.code == 1, "Should exit with code 1 on identity creation failure"
+        assert exc.value.code == 1, (
+            "Should exit with code 1 on identity creation failure"
+        )
         captured = capsys.readouterr()
-        assert "FATAL" in captured.out + captured.err, "Output should indicate FATAL error"
+        assert "FATAL" in captured.out + captured.err, (
+            "Output should indicate FATAL error"
+        )
 
     def test_router_creation_failure(self, server_with_main_mocks, capsys):
         """main() should exit(1) when LXMF.LXMRouter() fails."""
         server = server_with_main_mocks
 
         mock_identity = MagicMock()
-        type(mock_identity).hash = PropertyMock(return_value=b'\x01' * 16)
+        type(mock_identity).hash = PropertyMock(return_value=b"\x01" * 16)
         sys.modules["RNS"].Identity.return_value = mock_identity
-        sys.modules["LXMF"].LXMRouter.side_effect = sys.modules["LXMF"].LXMFException("Storage unwritable")
+        sys.modules["LXMF"].LXMRouter.side_effect = sys.modules["LXMF"].LXMFException(
+            "Storage unwritable"
+        )
 
-        with patch.object(server.os.path, "exists", return_value=True), \
-             patch.object(server.time, "sleep", side_effect=KeyboardInterrupt):
+        with (
+            patch.object(server.os.path, "exists", return_value=True),
+            patch.object(server.time, "sleep", side_effect=KeyboardInterrupt),
+        ):
             with pytest.raises(SystemExit) as exc:
                 server.main()
 
         assert exc.value.code == 1, "Should exit with code 1 on router creation failure"
         captured = capsys.readouterr()
-        assert "FATAL" in captured.out + captured.err, "Output should indicate FATAL error"
+        assert "FATAL" in captured.out + captured.err, (
+            "Output should indicate FATAL error"
+        )
 
-    @pytest.mark.parametrize("rnode_exists,expected_substr", [
-        (True, "RNode on /dev/ttyUSB0"),
-        (False, "RNode not connected"),
-    ])
-    def test_banner_reflects_rnode_status(self, server_with_main_mocks, rnode_exists, expected_substr, capsys, caplog):
+    @pytest.mark.parametrize(
+        "rnode_exists,expected_substr",
+        [
+            (True, "RNode on /dev/ttyUSB0"),
+            (False, "RNode not connected"),
+        ],
+    )
+    def test_banner_reflects_rnode_status(
+        self, server_with_main_mocks, rnode_exists, expected_substr, capsys, caplog
+    ):
         """Banner should show RNode status or warning based on port existence."""
         server = server_with_main_mocks
 
         mock_identity = MagicMock()
-        type(mock_identity).hash = PropertyMock(return_value=b'\x01' * 16)
+        type(mock_identity).hash = PropertyMock(return_value=b"\x01" * 16)
         sys.modules["RNS"].Identity.return_value = mock_identity
 
         # start() now returns naturally on KeyboardInterrupt, no sys.exit
-        with patch.object(server.os.path, "exists", return_value=rnode_exists), \
-             patch.object(server.time, "sleep", side_effect=KeyboardInterrupt):
+        with (
+            patch.object(server.os.path, "exists", return_value=rnode_exists),
+            patch.object(server.time, "sleep", side_effect=KeyboardInterrupt),
+        ):
             server.main()
 
         captured = capsys.readouterr()
@@ -129,13 +148,18 @@ class TestMain:
                 for record in caplog.records
             ), "logger.warning should contain RNode port not found message"
 
-    @pytest.mark.parametrize("exc_cls_name,exc_msg,expected_err", [
-        ("PermissionError", "Permission denied", "FATAL"),
-        ("OSError", "Disk full", "FATAL"),
-        ("RNSException", "RNS init failed", "FATAL"),
-        ("Exception", "Generic error", "FATAL"),
-    ])
-    def test_ret_init_failure_handling(self, server_with_main_mocks, exc_cls_name, exc_msg, expected_err, capsys):
+    @pytest.mark.parametrize(
+        "exc_cls_name,exc_msg,expected_err",
+        [
+            ("PermissionError", "Permission denied", "FATAL"),
+            ("OSError", "Disk full", "FATAL"),
+            ("RNSException", "RNS init failed", "FATAL"),
+            ("Exception", "Generic error", "FATAL"),
+        ],
+    )
+    def test_ret_init_failure_handling(
+        self, server_with_main_mocks, exc_cls_name, exc_msg, expected_err, capsys
+    ):
         """main() should print fatal error and exit(1) when Reticulum init fails."""
         server = server_with_main_mocks
 
@@ -146,8 +170,10 @@ class TestMain:
             exc_cls = getattr(builtins, exc_cls_name, None)
         assert exc_cls is not None, f"Unknown exception class: {exc_cls_name}"
 
-        with patch.object(server.os.path, "exists", return_value=True), \
-             patch.object(server.RNS, "Reticulum", side_effect=exc_cls(exc_msg)):
+        with (
+            patch.object(server.os.path, "exists", return_value=True),
+            patch.object(server.RNS, "Reticulum", side_effect=exc_cls(exc_msg)),
+        ):
             with pytest.raises(SystemExit) as exc:
                 server.main()
 
@@ -170,6 +196,7 @@ class TestAsyncMain:
 
         # Force GRPC_AVAILABLE to False
         from lmao_server import server as server_mod
+
         original_grpc = server_mod.GRPC_AVAILABLE
         server_mod.GRPC_AVAILABLE = False
 
@@ -179,8 +206,9 @@ class TestAsyncMain:
         sys.modules["RNS"].Identity.return_value = mock_identity
 
         # Make asyncio.sleep raise KeyboardInterrupt after one iteration
-        with patch.object(server_mod.asyncio, "sleep",
-                          side_effect=[None, KeyboardInterrupt]) as mock_sleep:
+        with patch.object(
+            server_mod.asyncio, "sleep", side_effect=[None, KeyboardInterrupt]
+        ):
             await server_mod.async_main()
 
         captured = capsys.readouterr()
@@ -220,8 +248,7 @@ class TestAsyncMain:
         sys.modules["lma_core"].add_LMAOServicer_to_server = mock_add
 
         # Make asyncio.sleep raise KeyboardInterrupt to exit
-        with patch.object(server_mod.asyncio, "sleep",
-                          side_effect=KeyboardInterrupt):
+        with patch.object(server_mod.asyncio, "sleep", side_effect=KeyboardInterrupt):
             await server_mod.async_main()
 
         captured = capsys.readouterr()
@@ -250,6 +277,7 @@ class TestInitRnsAndLxmf:
             del sys.modules["server"]
         setup_common_mocks(with_grpc=True)
         from lmao_server import server as mod
+
         yield mod
         cleanup_common_mocks()
 
@@ -267,7 +295,9 @@ class TestInitRnsAndLxmf:
 
     def test_init_custom_storage_path(self, server_mod):
         """_init_rns_and_lxmf should pass custom identity_storage_path."""
-        server_mod._init_rns_and_lxmf("/dev/ttyUSB0", identity_storage_path="/custom/path")
+        server_mod._init_rns_and_lxmf(
+            "/dev/ttyUSB0", identity_storage_path="/custom/path"
+        )
 
         _, kwargs = sys.modules["LXMF"].LXMRouter.call_args
         assert kwargs.get("storagepath") == "/custom/path"
@@ -338,9 +368,11 @@ class TestServerStart:
         type(mock_identity).hash = PropertyMock(return_value=b"\x01" * 16)
         sys.modules["RNS"].Identity.return_value = mock_identity
 
-        server_instance = mod.Server(config_dict={
-            "interfaces": {"RNode LoRa": {"port": "/dev/ttyUSB0"}},
-        })
+        server_instance = mod.Server(
+            config_dict={
+                "interfaces": {"RNode LoRa": {"port": "/dev/ttyUSB0"}},
+            }
+        )
 
         yield server_instance, mod
         cleanup_common_mocks()
@@ -367,8 +399,10 @@ class TestServerStart:
         """start() should print warning when RNode port does not exist."""
         server_inst, mod = server_and_mod
 
-        with patch.object(mod.os.path, "exists", return_value=False), \
-             patch.object(mod.time, "sleep", side_effect=KeyboardInterrupt):
+        with (
+            patch.object(mod.os.path, "exists", return_value=False),
+            patch.object(mod.time, "sleep", side_effect=KeyboardInterrupt),
+        ):
             server_inst.start()
 
         captured = capsys.readouterr()
@@ -389,17 +423,18 @@ class TestServerStart:
         """start() should use the config_dict passed to constructor."""
         server_inst, mod = server_and_mod
 
-        with patch.object(mod.os.path, "exists", return_value=True), \
-             patch.object(mod.time, "sleep", side_effect=KeyboardInterrupt):
+        with (
+            patch.object(mod.os.path, "exists", return_value=True),
+            patch.object(mod.time, "sleep", side_effect=KeyboardInterrupt),
+        ):
             server_inst.start()
 
         captured = capsys.readouterr()
         assert "/dev/ttyUSB0" in captured.out
 
 
-
-
 if __name__ == "__main__":
     import pytest
     import sys
+
     sys.exit(pytest.main([__file__] + sys.argv[1:]))

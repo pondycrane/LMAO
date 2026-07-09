@@ -11,6 +11,7 @@ _urns_parent = os.path.abspath(_urns_parent)
 if _urns_parent not in sys.path:
     sys.path.insert(0, _urns_parent)
 
+
 # Mock MicroPython dependencies
 class _MockMicroPython:
     @staticmethod
@@ -21,11 +22,13 @@ class _MockMicroPython:
     def native(f):
         return f
 
+
 sys.modules["micropython"] = _MockMicroPython()
 
 _mp_uhashlib = MagicMock()
 _mp_uhashlib.sha256 = hashlib.sha256
 sys.modules["uhashlib"] = _mp_uhashlib
+
 
 class _MockAESCipher:
     def __init__(self, key, mode, iv):
@@ -36,6 +39,7 @@ class _MockAESCipher:
 
     def decrypt(self, ciphertext):
         return ciphertext
+
 
 _mp_ucryptolib = MagicMock()
 _mp_ucryptolib.aes = _MockAESCipher
@@ -51,7 +55,9 @@ class TestIdentityCreation:
     def test_creates_valid_keypair(self):
         identity = Identity()
         assert identity.hash is not None
-        assert len(identity.hash) == const.TRUNCATED_HASHLENGTH // 8  # 16 bytes (truncated)
+        assert (
+            len(identity.hash) == const.TRUNCATED_HASHLENGTH // 8
+        )  # 16 bytes (truncated)
         assert identity.pub is not None
         assert identity.prv is not None
 

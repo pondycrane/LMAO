@@ -57,12 +57,22 @@ class Client:
         """
         try:
             source_identity = message.get_source()
-            source_hash = RNS.hexrep(source_identity.hash, delimit=False) if source_identity else "<unknown>"
-            content_bytes = message.content if hasattr(message, 'content') else b""
-            title = message.title_as_string() if hasattr(message, 'title_as_string') else ""
+            source_hash = (
+                RNS.hexrep(source_identity.hash, delimit=False)
+                if source_identity
+                else "<unknown>"
+            )
+            content_bytes = message.content if hasattr(message, "content") else b""
+            title = (
+                message.title_as_string() if hasattr(message, "title_as_string") else ""
+            )
 
-            logger.info("Message received — From: %s  Title: %s  Content length: %d bytes",
-                         source_hash, title, len(content_bytes))
+            logger.info(
+                "Message received — From: %s  Title: %s  Content length: %d bytes",
+                source_hash,
+                title,
+                len(content_bytes),
+            )
 
             # Decode content (protobuf first, UTF-8 fallback, byte-count placeholder)
             display_text = decode_lmao_message(content_bytes)
@@ -71,11 +81,15 @@ class Client:
             print(f"\n>>> MSG from {source_hash}: {display_text}")
 
         except AttributeError as e:
-            logger.error("LXMF message missing expected attributes: %s", e, exc_info=True)
+            logger.error(
+                "LXMF message missing expected attributes: %s", e, exc_info=True
+            )
         except (RNS.RNSException, LXMF.LXMFException) as e:
             logger.error("RNS/LXMF error processing message: %s", e, exc_info=True)
         except Exception as e:
-            logger.error("Unexpected error in handle_lxmf_delivery: %s", e, exc_info=True)
+            logger.error(
+                "Unexpected error in handle_lxmf_delivery: %s", e, exc_info=True
+            )
 
     def _send_message(self, dest_identity, content):
         """Build and send a protobuf-encoded TextMessage to the given
@@ -144,7 +158,10 @@ class Client:
         except ValueError:
             return False, "Destination hash must be a valid hex string."
         if len(dest_str) != 32:
-            return False, f"Destination hash must be 32 hex characters (got {len(dest_str)})."
+            return (
+                False,
+                f"Destination hash must be 32 hex characters (got {len(dest_str)}).",
+            )
         return True, None
 
     @staticmethod
@@ -198,9 +215,13 @@ class Client:
             try:
                 self._default_dest_identity = RNS.Identity.recall(dest_bytes)
             except (RNS.RNSException, OSError) as e:
-                logger.error("Failed to recall identity for %s: %s", dest_str, e, exc_info=True)
-                print(f"Warning: Could not resolve destination identity for {dest_str}. "
-                      f"Hash saved, but send may fail until the identity is discoverable.")
+                logger.error(
+                    "Failed to recall identity for %s: %s", dest_str, e, exc_info=True
+                )
+                print(
+                    f"Warning: Could not resolve destination identity for {dest_str}. "
+                    f"Hash saved, but send may fail until the identity is discoverable."
+                )
                 self._default_dest_identity = None
             if self._default_dest_identity is not None:
                 print(f"Default destination set to: {dest_str}")
@@ -225,12 +246,18 @@ class Client:
             try:
                 dest_identity = RNS.Identity.recall(dest_bytes)
             except (RNS.RNSException, OSError, ValueError) as e:
-                logger.error("Failed to recall identity for %s: %s", dest_str, e, exc_info=True)
-                print(f"Error: Could not resolve destination {dest_str}. Have you heard from this node?")
+                logger.error(
+                    "Failed to recall identity for %s: %s", dest_str, e, exc_info=True
+                )
+                print(
+                    f"Error: Could not resolve destination {dest_str}. Have you heard from this node?"
+                )
                 return True
             if dest_identity is None:
                 logger.error("Identity recall returned None for %s", dest_str)
-                print(f"Error: Could not resolve destination {dest_str}. Have you heard from this node?")
+                print(
+                    f"Error: Could not resolve destination {dest_str}. Have you heard from this node?"
+                )
                 return True
             self._send_message(dest_identity, content)
             return True
@@ -242,15 +269,23 @@ class Client:
                 try:
                     self._default_dest_identity = RNS.Identity.recall(dest_bytes)
                 except (RNS.RNSException, OSError) as e:
-                    logger.error("Failed to recall default identity: %s", e, exc_info=True)
-                    print(f"Error: Could not resolve default destination {self._default_dest_hash}.")
+                    logger.error(
+                        "Failed to recall default identity: %s", e, exc_info=True
+                    )
+                    print(
+                        f"Error: Could not resolve default destination {self._default_dest_hash}."
+                    )
                     return True
             if self._default_dest_identity is None:
-                print(f"Error: Could not resolve default destination {self._default_dest_hash}.")
+                print(
+                    f"Error: Could not resolve default destination {self._default_dest_hash}."
+                )
                 return True
             self._send_message(self._default_dest_identity, stripped)
         else:
-            print("No default destination set. Use /dest <hash> to set one, or /send <hash> <msg>.")
+            print(
+                "No default destination set. Use /dest <hash> to set one, or /send <hash> <msg>."
+            )
 
         return True
 
@@ -262,12 +297,19 @@ class Client:
             format="%(asctime)s [%(levelname)s] %(message)s",
         )
 
-        cfg_dict = self._config_dict if self._config_dict is not None else config.get_config_dict()
-        rnode_port = cfg_dict['interfaces']['RNode LoRa']['port']
+        cfg_dict = (
+            self._config_dict
+            if self._config_dict is not None
+            else config.get_config_dict()
+        )
+        rnode_port = cfg_dict["interfaces"]["RNode LoRa"]["port"]
 
         # Check if the RNode port exists — warn but DO NOT exit
         if not os.path.exists(rnode_port):
-            logger.warning("RNode port %s not found. LoRa messaging will be unavailable.", rnode_port)
+            logger.warning(
+                "RNode port %s not found. LoRa messaging will be unavailable.",
+                rnode_port,
+            )
             print(
                 f"⚠️  RNode port {rnode_port} not found.\n"
                 f"   The client will start with WiFi AutoInterface only.\n"
@@ -283,8 +325,13 @@ class Client:
             atexit.register(lambda: shutil.rmtree(configdir, ignore_errors=True))
             RNS.Reticulum(configdir=configdir)
         except (OSError, PermissionError) as e:
-            logger.critical("Failed to create config directory for Reticulum: %s", e, exc_info=True)
-            print(f"FATAL: Failed to create config directory for Reticulum: {e}", file=sys.stderr)
+            logger.critical(
+                "Failed to create config directory for Reticulum: %s", e, exc_info=True
+            )
+            print(
+                f"FATAL: Failed to create config directory for Reticulum: {e}",
+                file=sys.stderr,
+            )
             print("Check that /tmp is writable and disk is not full.", file=sys.stderr)
             sys.exit(1)
         except RNS.RNSException as e:
@@ -293,7 +340,9 @@ class Client:
             if os.path.exists(rnode_port):
                 print(f"This is often caused by a misconfigured RNode on {rnode_port}.")
                 print("Check that:")
-                print(f"  1. The RNode is plugged in and on the correct port ({rnode_port})")
+                print(
+                    f"  1. The RNode is plugged in and on the correct port ({rnode_port})"
+                )
                 print("  2. You have permission: sudo usermod -a -G dialout $USER")
                 print("  3. The RNode firmware is flashed correctly")
                 print("  See rnode_firmware/README.md and README Troubleshooting.")
@@ -301,7 +350,10 @@ class Client:
         except Exception as e:
             logger.critical("Failed to initialize Reticulum: %s", e, exc_info=True)
             print(f"FATAL: Failed to initialize Reticulum: {e}", file=sys.stderr)
-            print("Check your config and RNode connection. See README Troubleshooting.", file=sys.stderr)
+            print(
+                "Check your config and RNode connection. See README Troubleshooting.",
+                file=sys.stderr,
+            )
             sys.exit(1)
         print("Reticulum initialized.")
 
@@ -310,18 +362,26 @@ class Client:
             self.client_identity = RNS.Identity()
         except (RNS.RNSException, OSError) as e:
             logger.critical("Failed to create client identity: %s", e, exc_info=True)
-            print("FATAL: Failed to create client identity. See log for details.", file=sys.stderr)
+            print(
+                "FATAL: Failed to create client identity. See log for details.",
+                file=sys.stderr,
+            )
             sys.exit(1)
         identity_hex = RNS.hexrep(self.client_identity.hash, delimit=False)
 
         # Create LXMF router with our identity
         print("Starting LXMF router...")
         try:
-            self.router = LXMF.LXMRouter(identity=self.client_identity, storagepath="/tmp/lmao_human_client_lxmf")
+            self.router = LXMF.LXMRouter(
+                identity=self.client_identity, storagepath="/tmp/lmao_human_client_lxmf"
+            )
             self.router.register_delivery_callback(self.handle_lxmf_delivery)
         except (RNS.RNSException, LXMF.LXMFException, OSError) as e:
             logger.critical("Failed to start LXMF router: %s", e, exc_info=True)
-            print("FATAL: Failed to start LXMF router. See log for details.", file=sys.stderr)
+            print(
+                "FATAL: Failed to start LXMF router. See log for details.",
+                file=sys.stderr,
+            )
             sys.exit(1)
 
         # Announce presence on the network
@@ -332,14 +392,18 @@ class Client:
             logger.warning("Failed to announce presence: %s", e, exc_info=True)
 
         # Print startup banner
-        rnode_status = f"RNode on {rnode_port}" if os.path.exists(rnode_port) else "⚠️  RNode not connected — WiFi only"
-        print(f"\n{'='*50}")
+        rnode_status = (
+            f"RNode on {rnode_port}"
+            if os.path.exists(rnode_port)
+            else "⚠️  RNode not connected — WiFi only"
+        )
+        print(f"\n{'=' * 50}")
         print("LMAO Human Client — Ready")
         print(f"Node identity: {identity_hex}")
         print(f"  LoRa: {rnode_status}")
         print("  WiFi: AutoInterface enabled")
         print("  Title discriminator: p:Envelope")
-        print(f"{'='*50}")
+        print(f"{'=' * 50}")
         print("Type /help for commands, /quit to exit.\n")
 
         # Interactive REPL loop
@@ -350,7 +414,11 @@ class Client:
                 # background thread and printed with a newline prefix so they
                 # appear above the prompt.
                 try:
-                    prompt = "> " if self._default_dest_hash is None else f"[→{self._default_dest_hash[:8]}…]> "
+                    prompt = (
+                        "> "
+                        if self._default_dest_hash is None
+                        else f"[→{self._default_dest_hash[:8]}…]> "
+                    )
                     user_input = input(prompt)
                 except EOFError:
                     print("\nShutting down...")

@@ -69,9 +69,11 @@ def setup_common_mocks(with_grpc=True):
 
     # Mock config module
     sys.modules["config"].get_configdir = MagicMock(return_value="/tmp/test_config")
-    sys.modules["config"].get_config_dict = MagicMock(return_value={
-        "interfaces": {"RNode LoRa": {"port": "/dev/ttyUSB0"}},
-    })
+    sys.modules["config"].get_config_dict = MagicMock(
+        return_value={
+            "interfaces": {"RNode LoRa": {"port": "/dev/ttyUSB0"}},
+        }
+    )
 
     if with_grpc:
         # Mock gRPC types
@@ -100,11 +102,21 @@ def setup_common_mocks(with_grpc=True):
 def cleanup_common_mocks():
     """Remove mocked modules from sys.modules to prevent test pollution."""
     for mod in [
-        "RNS", "LXMF", "config", "lma_core", "lma_core.message_utils",
+        "RNS",
+        "LXMF",
+        "config",
+        "lma_core",
+        "lma_core.message_utils",
         "lma_core.rns_di",
-        "grpc", "proto", "proto.lma_pb2_grpc",
-        "server", "lmao_server", "lmao_server.server",
-        "client", "human_client", "human_client.client",
+        "grpc",
+        "proto",
+        "proto.lma_pb2_grpc",
+        "server",
+        "lmao_server",
+        "lmao_server.server",
+        "client",
+        "human_client",
+        "human_client.client",
     ]:
         if mod in sys.modules:
             del sys.modules[mod]

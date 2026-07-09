@@ -36,23 +36,19 @@ CONFIG = {
     "loglevel": 3,
     "enable_transport": False,
     "lora_boards": LORA_BOARDS,
-
     "probe": {
         "enabled": False,
         "app_name": "urns",
         "aspect": "probe",
         "announce_interval": 60 * 60,
     },
-
     "time_sync": {
         "enabled": True,
         "trusted_nodes": [],
         "min_sources": 2,
         "tolerance": 120,
     },
-
     "interfaces": [
-
         # ---- WiFi UDP (for setup / debugging) ----
         # Comment out if using LoRa-only mode.
         {
@@ -64,21 +60,20 @@ CONFIG = {
             "forward_ip": "255.255.255.255",
             "forward_port": 4242,
         },
-
         # ---- Cardputer onboard SX1262 LoRa radio ----
         {
             "type": "LoRaInterface",
-            "board": "cardputer_adv",   # pinout preset in lora_boards.py
+            "board": "cardputer_adv",  # pinout preset in lora_boards.py
             "name": "LoRa",
             "enabled": True,
-            "freq_khz": 868000,         # 868 MHz (EU); 915000 for US
-            "sf": 7,                     # SF7 fastest
-            "bw": "125",                 # 125 kHz
-            "coding_rate": 5,           # 4:5
-            "tx_power": 14,             # dBm
+            "freq_khz": 868000,  # 868 MHz (EU); 915000 for US
+            "sf": 7,  # SF7 fastest
+            "bw": "125",  # 125 kHz
+            "coding_rate": 5,  # 4:5
+            "tx_power": 14,  # dBm
             "preamble_len": 8,
             "crc_en": True,
-            "syncword": 0x1424,         # Reticulum default syncword
+            "syncword": 0x1424,  # Reticulum default syncword
         },
     ],
 }

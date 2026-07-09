@@ -25,6 +25,7 @@ class TestDictToINI:
     def config_module(self):
         """Import the human_client config module."""
         from human_client import config
+
         return config
 
     def test_simple_section(self, config_module):
@@ -101,6 +102,7 @@ class TestGetConfigDir:
     def config_module(self):
         """Import the human_client config module."""
         from human_client import config
+
         return config
 
     def test_returns_valid_path(self, config_module, tmp_path):
@@ -125,8 +127,10 @@ class TestGetConfigDir:
         """The config file content matches dict_to_ini output."""
         configdir_path = str(tmp_path / "lmao_config")
         os.makedirs(configdir_path, exist_ok=True)
-        with patch("tempfile.mkdtemp", return_value=configdir_path), \
-             patch.object(config_module._cfg, "CONFIG_CONTENT", "[test]\nkey = value\n"):
+        with (
+            patch("tempfile.mkdtemp", return_value=configdir_path),
+            patch.object(config_module._cfg, "CONFIG_CONTENT", "[test]\nkey = value\n"),
+        ):
             result = config_module.get_configdir()
         config_file = os.path.join(result, "config")
         with open(config_file) as f:
@@ -162,6 +166,7 @@ class TestGetConfigDict:
     def config_module(self):
         """Import the human_client config module."""
         from human_client import config
+
         return config
 
     def test_returns_expected_top_level_keys(self, config_module):
@@ -214,43 +219,58 @@ class TestResolveRNodePort:
     def config_module(self):
         """Import the human_client config module."""
         from human_client import config
+
         return config
 
     def test_env_var_overrides(self, config_module):
         """LMAO_RNODE_PORT env var takes priority."""
-        with patch.dict(os.environ, {"LMAO_RNODE_PORT": "/dev/ttySpecial"}, clear=False):
+        with patch.dict(
+            os.environ, {"LMAO_RNODE_PORT": "/dev/ttySpecial"}, clear=False
+        ):
             result = resolve_rnode_port()
         assert result == "/dev/ttySpecial"
 
     def test_auto_detect_first_match(self, config_module):
         """First existing port in common_ports list is returned."""
-        with patch.dict(os.environ, {}, clear=True), \
-             patch("os.path.exists", side_effect=lambda p: p == "/dev/ttyUSB0"):
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("os.path.exists", side_effect=lambda p: p == "/dev/ttyUSB0"),
+        ):
             result = resolve_rnode_port()
         assert result == "/dev/ttyUSB0"
 
     def test_auto_detect_second_match(self, config_module):
         """Second port returned when first doesn't exist."""
+
         def fake_exists(p):
             return p == "/dev/ttyACM0"
-        with patch.dict(os.environ, {}, clear=True), \
-             patch("os.path.exists", side_effect=fake_exists):
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("os.path.exists", side_effect=fake_exists),
+        ):
             result = resolve_rnode_port()
         assert result == "/dev/ttyACM0"
 
     def test_auto_detect_multiple_ports(self, config_module):
         """First existing port wins when multiple exist."""
+
         def fake_exists(p):
             return p in ("/dev/ttyUSB0", "/dev/ttyACM0", "/dev/ttyACM1")
-        with patch.dict(os.environ, {}, clear=True), \
-             patch("os.path.exists", side_effect=fake_exists):
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("os.path.exists", side_effect=fake_exists),
+        ):
             result = resolve_rnode_port()
         assert result == "/dev/ttyUSB0"
 
     def test_fallback_to_default(self, config_module):
         """When no port exists, fall back to /dev/ttyUSB0."""
-        with patch.dict(os.environ, {}, clear=True), \
-             patch("os.path.exists", return_value=False):
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("os.path.exists", return_value=False),
+        ):
             result = resolve_rnode_port()
         assert result == "/dev/ttyUSB0"
 
@@ -266,4 +286,5 @@ class TestResolveRNodePort:
 if __name__ == "__main__":
     import pytest as _pytest
     import sys as _sys
+
     _sys.exit(_pytest.main([__file__] + _sys.argv[1:]))

@@ -17,7 +17,6 @@ import os
 from unittest.mock import patch
 
 
-
 # Import the config module (available when running under Bazel via deps)
 try:
     from lmao_server import config
@@ -123,8 +122,10 @@ class TestGetConfigDir:
         """The config file content matches dict_to_ini output."""
         configdir_path = str(tmp_path / "lmao_config")
         os.makedirs(configdir_path, exist_ok=True)
-        with patch("tempfile.mkdtemp", return_value=configdir_path), \
-             patch.object(config._cfg, "CONFIG_CONTENT", "[test]\nkey = value\n"):
+        with (
+            patch("tempfile.mkdtemp", return_value=configdir_path),
+            patch.object(config._cfg, "CONFIG_CONTENT", "[test]\nkey = value\n"),
+        ):
             result = config.get_configdir()
         config_file = os.path.join(result, "config")
         with open(config_file) as f:
@@ -187,39 +188,53 @@ class TestResolveRNodePort:
 
     def test_env_var_overrides(self):
         """LMAO_RNODE_PORT env var takes priority."""
-        with patch.dict(os.environ, {"LMAO_RNODE_PORT": "/dev/ttySpecial"}, clear=False):
+        with patch.dict(
+            os.environ, {"LMAO_RNODE_PORT": "/dev/ttySpecial"}, clear=False
+        ):
             result = resolve_rnode_port()
         assert result == "/dev/ttySpecial"
 
     def test_auto_detect_first_match(self):
         """First existing port in common_ports list is returned."""
-        with patch.dict(os.environ, {}, clear=True), \
-             patch("os.path.exists", side_effect=lambda p: p == "/dev/ttyUSB0"):
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("os.path.exists", side_effect=lambda p: p == "/dev/ttyUSB0"),
+        ):
             result = resolve_rnode_port()
         assert result == "/dev/ttyUSB0"
 
     def test_auto_detect_second_match(self):
         """Second port returned when first doesn't exist."""
+
         def fake_exists(p):
             return p == "/dev/ttyACM0"
-        with patch.dict(os.environ, {}, clear=True), \
-             patch("os.path.exists", side_effect=fake_exists):
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("os.path.exists", side_effect=fake_exists),
+        ):
             result = resolve_rnode_port()
         assert result == "/dev/ttyACM0"
 
     def test_auto_detect_multiple_ports(self):
         """First existing port wins when multiple exist."""
+
         def fake_exists(p):
             return p in ("/dev/ttyUSB0", "/dev/ttyACM0", "/dev/ttyACM1")
-        with patch.dict(os.environ, {}, clear=True), \
-             patch("os.path.exists", side_effect=fake_exists):
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("os.path.exists", side_effect=fake_exists),
+        ):
             result = resolve_rnode_port()
         assert result == "/dev/ttyUSB0"
 
     def test_fallback_to_default(self):
         """When no port exists, fall back to /dev/ttyUSB0."""
-        with patch.dict(os.environ, {}, clear=True), \
-             patch("os.path.exists", return_value=False):
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("os.path.exists", return_value=False),
+        ):
             result = resolve_rnode_port()
         assert result == "/dev/ttyUSB0"
 
@@ -269,9 +284,7 @@ class TestCardputerConfigStructure:
             elif isinstance(node, ast.Import):
                 for alias in node.names:
                     top_level_names.add(alias.asname or alias.name)
-        assert "DEST_HASH" in top_level_names, (
-            "config.py does not define DEST_HASH"
-        )
+        assert "DEST_HASH" in top_level_names, "config.py does not define DEST_HASH"
 
     def test_config_exports_expected_keys(self):
         """config.py must define all expected module-level names."""
@@ -293,12 +306,16 @@ class TestCardputerConfigStructure:
             elif isinstance(node, ast.Import):
                 for alias in node.names:
                     top_level_names.add(alias.asname or alias.name)
-        expected = {"WIFI_SSID", "WIFI_PASS", "NODE_NAME", "DEBUG",
-                     "DEST_HASH", "CONFIG"}
+        expected = {
+            "WIFI_SSID",
+            "WIFI_PASS",
+            "NODE_NAME",
+            "DEBUG",
+            "DEST_HASH",
+            "CONFIG",
+        }
         missing = expected - top_level_names
-        assert not missing, (
-            f"config.py is missing expected names: {missing}"
-        )
+        assert not missing, f"config.py is missing expected names: {missing}"
 
     def test_dest_hash_default_is_none(self):
         """DEST_HASH must default to None (no server target until configured)."""
@@ -311,8 +328,7 @@ class TestCardputerConfigStructure:
         for node in ast.walk(tree):
             if isinstance(node, ast.Assign):
                 for target in node.targets:
-                    if (isinstance(target, ast.Name) and
-                            target.id == "DEST_HASH"):
+                    if isinstance(target, ast.Name) and target.id == "DEST_HASH":
                         # The value should be None (ast.NameConstant or
                         # ast.Constant depending on Python version)
                         if isinstance(node.value, ast.Constant):
@@ -332,4 +348,5 @@ class TestCardputerConfigStructure:
 if __name__ == "__main__":
     import pytest as _pytest
     import sys as _sys
+
     _sys.exit(_pytest.main([__file__] + _sys.argv[1:]))

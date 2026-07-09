@@ -1,7 +1,7 @@
 """Tests for human client message handler (with mocked RNS/LXMF)."""
+
 """Tests for human client message handler (with mocked RNS/LXMF)."""
-from unittest.mock import MagicMock, patch, PropertyMock
-import builtins
+from unittest.mock import MagicMock
 import pytest
 import sys
 from google.protobuf.message import DecodeError
@@ -30,10 +30,11 @@ def client_with_mocks():
     sys.modules["lma_core"].LMAOEnvelope.return_value = mock_envelope
 
     from human_client import client
+
     client_instance = client.Client()
     client_instance.router = MagicMock()
     client_instance.client_identity = MagicMock()
-    client_instance.client_identity.hash = b'\x01' * 16
+    client_instance.client_identity.hash = b"\x01" * 16
 
     yield client_instance
 
@@ -49,7 +50,7 @@ class TestHandleLXMFDelivery:
 
         msg = MagicMock()
         msg.get_source.return_value = MagicMock()
-        msg.get_source.return_value.hash = b'\x02' * 16
+        msg.get_source.return_value.hash = b"\x02" * 16
         msg.content = b"Hello from test"
         msg.title_as_string.return_value = "p:Envelope"
 
@@ -69,7 +70,7 @@ class TestHandleLXMFDelivery:
 
         msg = MagicMock()
         msg.get_source.return_value = MagicMock()
-        msg.get_source.return_value.hash = b'\x02' * 16
+        msg.get_source.return_value.hash = b"\x02" * 16
         msg.content = b"Hello from test"
         msg.title_as_string.return_value = "p:Envelope"
 
@@ -108,7 +109,7 @@ class TestHandleLXMFDelivery:
 
         msg = MagicMock()
         msg.get_source.return_value = MagicMock()
-        msg.get_source.return_value.hash = b'\x03' * 16
+        msg.get_source.return_value.hash = b"\x03" * 16
         msg.content = b""
         msg.title_as_string.return_value = "p:Envelope"
 
@@ -152,7 +153,7 @@ class TestHandleLXMFDelivery:
 
         msg = MagicMock()
         msg.get_source.return_value = MagicMock()
-        msg.get_source.return_value.hash = b'\x04' * 16
+        msg.get_source.return_value.hash = b"\x04" * 16
         msg.content = b"protobuf-bytes"
         msg.title_as_string.return_value = "p:Envelope"
 
@@ -173,7 +174,7 @@ class TestHandleLXMFDelivery:
 
         msg = MagicMock()
         msg.get_source.return_value = MagicMock()
-        msg.get_source.return_value.hash = b'\x05' * 16
+        msg.get_source.return_value.hash = b"\x05" * 16
         msg.content = b"non-text protobuf bytes"
         msg.title_as_string.return_value = "p:Envelope"
 
@@ -187,7 +188,7 @@ class TestHandleLXMFDelivery:
 
         msg = MagicMock()
         msg.get_source.return_value = MagicMock()
-        msg.get_source.return_value.hash = b'\x06' * 16
+        msg.get_source.return_value.hash = b"\x06" * 16
         msg.content = b"\xff\xfe\xfd\xfc\x00"
         msg.title_as_string.return_value = "p:Envelope"
 
@@ -197,7 +198,9 @@ class TestHandleLXMFDelivery:
         assert "MSG from" in captured.out
         assert "non-text" in captured.out or "bytes" in captured.out
 
-    def test_protobuf_decode_uses_content_from_text_field(self, client_with_mocks, capsys):
+    def test_protobuf_decode_uses_content_from_text_field(
+        self, client_with_mocks, capsys
+    ):
         """When protobuf decode succeeds and HasField('text') is True,
         the content from text.content is displayed."""
         client = client_with_mocks
@@ -210,7 +213,7 @@ class TestHandleLXMFDelivery:
 
         msg = MagicMock()
         msg.get_source.return_value = MagicMock()
-        msg.get_source.return_value.hash = b'\x07' * 16
+        msg.get_source.return_value.hash = b"\x07" * 16
         msg.content = b"protobuf-encoded-bytes"
         msg.title_as_string.return_value = "p:Envelope"
 
@@ -231,7 +234,7 @@ class TestHandleLXMFDelivery:
 
         msg = MagicMock()
         msg.get_source.return_value = MagicMock()
-        msg.get_source.return_value.hash = b'\x08' * 16
+        msg.get_source.return_value.hash = b"\x08" * 16
         msg.content = b"plain text fallback"
         msg.title_as_string.return_value = "p:Envelope"
 
@@ -249,7 +252,7 @@ class TestHandleLXMFDelivery:
         # Fixture already has ParseFromString side_effect = DecodeError
         msg = MagicMock()
         msg.get_source.return_value = MagicMock()
-        msg.get_source.return_value.hash = b'\x09' * 16
+        msg.get_source.return_value.hash = b"\x09" * 16
         msg.content = b"\xff\xfe\x00\x01"  # intentionally invalid UTF-8
         msg.title_as_string.return_value = "p:Envelope"
 
@@ -295,7 +298,7 @@ class TestSendMessage:
         client = client_with_mocks
 
         dest_identity = MagicMock()
-        dest_identity.hash = b'\x0a' * 16
+        dest_identity.hash = b"\x0a" * 16
 
         result = client._send_message(dest_identity, "Hello world")
 
@@ -369,7 +372,7 @@ class TestSendMessage:
         client.router.handle_outbound.side_effect = LXMFException("Delivery failed")
 
         dest_identity = MagicMock()
-        dest_identity.hash = b'\x0b' * 16
+        dest_identity.hash = b"\x0b" * 16
 
         result = client._send_message(dest_identity, "Test message")
 
@@ -382,16 +385,15 @@ class TestSendMessage:
         client.router.handle_outbound.side_effect = OSError("Connection broken")
 
         dest_identity = MagicMock()
-        dest_identity.hash = b'\x0c' * 16
+        dest_identity.hash = b"\x0c" * 16
 
         result = client._send_message(dest_identity, "Test message")
 
         assert result is False, "Send should return False on OSError"
 
 
-
-
 if __name__ == "__main__":
     import pytest
     import sys
+
     sys.exit(pytest.main([__file__] + sys.argv[1:]))
