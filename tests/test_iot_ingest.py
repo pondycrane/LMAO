@@ -1,8 +1,10 @@
 """Tests for k8s-app IoT ingest script."""
 
+import asyncio
 import importlib.util
 import sys
-from unittest.mock import MagicMock
+import types
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -236,3 +238,158 @@ class TestGetIdentityExample:
         captured = capsys.readouterr()
         assert "aaabbbccc" in captured.out
         assert "lmao-server" in captured.out
+
+
+# ---------------------------------------------------------------------------
+# Fixture — mock nats modules for NATS path tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def mock_nats_for_iot():
+    """Populate sys.modules with mocks for nats-py so iot_ingest NATS
+    functions can import lma_core.queue.NatsQueue successfully."""
+    nats_mod = types.ModuleType("nats")
+    nats_aio_mod = types.ModuleType("nats.aio")
+    nats_aio_client_mod = types.ModuleType("nats.aio.client")
+    nats_js_mod = types.ModuleType("nats.js")
+    nats_js_api_mod = types.ModuleType("nats.js.api")
+
+    nats_mod.connect = AsyncMock()
+    nats_aio_client_mod.Client = MagicMock()
+    nats_js_mod.JetStreamContext = MagicMock()
+    nats_js_mod.api = nats_js_api_mod
+
+    sys.modules["nats"] = nats_mod
+    sys.modules["nats.aio"] = nats_aio_mod
+    sys.modules["nats.aio.client"] = nats_aio_client_mod
+    sys.modules["nats.js"] = nats_js_mod
+    sys.modules["nats.js.api"] = nats_js_api_mod
+
+    # Clear lma_core.queue so it re-imports with mocked nats
+    for key in list(sys.modules):
+        if key.startswith("lma_core.queue"):
+            del sys.modules[key]
+
+    yield
+
+    for mod in ["nats", "nats.aio", "nats.aio.client", "nats.js", "nats.js.api", "lma_core.queue"]:
+        if mod in sys.modules:
+            del sys.modules[mod]
+
+
+class TestSendExampleNats:
+    """Tests for send_example_nats()."""
+
+    @pytest.mark.asyncio
+    async def test_send_example_nats_calls_publish(self, mock_nats_for_iot, capsys):
+        """send_example_nats should connect, ensure stream, publish, and close."""
+        from lma_core.queue import NatsQueue
+
+        nq = NatsQueue(name="iot-ingest-sender")
+        nq.connect = AsyncMock()
+        nq.ensure_stream = AsyncMock()
+        nq.publish = AsyncMock(return_value=MagicMock(seq=42))
+        nq.close = AsyncMock()
+
+        with patch("lma_core.queue.NatsQueue", return_value=nq):
+            await iot_ingest.send_example_nats("nats://test:4222")
+
+        nq.connect.assert_called_once_with(servers="nats://test:4222")
+        nq.ensure_stream.assert_called_once_with("LMAO_MESSAGES", ["lmao.messages.>"])
+        nq.publish.assert_called_once()
+        nq.close.assert_called_once()
+        captured = capsys.readouterr()
+        assert "seq=42" in captured.out
+
+    @pytest.mark.asyncio
+    async def test_send_example_nats_uses_custom_subject(self, mock_nats_for_iot, capsys):
+        """send_example_nats should publish to the custom subject provided."""
+        from lma_core.queue import NatsQueue
+
+        nq = NatsQueue(name="iot-ingest-sender")
+        nq.connect = AsyncMock()
+        nq.ensure_stream = AsyncMock()
+        nq.publish = AsyncMock(return_value=MagicMock(seq=99))
+        nq.close = AsyncMock()
+
+        with patch("lma_core.queue.NatsQueue", return_value=nq):
+            await iot_ingest.send_example_nats(
+                "nats://test:4222", subject="custom.subject.test"
+            )
+
+        # Publish should use the custom subject, but stream filter stays fixed
+        nq.publish.assert_called_once()
+        call_args = nq.publish.call_args
+        assert call_args[0][0] == "custom.subject.test"
+        nq.ensure_stream.assert_called_once_with("LMAO_MESSAGES", ["lmao.messages.>"])
+
+
+class TestSubscribeExampleNats:
+    """Tests for subscribe_example_nats()."""
+
+    @pytest.mark.asyncio
+    async def test_subscribe_example_nats_creates_subscription_and_cancels(
+        self, mock_nats_for_iot, capsys
+    ):
+        """subscribe_example_nats should subscribe, receive a message, and cancel."""
+        from lma_core.queue import NatsQueue
+
+        nq = NatsQueue(name="iot-ingest-subscriber")
+        nq.connect = AsyncMock()
+        nq.ensure_stream = AsyncMock()
+        nq.close = AsyncMock()
+
+        async def fake_subscribe(subject, durable, callback):
+            msg = MagicMock()
+            msg.data = b"hello"
+            msg.subject = "lmao.messages.env"
+            callback(msg)
+            # Simulate long-running subscription
+            while True:
+                await asyncio.sleep(0.1)
+
+        nq.subscribe = fake_subscribe
+
+        with patch("lma_core.queue.NatsQueue", return_value=nq):
+            await iot_ingest.subscribe_example_nats(
+                "nats://test:4222", timeout=1
+            )
+
+        nq.connect.assert_called_once()
+        nq.ensure_stream.assert_called_once()
+        nq.close.assert_called_once()
+        captured = capsys.readouterr()
+        assert "Received" in captured.out
+        assert "lmao.messages.env" in captured.out
+
+    @pytest.mark.asyncio
+    async def test_subscribe_example_nats_reports_count(
+        self, mock_nats_for_iot, capsys
+    ):
+        """subscribe_example_nats should report total received message count."""
+        from lma_core.queue import NatsQueue
+
+        nq = NatsQueue(name="iot-ingest-subscriber")
+        nq.connect = AsyncMock()
+        nq.ensure_stream = AsyncMock()
+        nq.close = AsyncMock()
+
+        async def fake_subscribe(subject, durable, callback):
+            for i in range(3):
+                msg = MagicMock()
+                msg.data = f"msg{i}".encode()
+                msg.subject = f"lmao.messages.{i}"
+                callback(msg)
+            while True:
+                await asyncio.sleep(0.1)
+
+        nq.subscribe = fake_subscribe
+
+        with patch("lma_core.queue.NatsQueue", return_value=nq):
+            await iot_ingest.subscribe_example_nats(
+                "nats://test:4222", timeout=1
+            )
+
+        captured = capsys.readouterr()
+        assert "Total received: 3 message(s)" in captured.out

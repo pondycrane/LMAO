@@ -29,12 +29,17 @@ server and an M5Stack Cardputer ADV client using the
 │                    ┌───────────┴────────────┐                                │
 │                    │  K8s Cluster           │                                │
 │                    │  ┌───────────────────┐ │                                │
+│                    │  │ NATS JetStream    │ │  (persistent queue)            │
+│                    │  │ publish/subscribe │ │                                │
+│                    │  └────────┬──────────┘ │                                │
+│                    │           │             │                                │
+│                    │  ┌────────┴──────────┐ │                                │
 │                    │  │ IoT Ingest Pod    │ │                                │
-│                    │  │ (gRPC client)     │ │                                │
+│                    │  │ (gRPC+NATS)       │ │                                │
 │                    │  └───────────────────┘ │                                │
 │                    │  ┌───────────────────┐ │                                │
 │                    │  │ Command Dispatch  │ │                                │
-│                    │  │ (gRPC client)     │ │                                │
+│                    │  │ (gRPC+NATS)       │ │                                │
 │                    │  └───────────────────┘ │                                │
 │                    └────────────────────────┘                                │
 └──────────────────────────────────────────────────────────────────────────────┘
@@ -212,7 +217,7 @@ bazel test //tests:test_cardputer_lora_e2e --test_output=all
 ```
 
 The test auto-skips when hardware is not detected.  See
-[Section 10](#10-run-tests) for all test targets.
+[Section 11](#11-run-tests) for all test targets.
 
 Manual verification steps:
 
@@ -309,7 +314,97 @@ export LMAO_SERVER=lmao-server.default.svc.cluster.local:50051
 python k8s-app/iot_ingest.py --send --get-identity
 ```
 
-### 10. Run Tests
+### 10. NATS Queue (K8s Persistent PubSub)
+
+A lightweight NATS server with JetStream persistence can be deployed inside
+the cluster to provide **durable message queuing** between pods. Messages
+published to NATS subjects are persisted on disk and delivered at-least-once
+to consumers — even when consumers restart or scale down.
+
+This augments (does not replace) the gRPC real-time stream: gRPC remains the
+path for external LMAO server communication, while NATS provides in-cluster
+queueing for pod-to-pod messaging.
+
+#### Deploy NATS
+
+```bash
+# Deploy NATS with JetStream persistence
+kubectl apply -f k8s/nats-server.yaml
+
+# Verify it's running
+kubectl get pods -l app=nats-server
+kubectl logs deployment/nats-server
+```
+
+Pods connect to NATS at `nats://nats-server.default.svc.cluster.local:4222`.
+
+> **Note for bare-metal / Raspi K8s**: If the PersistentVolumeClaim stays
+> Pending, install a local-path provisioner:
+> ```bash
+> kubectl apply -f https://raw.githubusercontent.com/rancher/local-path-provisioner/master/deploy/local-path-storage.yaml
+> ```
+
+#### Using `NatsQueue` from Python
+
+The `lma_core.queue` module provides an async `NatsQueue` wrapper that mirrors
+the existing codebase conventions:
+
+```python
+import asyncio
+from lma_core.queue import NatsQueue
+
+async def main():
+    nq = NatsQueue()
+
+    # Connect to the in-cluster NATS server
+    await nq.connect("nats://nats-server.default.svc.cluster.local:4222")
+
+    # Create a stream (idempotent — safe to call every startup)
+    await nq.ensure_stream("TELEMETRY", ["telemetry.>"])
+
+    # Publish a protobuf-encoded envelope
+    await nq.publish("telemetry.env", envelope_bytes)
+
+    # Subscribe with durable consumer + queue group
+    async def handle(msg):
+        print(f"Got {len(msg.data)} bytes on {msg.subject}")
+
+    await nq.subscribe("telemetry.>", "my-pod", handle)
+
+    await nq.close()
+
+asyncio.run(main())
+```
+
+#### Example: `iot_ingest.py --use-nats`
+
+The example K8s app supports an optional `--use-nats` flag that switches from
+gRPC to NATS for send and subscribe operations:
+
+```bash
+# Publish to NATS
+python k8s-app/iot_ingest.py --use-nats --send
+
+# Subscribe via NATS (durable consumer, queue group)
+python k8s-app/iot_ingest.py --use-nats --subscribe --subscribe-timeout 10
+
+# Override the NATS server address
+NATS_SERVER=nats://localhost:4222 python k8s-app/iot_ingest.py --use-nats --send
+```
+
+#### Architecture notes
+
+- **No changes to gRPC**: The LMAO server and gRPC API are unchanged. NATS is
+  additive and independent.
+- **No authentication (MVP)**: NATS runs without auth inside the cluster.
+  Token auth is a 2-line ConfigMap change.
+- **Single-node**: One NATS replica is deployed. For production, a 3-node
+  NATS cluster can be added with minimal YAML changes.
+- **Future bridge**: A gRPC-to-NATS bridge pod could subscribe to the LMAO
+  server's gRPC stream and republish all messages to NATS, allowing pods to
+  use NATS as their sole message source.
+
+### 11. Run Tests
 
 ```bash
 # Run all unit tests (no hardware required)
@@ -327,7 +422,7 @@ bazel test //tests:test_cardputer_lora_e2e --test_output=all
 
 The E2E tests auto-skip when the required hardware is not detected.
 
-### 11. Run the Human Client
+### 12. Run the Human Client
 
 ```bash
 # Using Bazel (recommended)
@@ -368,6 +463,7 @@ If an RNode is connected, LoRa messaging is available.
 │   ├── __init__.py                    # Re-exports generated protobuf stubs
 │   ├── config_utils.py                # RNode port resolution + INI generation helpers
 │   ├── message_utils.py               # Shared LXMF message decoding (decode_lmao_message)
+│   ├── queue.py                       # Async NATS JetStream wrapper (NatsQueue)
 │   └── rns_di.py                      # RNS/LXMF dependency-injection wrapper for testability
 │
 ├── lmao_server/                       # Python — runs on Raspberry Pi
@@ -385,10 +481,11 @@ If an RNode is connected, LoRa messaging is available.
 │   └── client.py                      # Interactive REPL for human messaging
 │
 ├── k8s/                               # Kubernetes manifests
-│   └── lmao-service.yaml              # Headless Service + Endpoints for external RPi
+│   ├── lmao-service.yaml              # Headless Service + Endpoints for external RPi
+│   └── nats-server.yaml               # NATS Deployment + Service + ConfigMap (JetStream)
 │
 ├── k8s-app/                           # Example K8s pod application
-│   └── iot_ingest.py                  # gRPC client: Send + Subscribe + GetIdentity
+│   └── iot_ingest.py                  # gRPC + NATS client: Send + Subscribe + GetIdentity
 │
 ├── cardputer_client/                  # MicroPython — runs on M5Stack Cardputer
 │   ├── boot.py                        # MicroPython boot script (sets /lib in path)
@@ -406,6 +503,7 @@ If an RNode is connected, LoRa messaging is available.
 │   ├── test_config.py                 # Config module unit tests (no hardware)
 │   ├── test_lma_core.py               # lma_core import error handling + exports
 │   ├── test_lma_encoder.py            # Encoder round-trip + cross-validation tests
+│   ├── test_queue.py                  # NatsQueue unit tests (mocked nats-py)
 │   ├── test_server_handler.py         # Server handler unit tests (mocked RNS/LXMF)
 │   ├── test_server_startup.py         # Server startup lifecycle + async entry point tests
 │   ├── test_client_repl.py            # Human client REPL input parsing tests

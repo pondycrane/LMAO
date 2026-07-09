@@ -6,7 +6,11 @@
 
 ```
 Application   │  Chat · IoT Ingest · Command Dispatch · Call Signaling
-              │  K8s Pods (gRPC Clients)
+              │  K8s Pods (gRPC Clients, NATS Publishers/Consumers)
+──────────────┼────────────────────────────────────────────────────────
+NATS Layer    │  JetStream: durable pub/sub message queue
+              │  Streams (file-backed) · Durable pull consumers
+              │  At-least-once delivery · Queue-group load balancing
 ──────────────┼────────────────────────────────────────────────────────
 gRPC API      │  Send · Subscribe · GetIdentity
               │  protobuf service on port 50051
@@ -29,7 +33,7 @@ Interfaces    │  LoRa (RNode) · WiFi (AutoInterface) · TCP/UDP · Serial
 | **LMAO Camera node** | ESP32-S3-CAM + LoRa/WiFi | LoRa or WiFi | Same, but captures WebP image on command |
 | **RNode** | ESP32/RP2040 + LoRa radio | LoRa ↔ USB/WiFi | Transparent LoRa bridge |
 | **LMAO Server** | RPi/NUC | LoRa + WiFi + TCP | Propagation Node · IoT processor · Command scheduler · Human services · **gRPC API (port 50051)** · **Docker container** |
-| **K8s Pod** | In-cluster container | TCP (gRPC) | Automated clients: IoT ingest, command dispatch, monitoring — reach server via K8s Service |
+| **K8s Pod** | In-cluster container | TCP (gRPC, NATS) | Automated clients: IoT ingest, command dispatch, monitoring — reach server via K8s Service; NATS JetStream for durable pub/sub |
 | **LMAO Human Client** | Laptop/Desktop (Python CLI) | WiFi + optional LoRa (RNode) | First-party terminal client for human messaging via LMAO protobuf protocol |
 | **Human nodes** | Phone (Sideband) / Laptop (NomadNet/MeshChat) | WiFi (preferred) | Person-to-person: text · images · audio clips · calls |
 | **Backbone** | Ubiquiti/MikroTik radios | Long-range WiFi | High-capacity between sites |
@@ -39,14 +43,14 @@ Interfaces    │  LoRa (RNode) · WiFi (AutoInterface) · TCP/UDP · Serial
 ```
   Sensors ──LoRa──→ RNode ──USB/WiFi──→ Central Server ←──WiFi mesh── Humans
   Actuators ←──LoRa── RNode          │   (RPi/NUC)                 ↕
-                              K8s Pods (gRPC)           Propagation Node
-                         IoT Ingest · Cmd Dispatch      (store-and-forward)
-                         Monitoring · Automation
+                                     K8s Pods (gRPC, NATS)    Propagation Node
+                                 IoT Ingest · Cmd Dispatch     (store-and-forward)
+                                 Monitoring · Automation
 ```
 
 - **LoRa leaf**: every device hears every packet; server moderates airtime
 - **WiFi mesh**: human communication, image/audio transfers, call streams
-- **K8s pods**: automated clients communicate via gRPC on port 50051; the server bridges gRPC ↔ LXMF
+- **K8s pods**: automated clients communicate via gRPC on port 50051 or NATS JetStream for durable pub/sub messaging; the server bridges gRPC/NATS ↔ LXMF
 - **Server bridges all worlds**: translates between high- and low-speed networks
 
 ## IoT Data Flow
@@ -106,6 +110,26 @@ Defined in [`proto/lma.proto`](../proto/lma.proto) and served on port 50051.
 *The `Tunnel` RPC is commented out in the .proto — planned for v0.2.*
 
 See [`README.md`](../README.md#7-grpc-api-k8s-pod-integration) for usage examples.
+
+### NATS JetStream Queue (K8s)
+
+A durable pub/sub message queue for in-cluster K8s pod communication.
+Implemented in [`lma_core/queue.py`](../lma_core/queue.py) with a NATS
+Kubernetes manifest at [`k8s-app/nats-deploy.yaml`](../k8s-app/nats-deploy.yaml).
+
+- **At-least-once delivery**: Messages are persisted to disk (file-backed
+  JetStream streams) and acknowledged individually by consumers.
+- **Durable pull consumers**: Consumer progress survives client restarts —
+  acknowledged messages are never redelivered.
+- **Queue-group load balancing**: Multiple subscribers on the same durable
+  name share workload automatically (one message → one pod).
+- **Idempotent stream management**: ``ensure_stream()`` safely creates or
+  updates streams on every pod startup.
+
+See [`README.md`](../README.md#10-nats-jetstream-queue-k8s) for deployment
+instructions and Python usage examples.
+
+## Human Client
 
 ### Usage
 
