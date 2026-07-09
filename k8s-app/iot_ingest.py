@@ -23,10 +23,10 @@ import argparse
 import asyncio
 import logging
 import os
+import sys
+import time
 
 logger = logging.getLogger(__name__)
-import time
-import sys
 
 # ---------------------------------------------------------------------------
 # gRPC imports (required for default mode)
