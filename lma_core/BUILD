@@ -5,6 +5,8 @@ py_library(
     srcs = [
         "__init__.py",
         "config_utils.py",
+        "message_utils.py",
+        "rns_di.py",
     ],
     visibility = ["//visibility:public"],
     deps = ["//proto:lma_py_proto"],
