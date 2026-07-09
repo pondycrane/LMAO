@@ -112,6 +112,7 @@ class NatsQueue:
         self._max_payload = max_payload
         self._nc: Any = None  # nats.aio.client.Client
         self._js: Any = None  # nats.js.JetStreamContext
+        self._connect_lock = asyncio.Lock()
 
     # ------------------------------------------------------------------
     # Connection lifecycle
@@ -137,23 +138,24 @@ class NatsQueue:
         if not _NATS_AVAILABLE:
             raise ImportError(_NATS_IMPORT_ERROR)
 
-        if self._nc is not None:
-            await self.close()
+        async with self._connect_lock:
+            if self._nc is not None:
+                await self.close()
 
-        _logger.info("Connecting to NATS at %s ...", servers)
-        try:
-            self._nc = await nats.connect(
-                servers=servers,
-                name=self._name,
-                **kwargs,
-            )
-            self._js = self._nc.jetstream()
-        except Exception:
-            _logger.critical(
-                "Failed to connect to NATS at %s", servers, exc_info=True
-            )
-            raise
-        _logger.info("Connected to NATS (JetStream available)")
+            _logger.info("Connecting to NATS at %s ...", servers)
+            try:
+                self._nc = await nats.connect(
+                    servers=servers,
+                    name=self._name,
+                    **kwargs,
+                )
+                self._js = self._nc.jetstream()
+            except Exception:
+                _logger.critical(
+                    "Failed to connect to NATS at %s", servers, exc_info=True
+                )
+                raise
+            _logger.info("Connected to NATS (JetStream available)")
 
     async def close(self) -> None:
         """Gracefully drain and close the NATS connection."""
@@ -318,12 +320,12 @@ class NatsQueue:
             Async or sync callable invoked with each ``nats.aio.msg.Msg``.
             Return to auto-ACK (sync callbacks implicitly return None);
             raise to trigger NAK.
-        **kwargs:
-            Passed to ``JetStreamContext.pull_subscribe()``
-            (e.g. ``stream``, ``flow_control``).
         fetch_timeout:
             Timeout in seconds passed to ``psub.fetch()``.
             Default is 5.
+        **kwargs:
+            Passed to ``JetStreamContext.pull_subscribe()``
+            (e.g. ``stream``, ``flow_control``).
 
         Note
         ----
