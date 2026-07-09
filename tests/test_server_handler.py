@@ -1,9 +1,7 @@
 """Tests for server message handler (with mocked RNS/LXMF)."""
-"""Tests for server message handler (with mocked RNS/LXMF)."""
 import asyncio
 import logging
-from unittest.mock import MagicMock, AsyncMock, patch, PropertyMock
-import builtins
+from unittest.mock import MagicMock, patch
 import pytest
 import sys
 from google.protobuf.message import DecodeError
@@ -32,10 +30,11 @@ def server_with_mocks():
     sys.modules["lma_core"].LMAOEnvelope.return_value = mock_envelope
 
     from lmao_server import server
+
     server_instance = server.Server()
     server_instance.router = MagicMock()
     server_instance.server_identity = MagicMock()
-    server_instance.server_identity.hash = b'\x01' * 16
+    server_instance.server_identity.hash = b"\x01" * 16
 
     yield server_instance
 
@@ -49,7 +48,7 @@ class TestHandleLXMFDelivery:
 
         msg = MagicMock()
         msg.get_source.return_value = MagicMock()
-        msg.get_source.return_value.hash = b'\x02' * 16
+        msg.get_source.return_value.hash = b"\x02" * 16
         msg.content = b"Hello from test"
         msg.title_as_string.return_value = "p:Envelope"
 
@@ -96,7 +95,7 @@ class TestHandleLXMFDelivery:
 
         msg = MagicMock()
         msg.get_source.return_value = MagicMock()
-        msg.get_source.return_value.hash = b'\x03' * 16
+        msg.get_source.return_value.hash = b"\x03" * 16
         msg.content = b""
         msg.title_as_string.return_value = "p:Envelope"
 
@@ -139,7 +138,7 @@ class TestHandleLXMFDelivery:
 
         msg = MagicMock()
         msg.get_source.return_value = MagicMock()
-        msg.get_source.return_value.hash = b'\x04' * 16
+        msg.get_source.return_value.hash = b"\x04" * 16
         msg.content = b"protobuf-bytes"
         msg.title_as_string.return_value = "p:Envelope"
 
@@ -161,7 +160,7 @@ class TestHandleLXMFDelivery:
 
         msg = MagicMock()
         msg.get_source.return_value = MagicMock()
-        msg.get_source.return_value.hash = b'\x05' * 16
+        msg.get_source.return_value.hash = b"\x05" * 16
         msg.content = b"non-text protobuf bytes"
         msg.title_as_string.return_value = "p:Envelope"
 
@@ -174,14 +173,16 @@ class TestHandleLXMFDelivery:
 
         msg = MagicMock()
         msg.get_source.return_value = MagicMock()
-        msg.get_source.return_value.hash = b'\x06' * 16
+        msg.get_source.return_value.hash = b"\x06" * 16
         msg.content = b"\xff\xfe\xfd\xfc\x00"
         msg.title_as_string.return_value = "p:Envelope"
 
         server.handle_lxmf_delivery(msg)
         server.router.handle_outbound.assert_called_once()
 
-    def test_protobuf_decode_uses_content_from_text_field(self, server_with_mocks, caplog):
+    def test_protobuf_decode_uses_content_from_text_field(
+        self, server_with_mocks, caplog
+    ):
         """When protobuf decode succeeds and HasField('text') is True,
         the content from text.content is used as display_text."""
         server = server_with_mocks
@@ -194,7 +195,7 @@ class TestHandleLXMFDelivery:
 
         msg = MagicMock()
         msg.get_source.return_value = MagicMock()
-        msg.get_source.return_value.hash = b'\x07' * 16
+        msg.get_source.return_value.hash = b"\x07" * 16
         msg.content = b"protobuf-encoded-bytes"
         msg.title_as_string.return_value = "p:Envelope"
 
@@ -202,10 +203,7 @@ class TestHandleLXMFDelivery:
             server.handle_lxmf_delivery(msg)
 
         # Verify the protobuf content was logged
-        found = any(
-            "Content (protobuf)" in record.message
-            for record in caplog.records
-        )
+        found = any("Content (protobuf)" in record.message for record in caplog.records)
         assert found, "Should log protobuf-decoded content"
 
     def test_protobuf_decode_non_text_uses_fallback(self, server_with_mocks, caplog):
@@ -220,7 +218,7 @@ class TestHandleLXMFDelivery:
 
         msg = MagicMock()
         msg.get_source.return_value = MagicMock()
-        msg.get_source.return_value.hash = b'\x08' * 16
+        msg.get_source.return_value.hash = b"\x08" * 16
         msg.content = b"plain text fallback"
         msg.title_as_string.return_value = "p:Envelope"
 
@@ -229,15 +227,13 @@ class TestHandleLXMFDelivery:
 
         # Verify fallback warning was logged
         warn_found = any(
-            "non-text payload" in record.message
-            for record in caplog.records
+            "non-text payload" in record.message for record in caplog.records
         )
         assert warn_found, "Should log warning about non-text payload"
 
         # Verify raw text fallback was used
         info_found = any(
-            "Content (raw text)" in record.message
-            for record in caplog.records
+            "Content (raw text)" in record.message for record in caplog.records
         )
         assert info_found, "Should log raw text fallback content"
 
@@ -249,7 +245,7 @@ class TestHandleLXMFDelivery:
         # Fixture already has ParseFromString side_effect = DecodeError
         msg = MagicMock()
         msg.get_source.return_value = MagicMock()
-        msg.get_source.return_value.hash = b'\x09' * 16
+        msg.get_source.return_value.hash = b"\x09" * 16
         msg.content = b"\xff\xfe\x00\x01"  # intentionally invalid UTF-8
         msg.title_as_string.return_value = "p:Envelope"
 
@@ -314,8 +310,12 @@ class TestSubscriberManagement:
         with caplog.at_level(logging.WARNING):
             server._fanout_to_grpc_subscribers("test-message")
 
-        warning_messages = [r.message for r in caplog.records if r.levelname == "WARNING"]
-        assert len(warning_messages) >= 1, "Should log at least one warning for bad subscriber"
+        warning_messages = [
+            r.message for r in caplog.records if r.levelname == "WARNING"
+        ]
+        assert len(warning_messages) >= 1, (
+            "Should log at least one warning for bad subscriber"
+        )
         assert q_ok in server._grpc_subscribers, "Good subscriber should survive"
 
     def test_clear_grpc_subscribers(self, server_with_mocks):
@@ -336,18 +336,21 @@ class TestSubscriberManagement:
 
         msg = MagicMock()
         msg.get_source.return_value = MagicMock()
-        msg.get_source.return_value.hash = b'\x0a' * 16
+        msg.get_source.return_value.hash = b"\x0a" * 16
         msg.content = b"fanout test message"
         msg.title_as_string.return_value = "p:Envelope"
 
-        with patch.object(server, '_fanout_to_grpc_subscribers', wraps=server._fanout_to_grpc_subscribers) as spy:
+        with patch.object(
+            server,
+            "_fanout_to_grpc_subscribers",
+            wraps=server._fanout_to_grpc_subscribers,
+        ) as spy:
             server.handle_lxmf_delivery(msg)
             spy.assert_called_once_with(msg)
-
-
 
 
 if __name__ == "__main__":
     import pytest
     import sys
+
     sys.exit(pytest.main([__file__] + sys.argv[1:]))

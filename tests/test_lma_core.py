@@ -20,6 +20,7 @@ class TestLmaCoreImportError:
         # Skip if proto stubs are available (generated via protoc)
         try:
             import proto.lma_pb2  # noqa: F401
+
             pytest.skip("proto.lma_pb2 is available — cannot test import error path")
         except ImportError:
             pass
@@ -36,11 +37,17 @@ class TestLmaCoreImportError:
             import lma_core  # noqa: F401
 
         # The module logs a CRITICAL message with build instructions before raising
-        critical_messages = [r.message for r in caplog.records if r.levelname == "CRITICAL"]
+        critical_messages = [
+            r.message for r in caplog.records if r.levelname == "CRITICAL"
+        ]
         assert len(critical_messages) > 0, "Should log a CRITICAL message"
         combined = " ".join(critical_messages)
-        assert "Bazel" in combined, f"CRITICAL message should mention Bazel, got: {combined}"
-        assert "protoc" in combined, f"CRITICAL message should mention protoc, got: {combined}"
+        assert "Bazel" in combined, (
+            f"CRITICAL message should mention Bazel, got: {combined}"
+        )
+        assert "protoc" in combined, (
+            f"CRITICAL message should mention protoc, got: {combined}"
+        )
 
     def test_import_succeeds_when_proto_present(self):
         """When proto.lma_pb2 is available, lma_core imports without error."""
@@ -110,12 +117,16 @@ class TestLmaCoreImportError:
 
             with caplog.at_level(logging.WARNING):
                 import importlib
+
                 # Re-import lma_core — the gRPC try/except should fire warnings
                 import lma_core as lma_core_mod
+
                 # Since lma_core is cached, reload it to trigger the import path
                 importlib.reload(lma_core_mod)
 
-            warning_messages = [r.message for r in caplog.records if r.levelname == "WARNING"]
+            warning_messages = [
+                r.message for r in caplog.records if r.levelname == "WARNING"
+            ]
             assert len(warning_messages) >= 1, (
                 f"Should log at least one WARNING for missing gRPC types, got {len(warning_messages)}"
             )
@@ -149,11 +160,10 @@ class TestLmaCoreImportError:
             "CallSignal",
         ]
         for name in expected:
-            assert name in lma_core.__all__, (
-                f"Expected '{name}' in lma_core.__all__"
-            )
+            assert name in lma_core.__all__, f"Expected '{name}' in lma_core.__all__"
 
 
 if __name__ == "__main__":
     import pytest as _pytest
+
     sys.exit(_pytest.main([__file__] + sys.argv[1:]))

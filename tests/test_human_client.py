@@ -1,7 +1,5 @@
 """Tests for human client message handler (with mocked RNS/LXMF)."""
-"""Tests for human client message handler (with mocked RNS/LXMF)."""
-from unittest.mock import MagicMock, patch, PropertyMock
-import builtins
+from unittest.mock import MagicMock, patch
 import pytest
 import sys
 from google.protobuf.message import DecodeError
@@ -30,10 +28,11 @@ def client_with_mocks():
     sys.modules["lma_core"].LMAOEnvelope.return_value = mock_envelope
 
     from human_client import client
+
     client_instance = client.Client()
     client_instance.router = MagicMock()
     client_instance.client_identity = MagicMock()
-    client_instance.client_identity.hash = b'\x01' * 16
+    client_instance.client_identity.hash = b"\x01" * 16
 
     yield client_instance
 
@@ -49,7 +48,7 @@ class TestHandleLXMFDelivery:
 
         msg = MagicMock()
         msg.get_source.return_value = MagicMock()
-        msg.get_source.return_value.hash = b'\x02' * 16
+        msg.get_source.return_value.hash = b"\x02" * 16
         msg.content = b"Hello from test"
         msg.title_as_string.return_value = "p:Envelope"
 
@@ -69,7 +68,7 @@ class TestHandleLXMFDelivery:
 
         msg = MagicMock()
         msg.get_source.return_value = MagicMock()
-        msg.get_source.return_value.hash = b'\x02' * 16
+        msg.get_source.return_value.hash = b"\x02" * 16
         msg.content = b"Hello from test"
         msg.title_as_string.return_value = "p:Envelope"
 
@@ -108,7 +107,7 @@ class TestHandleLXMFDelivery:
 
         msg = MagicMock()
         msg.get_source.return_value = MagicMock()
-        msg.get_source.return_value.hash = b'\x03' * 16
+        msg.get_source.return_value.hash = b"\x03" * 16
         msg.content = b""
         msg.title_as_string.return_value = "p:Envelope"
 
@@ -152,7 +151,7 @@ class TestHandleLXMFDelivery:
 
         msg = MagicMock()
         msg.get_source.return_value = MagicMock()
-        msg.get_source.return_value.hash = b'\x04' * 16
+        msg.get_source.return_value.hash = b"\x04" * 16
         msg.content = b"protobuf-bytes"
         msg.title_as_string.return_value = "p:Envelope"
 
@@ -173,7 +172,7 @@ class TestHandleLXMFDelivery:
 
         msg = MagicMock()
         msg.get_source.return_value = MagicMock()
-        msg.get_source.return_value.hash = b'\x05' * 16
+        msg.get_source.return_value.hash = b"\x05" * 16
         msg.content = b"non-text protobuf bytes"
         msg.title_as_string.return_value = "p:Envelope"
 
@@ -187,7 +186,7 @@ class TestHandleLXMFDelivery:
 
         msg = MagicMock()
         msg.get_source.return_value = MagicMock()
-        msg.get_source.return_value.hash = b'\x06' * 16
+        msg.get_source.return_value.hash = b"\x06" * 16
         msg.content = b"\xff\xfe\xfd\xfc\x00"
         msg.title_as_string.return_value = "p:Envelope"
 
@@ -197,7 +196,9 @@ class TestHandleLXMFDelivery:
         assert "MSG from" in captured.out
         assert "non-text" in captured.out or "bytes" in captured.out
 
-    def test_protobuf_decode_uses_content_from_text_field(self, client_with_mocks, capsys):
+    def test_protobuf_decode_uses_content_from_text_field(
+        self, client_with_mocks, capsys
+    ):
         """When protobuf decode succeeds and HasField('text') is True,
         the content from text.content is displayed."""
         client = client_with_mocks
@@ -210,7 +211,7 @@ class TestHandleLXMFDelivery:
 
         msg = MagicMock()
         msg.get_source.return_value = MagicMock()
-        msg.get_source.return_value.hash = b'\x07' * 16
+        msg.get_source.return_value.hash = b"\x07" * 16
         msg.content = b"protobuf-encoded-bytes"
         msg.title_as_string.return_value = "p:Envelope"
 
@@ -231,7 +232,7 @@ class TestHandleLXMFDelivery:
 
         msg = MagicMock()
         msg.get_source.return_value = MagicMock()
-        msg.get_source.return_value.hash = b'\x08' * 16
+        msg.get_source.return_value.hash = b"\x08" * 16
         msg.content = b"plain text fallback"
         msg.title_as_string.return_value = "p:Envelope"
 
@@ -249,7 +250,7 @@ class TestHandleLXMFDelivery:
         # Fixture already has ParseFromString side_effect = DecodeError
         msg = MagicMock()
         msg.get_source.return_value = MagicMock()
-        msg.get_source.return_value.hash = b'\x09' * 16
+        msg.get_source.return_value.hash = b"\x09" * 16
         msg.content = b"\xff\xfe\x00\x01"  # intentionally invalid UTF-8
         msg.title_as_string.return_value = "p:Envelope"
 
@@ -287,6 +288,157 @@ class TestHandleLXMFDelivery:
         client.router.handle_outbound.assert_not_called()
 
 
+VALID_HASH = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4"  # 32 hex characters
+
+
+class TestParseInput:
+    """Tests for Client._parse_input REPL command dispatch."""
+
+    def test_quit_returns_false(self, client_with_mocks):
+        """/quit should cause the REPL to exit."""
+        client = client_with_mocks
+        result = client._parse_input("/quit")
+        assert result is False
+
+    def test_exit_returns_false(self, client_with_mocks):
+        """/exit should cause the REPL to exit."""
+        client = client_with_mocks
+        result = client._parse_input("/exit")
+        assert result is False
+
+    def test_empty_input_returns_true(self, client_with_mocks):
+        """Empty input should keep the REPL running."""
+        client = client_with_mocks
+        result = client._parse_input("")
+        assert result is True
+
+    def test_whitespace_only_returns_true(self, client_with_mocks):
+        """Whitespace-only input should keep the REPL running."""
+        client = client_with_mocks
+        result = client._parse_input("   ")
+        assert result is True
+
+    def test_help_prints_and_returns_true(self, client_with_mocks, capsys):
+        """/help should print help text and keep the REPL running."""
+        client = client_with_mocks
+        result = client._parse_input("/help")
+        assert result is True
+        captured = capsys.readouterr()
+        assert "Available commands" in captured.out
+
+    def test_dest_sets_hash(self, client_with_mocks):
+        """/dest with a valid hash should set the default destination."""
+        client = client_with_mocks
+        result = client._parse_input(f"/dest {VALID_HASH}")
+        assert result is True
+        assert client._default_dest_hash == VALID_HASH
+
+    def test_dest_rejects_invalid_hash(self, client_with_mocks, capsys):
+        """/dest with an invalid hash should print an error."""
+        client = client_with_mocks
+        result = client._parse_input("/dest short")
+        assert result is True
+        captured = capsys.readouterr()
+        assert "Invalid hash" in captured.out
+
+    def test_dest_missing_arg_shows_usage(self, client_with_mocks, capsys):
+        """/dest without an argument should show usage."""
+        client = client_with_mocks
+        result = client._parse_input("/dest")
+        assert result is True
+        captured = capsys.readouterr()
+        assert "Usage" in captured.out
+
+    def test_send_with_dest_and_msg(self, client_with_mocks):
+        """/send with valid hash and message should call _send_message."""
+        client = client_with_mocks
+        with patch.object(client, "_send_message", return_value=True) as mock_send:
+            result = client._parse_input(f"/send {VALID_HASH} Hello there")
+            assert result is True
+            mock_send.assert_called_once()
+
+    def test_send_missing_args_shows_usage(self, client_with_mocks, capsys):
+        """/send without enough arguments should show usage."""
+        client = client_with_mocks
+        result = client._parse_input("/send")
+        assert result is True
+        captured = capsys.readouterr()
+        assert "Usage" in captured.out
+
+    def test_send_invalid_hash_prints_error(self, client_with_mocks, capsys):
+        """/send with invalid hash should print error."""
+        client = client_with_mocks
+        result = client._parse_input("/send short message")
+        assert result is True
+        captured = capsys.readouterr()
+        assert "Invalid hash" in captured.out
+
+    def test_unknown_command_falls_to_plain_text(self, client_with_mocks, capsys):
+        """Unknown commands are treated as plain text (no dispatch prefix).
+
+        Since no default destination is set, REPL prints a hint and continues.
+        """
+        client = client_with_mocks
+        result = client._parse_input("/unknown")
+        assert result is True
+        captured = capsys.readouterr()
+        assert "No default destination" in captured.out
+
+    def test_plain_text_no_default_prints_hint(self, client_with_mocks, capsys):
+        """Plain text without default destination should print a hint."""
+        client = client_with_mocks
+        client._default_dest_hash = None
+        result = client._parse_input("Hello there")
+        assert result is True
+        captured = capsys.readouterr()
+        assert "No default destination" in captured.out
+
+    def test_plain_text_with_default_sends(self, client_with_mocks):
+        """Plain text with default destination should send the message."""
+        client = client_with_mocks
+        client._default_dest_hash = VALID_HASH
+        client._default_dest_identity = MagicMock()
+        with patch.object(client, "_send_message", return_value=True) as mock_send:
+            result = client._parse_input("Hello there")
+            assert result is True
+            mock_send.assert_called_once()
+
+
+class TestValidateHash:
+    """Tests for Client._validate_hash static method."""
+
+    @pytest.fixture
+    def client_class(self):
+        """Import Client after setting up mocks for the human_client module."""
+        setup_common_mocks(with_grpc=False)
+        from human_client.client import Client
+
+        yield Client
+        cleanup_common_mocks()
+
+    @pytest.mark.parametrize("hash_str,expected_valid", [
+        ("a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4", True),
+        ("00000000000000000000000000000000", True),
+        ("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF", True),
+        ("", False),
+        ("abc", False),  # Too short
+        ("not-hex!!", False),  # Invalid hex
+        ("a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5", False),  # 31 chars — hex but wrong length
+        ("a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e", False),  # 31 chars — hex but wrong length
+        ("g1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4", False),  # 'g' not hex
+        ("a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6!", False),  # 33 chars — hex but wrong length
+    ])
+    def test_validates_hash(self, client_class, hash_str, expected_valid):
+        """Verify hash validation for various inputs."""
+        valid, err = client_class._validate_hash(hash_str)
+
+        # For invalid hashes, we need to check various failure reasons
+        if expected_valid:
+            assert valid, f"Expected valid=True for {hash_str!r}, got False: {err}"
+        else:
+            assert not valid, f"Expected valid=False for {hash_str!r}, got True: {err}"
+
+
 class TestSendMessage:
     """Tests for client message sending."""
 
@@ -295,7 +447,7 @@ class TestSendMessage:
         client = client_with_mocks
 
         dest_identity = MagicMock()
-        dest_identity.hash = b'\x0a' * 16
+        dest_identity.hash = b"\x0a" * 16
 
         result = client._send_message(dest_identity, "Hello world")
 
@@ -369,7 +521,7 @@ class TestSendMessage:
         client.router.handle_outbound.side_effect = LXMFException("Delivery failed")
 
         dest_identity = MagicMock()
-        dest_identity.hash = b'\x0b' * 16
+        dest_identity.hash = b"\x0b" * 16
 
         result = client._send_message(dest_identity, "Test message")
 
@@ -382,16 +534,15 @@ class TestSendMessage:
         client.router.handle_outbound.side_effect = OSError("Connection broken")
 
         dest_identity = MagicMock()
-        dest_identity.hash = b'\x0c' * 16
+        dest_identity.hash = b"\x0c" * 16
 
         result = client._send_message(dest_identity, "Test message")
 
         assert result is False, "Send should return False on OSError"
 
 
-
-
 if __name__ == "__main__":
     import pytest
     import sys
+
     sys.exit(pytest.main([__file__] + sys.argv[1:]))

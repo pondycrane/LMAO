@@ -24,6 +24,7 @@ except ImportError:
 
 # ── _needs_wifi ─────────────────────────────────────────────────────
 
+
 class TestNeedsWifi:
     """Tests for _needs_wifi() — pure function, no mocking needed."""
 
@@ -73,6 +74,7 @@ class TestNeedsWifi:
 
 
 # ── handle_reply ────────────────────────────────────────────────────
+
 
 class TestHandleReply:
     """Tests for handle_reply() callback logic."""
@@ -141,6 +143,7 @@ class TestHandleReply:
 
 # ── DEST_HASH conversion ───────────────────────────────────────────
 
+
 class TestConvertDestHash:
     """Tests for _convert_dest_hash() — pure function, no mocking needed."""
 
@@ -170,21 +173,25 @@ class TestConvertDestHash:
 
     def test_raises_valueerror_on_invalid_hex_string(self):
         import pytest
+
         with pytest.raises(ValueError):
             self._convert_dest_hash("not-hex!!")
 
     def test_raises_valueerror_on_odd_length_hex(self):
         import pytest
+
         with pytest.raises(ValueError):
             self._convert_dest_hash("abc")
 
     def test_raises_valueerror_on_non_string_non_bytes_non_none(self):
         import pytest
+
         with pytest.raises(ValueError):
             self._convert_dest_hash(42)
 
 
 # ── Module-level helpers ────────────────────────────────────────────
+
 
 class TestModuleFunctions:
     """Tests for remaining module-level helpers."""
@@ -215,9 +222,9 @@ class TestModuleFunctions:
 
 # ── import guard ────────────────────────────────────────────────────
 
+
 def test_module_importable():
     """The module must be importable when all deps are met."""
     assert lmao_client is not None, (
-        "cardputer_client.main not importable. "
-        "Ensure deps are declared in tests/BUILD."
+        "cardputer_client.main not importable. Ensure deps are declared in tests/BUILD."
     )

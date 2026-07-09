@@ -41,6 +41,7 @@ try:
         GetIdentityResponse,
         LMAOServicer,
     )
+
     GRPC_AVAILABLE = True
 except ImportError:
     GRPC_AVAILABLE = False
@@ -51,7 +52,9 @@ def _warn_if_rnode_missing(rnode_port):
     """Warn if the RNode port does not exist."""
     if os.path.exists(rnode_port):
         return
-    logger.warning("RNode port %s not found. LoRa messaging will be unavailable.", rnode_port)
+    logger.warning(
+        "RNode port %s not found. LoRa messaging will be unavailable.", rnode_port
+    )
     print(
         f"\u26a0\ufe0f  RNode port {rnode_port} not found.\n"
         f"   The server will start with WiFi AutoInterface only.\n"
@@ -74,14 +77,21 @@ def _init_rns_and_lxmf(rnode_port, identity_storage_path="/tmp/lmao_server_lxmf"
         atexit.register(lambda: shutil.rmtree(configdir, ignore_errors=True))
         RNS.Reticulum(configdir=configdir)
     except (OSError, PermissionError) as e:
-        logger.critical("Failed to create config directory for Reticulum: %s", e, exc_info=True)
-        print(f"FATAL: Failed to create config directory for Reticulum: {e}", file=sys.stderr)
+        logger.critical(
+            "Failed to create config directory for Reticulum: %s", e, exc_info=True
+        )
+        print(
+            f"FATAL: Failed to create config directory for Reticulum: {e}",
+            file=sys.stderr,
+        )
         print("Check that /tmp is writable and disk is not full.", file=sys.stderr)
         sys.exit(1)
     except RNS.RNSException as e:
         logger.critical("Reticulum initialization failed: %s", e, exc_info=True)
         print(f"FATAL: Reticulum initialization failed: {e}", file=sys.stderr)
-        print(f"This is often caused by a missing or misconfigured RNode on {rnode_port}.")
+        print(
+            f"This is often caused by a missing or misconfigured RNode on {rnode_port}."
+        )
         print("Check that:")
         print(f"  1. The RNode is plugged in and on the correct port ({rnode_port})")
         print("  2. You have permission: sudo usermod -a -G dialout $USER")
@@ -91,7 +101,10 @@ def _init_rns_and_lxmf(rnode_port, identity_storage_path="/tmp/lmao_server_lxmf"
     except Exception as e:
         logger.critical("Failed to initialize Reticulum: %s", e, exc_info=True)
         print(f"FATAL: Failed to initialize Reticulum: {e}", file=sys.stderr)
-        print("Check your config and RNode connection. See README Troubleshooting.", file=sys.stderr)
+        print(
+            "Check your config and RNode connection. See README Troubleshooting.",
+            file=sys.stderr,
+        )
         sys.exit(1)
     print("Reticulum initialized.")
 
@@ -100,7 +113,10 @@ def _init_rns_and_lxmf(rnode_port, identity_storage_path="/tmp/lmao_server_lxmf"
         identity = RNS.Identity()
     except (RNS.RNSException, OSError) as e:
         logger.critical("Failed to create identity: %s", e, exc_info=True)
-        print("FATAL: Failed to create server identity. See log for details.", file=sys.stderr)
+        print(
+            "FATAL: Failed to create server identity. See log for details.",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     # Create LXMF router
@@ -109,7 +125,9 @@ def _init_rns_and_lxmf(rnode_port, identity_storage_path="/tmp/lmao_server_lxmf"
         router = LXMF.LXMRouter(identity=identity, storagepath=identity_storage_path)
     except (RNS.RNSException, LXMF.LXMFException, OSError) as e:
         logger.critical("Failed to start LXMF router: %s", e, exc_info=True)
-        print("FATAL: Failed to start LXMF router. See log for details.", file=sys.stderr)
+        print(
+            "FATAL: Failed to start LXMF router. See log for details.", file=sys.stderr
+        )
         sys.exit(1)
 
     return identity, router
@@ -150,7 +168,9 @@ class Server:
             try:
                 queue.put_nowait(message)
             except Exception:
-                logger.warning("gRPC subscriber error — dropping subscriber", exc_info=True)
+                logger.warning(
+                    "gRPC subscriber error — dropping subscriber", exc_info=True
+                )
                 dead.append(queue)
         for q in dead:
             self.unregister_grpc_subscriber(q)
@@ -166,15 +186,25 @@ class Server:
         """
         try:
             source_identity = message.get_source()
-            source_hash = RNS.hexrep(source_identity.hash, delimit=False) if source_identity else "<unknown>"
-            content_bytes = message.content if hasattr(message, 'content') else b""
-            title = message.title_as_string() if hasattr(message, 'title_as_string') else ""
+            source_hash = (
+                RNS.hexrep(source_identity.hash, delimit=False)
+                if source_identity
+                else "<unknown>"
+            )
+            content_bytes = message.content if hasattr(message, "content") else b""
+            title = (
+                message.title_as_string() if hasattr(message, "title_as_string") else ""
+            )
 
-            logger.info("Message received — From: %s  Title: %s  Content length: %d bytes",
-                         source_hash, title, len(content_bytes))
+            logger.info(
+                "Message received — From: %s  Title: %s  Content length: %d bytes",
+                source_hash,
+                title,
+                len(content_bytes),
+            )
 
             # Decode content (protobuf first, UTF-8 fallback, byte-count placeholder)
-            display_text = decode_lmao_message(content_bytes)
+            decode_lmao_message(content_bytes)
 
             # Build and send a protobuf-encoded ACK reply
             reply_text = f"ACK from LMAO Server — received your message ({len(content_bytes)} bytes)"
@@ -203,11 +233,15 @@ class Server:
             self._fanout_to_grpc_subscribers(message)
 
         except AttributeError as e:
-            logger.error("LXMF message missing expected attributes: %s", e, exc_info=True)
+            logger.error(
+                "LXMF message missing expected attributes: %s", e, exc_info=True
+            )
         except (RNS.RNSException, LXMF.LXMFException) as e:
             logger.error("RNS/LXMF error processing message: %s", e, exc_info=True)
         except Exception as e:
-            logger.error("Unexpected error in handle_lxmf_delivery: %s", e, exc_info=True)
+            logger.error(
+                "Unexpected error in handle_lxmf_delivery: %s", e, exc_info=True
+            )
 
     def start(self):
         """Initialize Reticulum, LXMF router, and enter main loop (sync version).
@@ -221,8 +255,12 @@ class Server:
             format="%(asctime)s [%(levelname)s] %(message)s",
         )
 
-        cfg_dict = self._config_dict if self._config_dict is not None else config.get_config_dict()
-        rnode_port = cfg_dict['interfaces']['RNode LoRa']['port']
+        cfg_dict = (
+            self._config_dict
+            if self._config_dict is not None
+            else config.get_config_dict()
+        )
+        rnode_port = cfg_dict["interfaces"]["RNode LoRa"]["port"]
         _warn_if_rnode_missing(rnode_port)
 
         # Use shared initialization helper
@@ -233,15 +271,19 @@ class Server:
 
         # Print startup banner
         identity_hex = RNS.hexrep(self.server_identity.hash, delimit=False)
-        rnode_status = f"RNode on {rnode_port}" if os.path.exists(rnode_port) else "⚠️  RNode not connected — LoRa unavailable"
-        print(f"\n{'='*50}")
+        rnode_status = (
+            f"RNode on {rnode_port}"
+            if os.path.exists(rnode_port)
+            else "⚠️  RNode not connected — LoRa unavailable"
+        )
+        print(f"\n{'=' * 50}")
         print("LMAO Server POC — Running")
         print(f"Node identity: {identity_hex}")
         print("Listening for LXMF messages...")
         print(f"  LoRa: {rnode_status}")
         print("  WiFi: AutoInterface enabled")
         print("  Title discriminator: p:Envelope")
-        print(f"{'='*50}\n")
+        print(f"{'=' * 50}\n")
 
         # Main event loop
         try:
@@ -271,7 +313,9 @@ if GRPC_AVAILABLE:
             try:
                 envelope.ParseFromString(request.envelope)
             except (DecodeError, ValueError) as e:
-                await context.abort(grpc.StatusCode.INVALID_ARGUMENT, f"Bad envelope: {e}")
+                await context.abort(
+                    grpc.StatusCode.INVALID_ARGUMENT, f"Bad envelope: {e}"
+                )
 
             # Resolve destination identity from the request hash
             dest_hash = request.destination_hash
@@ -318,13 +362,17 @@ if GRPC_AVAILABLE:
                         break
                     try:
                         # Apply optional title filter
-                        title = getattr(message, 'title_as_string', lambda: "")()
+                        title = getattr(message, "title_as_string", lambda: "")()
                         if request.title_filter and request.title_filter not in title:
                             continue
                         # Build response
-                        content_bytes = getattr(message, 'content', b"")
+                        content_bytes = getattr(message, "content", b"")
                         source_identity = message.get_source()
-                        source_hash = RNS.hexrep(source_identity.hash, delimit=False) if source_identity else ""
+                        source_hash = (
+                            RNS.hexrep(source_identity.hash, delimit=False)
+                            if source_identity
+                            else ""
+                        )
                         resp = SubscribeResponse(
                             envelope=content_bytes,
                             source_hash=source_hash,
@@ -348,8 +396,9 @@ if GRPC_AVAILABLE:
 
 else:
 
-    class LMAOGrpcService:
+    class LMAOGrpcService:  # type: ignore[no-redef]
         """Placeholder when gRPC is not available — all methods raise ImportError."""
+
         def __init__(self, server_instance):
             raise ImportError("gRPC is not installed. Install grpcio and grpcio-tools.")
 
@@ -357,6 +406,7 @@ else:
 # ──────────────────────────────────────────────────────────────
 # Async Entry Point (with gRPC)
 # ──────────────────────────────────────────────────────────────
+
 
 async def async_main():
     """Async entry point: initialize LXMF router and optionally start gRPC server.
@@ -370,7 +420,7 @@ async def async_main():
     )
 
     cfg_dict = config.get_config_dict()
-    rnode_port = cfg_dict['interfaces']['RNode LoRa']['port']
+    rnode_port = cfg_dict["interfaces"]["RNode LoRa"]["port"]
     _warn_if_rnode_missing(rnode_port)
 
     # Use shared initialization helper (handles specific exception types)
@@ -386,8 +436,12 @@ async def async_main():
 
     # Print banner
     identity_hex = RNS.hexrep(server_identity.hash, delimit=False)
-    rnode_status = f"RNode on {rnode_port}" if os.path.exists(rnode_port) else "⚠️  RNode not connected — LoRa unavailable"
-    print(f"\n{'='*50}")
+    rnode_status = (
+        f"RNode on {rnode_port}"
+        if os.path.exists(rnode_port)
+        else "⚠️  RNode not connected — LoRa unavailable"
+    )
+    print(f"\n{'=' * 50}")
     print("LMAO Server — Running (async mode)")
     print(f"Node identity: {identity_hex}")
     print("Listening for LXMF messages...")
@@ -396,7 +450,7 @@ async def async_main():
     print("  Title discriminator: p:Envelope")
     if GRPC_AVAILABLE:
         print("  gRPC: 0.0.0.0:50051")
-    print(f"{'='*50}\n")
+    print(f"{'=' * 50}\n")
 
     # Start gRPC server if available
     grpc_server = None
@@ -404,6 +458,7 @@ async def async_main():
         grpc_service = LMAOGrpcService(lmao_server)
         grpc_server = grpc.aio.server()
         from lma_core import add_LMAOServicer_to_server
+
         add_LMAOServicer_to_server(grpc_service, grpc_server)
         grpc_server.add_insecure_port("0.0.0.0:50051")
         await grpc_server.start()

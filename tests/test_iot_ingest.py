@@ -1,4 +1,5 @@
 """Tests for k8s-app IoT ingest script."""
+
 import importlib.util
 from unittest.mock import MagicMock
 
@@ -10,9 +11,7 @@ import pytest
 # a regular 'from k8s_app import iot_ingest' statement).
 def _load_iot_ingest():
     """Import k8s-app/iot_ingest.py as a module via importlib."""
-    spec = importlib.util.spec_from_file_location(
-        "iot_ingest", "k8s-app/iot_ingest.py"
-    )
+    spec = importlib.util.spec_from_file_location("iot_ingest", "k8s-app/iot_ingest.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -41,6 +40,7 @@ class TestBuildSensorEnvelope:
 
         # Parse back
         from proto import lma_pb2
+
         envelope = lma_pb2.LMAOEnvelope()
         envelope.ParseFromString(payload)
 
@@ -53,6 +53,7 @@ class TestBuildSensorEnvelope:
         payload = iot_ingest.build_sensor_envelope("struct-node", 30.0, 80.0)
 
         from proto import lma_pb2
+
         envelope = lma_pb2.LMAOEnvelope()
         envelope.ParseFromString(payload)
 
@@ -76,6 +77,7 @@ class TestBuildSensorEnvelope:
         payload = iot_ingest.build_sensor_envelope("batt-test", 20.0, 50.0)
 
         from proto import lma_pb2
+
         envelope = lma_pb2.LMAOEnvelope()
         envelope.ParseFromString(payload)
 
@@ -86,6 +88,7 @@ class TestBuildSensorEnvelope:
         payload = iot_ingest.build_sensor_envelope("freezer", -15.0, 40.0)
 
         from proto import lma_pb2
+
         envelope = lma_pb2.LMAOEnvelope()
         envelope.ParseFromString(payload)
 
@@ -96,6 +99,7 @@ class TestBuildSensorEnvelope:
         payload = iot_ingest.build_sensor_envelope("dry", 30.0, 0.0)
 
         from proto import lma_pb2
+
         envelope = lma_pb2.LMAOEnvelope()
         envelope.ParseFromString(payload)
 
@@ -127,6 +131,7 @@ class TestSubscribeExample:
         class FakeRpcError(iot_ingest.grpc.RpcError):
             def code(self):
                 return iot_ingest.grpc.StatusCode.CANCELLED
+
             def details(self):
                 return ""
 
@@ -144,6 +149,7 @@ class TestSubscribeExample:
         class FakeRpcError(iot_ingest.grpc.RpcError):
             def code(self):
                 return iot_ingest.grpc.StatusCode.UNAVAILABLE
+
             def __str__(self):
                 return "Service unavailable"
 
@@ -179,7 +185,9 @@ class TestSendExample:
     def test_send_example_calls_stub(self, capsys):
         """send_example should call stub.Send with a valid request."""
         mock_stub = MagicMock()
-        mock_stub.Send.return_value = MagicMock(status="queued", destination_hash="abc123")
+        mock_stub.Send.return_value = MagicMock(
+            status="queued", destination_hash="abc123"
+        )
 
         iot_ingest.send_example(mock_stub)
 

@@ -42,6 +42,7 @@ FILES_TO_UPLOAD = [
     "proto/lma_encoder.py",
 ]
 
+
 # Library files to upload under /lib/ (µReticulum urns port + native modules).
 # These are the .py files from the urns package and .mpy native crypto modules.
 #
@@ -68,6 +69,7 @@ def auto_discover_lib_files(client_root):
                 files.append(rel)
     files.sort()
     return files
+
 
 # ---- Path helpers ----
 
@@ -101,9 +103,7 @@ def _sanitize_path_for_script(path: str) -> str:
     path = path.replace("'", "\\'")
     # Basic sanity: reject non-printable characters
     if not all(32 <= ord(c) < 127 for c in path):
-        raise ValueError(
-            f"Path contains non-printable characters: {path!r}"
-        )
+        raise ValueError(f"Path contains non-printable characters: {path!r}")
     return path
 
 
@@ -150,6 +150,7 @@ def find_client_root():
 
 
 # ---- Serial helpers ----
+
 
 def find_cardputer_port(preferred=None):
     """Return the serial device path for a connected Cardputer (ESP32-S3).
@@ -270,12 +271,15 @@ def verify_device(ser):
 
     Returns ``(True, info_string)`` or ``(False, reason_string)``.
     """
-    ok, out = exec_raw(ser, """
+    ok, out = exec_raw(
+        ser,
+        """
 import sys as _sys
 import os as _os
 print(_sys.platform)
 print(_os.uname().machine)
-""")
+""",
+    )
     if not ok:
         return False, f"exec_raw failed: {out[:200]}"
 
@@ -413,20 +417,25 @@ def upload_file(ser, local_path, remote_path, chunk_size=1024):
 
 # ---- Main (entry-point for ``bazel run``) ----
 
+
 def main():
     parser = argparse.ArgumentParser(
         description="Flash Cardputer with LMAO MicroPython client code",
     )
     parser.add_argument(
-        "--port", "-p", default=None,
+        "--port",
+        "-p",
+        default=None,
         help="Serial port (e.g. /dev/ttyACM0). Auto-detected when omitted.",
     )
     parser.add_argument(
-        "--verify-only", action="store_true",
+        "--verify-only",
+        action="store_true",
         help="Only verify device type, do not upload files.",
     )
     parser.add_argument(
-        "--client-root", default=None,
+        "--client-root",
+        default=None,
         help="Path to cardputer_client/ directory (auto-detected when omitted).",
     )
     args = parser.parse_args()
@@ -456,7 +465,11 @@ def main():
         print("Specify port manually with: --port /dev/ttyACM0")
         print("\nDetected serial ports:")
         for p in serial.tools.list_ports.comports():
-            print(f"  {p.device} — {p.description}  (VID:0x{p.vid:04X})" if p.vid else f"  {p.device} — {p.description}")
+            print(
+                f"  {p.device} — {p.description}  (VID:0x{p.vid:04X})"
+                if p.vid
+                else f"  {p.device} — {p.description}"
+            )
         sys.exit(1)
 
     print(f"Connecting to Cardputer on {port} …")
@@ -475,7 +488,9 @@ def main():
         if not enter_raw_repl(ser):
             print("ERROR: Could not enter raw REPL.")
             print("Is MicroPython firmware installed on the Cardputer?")
-            print("The device might be in bootloader mode or running a different firmware.")
+            print(
+                "The device might be in bootloader mode or running a different firmware."
+            )
             sys.exit(1)
 
         # — Verify device —
@@ -503,7 +518,9 @@ def main():
         ser.write(b"\x04")  # Ctrl+D = soft reset in friendly REPL
 
         print("Done. The Cardputer will reboot and run the LMAO client automatically.")
-        print(f"Uploaded {len(FILES_TO_UPLOAD)} client + {len(lib_files)} library file(s).")
+        print(
+            f"Uploaded {len(FILES_TO_UPLOAD)} client + {len(lib_files)} library file(s)."
+        )
 
     except KeyboardInterrupt:
         print("\nAborted by user.")
@@ -514,6 +531,7 @@ def main():
         sys.exit(1)
     except Exception as e:
         import traceback
+
         traceback.print_exc()
         print(f"\nERROR: Unexpected error during flashing: {e}")
         sys.exit(1)
