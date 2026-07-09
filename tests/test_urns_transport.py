@@ -11,6 +11,7 @@ _urns_parent = os.path.abspath(_urns_parent)
 if _urns_parent not in sys.path:
     sys.path.insert(0, _urns_parent)
 
+
 # Mock MicroPython dependencies
 class _MockMicroPython:
     @staticmethod
@@ -21,19 +22,24 @@ class _MockMicroPython:
     def native(f):
         return f
 
+
 sys.modules["micropython"] = _MockMicroPython()
 
 _mp_uhashlib = MagicMock()
 _mp_uhashlib.sha256 = hashlib.sha256
 sys.modules["uhashlib"] = _mp_uhashlib
 
+
 class _MockAESCipher:
     def __init__(self, key, mode, iv):
         pass
+
     def encrypt(self, plaintext):
         return plaintext
+
     def decrypt(self, ciphertext):
         return ciphertext
+
 
 _mp_ucryptolib = MagicMock()
 _mp_ucryptolib.aes = _MockAESCipher
@@ -48,6 +54,7 @@ from urns.identity import Identity  # noqa: E402
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
+
 
 def _make_mock_interface(name="mock_iface"):
     """Create a mock interface with minimal attributes."""
@@ -124,6 +131,7 @@ class TransportStateHelper:
 
 
 # ── Tests ───────────────────────────────────────────────────────────────────
+
 
 class TestRegisterInterface:
     """Interface registration and lookup."""

@@ -1,7 +1,7 @@
 """Tests for human client REPL parsing (with mocked RNS/LXMF)."""
+
 """Tests for human client message handler (with mocked RNS/LXMF)."""
-from unittest.mock import MagicMock, patch, PropertyMock
-import builtins
+from unittest.mock import MagicMock, patch
 import pytest
 import sys
 from google.protobuf.message import DecodeError
@@ -30,10 +30,11 @@ def client_with_mocks():
     sys.modules["lma_core"].LMAOEnvelope.return_value = mock_envelope
 
     from human_client import client
+
     client_instance = client.Client()
     client_instance.router = MagicMock()
     client_instance.client_identity = MagicMock()
-    client_instance.client_identity.hash = b'\x01' * 16
+    client_instance.client_identity.hash = b"\x01" * 16
 
     yield client_instance
 
@@ -272,7 +273,9 @@ class TestInputParsing:
             result = client._parse_input("Lazy recall test")
 
             assert result is True
-            assert client._default_dest_identity == mock_recalled, "Should cache recalled identity"
+            assert client._default_dest_identity == mock_recalled, (
+                "Should cache recalled identity"
+            )
             mock_send.assert_called_once_with(mock_recalled, "Lazy recall test")
 
     def test_plain_text_lazy_recall_failure(self, client_parsed, capsys):
@@ -306,9 +309,8 @@ class TestInputParsing:
         assert "Error" in captured.out or "Could not resolve" in captured.out
 
 
-
-
 if __name__ == "__main__":
     import pytest
     import sys
+
     sys.exit(pytest.main([__file__] + sys.argv[1:]))

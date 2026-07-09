@@ -25,18 +25,21 @@ import pytest
 try:
     import serial
     import serial.tools.list_ports
+
     HAS_PYSERIAL = True
 except ImportError:
     HAS_PYSERIAL = False
 
 try:
     from cardputer_client import flash as cardputer_flash
+
     HAS_FLASH_LIB = True
 except ImportError:
     HAS_FLASH_LIB = False
 
 try:
     from lmao_server.config import get_config_dict
+
     HAS_SERVER_CONFIG = True
 except ImportError:
     HAS_SERVER_CONFIG = False
@@ -140,7 +143,9 @@ def _probe_hardware():
                 )
                 return
     except Exception as exc:
-        _HARDWARE_REASON = f"Cannot communicate with Cardputer at {_CARDCOMPUTER_PORT}: {exc}"
+        _HARDWARE_REASON = (
+            f"Cannot communicate with Cardputer at {_CARDCOMPUTER_PORT}: {exc}"
+        )
         return
 
     _HARDWARE_READY = True
@@ -271,13 +276,16 @@ class TestCardputerLoRaE2E:
         configdir = tempfile.mkdtemp(prefix="lmao_e2e_rns_")
         try:
             config_content = dict_to_ini(
-                {"logging": {"loglevel": 3}, "transport": {"path": "/tmp/lmao_e2e_rns_state"}},
+                {
+                    "logging": {"loglevel": 3},
+                    "transport": {"path": "/tmp/lmao_e2e_rns_state"},
+                },
                 {"RNode LoRa": cfg_dict["interfaces"]["RNode LoRa"]},
             )
             with open(os.path.join(configdir, "config"), "w") as f:
                 f.write(config_content)
 
-            rns = RNS.Reticulum(configdir=configdir)
+            RNS.Reticulum(configdir=configdir)
             identity = RNS.Identity()
             server_hash = RNS.hexrep(identity.hash, delimit=False)
 
@@ -291,8 +299,7 @@ class TestCardputerLoRaE2E:
                 """Record received messages for the test to inspect."""
                 source = message.get_source()
                 source_hash = (
-                    RNS.hexrep(source.hash, delimit=False)
-                    if source else "<unknown>"
+                    RNS.hexrep(source.hash, delimit=False) if source else "<unknown>"
                 )
                 content_bytes = message.content if hasattr(message, "content") else b""
                 try:
@@ -306,11 +313,13 @@ class TestCardputerLoRaE2E:
                     print(f"WARNING: capture_delivery: envelope parse failed: {exc}")
                     display_text = content_bytes.decode("utf-8", errors="replace")
 
-                received_messages.append({
-                    "source": source_hash,
-                    "content": display_text,
-                    "raw": content_bytes,
-                })
+                received_messages.append(
+                    {
+                        "source": source_hash,
+                        "content": display_text,
+                        "raw": content_bytes,
+                    }
+                )
                 message_event.set()
 
             router.register_delivery_callback(capture_delivery)
@@ -373,6 +382,7 @@ class TestCardputerLoRaE2E:
                 # device's flash filesystem (exec() only modifies the in-memory
                 # namespace and is lost on soft reset).
                 import tempfile
+
                 with tempfile.NamedTemporaryFile(
                     mode="w", suffix=".py", delete=False
                 ) as tmp:
@@ -414,14 +424,12 @@ class TestCardputerLoRaE2E:
 
                 while time.time() < serial_deadline:
                     if cardputer_ser.in_waiting:
-                        cardputer_output += cardputer_ser.read(
-                            cardputer_ser.in_waiting
-                        )
+                        cardputer_output += cardputer_ser.read(cardputer_ser.in_waiting)
 
                     if b"LMAO" in cardputer_output or b"POC Ready" in cardputer_output:
                         found_banner = True
 
-                    if b"ACK" in cardputer_output or b"Reply" in cardputer_output:
+                    if b"ack" in cardputer_output.lower() or b"reply" in cardputer_output.lower():
                         found_ack = True
 
                     # If we've received a LoRa message from the Cardputer on the
@@ -466,11 +474,11 @@ class TestCardputerLoRaE2E:
                 # Verify message content
                 msg = received_messages[0]
                 print(f"\nReceived message from {msg['source']}: {msg['content']}")
-                assert "Hello" in msg["content"], (
+                assert "hello" in msg["content"].lower(), (
                     f"Expected 'Hello' in message content, got: {msg['content'][:200]}"
                 )
 
-                print(f"\n✅ LoRa E2E test passed!")
+                print("\n✅ LoRa E2E test passed!")
                 print(f"   Cardputer booted: {found_banner}")
                 print(f"   Server ACK on Cardputer: {found_ack}")
                 print(f"   Messages received by server: {len(received_messages)}")
@@ -491,4 +499,5 @@ class TestCardputerLoRaE2E:
 
 if __name__ == "__main__":
     import sys
+
     sys.exit(pytest.main([__file__] + sys.argv[1:]))

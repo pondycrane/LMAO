@@ -36,7 +36,9 @@ def find_rnode_port():
         try:
             desc = (p.description or "").lower()
         except (TypeError, AttributeError) as exc:
-            print(f"DEBUG: could not read description for {getattr(p, 'device', '<unknown>')}: {exc}")
+            print(
+                f"DEBUG: could not read description for {getattr(p, 'device', '<unknown>')}: {exc}"
+            )
             desc = ""
         if "rnode" in desc:
             return p.device

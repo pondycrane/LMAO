@@ -10,7 +10,6 @@ import sys
 from types import SimpleNamespace
 from unittest.mock import patch
 
-import pytest
 
 # Ensure the e2e/ directory is on sys.path for sibling imports
 sys.path.insert(0, os.path.dirname(__file__))
@@ -92,9 +91,11 @@ class TestFindRNodePort:
 
     def test_handles_missing_vid_attribute(self):
         """Ports without a 'vid' attribute do not crash."""
+
         class PortNoVid:
             device = "/dev/ttyS0"
             description = "RNode device"
+
         mock_ports = [PortNoVid]
         with patch("serial.tools.list_ports.comports", return_value=mock_ports):
             result = find_rnode_port()
@@ -102,9 +103,11 @@ class TestFindRNodePort:
 
     def test_handles_missing_description_attribute(self):
         """Ports without 'description' attribute do not crash."""
+
         class PortNoDesc:
             device = "/dev/ttyS0"
             vid = 0x303A
+
         mock_ports = [PortNoDesc]
         with patch("serial.tools.list_ports.comports", return_value=mock_ports):
             result = find_rnode_port()
@@ -112,8 +115,9 @@ class TestFindRNodePort:
 
     def test_comports_exception_prints_warning(self, capsys):
         """When comports() raises, return None with a warning."""
-        with patch("serial.tools.list_ports.comports",
-                    side_effect=OSError("permission denied")):
+        with patch(
+            "serial.tools.list_ports.comports", side_effect=OSError("permission denied")
+        ):
             result = find_rnode_port()
         assert result is None
         captured = capsys.readouterr()
@@ -156,4 +160,5 @@ class TestRNODEVIDS:
 if __name__ == "__main__":
     import pytest as _pytest
     import sys as _sys
+
     _sys.exit(_pytest.main([__file__] + _sys.argv[1:]))

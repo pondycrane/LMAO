@@ -12,14 +12,16 @@ import sys
 
 # µReticulum imports (urns MicroPython port)
 import gc
+
 gc.collect()
 
 # Try to import the urns library from /lib (where the flash tool places it)
 try:
     sys.path.insert(0, "/lib")
-    from urns import Reticulum, Identity
-    from urns.lxmf import LXMRouter, LXMessage
-    from urns.log import LOG_NOTICE, LOG_INFO
+    from urns import Reticulum, Identity  # noqa: F401
+    from urns.lxmf import LXMRouter, LXMessage  # noqa: F401
+    from urns.log import LOG_NOTICE, LOG_INFO  # noqa: F401
+
     HAS_URNS = True
 except ImportError:
     HAS_URNS = False
@@ -28,6 +30,7 @@ except ImportError:
 try:
     from machine import Pin, SPI
     import st7789
+
     HAS_DISPLAY = True
 except ImportError:
     HAS_DISPLAY = False
@@ -35,6 +38,7 @@ except ImportError:
 # Proto encoder (optional — gracefully degrades if not on device)
 try:
     from proto.lma_encoder import make_poc_message
+
     HAS_PROTO = True
 except ImportError:
     HAS_PROTO = False
@@ -42,15 +46,25 @@ except ImportError:
 
 # ---- Display helpers ----
 
+
 def init_display():
     """Initialize the Cardputer ST7789 display."""
     if not HAS_DISPLAY:
         return None
     try:
-        spi = SPI(1, baudrate=40000000, polarity=1, phase=0,
-                  sck=Pin(36), mosi=Pin(35), miso=Pin(37))
+        spi = SPI(
+            1,
+            baudrate=40000000,
+            polarity=1,
+            phase=0,
+            sck=Pin(36),
+            mosi=Pin(35),
+            miso=Pin(37),
+        )
         tft = st7789.ST7789(
-            spi, 240, 135,
+            spi,
+            240,
+            135,
             reset=Pin(33, Pin.OUT),
             dc=Pin(34, Pin.OUT),
             cs=Pin(12, Pin.OUT),
@@ -94,6 +108,7 @@ def log(msg, tft=None, status_lines=None):
 
 # ---- LXMF message handler ----
 
+
 def handle_reply(message):
     """Callback invoked when an LXMF reply is received.
 
@@ -119,11 +134,13 @@ pending_replies = []
 
 # ---- Helpers ----
 
+
 def _needs_wifi(config):
     """Check if any UDP or TCP interface is enabled in config."""
     for iface in config.get("interfaces", []):
         if iface.get("enabled", False) and iface.get("type", "") in (
-            "UDPInterface", "TCPClientInterface",
+            "UDPInterface",
+            "TCPClientInterface",
         ):
             return True
     return False
@@ -159,6 +176,7 @@ def _connect_wifi(ssid, password, debug=0, timeout=15):
 
     try:
         import ntptime
+
         ntptime.settime()
         if debug >= 1:
             print("NTP synced")
@@ -169,6 +187,7 @@ def _connect_wifi(ssid, password, debug=0, timeout=15):
 
 
 # ---- Config helpers ----
+
 
 def _convert_dest_hash(hex_val):
     """Convert a DEST_HASH hex string to bytes for the urns LXMF router.
@@ -195,14 +214,17 @@ def _convert_dest_hash(hex_val):
         )
     try:
         import ubinascii
+
         unhex = ubinascii.unhexlify
     except ImportError:
         import binascii
+
         unhex = binascii.unhexlify
     return unhex(hex_val)
 
 
 # ---- Main ----
+
 
 def main():
     global pending_replies
@@ -220,8 +242,10 @@ def main():
     # ---- Load config (must be on device as /config.py) ----
     try:
         from config import WIFI_SSID, WIFI_PASS, NODE_NAME, DEBUG, CONFIG
+
         try:
             from config import DEST_HASH
+
             raw_dest = DEST_HASH  # captured for error messages
             DEST_HASH = _convert_dest_hash(DEST_HASH)
         except ImportError:
@@ -231,7 +255,8 @@ def main():
                 f"ERROR: DEST_HASH is not a valid hex string: {raw_dest!r}. "
                 "Expected 32 hex characters (e.g. 'a1b2c3d4e5f6...'). "
                 "Set DEST_HASH = None in config.py to disable sending.",
-                tft, status_lines,
+                tft,
+                status_lines,
             )
             while True:
                 time.sleep(1)
@@ -272,7 +297,7 @@ def main():
     tft = log("Starting LXMF router...", tft, status_lines)
     try:
         router = LXMRouter(identity=rns.identity, storagepath="/flash/lxmf_state")
-        dest = router.register_delivery_identity(rns.identity, display_name=NODE_NAME)
+        router.register_delivery_identity(rns.identity, display_name=NODE_NAME)
         router.register_delivery_callback(handle_reply)
         tft = log("LXMF router OK.", tft, status_lines)
     except Exception as e:
@@ -307,8 +332,9 @@ def main():
             elif DEST_HASH is None:
                 log("No destination configured — not sending", tft, status_lines)
             else:
-                content = make_poc_message(identity_hex, hello_text,
-                                           timestamp=int(time.time() * 1000))
+                content = make_poc_message(
+                    identity_hex, hello_text, timestamp=int(time.time() * 1000)
+                )
                 # Send via urns LXMF router
                 msg = router.send_message(
                     destination_hash=DEST_HASH,
@@ -337,7 +363,8 @@ def main():
                 f"❗ Error in main loop "
                 f"({consecutive_errors}/{MAX_CONSECUTIVE_ERRORS}): "
                 f"{type(e).__name__}: {e}",
-                tft, status_lines,
+                tft,
+                status_lines,
             )
             if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
                 log("FATAL: Too many consecutive errors, halting.", tft, status_lines)
