@@ -148,6 +148,16 @@ py_test(
 )
 
 py_test(
+    name = "test_queue",
+    srcs = ["test_queue.py"],
+    deps = [
+        "//lma_core",
+        "@lmao_pip//pytest",
+        "@lmao_pip//pytest_asyncio",
+    ],
+)
+
+py_test(
     name = "test_urns_packet",
     srcs = ["test_urns_packet.py"],
     data = ["//cardputer_client:lib_files"],
