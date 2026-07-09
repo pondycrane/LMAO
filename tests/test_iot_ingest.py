@@ -186,6 +186,46 @@ class TestSubscribeExample:
         captured = capsys.readouterr()
         assert "Subscribe error" in captured.out
 
+    @pytest.mark.parametrize("status_code,expected_output,expected_log", [
+        (
+            "UNAVAILABLE",
+            "Subscribe error: server unavailable",
+            "gRPC subscribe failed (UNAVAILABLE)",
+        ),
+        (
+            "DEADLINE_EXCEEDED",
+            "Subscribe timeout",
+            "gRPC subscribe timeout (DEADLINE_EXCEEDED)",
+        ),
+    ])
+    def test_subscribe_specific_errors_logged(
+        self, status_code, expected_output, expected_log, capsys
+    ):
+        """Specific gRPC error codes should print/log appropriate messages."""
+        mock_stub = MagicMock()
+
+        class FakeRpcError(iot_ingest.grpc.RpcError):
+            def code(self):
+                return getattr(iot_ingest.grpc.StatusCode, status_code)
+
+            def details(self):
+                return f"details for {status_code}"
+
+            def __str__(self):
+                return f"details for {status_code}"
+
+        mock_stub.Subscribe.side_effect = FakeRpcError()
+
+        with patch.object(iot_ingest.logger, "warning") as mock_logger_warning:
+            iot_ingest.subscribe_example(mock_stub, timeout=5)
+
+        captured = capsys.readouterr()
+        assert expected_output in captured.out
+
+        if expected_log:
+            mock_logger_warning.assert_called_once()
+            assert expected_log in mock_logger_warning.call_args[0][0]
+
     def test_subscribe_receives_message(self, capsys):
         """subscribe_example should print received message bytes."""
         mock_stub = MagicMock()
@@ -393,3 +433,44 @@ class TestSubscribeExampleNats:
 
         captured = capsys.readouterr()
         assert "Total received: 3 message(s)" in captured.out
+
+
+class TestMainFunction:
+    """Tests for main() entry point."""
+
+    @pytest.mark.asyncio
+    async def test_main_nats_error_logged(self, mock_nats_for_iot):
+        """main() with --use-nats should log NATS failures via logger.exception."""
+        test_args = ["iot_ingest.py", "--use-nats", "--send"]
+        with patch.object(sys, "argv", test_args):
+            with patch.object(iot_ingest.logger, "exception") as mock_logger_exc:
+                with patch.object(
+                    iot_ingest, "send_example_nats",
+                    side_effect=Exception("nats failed"),
+                ):
+                    with pytest.raises(SystemExit):
+                        iot_ingest.main()
+
+        mock_logger_exc.assert_called_once_with("NATS operation failed")
+
+    def test_main_runs_default_mode_without_args(self, capsys):
+        """main() with no args should run all examples (gRPC path).
+
+        Verifies that argument parsing and default dispatch work correctly.
+        """
+        test_args = ["iot_ingest.py"]
+        mock_stub = MagicMock()
+        mock_stub.Send.return_value.status = "queued"
+        mock_stub.GetIdentity.return_value.identity_hex = "aaabbb"
+        mock_stub.Subscribe.return_value = iter([])
+
+        with patch.object(sys, "argv", test_args):
+            with patch.object(iot_ingest, "LMAOStub", return_value=mock_stub):
+                with patch.object(iot_ingest.grpc, "insecure_channel"):
+                    iot_ingest.main()
+
+        captured = capsys.readouterr()
+        assert "Connected to LMAO server" in captured.out
+        assert "Send response" in captured.out
+        assert "Subscribe Example" in captured.out
+        assert "Server identity" in captured.out
