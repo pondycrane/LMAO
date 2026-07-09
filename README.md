@@ -366,7 +366,9 @@ If an RNode is connected, LoRa messaging is available.
 ├── lma_core/                          # Shared Python wrapper library
 │   ├── BUILD                          # Bazel: py_library target
 │   ├── __init__.py                    # Re-exports generated protobuf stubs
-│   └── config_utils.py                # RNode port resolution + INI generation helpers
+│   ├── config_utils.py                # RNode port resolution + INI generation helpers
+│   ├── message_utils.py               # Shared LXMF message decoding (decode_lmao_message)
+│   └── rns_di.py                      # RNS/LXMF dependency-injection wrapper for testability
 │
 ├── lmao_server/                       # Python — runs on Raspberry Pi
 │   ├── BUILD                          # Bazel: py_binary target
@@ -400,10 +402,14 @@ If an RNode is connected, LoRa messaging is available.
 │
 ├── tests/                             # Host-side tests (Bazel py_test targets)
 │   ├── BUILD                          # Bazel: py_test targets
+│   ├── conftest.py                    # Shared mock helpers (setup_common_mocks / cleanup_common_mocks)
 │   ├── test_config.py                 # Config module unit tests (no hardware)
 │   ├── test_lma_core.py               # lma_core import error handling + exports
 │   ├── test_lma_encoder.py            # Encoder round-trip + cross-validation tests
 │   ├── test_server_handler.py         # Server handler unit tests (mocked RNS/LXMF)
+│   ├── test_server_startup.py         # Server startup lifecycle + async entry point tests
+│   ├── test_client_repl.py            # Human client REPL input parsing tests
+│   ├── test_client_startup.py         # Human client startup lifecycle tests
 │   └── e2e/
 │       └── test_cardputer_flash.py    # E2E flash + boot validation test
 │
