@@ -115,6 +115,20 @@ def connected_queue(mock_nats_modules):
     return _make
 
 
+@pytest.fixture
+def nats_unavailable():
+    """Simulate missing nats-py by temporarily removing modules from sys.modules."""
+    saved = {}
+    for mod in ["nats", "nats.aio", "nats.aio.client", "nats.js", "nats.js.api"]:
+        if mod in sys.modules:
+            saved[mod] = sys.modules.pop(mod)
+    for key in list(sys.modules):
+        if key.startswith("lma_core.queue"):
+            del sys.modules[key]
+    yield
+    sys.modules.update(saved)
+
+
 # ===================================================================
 # Tests
 # ===================================================================
@@ -151,26 +165,12 @@ class TestNatsQueueConnect:
             await nq.connect()
 
     @pytest.mark.asyncio
-    async def test_nats_unavailable_raises_import_error(self):
+    async def test_nats_unavailable_raises_import_error(self, nats_unavailable):
         """When nats-py is not installed, NatsQueue.__init__ raises ImportError."""
-        # Temporarily hide nats from sys.modules to simulate missing dep
-        saved = {}
-        for mod in ["nats", "nats.aio", "nats.aio.client", "nats.js", "nats.js.api"]:
-            if mod in sys.modules:
-                saved[mod] = sys.modules.pop(mod)
-        # Also force re-import of lma_core.queue
-        for key in list(sys.modules):
-            if key.startswith("lma_core.queue"):
-                del sys.modules[key]
+        from lma_core.queue import NatsQueue
 
-        try:
-            from lma_core.queue import NatsQueue
-
-            with pytest.raises(ImportError, match="nats-py"):
-                NatsQueue()
-        finally:
-            # Restore
-            sys.modules.update(saved)
+        with pytest.raises(ImportError, match="nats-py"):
+            NatsQueue()
 
     @pytest.mark.asyncio
     async def test_graceful_close(self, mock_nats_modules):
@@ -183,6 +183,41 @@ class TestNatsQueueConnect:
         mock_nc = MagicMock()
         mock_nc.drain = AsyncMock()
         nq._nc = mock_nc
+
+        await nq.close()
+
+        mock_nc.drain.assert_called_once()
+        assert nq._nc is None
+        assert nq._js is None
+
+    @pytest.mark.asyncio
+    async def test_connect_forwards_kwargs(self, mock_nats_modules):
+        """connect() should forward **kwargs to nats.connect()."""
+        from lma_core.queue import NatsQueue
+
+        nq = NatsQueue(name="test-kwargs")
+        await nq.connect(servers="nats://test:4222", token="s3kr1t")
+
+        nats_mod, _, _ = mock_nats_modules
+        nats_mod.connect.assert_called_once_with(
+            servers="nats://test:4222",
+            name="test-kwargs",
+            token="s3kr1t",
+        )
+        await nq.close()
+
+    @pytest.mark.asyncio
+    async def test_close_handles_drain_error(self, mock_nats_modules):
+        """close() should clear _nc/_js even if drain() raises."""
+        from lma_core.queue import NatsQueue
+
+        nq = NatsQueue(name="test-drain-err")
+        await nq.connect()
+        # Make drain raise
+        mock_nc = MagicMock()
+        mock_nc.drain = AsyncMock(side_effect=OSError("drain failed"))
+        nq._nc = mock_nc
+        nq._js = MagicMock()
 
         await nq.close()
 
@@ -251,6 +286,17 @@ class TestNatsQueueStream:
 
         with pytest.raises(RuntimeError, match="update failed"):
             await nq.ensure_stream("BROKEN", ["b.>"])
+
+    @pytest.mark.asyncio
+    async def test_ensure_stream_passes_overrides(self, connected_queue):
+        """ensure_stream() should forward **overrides to add_stream."""
+        nq = await connected_queue()
+        await nq.ensure_stream("OVERRIDE", ["o.>"], max_bytes=500, num_replicas=3)
+
+        nq._js.add_stream.assert_called_once()
+        call_kwargs = nq._js.add_stream.call_args.kwargs
+        assert call_kwargs["max_bytes"] == 500
+        assert call_kwargs["num_replicas"] == 3
 
 
 class TestNatsQueuePublish:
@@ -388,21 +434,87 @@ class TestNatsQueueSubscribe:
         msg.ack.assert_not_called()
         msg.nak.assert_called_once()
 
+    @pytest.mark.asyncio
+    async def test_subscribe_with_sync_callback(self, connected_queue):
+        """subscribe() should handle sync callbacks (no await) and ACK."""
+        nq = await connected_queue()
+        msg = MagicMock()
+        msg.data = b"sync"
+        msg.ack = AsyncMock()
+        msg.nak = AsyncMock()
 
-class TestModuleLevelFactory:
-    """create_queue() factory tests."""
+        import asyncio
+
+        call_count = 0
+
+        async def _fetch_with_msg_then_timeout(batch=1, timeout=5):
+            nonlocal call_count
+            await asyncio.sleep(0)
+            call_count += 1
+            if call_count == 1:
+                return [msg]
+            raise TimeoutError
+
+        nq._js.pull_subscribe.return_value.fetch = _fetch_with_msg_then_timeout
+
+        # Sync callback — returns None, no await
+        def sync_callback(m):
+            pass  # sync, no return
+
+        task = asyncio.ensure_future(
+            nq.subscribe("sync.>", "pod-sync", sync_callback)
+        )
+        await asyncio.sleep(0.1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        msg.ack.assert_called_once()
+        msg.nak.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_create_queue_returns_instance(self, mock_nats_modules):
-        """create_queue() should return a NatsQueue with the given name."""
-        from lma_core.queue import create_queue
+    async def test_subscribe_recovers_from_fetch_error(self, connected_queue):
+        """subscribe() should retry after fetch errors and eventually process messages."""
+        nq = await connected_queue()
+        msg = MagicMock()
+        msg.data = b"recovered"
+        msg.ack = AsyncMock()
 
-        nq = create_queue(name="factory-test")
-        assert nq._name == "factory-test"
-        assert nq._nc is None  # not yet connected
+        import asyncio
+
+        call_count = 0
+
+        async def _fetch_fail_then_succeed(batch=1, timeout=5):
+            nonlocal call_count
+            await asyncio.sleep(0)
+            call_count += 1
+            if call_count == 1:
+                raise OSError("temporary network error")
+            if call_count == 2:
+                return [msg]
+            raise TimeoutError
+
+        nq._js.pull_subscribe.return_value.fetch = _fetch_fail_then_succeed
+
+        callback = AsyncMock()
+
+        task = asyncio.ensure_future(
+            nq.subscribe("recover.>", "pod-recover", callback)
+        )
+        await asyncio.sleep(1.5)  # enough time for backoff(1) + retry
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        # Callback should have been called once with the recovered message
+        callback.assert_called_once_with(msg)
+        msg.ack.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
-# Inline imports needed by tests that access NatsQueue class attributes
+# Module-level import for tests that reference NatsQueue class attributes
+# (e.g., NatsQueue._MAX_MSG_SIZE). This must be placed AFTER the mock_nats_modules
+# fixture definition so that the lazy import of nats-py succeeds with our mocks.
+# Test methods inside classes use local imports (after fixtures are active).
 # ---------------------------------------------------------------------------
 from lma_core.queue import NatsQueue  # noqa: E402
