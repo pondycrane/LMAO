@@ -13,7 +13,11 @@ py_test(
 
 py_test(
     name = "test_server_handler",
-    srcs = ["test_server_handler.py"],
+    srcs = [
+        "test_server_handler.py",
+        "conftest.py",
+    ],
+    imports = ["."],
     deps = [
         "//lmao_server:server_lib",
         "@lmao_pip//protobuf",
@@ -137,8 +141,55 @@ py_test(
 )
 
 py_test(
+    name = "test_server_startup",
+    srcs = [
+        "test_server_startup.py",
+        "conftest.py",
+    ],
+    imports = ["."],
+    deps = [
+        "//lmao_server:server_lib",
+        "@lmao_pip//protobuf",
+        "@lmao_pip//pytest",
+        "@lmao_pip//pytest_asyncio",
+    ],
+)
+
+py_test(
+    name = "test_client_repl",
+    srcs = [
+        "test_client_repl.py",
+        "conftest.py",
+    ],
+    imports = ["."],
+    deps = [
+        "//human_client:client_lib",
+        "@lmao_pip//protobuf",
+        "@lmao_pip//pytest",
+    ],
+)
+
+py_test(
+    name = "test_client_startup",
+    srcs = [
+        "test_client_startup.py",
+        "conftest.py",
+    ],
+    imports = ["."],
+    deps = [
+        "//human_client:client_lib",
+        "@lmao_pip//protobuf",
+        "@lmao_pip//pytest",
+    ],
+)
+
+py_test(
     name = "test_human_client",
-    srcs = ["test_human_client.py"],
+    srcs = [
+        "test_human_client.py",
+        "conftest.py",
+    ],
+    imports = ["."],
     deps = [
         "//human_client:client_lib",
         "@lmao_pip//protobuf",
