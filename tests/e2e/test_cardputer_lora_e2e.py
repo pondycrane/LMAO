@@ -91,118 +91,122 @@ def _probe_hardware():
         return
     _HARDWARE_CHECKED = True
 
-    if not HAS_PYSERIAL:
-        _HARDWARE_REASON = "pyserial not installed"
-        return
-    if not HAS_FLASH_LIB:
-        _HARDWARE_REASON = "cardputer_client.flash library not importable"
-        return
-    if not HAS_SERVER_CONFIG:
-        _HARDWARE_REASON = (
-            "lmao_server.config module not importable. "
-            "Check that server dependencies are declared in tests/BUILD."
-        )
-        return
-
-    # Probe Heltec RNode
-    if _RNODE_PORT is None:
-        _HARDWARE_REASON = (
-            "RNode (Heltec ESP32) not detected. "
-            "Is it connected via USB and flashed with RNode firmware? "
-            "See rnode_firmware/README.md."
-        )
-        return
-
-    # Firmware liveness check + auto-flash (self-healing for most common
-    # failure mode: Heltec connected but erased / mis-flashed).
-    if not check_rnode_firmware(_RNODE_PORT):
-        print(
-            "RNode firmware not detected on Heltec — attempting auto-flash...",
-            flush=True,
-        )
-        flash_ok, flash_msg = flash_rnode_firmware(_RNODE_PORT)
-        if not flash_ok:
+    try:
+        if not HAS_PYSERIAL:
+            _HARDWARE_REASON = "pyserial not installed"
+            return
+        if not HAS_FLASH_LIB:
+            _HARDWARE_REASON = "cardputer_client.flash library not importable"
+            return
+        if not HAS_SERVER_CONFIG:
             _HARDWARE_REASON = (
-                f"RNode firmware not detected on {_RNODE_PORT} and "
-                f"auto-flash failed: {flash_msg}"
+                "lmao_server.config module not importable. "
+                "Check that server dependencies are declared in tests/BUILD."
             )
             return
 
-        # After a successful flash the RNode may re-enumerate with a
-        # different device path.  Wait for the device to settle, then
-        # re-discover and re-check.
-        print("Waiting for device to re-enumerate (3s)...", flush=True)
-        time.sleep(3)
-        _RNODE_PORT = find_rnode_port()
+        # Probe Heltec RNode
         if _RNODE_PORT is None:
             _HARDWARE_REASON = (
-                "RNode port disappeared after flashing. "
-                "The device may have re-enumerated to a path not matched "
-                "by find_rnode_port().  Check 'ls /dev/tty*' and re-run."
+                "RNode (Heltec ESP32) not detected. "
+                "Is it connected via USB and flashed with RNode firmware? "
+                "See rnode_firmware/README.md."
             )
             return
+
+        # Firmware liveness check + auto-flash (self-healing for most common
+        # failure mode: Heltec connected but erased / mis-flashed).
         if not check_rnode_firmware(_RNODE_PORT):
+            print(
+                "RNode firmware not detected on Heltec — attempting auto-flash...",
+                flush=True,
+            )
+            flash_ok, flash_msg = flash_rnode_firmware(_RNODE_PORT)
+            if not flash_ok:
+                _HARDWARE_REASON = (
+                    f"RNode firmware not detected on {_RNODE_PORT} and "
+                    f"auto-flash failed: {flash_msg}"
+                )
+                return
+
+            # After a successful flash the RNode may re-enumerate with a
+            # different device path.  Wait for the device to settle, then
+            # re-discover and re-check.
+            print("Waiting for device to re-enumerate (3s)...", flush=True)
+            time.sleep(3)
+            _RNODE_PORT = find_rnode_port()
+            if _RNODE_PORT is None:
+                _HARDWARE_REASON = (
+                    "RNode port disappeared after flashing. "
+                    "The device may have re-enumerated to a path not matched "
+                    "by find_rnode_port().  Check 'ls /dev/tty*' and re-run."
+                )
+                return
+            if not check_rnode_firmware(_RNODE_PORT):
+                _HARDWARE_REASON = (
+                    f"RNode firmware still not detected on {_RNODE_PORT} "
+                    f"after flash.  Flash completed but post-flash verification "
+                    f"failed.  Try running 'rnodeconf --port {_RNODE_PORT} --info' "
+                    f"manually."
+                )
+                return
+            print(
+                f"RNode firmware verified on {_RNODE_PORT} after auto-flash.",
+                flush=True,
+            )
+        else:
+            print(f"RNode firmware detected on {_RNODE_PORT}.", flush=True)
+
+        # Probe Cardputer
+        if _CARDCOMPUTER_PORT is None:
+            _HARDWARE_REASON = "Cardputer not detected — is it connected via USB?"
+            return
+
+        # Check both ports are different devices (avoid accidental same-device detection)
+        if _RNODE_PORT == _CARDCOMPUTER_PORT:
             _HARDWARE_REASON = (
-                f"RNode firmware still not detected on {_RNODE_PORT} "
-                f"after flash.  Flash completed but post-flash verification "
-                f"failed.  Try running 'rnodeconf --port {_RNODE_PORT} --info' "
-                f"manually."
+                f"RNode and Cardputer detected on same port {_RNODE_PORT}. "
+                "They must be on different USB ports."
             )
             return
-        print(
-            f"RNode firmware verified on {_RNODE_PORT} after auto-flash.",
-            flush=True,
-        )
-    else:
-        print(f"RNode firmware detected on {_RNODE_PORT}.", flush=True)
 
-    # Probe Cardputer
-    if _CARDCOMPUTER_PORT is None:
-        _HARDWARE_REASON = "Cardputer not detected — is it connected via USB?"
-        return
+        # Try opening the Cardputer port to verify MicroPython REPL
+        try:
+            with serial.Serial(_CARDCOMPUTER_PORT, 115200, timeout=1) as ser:
+                time.sleep(0.6)
+                ok = cardputer_flash.enter_raw_repl(ser)
+                if not ok:
+                    _HARDWARE_REASON = (
+                        f"Device at {_CARDCOMPUTER_PORT} does not respond to "
+                        "MicroPython raw REPL. Is the Cardputer running MicroPython?"
+                    )
+                    return
 
-    # Check both ports are different devices (avoid accidental same-device detection)
-    if _RNODE_PORT == _CARDCOMPUTER_PORT:
-        _HARDWARE_REASON = (
-            f"RNode and Cardputer detected on same port {_RNODE_PORT}. "
-            "They must be on different USB ports."
-        )
-        return
-
-    # Try opening the Cardputer port to verify MicroPython REPL
-    try:
-        with serial.Serial(_CARDCOMPUTER_PORT, 115200, timeout=1) as ser:
-            time.sleep(0.6)
-            ok = cardputer_flash.enter_raw_repl(ser)
-            if not ok:
-                _HARDWARE_REASON = (
-                    f"Device at {_CARDCOMPUTER_PORT} does not respond to MicroPython "
-                    "raw REPL. Is the Cardputer running MicroPython?"
+                # Check for native LoRa driver (required for on-board SX1262)
+                ok, out = cardputer_flash.exec_raw(
+                    ser,
+                    "import sys; ok = False; "
+                    "try: import lora; ok = True\n"
+                    "except ImportError: pass\n"
+                    "print('__LORA_OK__' if ok else '__LORA_MISSING__')",
                 )
-                return
-
-            # Check for native LoRa driver (required for on-board SX1262)
-            ok, out = cardputer_flash.exec_raw(
-                ser,
-                "import sys; ok = False; "
-                "try: import lora; ok = True\n"
-                "except ImportError: pass\n"
-                "print('__LORA_OK__' if ok else '__LORA_MISSING__')",
+                if not ok or b"__LORA_OK__" not in out:
+                    _HARDWARE_REASON = (
+                        f"Cardputer at {_CARDCOMPUTER_PORT} is missing the native "
+                        "LoRa driver (SX1262). The 'lora' module is not "
+                        "importable.\n"
+                        "Install the lora.mpy driver in /lib/ on the Cardputer."
+                    )
+                    return
+        except Exception as exc:
+            _HARDWARE_REASON = (
+                f"Cannot communicate with Cardputer at {_CARDCOMPUTER_PORT}: {exc}"
             )
-            if not ok or b"__LORA_OK__" not in out:
-                _HARDWARE_REASON = (
-                    f"Cardputer at {_CARDCOMPUTER_PORT} is missing the native LoRa "
-                    "driver (SX1262). The 'lora' module is not importable.\n"
-                    "Install the lora.mpy driver in /lib/ on the Cardputer."
-                )
-                return
-    except Exception as exc:
-        _HARDWARE_REASON = (
-            f"Cannot communicate with Cardputer at {_CARDCOMPUTER_PORT}: {exc}"
-        )
-        return
+            return
 
-    _HARDWARE_READY = True
+        _HARDWARE_READY = True
+    except Exception as exc:
+        _HARDWARE_REASON = f"Unexpected error during hardware probe: {exc}"
 
 
 def _hardware_required():
@@ -409,6 +413,103 @@ class TestHardwareDetection:
             for k, v in _saved.items():
                 setattr(mod, k, v)
 
+    def test_probe_rnode_device_disappears_after_flash(self):
+        """_probe_hardware sets reason when RNode disappears after flash."""
+        from unittest.mock import patch
+
+        mod = sys.modules[__name__]
+
+        _saved = {
+            k: getattr(mod, k)
+            for k in (
+                "_HARDWARE_CHECKED",
+                "_HARDWARE_READY",
+                "_HARDWARE_REASON",
+                "_RNODE_PORT",
+                "_CARDCOMPUTER_PORT",
+                "HAS_PYSERIAL",
+                "HAS_FLASH_LIB",
+                "HAS_SERVER_CONFIG",
+            )
+        }
+        try:
+            mod._HARDWARE_CHECKED = False
+            mod._HARDWARE_READY = False
+            mod._HARDWARE_REASON = None
+            mod._RNODE_PORT = "/dev/fake_rnode"
+            mod._CARDCOMPUTER_PORT = "/dev/fake_cardputer"
+            mod.HAS_PYSERIAL = True
+            mod.HAS_FLASH_LIB = True
+            mod.HAS_SERVER_CONFIG = True
+
+            # Firmware missing -> flash succeeds -> device disappears
+            with (
+                patch.object(mod, "check_rnode_firmware", return_value=False),
+                patch.object(
+                    mod, "flash_rnode_firmware", return_value=(True, "ok")
+                ),
+                patch.object(mod, "find_rnode_port", return_value=None),
+            ):
+                _probe_hardware()
+
+            assert mod._HARDWARE_READY is False
+            assert mod._HARDWARE_REASON is not None
+            assert "disappeared" in mod._HARDWARE_REASON
+        finally:
+            for k, v in _saved.items():
+                setattr(mod, k, v)
+
+    def test_probe_rnode_post_flash_verification_fails(self):
+        """_probe_hardware sets reason when post-flash firmware check fails."""
+        from unittest.mock import patch
+
+        mod = sys.modules[__name__]
+
+        _saved = {
+            k: getattr(mod, k)
+            for k in (
+                "_HARDWARE_CHECKED",
+                "_HARDWARE_READY",
+                "_HARDWARE_REASON",
+                "_RNODE_PORT",
+                "_CARDCOMPUTER_PORT",
+                "HAS_PYSERIAL",
+                "HAS_FLASH_LIB",
+                "HAS_SERVER_CONFIG",
+            )
+        }
+        try:
+            mod._HARDWARE_CHECKED = False
+            mod._HARDWARE_READY = False
+            mod._HARDWARE_REASON = None
+            mod._RNODE_PORT = "/dev/fake_rnode"
+            mod._CARDCOMPUTER_PORT = "/dev/fake_cardputer"
+            mod.HAS_PYSERIAL = True
+            mod.HAS_FLASH_LIB = True
+            mod.HAS_SERVER_CONFIG = True
+
+            # Firmware missing -> flash succeeds -> re-discovery finds port
+            # -> post-flash verification fails
+            with (
+                patch.object(
+                    mod, "check_rnode_firmware", side_effect=[False, False]
+                ),
+                patch.object(
+                    mod, "flash_rnode_firmware", return_value=(True, "ok")
+                ),
+                patch.object(
+                    mod, "find_rnode_port", return_value="/dev/fake_rnode2"
+                ),
+            ):
+                _probe_hardware()
+
+            assert mod._HARDWARE_READY is False
+            assert mod._HARDWARE_REASON is not None
+            assert "post-flash verification" in mod._HARDWARE_REASON
+        finally:
+            for k, v in _saved.items():
+                setattr(mod, k, v)
+
 
 class TestCardputerLoRaE2E:
     """Tests that require Cardputer + Heltec RNode hardware."""
@@ -516,13 +617,28 @@ class TestCardputerLoRaE2E:
                 try:
                     envelope = LMAOEnvelope()
                     envelope.ParseFromString(content_bytes)
+                except Exception as exc:
+                    import traceback
+                    print(
+                        f"WARNING: capture_delivery: envelope parse failed: {exc}",
+                        file=sys.stderr,
+                    )
+                    traceback.print_exc(file=sys.stderr)
+                    display_text = (
+                        content_bytes.decode("utf-8", errors="replace")
+                        if isinstance(content_bytes, bytes)
+                        else str(content_bytes)
+                    )
+                else:
                     if envelope.HasField("text"):
                         display_text = envelope.text.content
                     else:
-                        display_text = content_bytes.decode("utf-8", errors="replace")
-                except Exception as exc:
-                    print(f"WARNING: capture_delivery: envelope parse failed: {exc}")
-                    display_text = content_bytes.decode("utf-8", errors="replace")
+                        try:
+                            display_text = content_bytes.decode(
+                                "utf-8", errors="replace"
+                            )
+                        except Exception:
+                            display_text = "<undecodable>"
 
                 received_messages.append(
                     {
