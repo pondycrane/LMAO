@@ -221,9 +221,9 @@ class TestNatsQueueStream:
 
     @pytest.mark.asyncio
     async def test_ensure_stream_updates_existing(self, connected_queue):
-        """If add_stream fails, ensure_stream should fall back to update_stream."""
+        """If add_stream fails because stream exists, ensure_stream should update."""
         nq = await connected_queue()
-        nq._js.add_stream.side_effect = Exception("already exists")
+        nq._js.add_stream.side_effect = Exception("stream name already in use")
 
         await nq.ensure_stream("EXISTING", ["e.>"])
 
@@ -231,10 +231,22 @@ class TestNatsQueueStream:
         nq._js.update_stream.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_ensure_stream_raises_on_both_failures(self, connected_queue):
-        """If both add_stream and update_stream fail, propagate the error."""
+    async def test_ensure_stream_raises_on_non_exists_error(self, connected_queue):
+        """If add_stream fails with a non-'already exists' error, re-raise it."""
         nq = await connected_queue()
-        nq._js.add_stream.side_effect = Exception("add failed")
+        nq._js.add_stream.side_effect = OSError("connection refused")
+
+        with pytest.raises(OSError, match="connection refused"):
+            await nq.ensure_stream("BROKEN", ["b.>"])
+
+        nq._js.add_stream.assert_called_once()
+        nq._js.update_stream.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_ensure_stream_raises_on_both_failures(self, connected_queue):
+        """If add_stream fails with 'already exists' and update_stream also fails, propagate."""
+        nq = await connected_queue()
+        nq._js.add_stream.side_effect = Exception("stream name already in use")
         nq._js.update_stream.side_effect = RuntimeError("update failed")
 
         with pytest.raises(RuntimeError, match="update failed"):

@@ -210,17 +210,25 @@ class NatsQueue:
             # add_stream raises if JetStream is not available (no --js)
             await self._js.add_stream(**config)
             _logger.info("JetStream stream '%s' created with subjects: %s", name, subjects)
-        except Exception:
-            # Stream likely already exists — update it
-            _logger.info(
-                "Stream '%s' may already exist — attempting update", name
-            )
-            try:
-                await self._js.update_stream(**config)
-                _logger.info("JetStream stream '%s' updated", name)
-            except Exception:
+        except Exception as exc:
+            err_msg = str(exc).lower()
+            if "already exists" in err_msg or "stream name already in use" in err_msg:
+                # Stream already exists — update it
+                _logger.info(
+                    "Stream '%s' already exists — updating config", name
+                )
+                try:
+                    await self._js.update_stream(**config)
+                    _logger.info("JetStream stream '%s' updated", name)
+                except Exception:
+                    _logger.error(
+                        "Failed to update stream '%s'", name, exc_info=True
+                    )
+                    raise
+            else:
                 _logger.error(
-                    "Failed to create or update stream '%s'", name, exc_info=True
+                    "Failed to create stream '%s' — unexpected error", name,
+                    exc_info=True
                 )
                 raise
 
@@ -323,6 +331,10 @@ class NatsQueue:
         )
 
         # Process messages until cancelled
+        max_retries = 10
+        retry_count = 0
+        backoff = 1
+
         try:
             while True:
                 try:
@@ -331,10 +343,19 @@ class NatsQueue:
                     # No messages available — keep waiting
                     continue
                 except Exception:
+                    retry_count += 1
+                    if retry_count >= max_retries:
+                        _logger.error(
+                            "Subscribe to '%s' failed after %d retries — giving up",
+                            subject, max_retries
+                        )
+                        raise
                     _logger.warning(
-                        "Error fetching from '%s' — reconnecting", subject, exc_info=True
+                        "Error fetching from '%s' (attempt %d/%d) — retrying in %ds",
+                        subject, retry_count, max_retries, backoff, exc_info=True
                     )
-                    await asyncio.sleep(1)
+                    await asyncio.sleep(backoff)
+                    backoff = min(backoff * 2, 60)
                     continue
 
                 for msg in msgs:
@@ -349,8 +370,11 @@ class NatsQueue:
                         )
                         try:
                             await msg.nak()
-                        except Exception:
-                            pass
+                        except Exception as nak_err:
+                            _logger.error(
+                                "NAK failed on '%s': %s", subject, nak_err, exc_info=True
+                            )
+                            raise  # Bubble up to outer retry/reconnect
         except asyncio.CancelledError:
             _logger.info("Subscribe cancelled for '%s'", subject)
             raise

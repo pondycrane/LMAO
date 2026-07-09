@@ -95,7 +95,7 @@ def send_example(stub: LMAOStub):
     print()
 
 
-async def send_example_nats(nats_server: str, subject: str = "lmao.messages"):
+async def send_example_nats(nats_server: str, subject: str = "lmao.messages.env"):
     """Publish a sensor reading to NATS JetStream."""
     print("=== Send Example (NATS) ===")
     from lma_core.queue import NatsQueue
@@ -104,7 +104,9 @@ async def send_example_nats(nats_server: str, subject: str = "lmao.messages"):
     nq = NatsQueue(name="iot-ingest-sender")
     try:
         await nq.connect(servers=nats_server)
-        await nq.ensure_stream("LMAO_MESSAGES", [f"{subject}.>"])
+        # Stream subject filter uses wildcard, publish subject is concrete —
+        # both must align with the subscribe wildcard "lmao.messages.>"
+        await nq.ensure_stream("LMAO_MESSAGES", ["lmao.messages.>"])
         ack = await nq.publish(subject, payload)
         print(f"Published {len(payload)} bytes to '{subject}' (seq={ack.seq})")
     finally:
