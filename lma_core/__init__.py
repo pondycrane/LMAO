@@ -53,7 +53,7 @@ except ImportError:
     )
 
 try:
-    from proto.lma_pb2_grpc import (  # noqa: F401
+    from proto.lma_pb2_grpc import (  # noqa: F401  # type: ignore[attr-defined]
         LMAOStub,
         LMAOServicer,
         LMAO,
