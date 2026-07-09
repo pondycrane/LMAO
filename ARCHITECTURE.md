@@ -58,7 +58,7 @@ Interfaces    │  LoRa (RNode) · WiFi (AutoInterface) · TCP/UDP · Serial
 1. Sensor wakes, reads peripherals, builds LXMF message addressed to server's 16-byte hash
 2. Sends over LoRa (or WiFi if available)
 3. Listens 2-15 s for incoming commands, then deep sleeps
-4. Server receives → parses → stores (SQLite/InfluxDB) → evaluates rules → sends commands if triggered
+4. Server receives → parses → stores (DuckDB via `DuckDbStore`) → evaluates rules → sends commands if triggered
 5. Propagated commands wait on the server's Propagation Node until the target node wakes and collects
 
 ## Messaging per Content Type

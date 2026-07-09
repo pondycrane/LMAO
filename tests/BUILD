@@ -298,6 +298,16 @@ py_test(
 )
 
 py_test(
+    name = "test_storage",
+    srcs = ["test_storage.py"],
+    deps = [
+        "//lma_core",
+        "@lmao_pip//pytest",
+        "@lmao_pip//pytest_asyncio",
+    ],
+)
+
+py_test(
     name = "test_human_client_config",
     srcs = ["test_human_client_config.py"],
     deps = [

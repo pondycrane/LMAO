@@ -401,6 +401,23 @@ python k8s-app/iot_ingest.py --use-nats --subscribe --subscribe-timeout 10
 NATS_SERVER=nats://localhost:4222 python k8s-app/iot_ingest.py --use-nats --send
 ```
 
+#### Persistent DuckDB Storage
+
+Messages consumed via NATS can be persisted to a local DuckDB database for
+offline query and analysis. The IoT ingest app supports three flags:
+
+- `--store`: Enable DuckDB persistence (requires `--subscribe --use-nats`)
+- `--db-path PATH`: Database file path (default: `/data/sensors.db` or `$DUCKDB_PATH`)
+- `--query SQL`: Run a read-only SQL query against the store and exit
+
+```bash
+# Subscribe with DuckDB persistence
+python k8s-app/iot_ingest.py --use-nats --subscribe --store --subscribe-timeout 30
+
+# Query stored data (no NATS connection needed)
+python k8s-app/iot_ingest.py --query "SELECT node_id, count(*) FROM sensor_readings GROUP BY node_id"
+```
+
 #### Architecture notes
 
 - **No changes to gRPC**: The LMAO server and gRPC API are unchanged. NATS is
@@ -473,6 +490,7 @@ If an RNode is connected, LoRa messaging is available.
 │   ├── config_utils.py                # RNode port resolution + INI generation helpers
 │   ├── message_utils.py               # Shared LXMF message decoding (decode_lmao_message)
 │   ├── queue.py                       # Async NATS JetStream wrapper (NatsQueue)
+│   ├── storage.py                     # Async DuckDB persistent store (DuckDbStore)
 │   └── rns_di.py                      # RNS/LXMF dependency-injection wrapper for testability
 │
 ├── lmao_server/                       # Python — runs on Raspberry Pi
@@ -513,6 +531,7 @@ If an RNode is connected, LoRa messaging is available.
 │   ├── test_lma_core.py               # lma_core import error handling + exports
 │   ├── test_lma_encoder.py            # Encoder round-trip + cross-validation tests
 │   ├── test_queue.py                  # NatsQueue unit tests (mocked nats-py)
+│   ├── test_storage.py               # DuckDbStore unit tests (mocked duckdb)
 │   ├── test_server_handler.py         # Server handler unit tests (mocked RNS/LXMF)
 │   ├── test_server_startup.py         # Server startup lifecycle + async entry point tests
 │   ├── test_client_repl.py            # Human client REPL input parsing tests
