@@ -1,6 +1,4 @@
 """Tests for server startup and lifecycle (with mocked RNS/LXMF)."""
-
-"""Tests for server message handler (with mocked RNS/LXMF)."""
 from unittest.mock import MagicMock, AsyncMock, patch, PropertyMock
 import builtins
 import pytest

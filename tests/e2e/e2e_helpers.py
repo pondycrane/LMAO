@@ -15,6 +15,22 @@ import serial.tools.list_ports
 RNODE_VIDS = {0x303A, 0x10C4, 0x1A86}
 
 
+def case_insensitive_contains(haystack: bytes, needle: str) -> bool:
+    """Check if *needle* appears in *haystack*, case-insensitively.
+
+    Both arguments are lowercased before comparison so that
+    e.g. ``case_insensitive_contains(b"ACK received", "ack")`` returns ``True``.
+
+    Args:
+        haystack: Byte string to search within.
+        needle: Plain-text substring to search for (will be encoded as ASCII).
+
+    Returns:
+        ``True`` if *needle* (lowercased) appears in *haystack* (lowercased).
+    """
+    return needle.encode().lower() in haystack.lower()
+
+
 def find_rnode_port():
     """Return the device path of a connected Heltec/ESP32 RNode, or *None*.
 

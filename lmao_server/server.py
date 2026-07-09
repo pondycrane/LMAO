@@ -204,7 +204,7 @@ class Server:
             )
 
             # Decode content (protobuf first, UTF-8 fallback, byte-count placeholder)
-            decode_lmao_message(content_bytes)
+            _ = decode_lmao_message(content_bytes)
 
             # Build and send a protobuf-encoded ACK reply
             reply_text = f"ACK from LMAO Server — received your message ({len(content_bytes)} bytes)"

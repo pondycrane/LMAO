@@ -52,7 +52,7 @@ except ImportError:
 # Ensure e2e_helpers is importable when running the script directly
 # (Bazel already adds the e2e/ directory to sys.path).
 sys.path.insert(0, os.path.dirname(__file__))
-from e2e_helpers import find_rnode_port
+from e2e_helpers import find_rnode_port, case_insensitive_contains
 
 
 def _find_cardputer_port():
@@ -429,7 +429,7 @@ class TestCardputerLoRaE2E:
                     if b"LMAO" in cardputer_output or b"POC Ready" in cardputer_output:
                         found_banner = True
 
-                    if b"ack" in cardputer_output.lower() or b"reply" in cardputer_output.lower():
+                    if case_insensitive_contains(cardputer_output, "ack") or case_insensitive_contains(cardputer_output, "reply"):
                         found_ack = True
 
                     # If we've received a LoRa message from the Cardputer on the
@@ -474,7 +474,7 @@ class TestCardputerLoRaE2E:
                 # Verify message content
                 msg = received_messages[0]
                 print(f"\nReceived message from {msg['source']}: {msg['content']}")
-                assert "hello" in msg["content"].lower(), (
+                assert case_insensitive_contains(msg["content"].encode(), "hello"), (
                     f"Expected 'Hello' in message content, got: {msg['content'][:200]}"
                 )
 

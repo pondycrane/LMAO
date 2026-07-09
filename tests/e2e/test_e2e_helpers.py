@@ -13,12 +13,56 @@ from unittest.mock import patch
 
 # Ensure the e2e/ directory is on sys.path for sibling imports
 sys.path.insert(0, os.path.dirname(__file__))
-from e2e_helpers import RNODE_VIDS, find_rnode_port
+from e2e_helpers import RNODE_VIDS, find_rnode_port, case_insensitive_contains
 
 
 def _make_port(device, vid, description):
     """Build a lightweight fake port object for mocking list_ports."""
     return SimpleNamespace(device=device, vid=vid, description=description)
+
+
+class TestCaseInsensitiveContains:
+    """Tests for case_insensitive_contains() — pure function, no hardware needed."""
+
+    def test_matches_lowercase_needle_in_mixed_case_haystack(self):
+        assert case_insensitive_contains(b"Hello World", "hello")
+
+    def test_matches_uppercase_needle_in_lowercase_haystack(self):
+        assert case_insensitive_contains(b"hello world", "HELLO")
+
+    def test_matches_mixed_case_everything(self):
+        assert case_insensitive_contains(b"ACK received OK", "ack")
+
+    def test_matches_reply(self):
+        assert case_insensitive_contains(b"Reply sent", "reply")
+
+    def test_rejects_absent_needle(self):
+        assert not case_insensitive_contains(b"Hello World", "goodbye")
+
+    def test_empty_haystack(self):
+        assert not case_insensitive_contains(b"", "hello")
+
+    def test_empty_needle(self):
+        assert case_insensitive_contains(b"anything", "")
+
+    def test_needle_at_start(self):
+        assert case_insensitive_contains(b"ACK: message received", "ack")
+
+    def test_needle_at_end(self):
+        assert case_insensitive_contains(b"message: ACK", "ack")
+
+    def test_needle_in_middle(self):
+        assert case_insensitive_contains(b"got [ACK] from node", "ack")
+
+    def test_needle_longer_than_haystack(self):
+        assert not case_insensitive_contains(b"hi", "hello world")
+
+    def test_binary_bytes_dont_crash(self):
+        assert case_insensitive_contains(b"\xff\xfeACK\x00", "ack")
+
+    def test_non_ascii_needle_is_encoded(self):
+        # Plain ASCII only — this is the contract for needle parameter
+        assert case_insensitive_contains(b"cafe", "cafe")
 
 
 class TestFindRNodePort:
