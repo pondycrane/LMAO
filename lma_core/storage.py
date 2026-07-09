@@ -64,7 +64,7 @@ except ImportError as exc:
 
 _CREATE_SENSOR_READINGS_TABLE = """
 CREATE TABLE IF NOT EXISTS sensor_readings (
-    id INTEGER PRIMARY KEY,
+    id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     node_id TEXT NOT NULL,
     seq INTEGER,
     battery REAL,
@@ -86,7 +86,7 @@ class DuckDbStore:
     """Async-safe DuckDB persistent store for IoT sensor readings.
 
     Encapsulates a DuckDB database connection with idempotent
-    initialization and close.  All writes are delegated to a
+    initialization and close.  All database operations are delegated to a
     thread-pool executor so the asyncio event loop is never
     blocked by synchronous DuckDB I/O.
 
@@ -117,7 +117,7 @@ class DuckDbStore:
     # Lifecycle
     # ------------------------------------------------------------------
 
-    def initialize(self, db_path: str) -> None:
+    def initialize(self, db_path: str, read_only: bool = False) -> None:
         """Open (or create) a DuckDB database file and ensure the schema exists.
 
         Safe to call multiple times — subsequent calls are no-ops
@@ -129,6 +129,9 @@ class DuckDbStore:
             Filesystem path to the DuckDB database file, e.g.
             ``"/data/sensors.db"``.  The directory must exist;
             DuckDB will create the file if it does not exist.
+        read_only:
+            If True, open the database in read-only mode.
+            Writes will be rejected by DuckDB at the connection level.
         """
         if self._conn is not None:
             if self._db_path == db_path:
@@ -150,9 +153,9 @@ class DuckDbStore:
         if not _DUCKDB_AVAILABLE:
             raise ImportError(_DUCKDB_IMPORT_ERROR)
 
-        _logger.info("Opening DuckDB database at %s ...", db_path)
+        _logger.info("Opening DuckDB database at %s (read_only=%s) ...", db_path, read_only)
         try:
-            self._conn = duckdb.connect(db_path)
+            self._conn = duckdb.connect(db_path, read_only=read_only)
             self._db_path = db_path
         except Exception:
             _logger.critical(

@@ -83,13 +83,16 @@ def duckdb_unavailable():
 
     with patch.object(builtins, "__import__", _mock_import):
         saved = {}
-        for mod in ["duckdb"]:
+        for mod in ["duckdb", "lma_core.storage"]:
             if mod in sys.modules:
                 saved[mod] = sys.modules.pop(mod)
         for key in list(sys.modules):
-            if key.startswith("lma_core.storage"):
-                del sys.modules[key]
+            if key.startswith("lma_core.storage."):
+                saved[key] = sys.modules.pop(key)
         yield
+        for mod in list(saved):
+            if mod in sys.modules:
+                del sys.modules[mod]
         sys.modules.update(saved)
 
 
@@ -116,7 +119,7 @@ class TestDuckDbStoreInit:
         store = DuckDbStore(name="test-init")
         store.initialize("/tmp/test.db")
 
-        duckdb_mod.connect.assert_called_once_with("/tmp/test.db")
+        duckdb_mod.connect.assert_called_once_with("/tmp/test.db", read_only=False)
         assert store._conn is not None
         assert store._db_path == "/tmp/test.db"
 
@@ -161,7 +164,7 @@ class TestDuckDbStoreInit:
         # Old connection should have been closed
         mock_conn.close.assert_called_once()
         # New connection should have been opened
-        duckdb_mod.connect.assert_called_once_with("/tmp/second.db")
+        duckdb_mod.connect.assert_called_once_with("/tmp/second.db", read_only=False)
         assert store._db_path == "/tmp/second.db"
 
     def test_initialize_raises_on_connect_failure(self, mock_duckdb_module):
@@ -176,6 +179,21 @@ class TestDuckDbStoreInit:
             store.initialize("/tmp/bad.db")
 
         assert store._conn is None
+
+    def test_initialize_raises_on_schema_failure(self, mock_duckdb_module):
+        """initialize() should raise when CREATE TABLE fails after a successful connect."""
+        from lma_core.storage import DuckDbStore
+
+        duckdb_mod, mock_conn = mock_duckdb_module
+        # duckdb.connect succeeds but execute(CREATE TABLE) fails
+        mock_conn.execute.side_effect = RuntimeError("schema creation failed")
+
+        store = DuckDbStore(name="test-schema-fail")
+        with pytest.raises(RuntimeError, match="schema creation failed"):
+            store.initialize("/tmp/test.db")
+
+        # Connection was established before schema failure
+        assert store._conn is not None
 
     def test_close_idempotent(self, mock_duckdb_module):
         """close() should be safe to call multiple times."""
@@ -315,6 +333,7 @@ class TestDuckDbStoreQuery:
         """query() should execute SQL and return results via run_in_executor."""
         store, (duckdb_mod, mock_conn) = initialized_store
 
+        mock_conn.execute.reset_mock()
         mock_conn.execute.return_value.fetchall.return_value = [
             ("node-1", 42),
             ("node-2", 99),
@@ -334,6 +353,7 @@ class TestDuckDbStoreQuery:
         """query() should pass params to execute()."""
         store, (duckdb_mod, mock_conn) = initialized_store
 
+        mock_conn.execute.reset_mock()
         mock_conn.execute.return_value.fetchall.return_value = [("node-5",)]
 
         rows = await store.query(
