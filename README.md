@@ -121,6 +121,9 @@ Edit `lmao_server/config.py` to adjust radio parameters:
 - Set `frequency` for your region (868 MHz EU / 915 MHz US)
 - Set `spreadingfactor`, `bandwidth`, `txpower` — **must match the client**
 
+> **Note:** The optional `nats-py` package is required for NATS JetStream
+> queue features. Install with `pip install nats-py`.
+
 ### 4. Start the Server
 
 ```bash
@@ -232,6 +235,9 @@ Manual verification steps:
 The server exposes a gRPC API on port `50051` for K8s pods and other
 automated clients to interact with the LoRa mesh programmatically.
 
+> **Note:** K8s pods can also use NATS JetStream for durable,
+> at-least-once message queuing without gRPC. See [Section 10](#10-nats-queue-k8s-persistent-pubsub).
+
 **Proto definition**: [`proto/lma.proto`](proto/lma.proto)
 
 | RPC | Type | Description |
@@ -313,6 +319,9 @@ can be used from any pod to interact with the server:
 export LMAO_SERVER=lmao-server.default.svc.cluster.local:50051
 python k8s-app/iot_ingest.py --send --get-identity
 ```
+
+> For in-cluster durable message queuing, see [Section 10](#10-nats-queue-k8s-persistent-pubsub)
+> for NATS JetStream deployment and usage.
 
 ### 10. NATS Queue (K8s Persistent PubSub)
 
@@ -555,6 +564,7 @@ This POC intentionally limits scope to:
 - ✅ LXMF acknowledgements
 - ✅ Protobuf-encoded payloads
 - ✅ gRPC API for K8s pod integration (Send, Subscribe, GetIdentity)
+- ✅ NATS JetStream queue for in-cluster pub/sub messaging
 - ✅ Docker containerization
 - ✅ K8s Service + Endpoints for external RPi discovery
 - ❌ No multi-hop / store-and-forward
