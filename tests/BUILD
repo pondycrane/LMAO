@@ -15,8 +15,12 @@ py_test(
     name = "test_server_handler",
     srcs = [
         "test_server_handler.py",
+        # conftest.py required in srcs for Bazel sandbox; pytest auto-discovery
+        # does not work because Bazel only exposes files explicitly listed.
         "conftest.py",
     ],
+    # imports = ["."] is needed so "from conftest import ..." resolves
+    # under Bazel's sandbox; without it the tests/ directory is not on PYTHONPATH.
     imports = ["."],
     deps = [
         "//lmao_server:server_lib",
@@ -105,6 +109,16 @@ py_test(
 )
 
 py_test(
+    name = "test_message_utils",
+    srcs = ["test_message_utils.py"],
+    deps = [
+        "//lma_core",
+        "@lmao_pip//protobuf",
+        "@lmao_pip//pytest",
+    ],
+)
+
+py_test(
     name = "test_urns_packet",
     srcs = ["test_urns_packet.py"],
     data = ["//cardputer_client:lib_files"],
@@ -140,12 +154,18 @@ py_test(
     ],
 )
 
+# Server lifecycle tests (async — requires pytest_asyncio).
+# Client REPL and startup tests below (sync — no pytest_asyncio needed).
 py_test(
     name = "test_server_startup",
     srcs = [
         "test_server_startup.py",
+        # conftest.py required in srcs for Bazel sandbox; pytest auto-discovery
+        # does not work because Bazel only exposes files explicitly listed.
         "conftest.py",
     ],
+    # imports = ["."] is needed so "from conftest import ..." resolves
+    # under Bazel's sandbox; without it the tests/ directory is not on PYTHONPATH.
     imports = ["."],
     deps = [
         "//lmao_server:server_lib",
@@ -159,8 +179,12 @@ py_test(
     name = "test_client_repl",
     srcs = [
         "test_client_repl.py",
+        # conftest.py required in srcs for Bazel sandbox; pytest auto-discovery
+        # does not work because Bazel only exposes files explicitly listed.
         "conftest.py",
     ],
+    # imports = ["."] is needed so "from conftest import ..." resolves
+    # under Bazel's sandbox; without it the tests/ directory is not on PYTHONPATH.
     imports = ["."],
     deps = [
         "//human_client:client_lib",
@@ -173,8 +197,12 @@ py_test(
     name = "test_client_startup",
     srcs = [
         "test_client_startup.py",
+        # conftest.py required in srcs for Bazel sandbox; pytest auto-discovery
+        # does not work because Bazel only exposes files explicitly listed.
         "conftest.py",
     ],
+    # imports = ["."] is needed so "from conftest import ..." resolves
+    # under Bazel's sandbox; without it the tests/ directory is not on PYTHONPATH.
     imports = ["."],
     deps = [
         "//human_client:client_lib",
@@ -187,8 +215,12 @@ py_test(
     name = "test_human_client",
     srcs = [
         "test_human_client.py",
+        # conftest.py required in srcs for Bazel sandbox; pytest auto-discovery
+        # does not work because Bazel only exposes files explicitly listed.
         "conftest.py",
     ],
+    # imports = ["."] is needed so "from conftest import ..." resolves
+    # under Bazel's sandbox; without it the tests/ directory is not on PYTHONPATH.
     imports = ["."],
     deps = [
         "//human_client:client_lib",
