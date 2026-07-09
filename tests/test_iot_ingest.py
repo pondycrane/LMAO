@@ -1,6 +1,7 @@
 """Tests for k8s-app IoT ingest script."""
 
 import importlib.util
+import sys
 from unittest.mock import MagicMock
 
 import pytest
@@ -10,7 +11,27 @@ import pytest
 # so it's not a valid Python package name and can't be imported with
 # a regular 'from k8s_app import iot_ingest' statement).
 def _load_iot_ingest():
-    """Import k8s-app/iot_ingest.py as a module via importlib."""
+    """Import k8s-app/iot_ingest.py as a module via importlib.
+
+    Mock grpc and proto stubs in sys.modules before loading so that the
+    module-level imports in iot_ingest.py succeed even when grpcio is not
+    installed (the actual gRPC calls are mocked in individual tests).
+    """
+    if "grpc" not in sys.modules:
+        _grpc_mock = MagicMock()
+        # RpcError must be a real class so tests can subclass it.
+        _grpc_mock.RpcError = type("RpcError", (Exception,), {})
+        _grpc_mock.StatusCode = MagicMock()
+        _grpc_mock.StatusCode.CANCELLED = "CANCELLED"
+        _grpc_mock.StatusCode.UNAVAILABLE = "UNAVAILABLE"
+        sys.modules["grpc"] = _grpc_mock
+
+    # proto.lma_pb2_grpc is a checked-in generated file not covered by
+    # Bazel's py_proto_library rule. Mock it so that lma_core imports
+    # LMAOStub/LMAOServicer successfully.
+    if "proto.lma_pb2_grpc" not in sys.modules:
+        sys.modules["proto.lma_pb2_grpc"] = MagicMock()
+
     spec = importlib.util.spec_from_file_location("iot_ingest", "k8s-app/iot_ingest.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -149,6 +170,9 @@ class TestSubscribeExample:
         class FakeRpcError(iot_ingest.grpc.RpcError):
             def code(self):
                 return iot_ingest.grpc.StatusCode.UNAVAILABLE
+
+            def details(self):
+                return "Service unavailable"
 
             def __str__(self):
                 return "Service unavailable"
