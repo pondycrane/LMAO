@@ -12,7 +12,7 @@ through the in-cluster NATS JetStream queue instead of gRPC, providing
 durable, at-least-once delivery with queue-group load balancing.
 
 Usage:
-  python k8s-app/iot_ingest.py [--server SERVER] [--send] [--subscribe] [--subscribe-timeout SECONDS] [--get-identity] [--use-nats]
+  python k8s-app/iot_ingest.py [--server SERVER] [--send] [--subscribe] [--subscribe-timeout SECONDS] [--get-identity] [--use-nats] [--store] [--db-path PATH] [--query SQL]
 
 Environment Variables:
   LMAO_SERVER  gRPC target (default: lmao-server.default.svc.cluster.local:50051)
@@ -145,16 +145,44 @@ async def subscribe_example_nats(
     nats_server: str,
     subject: str = "lmao.messages.>",
     timeout: int = 5,
+    store_path: str | None = None,
 ):
-    """Consume messages from NATS JetStream via a durable pull consumer."""
+    """Consume messages from NATS JetStream via a durable pull consumer.
+
+    If *store_path* is provided, each message is also persisted to a
+    DuckDB database at that path via ``DuckDbStore.store_sensor_report()``.
+    """
     print(f"=== Subscribe Example (NATS, listening for {timeout}s) ===")
     from lma_core.queue import NatsQueue
 
     received: list = []
 
+    store = None
+    if store_path:
+        from lma_core.storage import DuckDbStore
+
+        store = DuckDbStore(name="iot-ingest-subscriber")
+        store.initialize(store_path)
+        print(f"  DuckDB store initialized at {store_path}")
+
     def _on_message(msg):
         print(f"  Received {len(msg.data)} bytes on '{msg.subject}'")
         received.append(msg)
+
+    async def _store_and_ack(msg):
+        """Thin wrapper that stores the message if store is active, then ACKs."""
+        if store is not None:
+            try:
+                await store.store_sensor_report(bytes(msg.data))
+            except Exception:
+                logger.warning(
+                    "Failed to persist message on '%s' — NAK-ing",
+                    msg.subject,
+                    exc_info=True,
+                )
+                raise  # Trigger NAK in the subscribe loop
+        # If no store, _on_message handles the print — still call it
+        _on_message(msg)
 
     nq = NatsQueue(name="iot-ingest-subscriber")
     try:
@@ -163,7 +191,7 @@ async def subscribe_example_nats(
 
         # Subscribe as a background task, cancel after timeout
         task = asyncio.ensure_future(
-            nq.subscribe(subject, "iot-ingest", _on_message)
+            nq.subscribe(subject, "iot-ingest", _store_and_ack)
         )
         await asyncio.sleep(timeout)
         task.cancel()
@@ -175,6 +203,8 @@ async def subscribe_example_nats(
         print(f"  Total received: {len(received)} message(s)")
     finally:
         await nq.close()
+        if store is not None:
+            store.close()
     print()
 
 
@@ -219,6 +249,22 @@ def main():
         action="store_true",
         help="Use NATS JetStream queue instead of gRPC for send/subscribe",
     )
+    parser.add_argument(
+        "--store",
+        action="store_true",
+        help="Persist consumed messages to DuckDB (requires --subscribe --use-nats)",
+    )
+    parser.add_argument(
+        "--db-path",
+        default=os.environ.get("DUCKDB_PATH", "/data/sensors.db"),
+        help="Path to DuckDB database file (default: /data/sensors.db or $DUCKDB_PATH)",
+    )
+    parser.add_argument(
+        "--query",
+        type=str,
+        default=None,
+        help="Run a SQL query against the DuckDB store and print results",
+    )
     args = parser.parse_args()
 
     if not (args.send or args.subscribe or args.get_identity):
@@ -226,6 +272,45 @@ def main():
         args.send = True
         args.subscribe = True
         args.get_identity = True
+
+    # ── Query-only mode (DuckDB read, no NATS) ──────────────────
+    if args.query and not (args.send or args.subscribe):
+        try:
+            from lma_core.storage import DuckDbStore
+        except ImportError as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            sys.exit(1)
+
+        store = DuckDbStore(name="iot-ingest-query")
+        store.initialize(args.db_path)
+        try:
+            rows = asyncio.run(store.query(args.query))
+            if rows:
+                # Try duckdb's own pretty-print; fall back to repr
+                try:
+                    import duckdb as _duckdb_query
+                    # Fetch column names
+                    col_rows = asyncio.run(
+                        store.query(
+                            f"SELECT column_name FROM information_schema.columns "
+                            f"WHERE table_name = 'sensor_readings' "
+                            f"ORDER BY ordinal_position"
+                        )
+                    )
+                    cols = [r[0] for r in col_rows]
+                    if cols:
+                        print("  ".join(cols))
+                        print("-" * 60)
+                except Exception:
+                    pass
+                for row in rows:
+                    print(row)
+            else:
+                print("(no rows returned)")
+        finally:
+            store.close()
+        print("Done.")
+        return
 
     # ── NATS path ───────────────────────────────────────────────────
     if args.use_nats:
@@ -242,7 +327,9 @@ def main():
                 await send_example_nats(args.nats_server)
             if args.subscribe:
                 await subscribe_example_nats(
-                    args.nats_server, timeout=args.subscribe_timeout
+                    args.nats_server,
+                    timeout=args.subscribe_timeout,
+                    store_path=args.db_path if args.store else None,
                 )
 
         try:
