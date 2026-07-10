@@ -588,7 +588,7 @@ This POC intentionally limits scope to:
 - ✅ K8s Service + Endpoints for external RPi discovery
 - ❌ No multi-hop / store-and-forward
 - ✅ WiFi fallback (AutoInterface enabled when RNode is not connected)
-- ❌ No sensor integration in server
+- ❌ No DuckDB storage in server.py
 - ❌ No image/audio/file transfer
 - ❌ No encryption key management
 - ❌ No battery optimization

@@ -519,6 +519,93 @@ class TestBackwardCompatibility:
         assert payload == expected
 
 
+class TestEncodeSensorEnvelope:
+    """Edge-case tests for encode_sensor_envelope."""
+
+    def test_empty_readings(self):
+        """Empty readings list should produce valid envelope."""
+        envelope = enc.encode_sensor_envelope("node-1", 1, 3.7, [])
+        decoded = enc.decode_envelope(envelope)
+        assert decoded is not None
+        assert decoded["node_id"] == "node-1"
+        assert decoded["seq"] == 1
+        assert decoded["battery"] == pytest.approx(3.7)
+        assert decoded["readings"] == []
+
+    def test_long_node_id(self):
+        """64-char hex node_id (boundary test)."""
+        long_id = "a" * 64
+        envelope = enc.encode_sensor_envelope(long_id, 0, 0.0, [])
+        decoded = enc.decode_envelope(envelope)
+        assert decoded is not None
+        assert decoded["node_id"] == long_id
+
+    def test_high_seq_values(self):
+        """Max uint32 seq values should round-trip correctly."""
+        for seq in [2**32 - 1, 0, 1, 65535]:
+            envelope = enc.encode_sensor_envelope("n", seq, 0.0, [])
+            decoded = enc.decode_envelope(envelope)
+            assert decoded is not None
+            assert decoded["seq"] == seq
+
+    def test_round_trip_envelope_to_sensor_report(self):
+        """Envelope → decode → verify all fields including readings."""
+        readings = [
+            {"sensor_id": 1, "value": 25.5, "unit": "C", "timestamp_ms": 1000},
+            {"sensor_id": 2, "value": 68.0, "unit": "%", "timestamp_ms": 1000},
+        ]
+        envelope = enc.encode_sensor_envelope("node-xyz", 42, 3.9, readings)
+        decoded = enc.decode_envelope(envelope)
+        assert decoded is not None
+        assert decoded["node_id"] == "node-xyz"
+        assert decoded["seq"] == 42
+        assert decoded["battery"] == pytest.approx(3.9)
+        assert len(decoded["readings"]) == 2
+        assert decoded["readings"][0]["sensor_id"] == 1
+        assert decoded["readings"][0]["value"] == pytest.approx(25.5)
+        assert decoded["readings"][0]["unit"] == "C"
+        assert decoded["readings"][0]["timestamp_ms"] == 1000
+        assert decoded["readings"][1]["sensor_id"] == 2
+        assert decoded["readings"][1]["value"] == pytest.approx(68.0)
+        assert decoded["readings"][1]["unit"] == "%"
+        assert decoded["readings"][1]["timestamp_ms"] == 1000
+
+
+class TestEncodeSensorEnvelopeEdgeCases:
+    """Invalid/malformed input edge-case tests for encode_sensor_envelope."""
+
+    def test_none_readings_raises(self):
+        """Passing None as readings should raise TypeError."""
+        with pytest.raises(TypeError):
+            enc.encode_sensor_envelope("node-1", 1, 3.7, None)
+
+    def test_non_dict_in_readings_raises(self):
+        """Non-dict items in readings list should raise TypeError."""
+        with pytest.raises(TypeError):
+            enc.encode_sensor_envelope("node-1", 1, 3.7, ["not-a-dict"])
+
+    def test_reading_missing_keys_raises_key_error(self):
+        """Reading dicts missing required keys should raise KeyError."""
+        readings = [{}]
+        with pytest.raises(KeyError):
+            enc.encode_sensor_envelope("node-1", 1, 3.7, readings)
+
+    def test_empty_string_node_id(self):
+        """Empty string node_id should be preserved in round-trip."""
+        envelope = enc.encode_sensor_envelope("", 0, 0.0, [])
+        decoded = enc.decode_envelope(envelope)
+        assert decoded is not None
+        assert decoded["node_id"] == ""
+
+    def test_negative_seq_encoded_as_positive(self):
+        """Negative seq is encoded as signed byte due to varint encoding."""
+        # The minimal varint encoder doesn't handle negative uint32 specially;
+        # -1 encodes as 127 (since (-1 & 0x7F) = 127).
+        envelope = enc.encode_sensor_envelope("n", -1, 0.0, [])
+        decoded = enc.decode_envelope(envelope)
+        assert decoded["seq"] == 127
+
+
 if __name__ == "__main__":
     import pytest
     import sys
