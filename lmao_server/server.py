@@ -133,6 +133,25 @@ def _init_rns_and_lxmf(rnode_port, identity_storage_path="/tmp/lmao_server_lxmf"
     return identity, router
 
 
+def _print_startup_banner(identity_hex, rnode_port, grpc_available):
+    """Print the server startup banner with identity and status info."""
+    rnode_status = (
+        f"RNode on {rnode_port}"
+        if os.path.exists(rnode_port)
+        else "⚠️  RNode not connected — LoRa unavailable"
+    )
+    print(f"\n{'=' * 50}")
+    print("LMAO Server — Running (async mode)")
+    print(f"Node identity: {identity_hex}")
+    print("Listening for LXMF messages...")
+    print(f"  LoRa: {rnode_status}")
+    print("  WiFi: AutoInterface enabled")
+    print("  Title discriminator: p:Envelope")
+    if grpc_available:
+        print("  gRPC: 0.0.0.0:50051")
+    print(f"{'=' * 50}\n")
+
+
 class Server:
     """Encapsulates LMAO server lifecycle: Reticulum init, LXMF router, and message handling."""
 
@@ -242,56 +261,6 @@ class Server:
             logger.error(
                 "Unexpected error in handle_lxmf_delivery: %s", e, exc_info=True
             )
-
-    def start(self):
-        """Initialize Reticulum, LXMF router, and enter main loop (sync version).
-
-        This is the legacy synchronous entry point. For the async version
-        (with gRPC), see async_main() below.
-        """
-        # Configure logging
-        logging.basicConfig(
-            level=logging.INFO,
-            format="%(asctime)s [%(levelname)s] %(message)s",
-        )
-
-        cfg_dict = (
-            self._config_dict
-            if self._config_dict is not None
-            else config.get_config_dict()
-        )
-        rnode_port = cfg_dict["interfaces"]["RNode LoRa"]["port"]
-        _warn_if_rnode_missing(rnode_port)
-
-        # Use shared initialization helper
-        self.server_identity, self.router = _init_rns_and_lxmf(rnode_port)
-
-        # Register the delivery callback
-        self.router.register_delivery_callback(self.handle_lxmf_delivery)
-
-        # Print startup banner
-        identity_hex = RNS.hexrep(self.server_identity.hash, delimit=False)
-        rnode_status = (
-            f"RNode on {rnode_port}"
-            if os.path.exists(rnode_port)
-            else "⚠️  RNode not connected — LoRa unavailable"
-        )
-        print(f"\n{'=' * 50}")
-        print("LMAO Server POC — Running")
-        print(f"Node identity: {identity_hex}")
-        print("Listening for LXMF messages...")
-        print(f"  LoRa: {rnode_status}")
-        print("  WiFi: AutoInterface enabled")
-        print("  Title discriminator: p:Envelope")
-        print(f"{'=' * 50}\n")
-
-        # Main event loop
-        try:
-            while True:
-                time.sleep(0.1)
-        except KeyboardInterrupt:
-            print("\nShutting down...")
-            return
 
 
 # ──────────────────────────────────────────────────────────────
@@ -435,22 +404,11 @@ async def async_main():
     router.register_delivery_callback(lmao_server.handle_lxmf_delivery)
 
     # Print banner
-    identity_hex = RNS.hexrep(server_identity.hash, delimit=False)
-    rnode_status = (
-        f"RNode on {rnode_port}"
-        if os.path.exists(rnode_port)
-        else "⚠️  RNode not connected — LoRa unavailable"
+    _print_startup_banner(
+        RNS.hexrep(server_identity.hash, delimit=False),
+        rnode_port,
+        GRPC_AVAILABLE,
     )
-    print(f"\n{'=' * 50}")
-    print("LMAO Server — Running (async mode)")
-    print(f"Node identity: {identity_hex}")
-    print("Listening for LXMF messages...")
-    print(f"  LoRa: {rnode_status}")
-    print("  WiFi: AutoInterface enabled")
-    print("  Title discriminator: p:Envelope")
-    if GRPC_AVAILABLE:
-        print("  gRPC: 0.0.0.0:50051")
-    print(f"{'=' * 50}\n")
 
     # Start gRPC server if available
     grpc_server = None
@@ -480,17 +438,6 @@ async def async_main():
             await grpc_server.stop(5)
         if lmao_server:
             lmao_server.clear_grpc_subscribers()
-
-
-def main():
-    """Thin entry point: creates a Server instance and starts it (sync mode).
-
-    For gRPC-enabled mode, run async_main() instead:
-        import asyncio
-        from lmao_server.server import async_main
-        asyncio.run(async_main())
-    """
-    Server(config.get_config_dict()).start()
 
 
 if __name__ == "__main__":
