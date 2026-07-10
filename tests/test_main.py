@@ -408,6 +408,32 @@ class TestMakeSensorMessage:
             with pytest.raises(OSError, match="Sensor read failed"):
                 lmao_client.make_sensor_message("a1b2", 0, 3.7)
 
+    def test_strict_mode_raises_on_cpython(self):
+        """When strict=True and no esp32 module, RuntimeError is raised."""
+        import pytest
+        with pytest.raises(RuntimeError, match="strict=True"):
+            lmao_client.make_sensor_message("a1b2", 0, 3.7, strict=True)
+
+    def test_strict_mode_passthrough_with_mocked_esp32(self):
+        """strict=True still works with mocked esp32 — temperature is read."""
+        import sys
+
+        mock_esp32 = MagicMock()
+        mock_esp32.raw_temperature.return_value = 86  # 86°F → 30°C
+
+        mock_encode = MagicMock()
+        with patch.dict(sys.modules, {"esp32": mock_esp32}):
+            with patch.object(lmao_client, "encode_sensor_envelope", mock_encode,
+                              create=True):
+                lmao_client.make_sensor_message("a1b2", 0, 3.7, strict=True)
+
+        mock_encode.assert_called_once()
+        readings = mock_encode.call_args[0][3]
+        assert readings[0]["value"] == 30.0, (
+            f"Expected 30.0°C for raw_temperature=86°F, "
+            f"got {readings[0]['value']}"
+        )
+
 
 # ── Module-level helpers ────────────────────────────────────────────
 
