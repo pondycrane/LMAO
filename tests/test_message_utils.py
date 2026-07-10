@@ -3,6 +3,7 @@
 Covers all five code paths of the shared utility function used by
 both the server and human client.
 """
+
 from unittest.mock import MagicMock, patch
 
 from google.protobuf.message import DecodeError

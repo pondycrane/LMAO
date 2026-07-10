@@ -1,4 +1,5 @@
 """Tests for human client startup and lifecycle (with mocked RNS/LXMF)."""
+
 from unittest.mock import MagicMock, patch, PropertyMock
 import builtins
 import pytest

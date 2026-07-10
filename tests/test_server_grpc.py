@@ -1,4 +1,5 @@
 """Tests for server gRPC service (with mocked RNS/LXMF)."""
+
 import asyncio
 from unittest.mock import MagicMock, AsyncMock
 import pytest

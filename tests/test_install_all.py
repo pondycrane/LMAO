@@ -8,7 +8,6 @@ Run with::
     bazel test //tests:test_install_all --test_output=all
 """
 
-import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -16,8 +15,10 @@ import pytest
 # Import the install_all module (available under Bazel via deps).
 try:
     from tools import install_all
+    from tools import install_services
 except ImportError:
     install_all = None
+    install_services = None
 
 
 # ── helpers ─────────────────────────────────────────────────────────
@@ -160,6 +161,34 @@ class TestParseArgs:
         assert args.skip_rnode is True
         assert args.skip_cardputer is False
 
+    # ── include-services flags ──
+
+    def test_include_services_default_false(self):
+        """--include-services defaults to False."""
+        args = install_all._parse_args([])
+        assert args.include_services is False
+
+    def test_include_services_flag(self):
+        """--include-services sets the flag to True."""
+        args = install_all._parse_args(["--include-services"])
+        assert args.include_services is True
+
+    def test_skip_server_flag(self):
+        """--skip-server sets the flag to True."""
+        args = install_all._parse_args(["--include-services", "--skip-server"])
+        assert args.skip_server is True
+
+    def test_skip_k8s_flag(self):
+        """--skip-k8s sets the flag to True."""
+        args = install_all._parse_args(["--include-services", "--skip-k8s"])
+        assert args.skip_k8s is True
+
+    def test_skip_flags_noop_without_include_services(self):
+        """--skip-server and --skip-k8s can be set without --include-services."""
+        args = install_all._parse_args(["--skip-server", "--skip-k8s"])
+        assert args.skip_server is True
+        assert args.include_services is False
+
 
 # ── Summary output ───────────────────────────────────────────────────
 
@@ -268,9 +297,7 @@ class TestFlashCardputerClient:
             "verify_device": patch.object(
                 install_all, "verify_device", return_value=(True, "ESP32 detected")
             ),
-            "upload_file": patch.object(
-                install_all, "upload_file", return_value=True
-            ),
+            "upload_file": patch.object(install_all, "upload_file", return_value=True),
             "exit_raw_repl": patch.object(
                 install_all, "exit_raw_repl", return_value=None
             ),
@@ -308,18 +335,14 @@ class TestFlashCardputerClient:
     def test_successful_flash_sets_ok(self):
         """Successful flash should set result to OK."""
         result = self._make_result()
-        install_all._flash_cardputer_client(
-            "/dev/ttyACM0", "/fake/root", result
-        )
+        install_all._flash_cardputer_client("/dev/ttyACM0", "/fake/root", result)
         assert result.status == "OK"
         assert "file(s)" in result.detail
 
     def test_successful_flash_closes_port(self):
         """Port should always be closed after flash."""
         result = self._make_result()
-        install_all._flash_cardputer_client(
-            "/dev/ttyACM0", "/fake/root", result
-        )
+        install_all._flash_cardputer_client("/dev/ttyACM0", "/fake/root", result)
         self.mock_ser.close.assert_called_once()
 
     # ── serial port open failure ──
@@ -327,11 +350,10 @@ class TestFlashCardputerClient:
     def test_cannot_open_port_sets_fail(self):
         """Serial port open failure should set result to FAIL."""
         import serial as pyserial
+
         self.mock_serial_class.side_effect = pyserial.SerialException("denied")
         result = self._make_result()
-        install_all._flash_cardputer_client(
-            "/dev/ttyACM0", "/fake/root", result
-        )
+        install_all._flash_cardputer_client("/dev/ttyACM0", "/fake/root", result)
         assert result.status == "FAIL"
         assert "Cannot open serial port" in result.detail
         self.mock_ser.close.assert_not_called()
@@ -342,9 +364,7 @@ class TestFlashCardputerClient:
         """Raw REPL entry failure should set FAIL and still close port."""
         self.mocks["enter_raw_repl"].return_value = False
         result = self._make_result()
-        install_all._flash_cardputer_client(
-            "/dev/ttyACM0", "/fake/root", result
-        )
+        install_all._flash_cardputer_client("/dev/ttyACM0", "/fake/root", result)
         assert result.status == "FAIL"
         assert "raw REPL" in result.detail
         self.mock_ser.close.assert_called_once()
@@ -357,9 +377,7 @@ class TestFlashCardputerClient:
             "main.py not found"
         )
         result = self._make_result()
-        install_all._flash_cardputer_client(
-            "/dev/ttyACM0", "/fake/root", result
-        )
+        install_all._flash_cardputer_client("/dev/ttyACM0", "/fake/root", result)
         assert result.status == "FAIL"
         assert "Missing source file" in result.detail
         self.mock_ser.close.assert_called_once()
@@ -371,9 +389,7 @@ class TestFlashCardputerClient:
         # First file succeeds, second fails
         self.mocks["upload_file"].side_effect = [True, False]
         result = self._make_result()
-        install_all._flash_cardputer_client(
-            "/dev/ttyACM0", "/fake/root", result
-        )
+        install_all._flash_cardputer_client("/dev/ttyACM0", "/fake/root", result)
         assert result.status == "FAIL"
         assert "failed to upload" in result.detail
         self.mock_ser.close.assert_called_once()
@@ -383,11 +399,12 @@ class TestFlashCardputerClient:
     def test_serial_exception_during_operations_sets_fail(self):
         """Serial exception mid-operation should set FAIL and close port."""
         import serial as pyserial
-        self.mocks["enter_raw_repl"].side_effect = pyserial.SerialException("disconnected")
-        result = self._make_result()
-        install_all._flash_cardputer_client(
-            "/dev/ttyACM0", "/fake/root", result
+
+        self.mocks["enter_raw_repl"].side_effect = pyserial.SerialException(
+            "disconnected"
         )
+        result = self._make_result()
+        install_all._flash_cardputer_client("/dev/ttyACM0", "/fake/root", result)
         assert result.status == "FAIL"
         assert "Serial error" in result.detail
         self.mock_ser.close.assert_called_once()
@@ -398,9 +415,7 @@ class TestFlashCardputerClient:
         """Ctrl+C during flash should set FAIL and close port."""
         self.mocks["upload_file"].side_effect = KeyboardInterrupt()
         result = self._make_result()
-        install_all._flash_cardputer_client(
-            "/dev/ttyACM0", "/fake/root", result
-        )
+        install_all._flash_cardputer_client("/dev/ttyACM0", "/fake/root", result)
         assert result.status == "FAIL"
         assert "Aborted by user" in result.detail
         # Port should still be closed
@@ -412,9 +427,7 @@ class TestFlashCardputerClient:
         """Device verification warning should not stop flash."""
         self.mocks["verify_device"].return_value = (False, "Unknown device")
         result = self._make_result()
-        install_all._flash_cardputer_client(
-            "/dev/ttyACM0", "/fake/root", result
-        )
+        install_all._flash_cardputer_client("/dev/ttyACM0", "/fake/root", result)
         # Should still succeed because verification is a warning, not a blocker
         assert result.status == "OK"
         self.mock_ser.close.assert_called_once()
@@ -456,9 +469,7 @@ class TestMainPipeline:
             "verify_device": patch.object(
                 install_all, "verify_device", return_value=(True, "ESP32 detected")
             ),
-            "upload_file": patch.object(
-                install_all, "upload_file", return_value=True
-            ),
+            "upload_file": patch.object(install_all, "upload_file", return_value=True),
             "exit_raw_repl": patch.object(
                 install_all, "exit_raw_repl", return_value=None
             ),
@@ -697,3 +708,256 @@ class TestMainRNodePortOverride:
         self.mocks["find_rnode_port"].assert_not_called()
         # check_rnode_firmware should be called with the explicit port
         self.mocks["check_rnode_firmware"].assert_called_once_with("/dev/customUSB0")
+
+
+# ── Main pipeline — include-services integration ────────────────────
+
+
+class TestMainWithoutServices:
+    """Test main() without --include-services (back-compat)."""
+
+    @pytest.fixture(autouse=True)
+    def _setup_mocks(self):
+        patches = _patch_imports()
+        self.mocks = _start_patches(patches)
+        self.mocks["find_cardputer_port"].return_value = None
+        self.mocks["find_rnode_port"].return_value = None
+        yield
+        _stop_patches(self.mocks)
+
+    def test_services_get_skip_when_flag_not_set(self, capsys):
+        """Pi Server and K8s Services should show SKIP when --include-services not set."""
+        with pytest.raises(SystemExit):
+            install_all.main([])
+        captured = capsys.readouterr().out
+        assert "Pi Server" in captured
+        assert "K8s Services" in captured
+        assert "--include-services not set" in captured
+
+    def test_summary_has_four_rows_when_nothing_detected(self, capsys):
+        """Summary should show all four rows even when nothing is connected."""
+        with pytest.raises(SystemExit):
+            install_all.main([])
+        captured = capsys.readouterr().out
+        assert captured.count("[SKIP]") == 4
+
+
+class TestMainWithServicesSkipped:
+    """Test main() with --include-services but both services skipped."""
+
+    @pytest.fixture(autouse=True)
+    def _setup_mocks(self):
+        patches = _patch_imports()
+        # Also mock the service install functions
+        patches["install_pi_server"] = patch.object(install_all, "install_pi_server")
+        patches["install_k8s_services"] = patch.object(
+            install_all, "install_k8s_services"
+        )
+        self.mocks = _start_patches(patches)
+        self.mocks["find_cardputer_port"].return_value = None
+        self.mocks["find_rnode_port"].return_value = None
+        yield
+        _stop_patches(self.mocks)
+
+    def test_skip_flags_prevent_service_calls(self):
+        """--skip-server and --skip-k8s prevent service install calls."""
+        with pytest.raises(SystemExit):
+            install_all.main(["--include-services", "--skip-server", "--skip-k8s"])
+        self.mocks["install_pi_server"].assert_not_called()
+        self.mocks["install_k8s_services"].assert_not_called()
+
+    def test_skip_flags_show_in_summary(self, capsys):
+        """Skipped services should show in summary with skip reason."""
+        with pytest.raises(SystemExit):
+            install_all.main(["--include-services", "--skip-server", "--skip-k8s"])
+        captured = capsys.readouterr().out
+        assert "--skip-server" in captured
+        assert "--skip-k8s" in captured
+
+
+class TestMainWithServices:
+    """Test main() with --include-services (services called)."""
+
+    @pytest.fixture(autouse=True)
+    def _setup_mocks(self):
+        patches = _patch_imports()
+        # Mock the service install functions
+        patches["install_pi_server"] = patch.object(install_all, "install_pi_server")
+        patches["install_k8s_services"] = patch.object(
+            install_all, "install_k8s_services"
+        )
+        self.mocks = _start_patches(patches)
+        self.mocks["find_cardputer_port"].return_value = None
+        self.mocks["find_rnode_port"].return_value = None
+        yield
+        _stop_patches(self.mocks)
+
+    def test_include_services_calls_install_functions(self):
+        """--include-services should call both install functions."""
+        with pytest.raises(SystemExit):
+            install_all.main(["--include-services"])
+        self.mocks["install_pi_server"].assert_called_once()
+        self.mocks["install_k8s_services"].assert_called_once()
+
+    def test_only_pi_server_called_when_k8s_skipped(self):
+        """--skip-k8s should prevent k8s install but allow Pi server."""
+        with pytest.raises(SystemExit):
+            install_all.main(["--include-services", "--skip-k8s"])
+        self.mocks["install_pi_server"].assert_called_once()
+        self.mocks["install_k8s_services"].assert_not_called()
+
+    def test_only_k8s_called_when_server_skipped(self):
+        """--skip-server should prevent Pi server install but allow K8s."""
+        with pytest.raises(SystemExit):
+            install_all.main(["--include-services", "--skip-server"])
+        self.mocks["install_pi_server"].assert_not_called()
+        self.mocks["install_k8s_services"].assert_called_once()
+
+    def test_service_results_in_summary(self, capsys):
+        """Pi Server and K8s Services should appear in summary."""
+        # The mocked install functions don't touch the DeviceResult, so
+        # they'll remain at default SKIP unless we simulate OK.
+        with pytest.raises(SystemExit):
+            install_all.main(["--include-services"])
+        captured = capsys.readouterr().out
+        assert "Pi Server" in captured
+        assert "K8s Services" in captured
+
+
+# ── Unit tests for install_services.py ─────────────────────────────
+
+
+class TestInstallPiServer:
+    """Unit tests for install_services.install_pi_server()."""
+
+    def _make_result(self):
+        return install_all.DeviceResult("Pi Server")
+
+    def test_skips_when_docker_not_found(self):
+        """Result should be SKIP when docker is not on PATH."""
+        with patch("shutil.which", return_value=None):
+            result = self._make_result()
+            install_services.install_pi_server(result, "/fake/repo")
+            assert result.status == "SKIP"
+            assert "docker" in result.detail.lower()
+
+    def test_skips_when_repo_root_none_and_not_found(self):
+        """Result should be FAIL when repo_root cannot be located."""
+        with patch.object(install_services, "_find_repo_root", return_value=None):
+            result = self._make_result()
+            install_services.install_pi_server(result, None)
+            assert result.status == "FAIL"
+            assert "repo root" in result.detail.lower()
+
+    def test_builds_when_docker_found_and_succeeds(self):
+        """Result should be OK when docker build succeeds."""
+        mock_proc = MagicMock()
+        mock_proc.returncode = 0
+        with (
+            patch("shutil.which", return_value="/usr/bin/docker"),
+            patch("subprocess.run", return_value=mock_proc),
+        ):
+            result = self._make_result()
+            install_services.install_pi_server(result, "/fake/repo")
+            assert result.status == "OK"
+            assert "Docker image built" in result.detail
+
+    def test_fails_when_docker_build_returns_nonzero(self):
+        """Result should be FAIL when docker build returns non-zero."""
+        mock_proc = MagicMock()
+        mock_proc.returncode = 1
+        mock_proc.stderr = "Error: Dockerfile not found"
+        with (
+            patch("shutil.which", return_value="/usr/bin/docker"),
+            patch("subprocess.run", return_value=mock_proc),
+        ):
+            result = self._make_result()
+            install_services.install_pi_server(result, "/fake/repo")
+            assert result.status == "FAIL"
+            assert "Docker build failed" in result.detail
+
+    def test_fails_when_subprocess_raises(self):
+        """Result should be FAIL when subprocess.run raises an error."""
+        with (
+            patch("shutil.which", return_value="/usr/bin/docker"),
+            patch("subprocess.run", side_effect=OSError("no such file")),
+        ):
+            result = self._make_result()
+            install_services.install_pi_server(result, "/fake/repo")
+            assert result.status == "FAIL"
+
+
+class TestInstallK8sServices:
+    """Unit tests for install_services.install_k8s_services()."""
+
+    def _make_result(self):
+        return install_all.DeviceResult("K8s Services")
+
+    def test_skips_when_kubectl_not_found(self):
+        """Result should be SKIP when kubectl is not on PATH."""
+        with patch("shutil.which", return_value=None):
+            result = self._make_result()
+            install_services.install_k8s_services(result, "/fake/repo")
+            assert result.status == "SKIP"
+            assert "kubectl" in result.detail.lower()
+
+    def test_skips_when_repo_root_none_and_not_found(self):
+        """Result should be FAIL when repo_root cannot be located."""
+        with patch.object(install_services, "_find_repo_root", return_value=None):
+            result = self._make_result()
+            install_services.install_k8s_services(result, None)
+            assert result.status == "FAIL"
+            assert "repo root" in result.detail.lower()
+
+    def test_fails_when_manifest_not_found(self):
+        """Result should be FAIL when a manifest file does not exist."""
+        with (
+            patch("shutil.which", return_value="/usr/bin/kubectl"),
+            patch("os.path.isfile", return_value=False),
+        ):
+            result = self._make_result()
+            install_services.install_k8s_services(result, "/fake/repo")
+            assert result.status == "FAIL"
+            assert "Manifest not found" in result.detail
+
+    def test_applies_manifests_when_kubectl_found(self):
+        """Result should be OK when both manifests are applied successfully."""
+        mock_proc = MagicMock()
+        mock_proc.returncode = 0
+        with (
+            patch("shutil.which", return_value="/usr/bin/kubectl"),
+            patch("os.path.isfile", return_value=True),
+            patch("subprocess.run", return_value=mock_proc),
+        ):
+            result = self._make_result()
+            install_services.install_k8s_services(result, "/fake/repo")
+            assert result.status == "OK"
+            assert "Applied" in result.detail
+            assert "lmao-service.yaml" in result.detail
+            assert "nats-server.yaml" in result.detail
+
+    def test_fails_when_first_manifest_apply_fails(self):
+        """Result should be FAIL when the first kubectl apply returns non-zero."""
+        mock_proc = MagicMock()
+        mock_proc.returncode = 1
+        mock_proc.stderr = "connection refused"
+        with (
+            patch("shutil.which", return_value="/usr/bin/kubectl"),
+            patch("os.path.isfile", return_value=True),
+            patch("subprocess.run", return_value=mock_proc),
+        ):
+            result = self._make_result()
+            install_services.install_k8s_services(result, "/fake/repo")
+            assert result.status == "FAIL"
+            assert "kubectl apply" in result.detail.lower()
+
+    def test_fails_when_subprocess_raises(self):
+        """Result should be FAIL when subprocess.run raises an error."""
+        with (
+            patch("shutil.which", return_value="/usr/bin/kubectl"),
+            patch("os.path.isfile", return_value=True),
+            patch("subprocess.run", side_effect=OSError("no such file")),
+        ):
+            result = self._make_result()
+            install_services.install_k8s_services(result, "/fake/repo")
+            assert result.status == "FAIL"
