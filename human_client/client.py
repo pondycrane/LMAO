@@ -14,14 +14,12 @@ Usage:
     python3 human_client/client.py
 """
 
-import sys
 import os
 import logging
 import time
-import atexit
-import shutil
 
 from lma_core.rns_di import RNS, LXMF
+from lma_core.rns_init import warn_if_rnode_missing, init_rns_and_lxmf
 
 # Local imports
 import config
@@ -304,85 +302,20 @@ class Client:
         )
         rnode_port = cfg_dict["interfaces"]["RNode LoRa"]["port"]
 
-        # Check if the RNode port exists — warn but DO NOT exit
-        if not os.path.exists(rnode_port):
-            logger.warning(
-                "RNode port %s not found. LoRa messaging will be unavailable.",
-                rnode_port,
-            )
-            print(
-                f"⚠️  RNode port {rnode_port} not found.\n"
-                f"   The client will start with WiFi AutoInterface only.\n"
-                f"   Set the LMAO_RNODE_PORT environment variable if your RNode is on a different port.\n"
-                f"   Example: LMAO_RNODE_PORT=/dev/ttyACM0 python3 client.py\n"
-                f"   LoRa messaging will be unavailable until an RNode is connected.\n"
-            )
+        # Warn if RNode port is missing (but DO NOT exit)
+        warn_if_rnode_missing(rnode_port, role="client")
 
-        # Initialize Reticulum with our config
-        print("Initializing Reticulum...")
-        try:
-            configdir = config.get_configdir()
-            atexit.register(lambda: shutil.rmtree(configdir, ignore_errors=True))
-            RNS.Reticulum(configdir=configdir)
-        except (OSError, PermissionError) as e:
-            logger.critical(
-                "Failed to create config directory for Reticulum: %s", e, exc_info=True
-            )
-            print(
-                f"FATAL: Failed to create config directory for Reticulum: {e}",
-                file=sys.stderr,
-            )
-            print("Check that /tmp is writable and disk is not full.", file=sys.stderr)
-            sys.exit(1)
-        except RNS.RNSException as e:
-            logger.critical("Reticulum initialization failed: %s", e, exc_info=True)
-            print(f"FATAL: Reticulum initialization failed: {e}", file=sys.stderr)
-            if os.path.exists(rnode_port):
-                print(f"This is often caused by a misconfigured RNode on {rnode_port}.")
-                print("Check that:")
-                print(
-                    f"  1. The RNode is plugged in and on the correct port ({rnode_port})"
-                )
-                print("  2. You have permission: sudo usermod -a -G dialout $USER")
-                print("  3. The RNode firmware is flashed correctly")
-                print("  See rnode_firmware/README.md and README Troubleshooting.")
-            sys.exit(1)
-        except Exception as e:
-            logger.critical("Failed to initialize Reticulum: %s", e, exc_info=True)
-            print(f"FATAL: Failed to initialize Reticulum: {e}", file=sys.stderr)
-            print(
-                "Check your config and RNode connection. See README Troubleshooting.",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-        print("Reticulum initialized.")
-
-        # Create identity for the client
-        try:
-            self.client_identity = RNS.Identity()
-        except (RNS.RNSException, OSError) as e:
-            logger.critical("Failed to create client identity: %s", e, exc_info=True)
-            print(
-                "FATAL: Failed to create client identity. See log for details.",
-                file=sys.stderr,
-            )
-            sys.exit(1)
+        # Use shared init helper
+        self.client_identity, self.router = init_rns_and_lxmf(
+            rnode_port=rnode_port,
+            configdir_factory=config.get_configdir,
+            identity_storage_path="/tmp/lmao_human_client_lxmf",
+            register_delivery_callback=lambda r: r.register_delivery_callback(
+                self.handle_lxmf_delivery
+            ),
+            rnode_exists=os.path.exists(rnode_port),
+        )
         identity_hex = RNS.hexrep(self.client_identity.hash, delimit=False)
-
-        # Create LXMF router with our identity
-        print("Starting LXMF router...")
-        try:
-            self.router = LXMF.LXMRouter(
-                identity=self.client_identity, storagepath="/tmp/lmao_human_client_lxmf"
-            )
-            self.router.register_delivery_callback(self.handle_lxmf_delivery)
-        except (RNS.RNSException, LXMF.LXMFException, OSError) as e:
-            logger.critical("Failed to start LXMF router: %s", e, exc_info=True)
-            print(
-                "FATAL: Failed to start LXMF router. See log for details.",
-                file=sys.stderr,
-            )
-            sys.exit(1)
 
         # Announce presence on the network
         try:

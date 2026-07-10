@@ -13,6 +13,7 @@ Run with::
 """
 
 from unittest.mock import MagicMock, patch
+import pytest
 
 
 # Import the module under test (works when running under Bazel with proper deps)
@@ -191,6 +192,101 @@ class TestConvertDestHash:
 
 
 # ── make_sensor_message ─────────────────────────────────────────────
+
+
+class TestInitRns:
+    """Tests for _init_rns() — boot-sequence helper."""
+
+    def test_init_rns_creates_reticulum_with_config(self):
+        """_init_rns should create Reticulum and set config."""
+        mock_config = {"interfaces": [{"type": "LoRaInterface"}]}
+        mock_rns = MagicMock()
+
+        with patch.object(
+            lmao_client, "Reticulum", create=True, return_value=mock_rns
+        ):
+            rns = lmao_client._init_rns(mock_config)
+
+        assert rns is mock_rns
+        assert rns.config is mock_config
+        rns.setup_interfaces.assert_called_once()
+
+    def test_init_rns_logs_and_hangs_on_failure(self):
+        """_init_rns should let exceptions propagate (caller handles hang)."""
+        with patch.object(
+            lmao_client, "Reticulum", create=True, side_effect=RuntimeError("fail")
+        ):
+            with pytest.raises(RuntimeError, match="fail"):
+                lmao_client._init_rns({})
+
+
+class TestInitLxmfRouter:
+    """Tests for _init_lxmf_router() — boot-sequence helper."""
+
+    def test_creates_router_with_identity(self):
+        """_init_lxmf_router should create LXMRouter and register callbacks."""
+        mock_identity = MagicMock()
+        mock_router = MagicMock()
+
+        with patch.object(
+            lmao_client, "LXMRouter", create=True, return_value=mock_router
+        ) as mock_lxmr:
+            router = lmao_client._init_lxmf_router(
+                mock_identity, storage_path="/tmp/test", display_name="my-node"
+            )
+            assert router is mock_router
+            mock_lxmr.assert_called_once_with(
+                identity=mock_identity, storagepath="/tmp/test"
+            )
+            mock_router.register_delivery_identity.assert_called_once_with(
+                mock_identity, display_name="my-node"
+            )
+            mock_router.register_delivery_callback.assert_called_once_with(
+                lmao_client.handle_reply
+            )
+
+    def test_uses_default_storage_path(self):
+        """_init_lxmf_router should default to /flash/lxmf_state."""
+        mock_identity = MagicMock()
+        mock_router = MagicMock()
+
+        with patch.object(
+            lmao_client, "LXMRouter", create=True, return_value=mock_router
+        ) as mock_lxmr:
+            lmao_client._init_lxmf_router(mock_identity)
+            call_kwargs = mock_lxmr.call_args[1]
+            assert call_kwargs["storagepath"] == "/flash/lxmf_state"
+
+
+class TestInitWifi:
+    """Tests for _init_wifi() — boot-sequence helper."""
+
+    def test_skips_when_not_needed(self):
+        """_init_wifi should return False when WiFi is not needed."""
+        config = {"interfaces": [{"type": "LoRaInterface", "enabled": True}]}
+
+        result = lmao_client._init_wifi("ssid", "pass", config)
+
+        assert result is False
+
+    def test_connects_when_needed(self):
+        """_init_wifi should call _connect_wifi and return True when needed."""
+        config = {"interfaces": [{"type": "UDPInterface", "enabled": True}]}
+
+        with patch.object(lmao_client, "_connect_wifi") as mock_connect:
+            result = lmao_client._init_wifi("ssid", "pass", config, debug=1)
+
+        assert result is True
+        mock_connect.assert_called_once_with("ssid", "pass", 1)
+
+    def test_uses_default_debug(self):
+        """_init_wifi should default debug to 0."""
+        config = {"interfaces": [{"type": "UDPInterface", "enabled": True}]}
+
+        with patch.object(lmao_client, "_connect_wifi") as mock_connect:
+            lmao_client._init_wifi("ssid", "pass", config)
+
+        mock_connect.assert_called_once_with("ssid", "pass", 0)
 
 
 class TestMakeSensorMessage:

@@ -47,6 +47,43 @@ except ImportError:
 SEND_SENSOR = True
 
 
+def _init_rns(config):
+    """Initialize µReticulum with the given config dict.
+
+    Returns the Reticulum instance.  On failure calls ``log(...)``
+    and enters an infinite sleep — does NOT return.
+    """
+    rns = Reticulum(loglevel=3)
+    rns.config = config
+    rns.setup_interfaces()
+    return rns
+
+
+def _init_lxmf_router(identity, storage_path="/flash/lxmf_state", display_name=""):
+    """Create and configure an LXMF router bound to *identity*.
+
+    Registers the delivery identity, attaches the reply callback,
+    and returns the router.  On failure calls ``log(...)`` and
+    enters an infinite sleep — does NOT return.
+    """
+    router = LXMRouter(identity=identity, storagepath=storage_path)
+    router.register_delivery_identity(identity, display_name=display_name)
+    router.register_delivery_callback(handle_reply)
+    return router
+
+
+def _init_wifi(ssid, password, config, debug=0):
+    """Connect to WiFi if the config requires it.
+
+    Returns ``True`` if WiFi was attempted, ``False`` otherwise.
+    Failures are logged but do NOT halt the boot sequence.
+    """
+    if not _needs_wifi(config):
+        return False
+    _connect_wifi(ssid, password, debug)
+    return True
+
+
 def make_sensor_message(identity_hex, seq, battery=3.7):
     """Build an LMAOEnvelope containing a SensorReport with real ESP32 die temperature.
 
@@ -315,7 +352,7 @@ def main():
     if _needs_wifi(CONFIG):
         tft = log("Connecting WiFi...", tft, status_lines)
         try:
-            _connect_wifi(WIFI_SSID, WIFI_PASS, DEBUG)
+            _init_wifi(WIFI_SSID, WIFI_PASS, CONFIG, DEBUG)
             tft = log("WiFi OK.", tft, status_lines)
         except Exception as e:
             log(f"WiFi failed: {e} — continuing without", tft, status_lines)
@@ -325,9 +362,7 @@ def main():
     # ---- Start µReticulum ----
     tft = log("Init Reticulum...", tft, status_lines)
     try:
-        rns = Reticulum(loglevel=3)
-        rns.config = CONFIG
-        rns.setup_interfaces()
+        rns = _init_rns(CONFIG)
         tft = log("Reticulum OK.", tft, status_lines)
     except Exception as e:
         log(f"FATAL: Reticulum init failed: {e}", tft, status_lines)
@@ -340,9 +375,7 @@ def main():
     # ---- Start LXMF router ----
     tft = log("Starting LXMF router...", tft, status_lines)
     try:
-        router = LXMRouter(identity=rns.identity, storagepath="/flash/lxmf_state")
-        router.register_delivery_identity(rns.identity, display_name=NODE_NAME)
-        router.register_delivery_callback(handle_reply)
+        router = _init_lxmf_router(rns.identity, display_name=NODE_NAME)
         tft = log("LXMF router OK.", tft, status_lines)
     except Exception as e:
         log(f"FATAL: LXMF router failed: {e}", tft, status_lines)

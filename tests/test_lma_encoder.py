@@ -135,31 +135,22 @@ class TestCrossValidation:
         result = enc.parse_poc_message(b"\xff\xfe\xfd\xfc")
         assert result is None
 
-    def test_verbose_flag_suppresses_debug_output(self, capsys):
-        """When VERBOSE=False (default), debug prints are suppressed."""
-        orig = enc.VERBOSE
-        enc.VERBOSE = False
-        try:
-            payload = enc.make_poc_message("node", "hello")
-            result = enc.parse_poc_message(payload)
-            assert result == "hello"
-            captured = capsys.readouterr()
-            assert "DEBUG" not in captured.out
-        finally:
-            enc.VERBOSE = orig
+    def test_parse_poc_fallback_warns_on_decode_none(self, capsys):
+        """parse_poc_message prints WARNING when protobuf decode returns None."""
+        # Invalid protobuf data that decode_envelope returns None for
+        result = enc.parse_poc_message(b"plain text not protobuf")
+        assert result == "plain text not protobuf"
+        captured = capsys.readouterr()
+        assert "WARNING" in captured.out
+        assert "trying raw UTF-8 fallback" in captured.out
 
-    def test_verbose_flag_enables_debug_output(self, capsys):
-        """When VERBOSE=True, debug prints appear."""
-        orig = enc.VERBOSE
-        enc.VERBOSE = True
-        try:
-            payload = enc.make_poc_message("node", "hello")
-            result = enc.parse_poc_message(payload)
-            assert result == "hello"
-            captured = capsys.readouterr()
-            assert "protobuf decode success" in captured.out
-        finally:
-            enc.VERBOSE = orig
+    def test_parse_poc_fallback_prints_error_on_decode_failure(self, capsys):
+        """parse_poc_message prints ERROR when both decode paths fail."""
+        # Invalid UTF-8 bytes: 0xFF is never valid in UTF-8
+        result = enc.parse_poc_message(b"\xff\xfe\xfd\xfc")
+        assert result is None
+        captured = capsys.readouterr()
+        assert "ERROR" in captured.out
 
 
 class TestEdgeCases:
@@ -270,12 +261,14 @@ class TestEdgeCases:
         with pytest.raises(ValueError, match="Unsupported wire type"):
             enc.decode_text_message(data)
 
-    def test_decode_text_message_wire_type_5_unsupported(self):
-        """Wire type 5 (fixed32) is unsupported."""
-        # field 1, wire type 5: tag = (1<<3)|5 = 0x0d, then 4 bytes
-        data = b"\x0d" + (b"\x00" * 4)
-        with pytest.raises(ValueError, match="Unsupported wire type"):
-            enc.decode_text_message(data)
+    def test_decode_text_message_wire_type_5_unknown_skipped(self):
+        """Wire type 5 on unknown fields is silently skipped (consistent
+        with how protobuf decoders handle unknown wire types for known fields)."""
+        # field 99, wire type 5: tag = (99<<3)|5 = 0x315, then 4 bytes
+        data = bytes([0xbd, 0x06]) + b"\x00" * 4
+        result = enc.decode_text_message(data)
+        # Unknown field is skipped, defaults preserved
+        assert result == {"node_id": "", "content": "", "timestamp": 0}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

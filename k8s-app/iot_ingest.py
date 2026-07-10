@@ -41,8 +41,8 @@ except ImportError:
 
 # Use lma_core to import proto stubs (single import point)
 try:
-    from lma_core import (
-        LMAOEnvelope,
+    from lma_core import LMAOEnvelope
+    from lma_core.grpc_types import (
         SendRequest,
         SubscribeRequest,
         GetIdentityRequest,
@@ -52,8 +52,8 @@ try:
 except ImportError:
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
     try:
-        from lma_core import (
-            LMAOEnvelope,
+        from lma_core import LMAOEnvelope
+        from lma_core.grpc_types import (
             SendRequest,
             SubscribeRequest,
             GetIdentityRequest,
