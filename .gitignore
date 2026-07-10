@@ -27,5 +27,9 @@ Thumbs.db
 bazel-*
 MODULE.bazel.lock
 
+# Generated protobuf stubs (build artifacts, not source)
+proto/lma_pb2.py
+proto/lma_pb2_grpc.py
+
 # Temp files
 /tmp/
