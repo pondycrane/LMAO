@@ -839,7 +839,6 @@ class TestCardputerLoRaE2E:
 
                 # ── DuckDB sensor data assertion ──
                 # SensorReports are sent by default (SEND_SENSOR=True), validate ingestion
-                max_node_id = sensor_messages[0]["node_id"] if sensor_messages else server_hash
                 rows = asyncio.run(store.query(
                     "SELECT node_id, value, unit FROM sensor_readings "
                     "ORDER BY id DESC LIMIT 5",
@@ -864,7 +863,7 @@ class TestCardputerLoRaE2E:
                     try:
                         cardputer_ser.close()
                     except Exception:
-                        pass
+                        _logger.warning("Serial close failed", exc_info=True)
 
                 # Close DuckDB store and clean up temp file
                 try:
