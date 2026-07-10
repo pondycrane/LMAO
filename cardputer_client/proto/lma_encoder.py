@@ -21,6 +21,9 @@ Supported sub-messages:
 
 import struct as _struct
 
+# Sentinel for repeated fields in _decode_proto_message field_map
+_REPEATED = object()
+
 
 def encode_varint(value):
     """Encode an unsigned integer as a protobuf varint."""
@@ -72,23 +75,29 @@ def _decode_float(data, offset=0):
 def _decode_proto_message(data, field_map):
     """Generic protobuf wire-format decoder for simple non-nested messages.
 
-    Interprets varint (wire type 0) and length-delimited (wire type 2) fields
-    according to *field_map*.  Unknown fields and mismatched wire types are
-    silently skipped when the wire type is 0 or 2; any other wire type raises
-    ``ValueError`` (preserving the original per-decoder behaviour).
+    Interprets varint (wire type 0), length-delimited (wire type 2), and
+    32-bit float (wire type 5) fields according to *field_map*.  Unknown
+    fields and mismatched wire types are silently skipped when the wire type
+    is 0, 2, or 5; any other wire type raises ``ValueError``.
 
     Args:
         data: Bytes to decode.
-        field_map: Dict mapping *field_number* to *(wire_type, attr_name,
-                   transform_fn, default_value)*.  *transform_fn* receives
-                   the raw decoded value (int or bytes) and returns the value
-                   to store in the result dict.  Pass ``None`` to keep the
-                   raw value unchanged.
+        field_map: Dict mapping *field_number* to
+            *(wire_type, attr_name, transform_fn, default_value)*
+            or
+            *(wire_type, attr_name, transform_fn, default_value, _REPEATED)*.
+
+            When the optional *_REPEATED* sentinel is present, multiple
+            occurrences of the field are accumulated: appended to a list
+            if *default_value* is a list, or merged via ``.update()`` if
+            *default_value* is a dict (for protobuf map entries).
 
     Returns:
         dict with keys from ``field_map`` initialised to their defaults.
     """
-    result = {info[1]: info[3] for info in field_map.values()}
+    result = {}
+    for info in field_map.values():
+        result[info[1]] = info[3]
     pos = 0
     while pos < len(data):
         tag, tag_len = decode_varint(data, pos)
@@ -97,25 +106,32 @@ def _decode_proto_message(data, field_map):
         wire_type = tag & 0x07
         info = field_map.get(field_number)
         if info is None:
-            # Unknown field — skip if wire type 0 or 2, raise otherwise
+            # Unknown field — skip if wire type 0, 2, or 5, raise otherwise
             if wire_type == 0:
                 _, vlen = decode_varint(data, pos)
                 pos += vlen
             elif wire_type == 2:
                 length, llen = decode_varint(data, pos)
                 pos += llen + length
+            elif wire_type == 5:
+                pos += 4
             else:
                 raise ValueError(f"Unsupported wire type: {wire_type}")
             continue
-        expected_wire, attr_name, xform, _default = info
+        expected_wire = info[0]
+        attr_name = info[1]
+        xform = info[2]
+        is_repeated = len(info) >= 5 and info[4] is _REPEATED
         if wire_type != expected_wire:
-            # Mismatched wire type — skip if 0 or 2, raise otherwise
+            # Mismatched wire type — skip if 0, 2, or 5, raise otherwise
             if wire_type == 0:
                 _, vlen = decode_varint(data, pos)
                 pos += vlen
             elif wire_type == 2:
                 length, llen = decode_varint(data, pos)
                 pos += llen + length
+            elif wire_type == 5:
+                pos += 4
             else:
                 raise ValueError(f"Unsupported wire type: {wire_type}")
             continue
@@ -127,11 +143,20 @@ def _decode_proto_message(data, field_map):
             pos += llen
             value = data[pos:pos + length]
             pos += length
+        elif wire_type == 5:  # 32-bit float
+            value = _decode_float(data, pos)
+            pos += 4
         else:
             raise ValueError(f"Unsupported wire type: {wire_type}")
         if xform is not None:
             value = xform(value)
-        result[attr_name] = value
+        if is_repeated:
+            if isinstance(result[attr_name], dict):
+                result[attr_name].update(value)
+            else:
+                result[attr_name].append(value)
+        else:
+            result[attr_name] = value
     return result
 
 
@@ -168,34 +193,12 @@ def encode_sensor_report(node_id, seq, battery, readings):
 
 def decode_sensor_reading(data):
     """Decode a single SensorReading from bytes. Returns dict or None."""
-    result = {"sensor_id": 0, "value": 0.0, "unit": "", "timestamp_ms": 0}
-    pos = 0
-    while pos < len(data):
-        tag, tag_len = decode_varint(data, pos)
-        pos += tag_len
-        field_number = tag >> 3
-        wire_type = tag & 0x07
-
-        if wire_type == 0:  # Varint
-            value, vlen = decode_varint(data, pos)
-            pos += vlen
-            if field_number == 1:
-                result["sensor_id"] = value
-            elif field_number == 4:
-                result["timestamp_ms"] = value
-        elif wire_type == 2:  # Length-delimited
-            length, llen = decode_varint(data, pos)
-            pos += llen
-            if field_number == 3:
-                result["unit"] = data[pos:pos + length].decode("utf-8", "replace")
-            pos += length
-        elif wire_type == 5:  # 32-bit float
-            if field_number == 2:
-                result["value"] = _decode_float(data, pos)
-            pos += 4
-        else:
-            raise ValueError(f"Unsupported wire type in SensorReading: {wire_type}")
-    return result
+    return _decode_proto_message(data, {
+        1: (0, "sensor_id", int, 0),
+        2: (5, "value", None, 0.0),
+        3: (2, "unit", lambda b: b.decode("utf-8", "replace"), ""),
+        4: (0, "timestamp_ms", int, 0),
+    })
 
 
 def decode_sensor_report(data):
@@ -203,35 +206,12 @@ def decode_sensor_report(data):
 
     Returns dict with keys: node_id, seq, battery, readings (list of dicts).
     """
-    result = {"node_id": "", "seq": 0, "battery": 0.0, "readings": []}
-    pos = 0
-    while pos < len(data):
-        tag, tag_len = decode_varint(data, pos)
-        pos += tag_len
-        field_number = tag >> 3
-        wire_type = tag & 0x07
-
-        if wire_type == 0:  # Varint
-            value, vlen = decode_varint(data, pos)
-            pos += vlen
-            if field_number == 2:
-                result["seq"] = value
-        elif wire_type == 2:  # Length-delimited
-            length, llen = decode_varint(data, pos)
-            pos += llen
-            value = data[pos:pos + length]
-            if field_number == 1:
-                result["node_id"] = value.decode("utf-8", "replace")
-            elif field_number == 4:
-                result["readings"].append(decode_sensor_reading(value))
-            pos += length
-        elif wire_type == 5:  # 32-bit float
-            if field_number == 3:
-                result["battery"] = _decode_float(data, pos)
-            pos += 4
-        else:
-            raise ValueError(f"Unsupported wire type in SensorReport: {wire_type}")
-    return result
+    return _decode_proto_message(data, {
+        1: (2, "node_id", lambda b: b.decode("utf-8", "replace"), ""),
+        2: (0, "seq", int, 0),
+        3: (5, "battery", None, 0.0),
+        4: (2, "readings", decode_sensor_reading, [], _REPEATED),
+    })
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -288,38 +268,14 @@ def decode_command_request(data):
 
     Returns dict with keys: cmd_id, target, action, params (dict), issued_ms, expires_ms.
     """
-    result = {"cmd_id": "", "target": "", "action": "", "params": {}, "issued_ms": 0, "expires_ms": 0}
-    pos = 0
-    while pos < len(data):
-        tag, tag_len = decode_varint(data, pos)
-        pos += tag_len
-        field_number = tag >> 3
-        wire_type = tag & 0x07
-
-        if wire_type == 0:  # Varint
-            value, vlen = decode_varint(data, pos)
-            pos += vlen
-            if field_number == 5:
-                result["issued_ms"] = value
-            elif field_number == 6:
-                result["expires_ms"] = value
-        elif wire_type == 2:  # Length-delimited
-            length, llen = decode_varint(data, pos)
-            pos += llen
-            value = data[pos:pos + length]
-            if field_number == 1:
-                result["cmd_id"] = value.decode("utf-8", "replace")
-            elif field_number == 2:
-                result["target"] = value.decode("utf-8", "replace")
-            elif field_number == 3:
-                result["action"] = value.decode("utf-8", "replace")
-            elif field_number == 4:
-                k, v = _decode_map_entry(value)
-                result["params"][k] = v
-            pos += length
-        else:
-            raise ValueError(f"Unsupported wire type in CommandRequest: {wire_type}")
-    return result
+    return _decode_proto_message(data, {
+        1: (2, "cmd_id", lambda b: b.decode("utf-8", "replace"), ""),
+        2: (2, "target", lambda b: b.decode("utf-8", "replace"), ""),
+        3: (2, "action", lambda b: b.decode("utf-8", "replace"), ""),
+        4: (2, "params", lambda b: dict([_decode_map_entry(b)]), {}, _REPEATED),
+        5: (0, "issued_ms", int, 0),
+        6: (0, "expires_ms", int, 0),
+    })
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

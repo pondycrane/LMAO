@@ -270,12 +270,14 @@ class TestEdgeCases:
         with pytest.raises(ValueError, match="Unsupported wire type"):
             enc.decode_text_message(data)
 
-    def test_decode_text_message_wire_type_5_unsupported(self):
-        """Wire type 5 (fixed32) is unsupported."""
-        # field 1, wire type 5: tag = (1<<3)|5 = 0x0d, then 4 bytes
-        data = b"\x0d" + (b"\x00" * 4)
-        with pytest.raises(ValueError, match="Unsupported wire type"):
-            enc.decode_text_message(data)
+    def test_decode_text_message_wire_type_5_unknown_skipped(self):
+        """Wire type 5 on unknown fields is silently skipped (consistent
+        with how protobuf decoders handle unknown wire types for known fields)."""
+        # field 99, wire type 5: tag = (99<<3)|5 = 0x315, then 4 bytes
+        data = bytes([0xbd, 0x06]) + b"\x00" * 4
+        result = enc.decode_text_message(data)
+        # Unknown field is skipped, defaults preserved
+        assert result == {"node_id": "", "content": "", "timestamp": 0}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
