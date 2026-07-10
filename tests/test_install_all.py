@@ -9,7 +9,6 @@ Run with::
 """
 
 import sys
-from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -25,7 +24,7 @@ except ImportError:
 
 
 def _patch_imports():
-    """Patch pyserial and subprocess calls to avoid importing real hardware.
+    """Patch pyserial and install_all hardware-detection functions.
 
     Returns a dict of patches keyed by target string so callers can
     start/stop them independently.
@@ -248,16 +247,289 @@ class TestPrintSummary:
         assert "Cardputer" in captured
 
 
+# ── Flash cardputer client unit tests ───────────────────────────────
+
+
+class TestFlashCardputerClient:
+    """Direct unit tests for _flash_cardputer_client()."""
+
+    @pytest.fixture(autouse=True)
+    def _setup_mocks(self):
+        """Mock serial and all flash helpers."""
+        self.mock_serial_class = MagicMock()
+        self.mock_ser = MagicMock()
+        self.mock_serial_class.return_value = self.mock_ser
+
+        patches = {
+            "time.sleep": patch("tools.install_all.time.sleep", return_value=None),
+            "enter_raw_repl": patch.object(
+                install_all, "enter_raw_repl", return_value=True
+            ),
+            "verify_device": patch.object(
+                install_all, "verify_device", return_value=(True, "ESP32 detected")
+            ),
+            "upload_file": patch.object(
+                install_all, "upload_file", return_value=True
+            ),
+            "exit_raw_repl": patch.object(
+                install_all, "exit_raw_repl", return_value=None
+            ),
+            "verify_files_exist": patch.object(
+                install_all, "verify_files_exist", return_value=None
+            ),
+            "auto_discover_lib_files": patch.object(
+                install_all, "auto_discover_lib_files", return_value=[]
+            ),
+            "os.path.getsize": patch("os.path.getsize", return_value=100),
+        }
+        self._all_patches = patches
+        self.mocks = {}
+        for key, p in patches.items():
+            self.mocks[key] = p.start()
+        # serial.Serial needs special handling (returns self.mock_ser)
+        self._serial_patch = patch(
+            "tools.install_all.serial.Serial", self.mock_serial_class
+        )
+        self._serial_patch.start()
+        # FILES_TO_UPLOAD is a list, not compatible with patch.object dict stop
+        self._saved_files = install_all.FILES_TO_UPLOAD
+        install_all.FILES_TO_UPLOAD = ["main.py", "config.py"]
+        yield
+        for p in self.mocks.values():
+            p.stop()
+        self._serial_patch.stop()
+        install_all.FILES_TO_UPLOAD = self._saved_files
+
+    def _make_result(self):
+        return install_all.DeviceResult("Cardputer")
+
+    # ── success path ──
+
+    def test_successful_flash_sets_ok(self):
+        """Successful flash should set result to OK."""
+        result = self._make_result()
+        install_all._flash_cardputer_client(
+            "/dev/ttyACM0", "/fake/root", result
+        )
+        assert result.status == "OK"
+        assert "file(s)" in result.detail
+
+    def test_successful_flash_closes_port(self):
+        """Port should always be closed after flash."""
+        result = self._make_result()
+        install_all._flash_cardputer_client(
+            "/dev/ttyACM0", "/fake/root", result
+        )
+        self.mock_ser.close.assert_called_once()
+
+    # ── serial port open failure ──
+
+    def test_cannot_open_port_sets_fail(self):
+        """Serial port open failure should set result to FAIL."""
+        import serial as pyserial
+        self.mock_serial_class.side_effect = pyserial.SerialException("denied")
+        result = self._make_result()
+        install_all._flash_cardputer_client(
+            "/dev/ttyACM0", "/fake/root", result
+        )
+        assert result.status == "FAIL"
+        assert "Cannot open serial port" in result.detail
+        self.mock_ser.close.assert_not_called()
+
+    # ── raw REPL failure ──
+
+    def test_raw_repl_failure_sets_fail_and_closes_port(self):
+        """Raw REPL entry failure should set FAIL and still close port."""
+        self.mocks["enter_raw_repl"].return_value = False
+        result = self._make_result()
+        install_all._flash_cardputer_client(
+            "/dev/ttyACM0", "/fake/root", result
+        )
+        assert result.status == "FAIL"
+        assert "raw REPL" in result.detail
+        self.mock_ser.close.assert_called_once()
+
+    # ── missing source file ──
+
+    def test_missing_source_file_sets_fail(self):
+        """Missing source file should set FAIL and close port."""
+        self.mocks["verify_files_exist"].side_effect = FileNotFoundError(
+            "main.py not found"
+        )
+        result = self._make_result()
+        install_all._flash_cardputer_client(
+            "/dev/ttyACM0", "/fake/root", result
+        )
+        assert result.status == "FAIL"
+        assert "Missing source file" in result.detail
+        self.mock_ser.close.assert_called_once()
+
+    # ── partial upload failure ──
+
+    def test_partial_upload_sets_fail(self):
+        """Partial upload failure should set FAIL."""
+        # First file succeeds, second fails
+        self.mocks["upload_file"].side_effect = [True, False]
+        result = self._make_result()
+        install_all._flash_cardputer_client(
+            "/dev/ttyACM0", "/fake/root", result
+        )
+        assert result.status == "FAIL"
+        assert "failed to upload" in result.detail
+        self.mock_ser.close.assert_called_once()
+
+    # ── serial exception during operations ──
+
+    def test_serial_exception_during_operations_sets_fail(self):
+        """Serial exception mid-operation should set FAIL and close port."""
+        import serial as pyserial
+        self.mocks["enter_raw_repl"].side_effect = pyserial.SerialException("disconnected")
+        result = self._make_result()
+        install_all._flash_cardputer_client(
+            "/dev/ttyACM0", "/fake/root", result
+        )
+        assert result.status == "FAIL"
+        assert "Serial error" in result.detail
+        self.mock_ser.close.assert_called_once()
+
+    # ── KeyboardInterrupt ──
+
+    def test_keyboard_interrupt_sets_fail_and_closes_port(self):
+        """Ctrl+C during flash should set FAIL and close port."""
+        self.mocks["upload_file"].side_effect = KeyboardInterrupt()
+        result = self._make_result()
+        install_all._flash_cardputer_client(
+            "/dev/ttyACM0", "/fake/root", result
+        )
+        assert result.status == "FAIL"
+        assert "Aborted by user" in result.detail
+        # Port should still be closed
+        self.mock_ser.close.assert_called_once()
+
+    # ── device verification warning (non-ESP32) ──
+
+    def test_device_verification_warning_continues_flash(self):
+        """Device verification warning should not stop flash."""
+        self.mocks["verify_device"].return_value = (False, "Unknown device")
+        result = self._make_result()
+        install_all._flash_cardputer_client(
+            "/dev/ttyACM0", "/fake/root", result
+        )
+        # Should still succeed because verification is a warning, not a blocker
+        assert result.status == "OK"
+        self.mock_ser.close.assert_called_once()
+
+
 # ── Main pipeline integration ────────────────────────────────────────
 
 
 class TestMainPipeline:
     """Integration tests for main() with mocked hardware detection."""
 
-    # Note: we avoid importing pyserial at module level so that these
-    # tests run even when pyserial is not installed.  The Bazel target
-    # provides pyserial as a dependency.
-    pass
+    @pytest.fixture(autouse=True)
+    def _setup_mocks(self):
+        """Mock out all hardware-dependent functions."""
+        patches = {
+            "serial": patch("tools.install_all.serial", MagicMock()),
+            "serial.tools": patch("tools.install_all.serial.tools", MagicMock()),
+            "serial.tools.list_ports": patch(
+                "tools.install_all.serial.tools.list_ports", MagicMock()
+            ),
+            "find_cardputer_port": patch.object(
+                install_all, "find_cardputer_port", return_value=None
+            ),
+            "find_rnode_port": patch.object(
+                install_all, "find_rnode_port", return_value=None
+            ),
+            "check_rnode_firmware": patch.object(
+                install_all, "check_rnode_firmware", return_value=False
+            ),
+            "flash_rnode_firmware": patch.object(
+                install_all, "flash_rnode_firmware", return_value=(True, "OK")
+            ),
+            "find_client_root": patch.object(
+                install_all, "find_client_root", return_value="/fake/client_root"
+            ),
+            "enter_raw_repl": patch.object(
+                install_all, "enter_raw_repl", return_value=True
+            ),
+            "verify_device": patch.object(
+                install_all, "verify_device", return_value=(True, "ESP32 detected")
+            ),
+            "upload_file": patch.object(
+                install_all, "upload_file", return_value=True
+            ),
+            "exit_raw_repl": patch.object(
+                install_all, "exit_raw_repl", return_value=None
+            ),
+            "verify_files_exist": patch.object(
+                install_all, "verify_files_exist", return_value=None
+            ),
+            "auto_discover_lib_files": patch.object(
+                install_all, "auto_discover_lib_files", return_value=[]
+            ),
+        }
+        self.mocks = _start_patches(patches)
+        # Patch FILES_TO_UPLOAD (a list, not compatible with patch.object dict)
+        self._saved_files = install_all.FILES_TO_UPLOAD
+        install_all.FILES_TO_UPLOAD = ["main.py", "config.py"]
+        self._getsizep = patch("os.path.getsize", return_value=100)
+        self._getsizep.start()
+        # Also mock serial.Serial for _flash_cardputer_client
+        self._serial_patch = patch("tools.install_all.serial.Serial", MagicMock())
+        self._serial_patch.start()
+        yield
+        _stop_patches(self.mocks)
+        install_all.FILES_TO_UPLOAD = self._saved_files
+        self._getsizep.stop()
+        self._serial_patch.stop()
+
+    def test_cardputer_detected_and_flash_succeeds_exits_0(self, capsys):
+        """Cardputer detected + flash succeeds → exit 0 with OK summary."""
+        self.mocks["find_cardputer_port"].return_value = "/dev/ttyACM0"
+        with pytest.raises(SystemExit) as exc_info:
+            install_all.main([])
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr().out
+        assert "[OK]" in captured
+        assert "Cardputer" in captured
+
+    def test_cardputer_detected_and_flash_fails_exits_1(self, capsys):
+        """Cardputer detected + flash fails → exit 1."""
+        self.mocks["find_cardputer_port"].return_value = "/dev/ttyACM0"
+        self.mocks["upload_file"].return_value = False
+        with pytest.raises(SystemExit) as exc_info:
+            install_all.main([])
+        assert exc_info.value.code == 1
+        captured = capsys.readouterr().out
+        assert "[FAIL]" in captured
+
+    def test_both_devices_detected_both_processed(self):
+        """Both Cardputer and RNode detected → both processed."""
+        self.mocks["find_cardputer_port"].return_value = "/dev/ttyACM0"
+        self.mocks["find_rnode_port"].return_value = "/dev/ttyUSB0"
+        self.mocks["check_rnode_firmware"].return_value = True
+        with pytest.raises(SystemExit) as exc_info:
+            install_all.main([])
+        assert exc_info.value.code == 0
+        self.mocks["find_cardputer_port"].assert_called_once()
+        self.mocks["find_rnode_port"].assert_called_once()
+
+    def test_cardputer_port_override_bypasses_auto_detection(self):
+        """--cardputer-port override bypasses auto-detection."""
+        with pytest.raises(SystemExit) as exc_info:
+            install_all.main(["--cardputer-port", "/dev/customACM0"])
+        assert exc_info.value.code == 0
+        # find_cardputer_port should have been called with the explicit port
+        self.mocks["find_cardputer_port"].assert_called_once_with("/dev/customACM0")
+
+    def test_client_root_override_passed_through(self):
+        """--client-root override is passed through to flash function."""
+        self.mocks["find_cardputer_port"].return_value = "/dev/ttyACM0"
+        with pytest.raises(SystemExit) as exc_info:
+            install_all.main(["--client-root", "/custom/root"])
+        assert exc_info.value.code == 0
+        self.mocks["find_client_root"].assert_not_called()
 
 
 class TestMainSkipFlags:

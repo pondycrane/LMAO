@@ -210,6 +210,40 @@ LoRa modulation independently.
 > For alternative client firmware options (e.g., rsCardputer), see
 > [docs/alternative-firmware.md](docs/alternative-firmware.md).
 
+**Option C — Unified flash (install_all)**:
+
+Flash both Cardputer client and RNode firmware in a single command.
+
+```bash
+# Auto-detect both devices and flash
+bazel run //tools:install_all
+
+# Specify explicit ports
+bazel run //tools:install_all -- --cardputer-port /dev/ttyACM0 --rnode-port /dev/ttyUSB0
+
+# Skip one device type
+bazel run //tools:install_all -- --skip-cardputer
+bazel run //tools:install_all -- --skip-rnode
+
+# Custom client root path
+bazel run //tools:install_all -- --client-root /path/to/cardputer_client
+```
+
+Output shows a per-device summary table with OK/FAIL/SKIP status:
+
+```
+============================================================
+  INSTALL SUMMARY
+============================================================
+  [OK]    Cardputer     — Flashed 42 file(s) to Cardputer
+  [OK]    RNode (Heltec) — RNode firmware already installed
+============================================================
+  All detected devices processed successfully.
+```
+
+The tool auto-detects connected hardware via USB and exits with code 1
+if any device fails.
+
 ### 6. Test Communication
 
 An automated E2E test can verify the full LoRa communication path with
@@ -538,6 +572,10 @@ If an RNode is connected, LoRa messaging is available.
 │   ├── test_client_startup.py         # Human client startup lifecycle tests
 │   └── e2e/
 │       └── test_cardputer_flash.py    # E2E flash + boot validation test
+│
+├── tools/                             # Build/install tools
+│   ├── BUILD                          # Bazel: py_binary + py_library targets
+│   └── install_all.py                 # Unified hardware flash orchestrator
 │
 └── rnode_firmware/                    # Documentation only
     └── README.md                      # Step-by-step ESP32 RNode flashing guide
