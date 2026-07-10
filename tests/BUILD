@@ -287,6 +287,7 @@ py_test(
         "//cardputer_client:flash_lib",
         "//lma_core",
         "//lmao_server:server_lib",
+        "@lmao_pip//duckdb",
         "@lmao_pip//lxmf",
         "@lmao_pip//pyserial",
         "@lmao_pip//pytest",

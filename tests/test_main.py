@@ -190,6 +190,108 @@ class TestConvertDestHash:
             self._convert_dest_hash(42)
 
 
+# ── make_sensor_message ─────────────────────────────────────────────
+
+
+class TestMakeSensorMessage:
+    """Tests for make_sensor_message() — mocks the encoder, validates args."""
+
+    import pytest
+
+    @staticmethod
+    def _call(identity_hex="a1b2", seq=0, battery=3.7):
+        """Call make_sensor_message with a mocked encoder, return captured args."""
+        mock_encode = MagicMock()
+        with patch.object(lmao_client, "encode_sensor_envelope", mock_encode,
+                          create=True):
+            lmao_client.make_sensor_message(identity_hex, seq, battery)
+        mock_encode.assert_called_once()
+        return mock_encode.call_args[0]  # (identity_hex, seq, battery, readings)
+
+    def test_temperature_formula_zero_seq(self):
+        """seq=0 should produce temperature 25.0°C."""
+        args = self._call(seq=0)
+        readings = args[3]
+        assert readings[0]["value"] == 25.0
+
+    def test_temperature_formula_seq_1(self):
+        """seq=1 should produce 25.5°C."""
+        args = self._call(seq=1)
+        assert args[3][0]["value"] == 25.5
+
+    def test_temperature_formula_seq_7(self):
+        """seq=7 should produce 28.5°C."""
+        args = self._call(seq=7)
+        assert args[3][0]["value"] == 28.5
+
+    def test_temperature_formula_seq_9(self):
+        """seq=9 should produce 29.5°C (maximum)."""
+        args = self._call(seq=9)
+        assert args[3][0]["value"] == 29.5
+
+    def test_temperature_formula_seq_10_wraps(self):
+        """seq=10 should wrap back to 25.0°C (seq % 10 = 0)."""
+        args = self._call(seq=10)
+        assert args[3][0]["value"] == 25.0
+
+    def test_identity_hex_passthrough(self):
+        """node_id should match the identity_hex argument exactly."""
+        args = self._call(identity_hex="deadbeef")
+        assert args[0] == "deadbeef"
+
+    def test_identity_hex_empty_string(self):
+        """Empty identity_hex should produce empty node_id."""
+        args = self._call(identity_hex="")
+        assert args[0] == ""
+
+    def test_default_battery_value(self):
+        """Default battery should be 3.7V when not explicitly provided."""
+        args = self._call()
+        assert args[2] == self.pytest.approx(3.7)
+
+    def test_custom_battery_value(self):
+        """Explicit battery argument should be passed through."""
+        args = self._call(battery=4.2)
+        assert args[2] == self.pytest.approx(4.2)
+
+    def test_battery_zero(self):
+        """Zero battery should be passed through."""
+        args = self._call(battery=0.0)
+        assert args[2] == self.pytest.approx(0.0)
+
+    def test_seq_passthrough(self):
+        """seq number should be preserved."""
+        args = self._call(seq=42)
+        assert args[1] == 42
+
+    def test_single_reading_structure(self):
+        """Readings list should contain exactly one reading with correct fields."""
+        args = self._call(seq=5)
+        readings = args[3]
+        assert len(readings) == 1
+        reading = readings[0]
+        assert reading["sensor_id"] == 1
+        assert reading["unit"] == "C"
+        assert "value" in reading
+        assert "timestamp_ms" in reading
+
+    def test_timestamp_recency(self):
+        """Timestamp should be within 5 seconds of now."""
+        import time
+
+        args = self._call(seq=0)
+        now_ms = int(time.time() * 1000)
+        ts = args[3][0]["timestamp_ms"]
+        assert abs(now_ms - ts) < 5000, (
+            f"Timestamp {ts} is more than 5s from now ({now_ms})"
+        )
+
+    def test_temperature_is_float(self):
+        """Temperature value should be a float type."""
+        args = self._call(seq=5)
+        assert isinstance(args[3][0]["value"], float)
+
+
 # ── Module-level helpers ────────────────────────────────────────────
 
 
