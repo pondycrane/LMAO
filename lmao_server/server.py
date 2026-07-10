@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 # ──────────────────────────────────────────────────────────────
 try:
     import grpc
-    from lma_core import (
+    from lma_core.grpc_types import (
         SendResponse,
         SubscribeResponse,
         GetIdentityResponse,
@@ -342,7 +342,7 @@ async def async_main():
     if GRPC_AVAILABLE:
         grpc_service = LMAOGrpcService(lmao_server)
         grpc_server = grpc.aio.server()
-        from lma_core import add_LMAOServicer_to_server
+        from lma_core.grpc_types import add_LMAOServicer_to_server
 
         add_LMAOServicer_to_server(grpc_service, grpc_server)
         grpc_server.add_insecure_port("0.0.0.0:50051")
