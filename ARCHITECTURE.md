@@ -61,6 +61,11 @@ Interfaces    │  LoRa (RNode) · WiFi (AutoInterface) · TCP/UDP · Serial
 4. Server receives → parses → stores (DuckDB via `DuckDbStore`) → evaluates rules → sends commands if triggered
 5. Propagated commands wait on the server's Propagation Node until the target node wakes and collects
 
+**External I2C sensors** (e.g., DHT20 Grove module) are supported via an extensible
+sensor dispatch pattern in `cardputer_client/lib/sensors/`. When a sensor type
+is configured, the client reads both the ESP32's internal die temperature and the
+external sensor, packaging both readings into a single `SensorReport`.
+
 ## Messaging per Content Type
 
 | Type | LXMF Mechanism | Bandwidth Needs |
