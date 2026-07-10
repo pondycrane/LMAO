@@ -290,8 +290,8 @@ def main():
 
         try:
             store.initialize(args.db_path, read_only=True)
-        except ImportError as e:
-            print(f"ERROR: {e}", file=sys.stderr)
+        except Exception as e:
+            print(f"ERROR: Could not open DuckDB database at {args.db_path}: {e}", file=sys.stderr)
             sys.exit(1)
 
         try:
