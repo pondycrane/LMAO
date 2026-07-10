@@ -13,8 +13,9 @@ class TestAsyncMain:
     @pytest.mark.asyncio
     async def test_async_main_grpc_disabled(self, capsys, caplog):
         """async_main should run main loop even when gRPC is not available."""
-        if "server" in sys.modules:
-            del sys.modules["server"]
+        for _mod in ("server", "lmao_server", "lmao_server.server"):
+            if _mod in sys.modules:
+                del sys.modules[_mod]
 
         setup_common_mocks(with_grpc=True)
 
@@ -46,8 +47,9 @@ class TestAsyncMain:
     @pytest.mark.asyncio
     async def test_async_main_grpc_enabled(self, capsys, caplog):
         """async_main should start gRPC server when GRPC_AVAILABLE is True."""
-        if "server" in sys.modules:
-            del sys.modules["server"]
+        for _mod in ("server", "lmao_server", "lmao_server.server"):
+            if _mod in sys.modules:
+                del sys.modules[_mod]
 
         setup_common_mocks(with_grpc=True)
 
@@ -67,9 +69,9 @@ class TestAsyncMain:
         sys.modules["grpc"].aio = MagicMock()
         sys.modules["grpc"].aio.server.return_value = mock_grpc_server
 
-        # Mock add_LMAOServicer_to_server on lma_core (local import inside async_main)
+        # Mock add_LMAOServicer_to_server on lma_core.grpc_types (local import inside async_main)
         mock_add = MagicMock()
-        sys.modules["lma_core"].add_LMAOServicer_to_server = mock_add
+        sys.modules["lma_core.grpc_types"].add_LMAOServicer_to_server = mock_add
 
         # Make asyncio.sleep raise KeyboardInterrupt to exit
         with patch.object(server_mod.asyncio, "sleep", side_effect=KeyboardInterrupt):
@@ -97,8 +99,9 @@ class TestInitRnsAndLxmf:
     @pytest.fixture
     def server_mod(self):
         """Import server module with mocked dependencies."""
-        if "server" in sys.modules:
-            del sys.modules["server"]
+        for _mod in ("server", "lmao_server", "lmao_server.server"):
+            if _mod in sys.modules:
+                del sys.modules[_mod]
         setup_common_mocks(with_grpc=True)
         from lmao_server import server as mod
 
@@ -182,8 +185,9 @@ class TestPrintStartupBanner:
     @pytest.fixture
     def server_mod(self):
         """Import server module with mocked dependencies."""
-        if "server" in sys.modules:
-            del sys.modules["server"]
+        for _mod in ("server", "lmao_server", "lmao_server.server"):
+            if _mod in sys.modules:
+                del sys.modules[_mod]
         setup_common_mocks(with_grpc=True)
         from lmao_server import server as mod
 

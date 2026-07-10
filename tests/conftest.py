@@ -25,51 +25,78 @@ def setup_common_mocks(with_grpc=True):
     Must be called **before** importing server or client modules.
     When ``with_grpc`` is True (default), gRPC and proto stubs are
     also mocked so that the server's gRPC service tests work.
-
-    The real ``lma_core.message_utils`` is registered so that the
-    ``decode_lmao_message`` import resolves, but the ``LMAOEnvelope``
-    inside the function body is picked up lazily from the mock below.
     """
-    # Create mock RNS and LXMF modules
+    # ── Mock RNS and LXMF ──────────────────────────────────────────
     sys.modules["RNS"] = MagicMock()
     sys.modules["LXMF"] = MagicMock()
 
-    # Wire the same mocks through lma_core.rns_di so that
-    # ``from lma_core.rns_di import RNS, LXMF`` resolves.
-    _rns_di = types.ModuleType("lma_core.rns_di")
-    _rns_di.RNS = sys.modules["RNS"]
-    _rns_di.LXMF = sys.modules["LXMF"]
-    sys.modules["lma_core.rns_di"] = _rns_di
+    # Mock proto.lma_pb2 so the real lma_core package can be imported
+    _proto_pb2 = MagicMock()
+    _proto_pb2.LMAOEnvelope = MagicMock()
+    _proto_pb2.TextMessage = MagicMock()
+    _proto_pb2.SensorReport = MagicMock()
+    _proto_pb2.SensorReading = MagicMock()
+    _proto_pb2.CommandRequest = MagicMock()
+    _proto_pb2.CommandAck = MagicMock()
+    _proto_pb2.AudioMessage = MagicMock()
+    _proto_pb2.ImageMessage = MagicMock()
+    _proto_pb2.CallSignal = MagicMock()
+    _proto_pb2.SendRequest = MagicMock()
+    _proto_pb2.SendResponse = MagicMock()
+    _proto_pb2.SubscribeRequest = MagicMock()
+    _proto_pb2.SubscribeResponse = MagicMock()
+    _proto_pb2.GetIdentityRequest = MagicMock()
+    _proto_pb2.GetIdentityResponse = MagicMock()
+    sys.modules["proto"] = MagicMock()
+    sys.modules["proto.lma_pb2"] = _proto_pb2
 
-    sys.modules["config"] = MagicMock()
+    # Import the real lma_core package (needs proto.lma_pb2 mocked first)
+    import lma_core as _real_lma_core
 
-    # Import the real message_utils module BEFORE mocking lma_core
-    # so that server.py's ``from lma_core.message_utils import ...`` resolves.
-    # The lazy import of LMAOEnvelope inside decode_lmao_message picks up
-    # the mock configured below at call time.
-    import lma_core.message_utils as _real_msg_utils
+    # Re-bind proto types on lma_core so they reference the fresh mocks
+    for _attr in (
+        "LMAOEnvelope", "TextMessage", "SensorReport", "SensorReading",
+        "CommandRequest", "CommandAck", "AudioMessage", "ImageMessage",
+        "CallSignal",
+    ):
+        setattr(_real_lma_core, _attr, getattr(_proto_pb2, _attr))
+
+    sys.modules["lma_core"] = _real_lma_core
+
+    # ── Patch rns_di with mock RNS / LXMF ──────────────────────────
+    import lma_core.rns_di as _real_rns_di
+
+    _real_rns_di.RNS = sys.modules["RNS"]
+    _real_rns_di.LXMF = sys.modules["LXMF"]
+    sys.modules["lma_core.rns_di"] = _real_rns_di
+
+    # ── Register real rns_init (imports from patched rns_di) ───────
     import lma_core.rns_init as _real_rns_init
 
-    sys.modules["lma_core"] = MagicMock()
-    sys.modules["lma_core"].LMAOEnvelope = MagicMock()
-    sys.modules["lma_core"].TextMessage = MagicMock()
-    sys.modules["lma_core.message_utils"] = _real_msg_utils
     sys.modules["lma_core.rns_init"] = _real_rns_init
 
-    # Mock RNS types
+    # ── Register real message_utils ────────────────────────────────
+    import lma_core.message_utils as _real_msg_utils
+
+    sys.modules["lma_core.message_utils"] = _real_msg_utils
+
+    # ── Mock config ────────────────────────────────────────────────
+    sys.modules["config"] = MagicMock()
+
+    # ── Mock RNS types ─────────────────────────────────────────────
     sys.modules["RNS"].RNSException = type("RNSException", (Exception,), {})
     sys.modules["RNS"].hexrep = MagicMock(return_value="testhash1234")
     sys.modules["RNS"].Identity = MagicMock()
     sys.modules["RNS"].Identity.recall = MagicMock()
     sys.modules["RNS"].Reticulum = MagicMock()
 
-    # Mock LXMF types
+    # ── Mock LXMF types ────────────────────────────────────────────
     sys.modules["LXMF"].LXMFException = type("LXMFException", (Exception,), {})
     sys.modules["LXMF"].LXMessage = MagicMock()
     sys.modules["LXMF"].LXMessage.OPPORTUNISTIC = 1
     sys.modules["LXMF"].LXMRouter = MagicMock()
 
-    # Mock config module
+    # ── Mock config module ─────────────────────────────────────────
     sys.modules["config"].get_configdir = MagicMock(return_value="/tmp/test_config")
     sys.modules["config"].get_config_dict = MagicMock(
         return_value={
@@ -78,48 +105,60 @@ def setup_common_mocks(with_grpc=True):
     )
 
     if with_grpc:
-        # Mock gRPC types
+        # ── Mock gRPC types ────────────────────────────────────────
         grpc_mock = MagicMock()
         grpc_mock.StatusCode.INVALID_ARGUMENT = MagicMock()
         grpc_mock.StatusCode.INTERNAL = MagicMock()
         grpc_mock.StatusCode.UNIMPLEMENTED = MagicMock()
         sys.modules["grpc"] = grpc_mock
 
-        # Mock proto module
+        # Mock proto.lma_pb2_grpc
         proto_grpc_mock = MagicMock()
-        sys.modules["proto"] = MagicMock()
         sys.modules["proto.lma_pb2_grpc"] = proto_grpc_mock
 
-        # Mock gRPC request/response types on lma_core
-        sys.modules["lma_core"].SendRequest = MagicMock()
-        sys.modules["lma_core"].SendResponse = MagicMock()
-        sys.modules["lma_core"].SubscribeRequest = MagicMock()
-        sys.modules["lma_core"].SubscribeResponse = MagicMock()
-        sys.modules["lma_core"].GetIdentityRequest = MagicMock()
-        sys.modules["lma_core"].GetIdentityResponse = MagicMock()
-        # LMAOServicer must be a real class (used as base class for LMAOGrpcService)
-        sys.modules["lma_core"].LMAOServicer = type("LMAOServicer", (), {})
+        # Create mock lma_core.grpc_types module
+        _grpc_types = types.ModuleType("lma_core.grpc_types")
+        _grpc_types.SendRequest = MagicMock()
+        _grpc_types.SendResponse = MagicMock()
+        _grpc_types.SubscribeRequest = MagicMock()
+        _grpc_types.SubscribeResponse = MagicMock()
+        _grpc_types.GetIdentityRequest = MagicMock()
+        _grpc_types.GetIdentityResponse = MagicMock()
+        _grpc_types.LMAOStub = MagicMock()
+        _grpc_types.LMAOServicer = type("LMAOServicer", (), {})
+        _grpc_types.LMAO = MagicMock()
+        _grpc_types.add_LMAOServicer_to_server = MagicMock()
+        sys.modules["lma_core.grpc_types"] = _grpc_types
+
+        # Backward compat: set on lma_core for direct imports
+        for _attr in (
+            "SendRequest", "SendResponse", "SubscribeRequest",
+            "SubscribeResponse", "GetIdentityRequest", "GetIdentityResponse",
+            "LMAOStub", "LMAOServicer", "LMAO", "add_LMAOServicer_to_server",
+        ):
+            setattr(_real_lma_core, _attr, getattr(_grpc_types, _attr))
 
 
 def cleanup_common_mocks():
     """Remove mocked modules from sys.modules to prevent test pollution."""
-    for mod in [
+    for mod in (
         "RNS",
         "LXMF",
         "config",
-        "lma_core",
-        "lma_core.message_utils",
+        "proto",
+        "proto.lma_pb2",
+        "proto.lma_pb2_grpc",
+        "grpc",
         "lma_core.rns_di",
         "lma_core.rns_init",
-        "grpc",
-        "proto",
-        "proto.lma_pb2_grpc",
+        "lma_core.message_utils",
+        "lma_core.grpc_types",
         "server",
         "lmao_server",
         "lmao_server.server",
         "client",
         "human_client",
         "human_client.client",
-    ]:
+    ):
         if mod in sys.modules:
             del sys.modules[mod]
