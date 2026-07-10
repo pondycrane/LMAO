@@ -15,12 +15,18 @@ Prerequisites:
     - k8s/lmao-service.yaml and k8s/nats-server.yaml at repo root
 """
 
+from __future__ import annotations
+
 import os
 import shutil
 import subprocess
+from typing import Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from tools.install_all import DeviceResult
 
 
-def _find_repo_root():
+def _find_repo_root() -> Optional[str]:
     """Walk up from this module's directory looking for the repo root.
 
     Identifies the repo root by locating a ``Dockerfile`` or ``.git``
@@ -42,8 +48,8 @@ def _find_repo_root():
     return None
 
 
-def install_pi_server(result, repo_root=None):
-    """Build Docker image and optionally start a container.
+def install_pi_server(result: DeviceResult, repo_root: Optional[str] = None) -> None:
+    """Build the lmao-server Docker image via ``docker build``.
 
     Checks for the ``docker`` CLI on PATH; if not found, marks the
     result as SKIP with a diagnostic message.  Otherwise runs
@@ -53,13 +59,15 @@ def install_pi_server(result, repo_root=None):
     from ``install_all``) as *result*.  On success the result is set to
     OK; on failure it is set to FAIL.
 
+    Note:
+        This function builds the image only.  Starting the container
+        is left to the operator (e.g. ``docker run lmao-server``).
+
     Args:
         result: A ``DeviceResult`` instance (from ``tools.install_all``).
         repo_root: Path to the repository root containing ``Dockerfile``.
             When ``None``, auto-detected via ``_find_repo_root()``.
     """
-    # Lazy import to avoid circular Bazel dependency.
-    from tools.install_all import DeviceResult  # noqa: F401
 
     print("\n--- Pi Server: Docker build ---")
 
@@ -104,7 +112,7 @@ def install_pi_server(result, repo_root=None):
         print(f"  FAIL: {exc}")
 
 
-def install_k8s_services(result, repo_root=None):
+def install_k8s_services(result: DeviceResult, repo_root: Optional[str] = None) -> None:
     """Apply Kubernetes manifests via ``kubectl apply -f``.
 
     Applies ``k8s/lmao-service.yaml`` and ``k8s/nats-server.yaml``.
@@ -120,8 +128,6 @@ def install_k8s_services(result, repo_root=None):
         repo_root: Path to the repository root containing ``k8s/``.
             When ``None``, auto-detected via ``_find_repo_root()``.
     """
-    # Lazy import to avoid circular Bazel dependency.
-    from tools.install_all import DeviceResult  # noqa: F401
 
     print("\n--- K8s Services: kubectl apply ---")
 
@@ -148,6 +154,10 @@ def install_k8s_services(result, repo_root=None):
     for manifest in manifests:
         manifest_path = os.path.join(repo_root, manifest)
         if not os.path.isfile(manifest_path):
+            if applied:
+                print(f"  WARNING: {', '.join(applied)} were already applied.")
+                print(f"  Manual rollback: kubectl delete -f k8s/<manifest>"
+                      f" for each applied manifest")
             result.fail(f"Manifest not found: {manifest}")
             print(f"  FAIL: Manifest not found: {manifest}")
             return
@@ -162,19 +172,39 @@ def install_k8s_services(result, repo_root=None):
                 stderr_tail = proc.stderr.strip().split("\n")[-3:]
                 stderr_msg = "; ".join(stderr_tail) if stderr_tail else "unknown error"
                 fail_msg = f"kubectl apply -f {manifest} failed: {stderr_msg}"
+                if applied:
+                    fail_msg += (
+                        f"  WARNING: {', '.join(applied)} were already applied."
+                        f" Manual rollback: kubectl delete -f k8s/<manifest>"
+                        f" for each applied manifest"
+                    )
                 result.fail(fail_msg)
                 print(f"  FAIL: {fail_msg}")
                 return
             applied.append(manifest)
         except subprocess.SubprocessError as exc:
-            result.fail(f"kubectl error ({manifest}): {exc}")
+            fail_msg = f"kubectl error ({manifest}): {exc}"
+            if applied:
+                fail_msg += (
+                    f"  WARNING: {', '.join(applied)} were already applied."
+                    f" Manual rollback: kubectl delete -f k8s/<manifest>"
+                    f" for each applied manifest"
+                )
+            result.fail(fail_msg)
             print(f"  FAIL: {exc}")
             return
         except Exception as exc:
             import traceback
 
             traceback.print_exc()
-            result.fail(f"Unexpected error during kubectl apply ({manifest}): {exc}")
+            fail_msg = f"Unexpected error during kubectl apply ({manifest}): {exc}"
+            if applied:
+                fail_msg += (
+                    f"  WARNING: {', '.join(applied)} were already applied."
+                    f" Manual rollback: kubectl delete -f k8s/<manifest>"
+                    f" for each applied manifest"
+                )
+            result.fail(fail_msg)
             print(f"  FAIL: {exc}")
             return
 
