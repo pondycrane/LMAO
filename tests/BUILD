@@ -1,4 +1,23 @@
-load("@rules_python//python:defs.bzl", "py_test")
+load("@rules_python//python:defs.bzl", "py_library", "py_test")
+
+py_library(
+    name = "e2e_helpers_lib",
+    srcs = ["e2e/e2e_helpers.py"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@lmao_pip//pyserial",
+    ],
+)
+
+py_test(
+    name = "test_install_all",
+    srcs = ["test_install_all.py"],
+    deps = [
+        "//tools:install_all_lib",
+        "@lmao_pip//pyserial",
+        "@lmao_pip//pytest",
+    ],
+)
 
 py_test(
     name = "test_lma_encoder",

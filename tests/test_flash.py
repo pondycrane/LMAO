@@ -760,7 +760,7 @@ class TestExitRawRepl:
 
 
 class TestVerifyFilesExist:
-    """Direct tests for _verify_files_exist()."""
+    """Direct tests for verify_files_exist()."""
 
     def test_all_files_exist(self, tmp_path):
         """All files exist — should return None (no error)."""
@@ -769,8 +769,8 @@ class TestVerifyFilesExist:
             f = tmp_path / f"file{i}.py"
             f.write_text("")
             files.append(str(f))
-        result = cardputer_flash._verify_files_exist(str(tmp_path), files)
-        # _verify_files_exist doesn't return anything (returns None),
+        result = cardputer_flash.verify_files_exist(str(tmp_path), files)
+        # verify_files_exist doesn't return anything (returns None),
         # it just raises on failure
         assert result is None
 
@@ -778,11 +778,11 @@ class TestVerifyFilesExist:
         """Missing file should raise FileNotFoundError."""
         files = [str(tmp_path / "nonexistent.py")]
         with pytest.raises(FileNotFoundError):
-            cardputer_flash._verify_files_exist(str(tmp_path), files)
+            cardputer_flash.verify_files_exist(str(tmp_path), files)
 
     def test_empty_list_passes(self, tmp_path):
         """Empty file list should pass without error."""
-        result = cardputer_flash._verify_files_exist(str(tmp_path), [])
+        result = cardputer_flash.verify_files_exist(str(tmp_path), [])
         assert result is None
 
 
