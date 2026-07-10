@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Callable, List, Optional
+from typing import Any, Callable, List
 
 _logger = logging.getLogger(__name__)
 
@@ -215,26 +215,25 @@ class NatsQueue:
         try:
             # add_stream raises if JetStream is not available (no --js)
             await self._js.add_stream(**config)
-            _logger.info("JetStream stream '%s' created with subjects: %s", name, subjects)
+            _logger.info(
+                "JetStream stream '%s' created with subjects: %s", name, subjects
+            )
         except Exception as exc:
             err_msg = str(exc).lower()
             if "already exists" in err_msg or "stream name already in use" in err_msg:
                 # Stream already exists — update it
-                _logger.info(
-                    "Stream '%s' already exists — updating config", name
-                )
+                _logger.info("Stream '%s' already exists — updating config", name)
                 try:
                     await self._js.update_stream(**config)
                     _logger.info("JetStream stream '%s' updated", name)
                 except Exception:
-                    _logger.error(
-                        "Failed to update stream '%s'", name, exc_info=True
-                    )
+                    _logger.error("Failed to update stream '%s'", name, exc_info=True)
                     raise
             else:
                 _logger.error(
-                    "Failed to create stream '%s' — unexpected error", name,
-                    exc_info=True
+                    "Failed to create stream '%s' — unexpected error",
+                    name,
+                    exc_info=True,
                 )
                 raise
 
@@ -278,7 +277,9 @@ class NatsQueue:
             )
 
         ack = await self._js.publish(subject, payload, **kwargs)
-        _logger.debug("Published %d bytes to '%s' (seq=%s)", len(payload), subject, ack.seq)
+        _logger.debug(
+            "Published %d bytes to '%s' (seq=%s)", len(payload), subject, ack.seq
+        )
         return ack
 
     # ------------------------------------------------------------------
@@ -341,9 +342,7 @@ class NatsQueue:
             durable=durable_name,
             **kwargs,
         )
-        _logger.info(
-            "Subscribed to '%s' (durable=%s)", subject, durable_name
-        )
+        _logger.info("Subscribed to '%s' (durable=%s)", subject, durable_name)
 
         # Process messages until cancelled
         max_retries = 10
@@ -362,12 +361,17 @@ class NatsQueue:
                     if retry_count >= max_retries:
                         _logger.error(
                             "Subscribe to '%s' failed after %d retries — giving up",
-                            subject, max_retries
+                            subject,
+                            max_retries,
                         )
                         raise
                     _logger.warning(
                         "Error fetching from '%s' (attempt %d/%d) — retrying in %ds",
-                        subject, retry_count, max_retries, backoff, exc_info=True
+                        subject,
+                        retry_count,
+                        max_retries,
+                        backoff,
+                        exc_info=True,
                     )
                     await asyncio.sleep(backoff)
                     backoff = min(backoff * 2, 60)
@@ -381,13 +385,18 @@ class NatsQueue:
                         await msg.ack()
                     except Exception:
                         _logger.warning(
-                            "Callback error on '%s' — NAK-ing message", subject, exc_info=True
+                            "Callback error on '%s' — NAK-ing message",
+                            subject,
+                            exc_info=True,
                         )
                         try:
                             await msg.nak()
                         except Exception as nak_err:
                             _logger.error(
-                                "NAK failed on '%s': %s", subject, nak_err, exc_info=True
+                                "NAK failed on '%s': %s",
+                                subject,
+                                nak_err,
+                                exc_info=True,
                             )
                             raise  # Bubble up to outer retry/reconnect
         except asyncio.CancelledError:
