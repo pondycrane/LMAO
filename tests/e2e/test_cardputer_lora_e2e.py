@@ -884,8 +884,9 @@ class TestCardputerLoRaE2E:
                 # per SensorReport: sensor_id=1 (temp, unit="C") and sensor_id=2
                 # (humidity, unit="%").  When no sensor is connected, only
                 # sensor_id=1 readings are produced — this is the normal case.
+                # Use index-based access — DuckDB fetchall() returns tuples, not objects
                 humidity_rows = [
-                    r for r in rows if hasattr(r, "unit") and r.unit == "%"
+                    r for r in rows if len(r) >= 3 and r[2] == "%"
                 ]
                 if humidity_rows:
                     # External sensor IS connected — validate humidity data

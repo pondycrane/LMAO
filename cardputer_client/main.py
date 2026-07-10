@@ -71,8 +71,8 @@ def _min_interval(val):
 def _init_rns(config):
     """Initialize µReticulum with the given config dict.
 
-    Returns the Reticulum instance.  On failure calls ``log(...)``
-    and enters an infinite sleep — does NOT return.
+    Returns the Reticulum instance.  Raises on failure — the
+    caller (``main()``) is responsible for error handling.
     """
     rns = Reticulum(loglevel=3)
     rns.config = config
@@ -84,8 +84,8 @@ def _init_lxmf_router(identity, storage_path="/flash/lxmf_state", display_name="
     """Create and configure an LXMF router bound to *identity*.
 
     Registers the delivery identity, attaches the reply callback,
-    and returns the router.  On failure calls ``log(...)`` and
-    enters an infinite sleep — does NOT return.
+    and returns the router.  Raises on failure — the caller
+    (``main()``) is responsible for error handling.
     """
     router = LXMRouter(identity=identity, storagepath=storage_path)
     router.register_delivery_identity(identity, display_name=display_name)
@@ -153,7 +153,7 @@ def make_sensor_message(identity_hex, seq, battery=3.7, strict=False):
     # ---- Humidity sensor (external Grove I2C) ----
     if SENSOR_TYPE is not None and HAS_SENSOR_LIB:
         try:
-            _hum_temp, humidity = read_humidity_temperature(
+            _, humidity = read_humidity_temperature(
                 SENSOR_TYPE, SENSOR_I2C_ADDR
             )
             if humidity is not None:
@@ -165,7 +165,9 @@ def make_sensor_message(identity_hex, seq, battery=3.7, strict=False):
                         "timestamp_ms": int(time.time() * 1000),
                     }
                 )
-        except Exception as e:
+        except (OSError, ValueError) as e:
+            if hasattr(sys, "print_exception"):
+                sys.print_exception(e)
             print(f"Humidity sensor read failed: {e}")
 
     return encode_sensor_envelope(identity_hex, seq, battery, readings)

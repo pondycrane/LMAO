@@ -34,7 +34,12 @@ def read_humidity_temperature(
             sensor = DHT20(i2c, i2c_addr)
             return sensor.read()
 
-    except Exception as e:
+    except ImportError:
+        # Missing driver module — let this propagate so the developer
+        # discovers the deployment problem immediately rather than
+        # silently falling back to die-temp-only mode.
+        raise
+    except (OSError, ValueError) as e:
         print(f"Sensor read failed: {e}")
 
     return None, None
