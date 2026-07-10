@@ -48,14 +48,37 @@ SEND_SENSOR = True
 
 
 def make_sensor_message(identity_hex, seq, battery=3.7):
-    """Build an LMAOEnvelope containing a SensorReport with real ESP32 die temperature."""
+    """Build an LMAOEnvelope containing a SensorReport with real ESP32 die temperature.
+
+    On MicroPython with the ``esp32`` module (i.e., on a real Cardputer), reads the
+    internal die temperature sensor and converts from Fahrenheit to Celsius.  On
+    CPython (testing) falls back to a constant 25.0°C.
+    """
 
     try:
         import esp32
 
-        temp = (esp32.raw_temperature() - 32) * 5.0 / 9.0  # Fahrenheit to Celsius
     except ImportError:
-        temp = 25.0  # Fallback for non-ESP32 environments
+        temp = 25.0  # Fallback for non-ESP32 environments; preserves backward compatibility
+                      # with old synthetic formula minimum (seq=0 → 25.0°C)
+        readings = [{
+            "sensor_id": 1,
+            "value": temp,
+            "unit": "C",
+            "timestamp_ms": int(time.time() * 1000),
+        }]
+        return encode_sensor_envelope(identity_hex, seq, battery, readings)
+
+    try:
+        temp = (esp32.raw_temperature() - 32) * 5.0 / 9.0  # Fahrenheit to Celsius
+    except Exception:
+        # esp32 module exists but raw_temperature() failed — use fallback
+        try:
+            sys.print_exception(sys.exc_info()[1])
+        except Exception:
+            pass
+        temp = 25.0
+
     readings = [{
         "sensor_id": 1,
         "value": temp,

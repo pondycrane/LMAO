@@ -279,6 +279,46 @@ class TestMakeSensorMessage:
         args = self._call(seq=5)
         assert isinstance(args[3][0]["value"], float)
 
+    def test_temperature_with_mocked_esp32(self):
+        """When esp32 module is available, raw_temperature() is converted to Celsius."""
+        import sys
+
+        mock_esp32 = MagicMock()
+        mock_esp32.raw_temperature.return_value = 68  # 68°F → 20°C
+
+        mock_encode = MagicMock()
+        with patch.dict(sys.modules, {"esp32": mock_esp32}):
+            with patch.object(lmao_client, "encode_sensor_envelope", mock_encode,
+                              create=True):
+                lmao_client.make_sensor_message("a1b2", 0, 3.7)
+
+        mock_encode.assert_called_once()
+        readings = mock_encode.call_args[0][3]
+        # 68°F → (68 - 32) * 5/9 = 20°C
+        assert readings[0]["value"] == 20.0, (
+            f"Expected 20.0°C for raw_temperature=68°F, "
+            f"got {readings[0]['value']}"
+        )
+
+    def test_raw_temperature_exception_falls_back(self):
+        """When esp32.raw_temperature() raises, fall back to 25.0."""
+        import sys
+
+        mock_esp32 = MagicMock()
+        mock_esp32.raw_temperature.side_effect = OSError("Sensor read failed")
+
+        mock_encode = MagicMock()
+        with patch.dict(sys.modules, {"esp32": mock_esp32}):
+            with patch.object(lmao_client, "encode_sensor_envelope", mock_encode,
+                              create=True):
+                lmao_client.make_sensor_message("a1b2", 0, 3.7)
+
+        mock_encode.assert_called_once()
+        assert mock_encode.call_args[0][3][0]["value"] == 25.0, (
+            f"Expected fallback 25.0 when raw_temperature raises, "
+            f"got {mock_encode.call_args[0][3][0]['value']}"
+        )
+
 
 # ── Module-level helpers ────────────────────────────────────────────
 
