@@ -153,10 +153,16 @@ def _flash_cardputer_client(
         result.ok(f"Flashed {total} file(s) to Cardputer")
         print(f"  OK: {total} file(s) uploaded")
 
+    except KeyboardInterrupt:
+        result.fail("Aborted by user")
+        print("\n  Interrupted by user — Cardputer flash cancelled.")
+        return
     except serial.SerialException as exc:
         result.fail(f"Serial error: {exc}")
         print(f"  FAIL: {exc}")
     except Exception as exc:
+        import traceback
+        traceback.print_exc()
         result.fail(f"Unexpected error: {exc}")
         print(f"  FAIL: {exc}")
     finally:
@@ -169,35 +175,44 @@ def _flash_cardputer_client(
 def _install_rnode_firmware(port: str, result: DeviceResult) -> None:
     """Check and (if needed) flash RNode firmware onto a Heltec at *port*.
 
-    Calls ``rnodeconf --info`` to detect existing firmware, then
-    ``rnodeconf --autoinstall`` when the device is not already running
-    RNode firmware.
+    Delegates to ``e2e_helpers.check_rnode_firmware`` and
+    ``e2e_helpers.flash_rnode_firmware`` which wrap ``rnodeconf``.
     """
     print(f"\n--- RNode: checking firmware on {port} ---")
 
-    # Step 1 — check if RNode firmware is already present.
-    is_rnode = check_rnode_firmware(port)
-    if is_rnode:
-        result.ok(f"RNode firmware already installed on {port}")
-        print("  OK: RNode firmware already detected")
-        return
+    try:
+        # Step 1 — check if RNode firmware is already present.
+        is_rnode = check_rnode_firmware(port)
+        if is_rnode:
+            result.ok(f"RNode firmware already installed on {port}")
+            print("  OK: RNode firmware already detected")
+            return
 
-    # Step 2 — not an RNode; trigger autoinstall.
-    print("  RNode firmware not detected. Starting autoinstall ...")
-    success, message = flash_rnode_firmware(port)
-    if success:
-        result.ok(f"RNode firmware flashed: {message}")
-        print(f"  OK: {message}")
-    else:
-        result.fail(message)
-        print(f"  FAIL: {message}")
+        # Step 2 — not an RNode; trigger autoinstall.
+        print("  RNode firmware not detected. Starting autoinstall ...")
+        success, message = flash_rnode_firmware(port)
+        if success:
+            result.ok(f"RNode firmware flashed: {message}")
+            print(f"  OK: {message}")
+        else:
+            result.fail(message)
+            print(f"  FAIL: {message}")
+    except Exception as exc:
+        import traceback
+        traceback.print_exc()
+        result.fail(f"Unexpected error during RNode flashing: {exc}")
+        print(f"  FAIL: {exc}")
 
 
 # ---- Summary output ----
 
 
 def _print_summary(results: list[DeviceResult]) -> None:
-    """Print a per-device success/failure summary table."""
+    """Print a per-device success/failure summary table and exit.
+
+    Exits with code 0 when all devices succeeded (or were skipped).
+    Exits with code 1 when any device failed.
+    """
     print("\n" + "=" * 60)
     print("  INSTALL SUMMARY")
     print("=" * 60)
@@ -301,9 +316,10 @@ def main(argv: list[str] | None = None) -> None:
         rn_result.skip("--skip-rnode")
         print("RNode: SKIP (--skip-rnode)")
     else:
-        port = find_rnode_port()
         if args.rnode_port:
-            port = args.rnode_port  # explicit override
+            port = args.rnode_port
+        else:
+            port = find_rnode_port()
         if not port:
             rn_result.skip("No RNode/Heltec detected on USB")
             print("RNode: SKIP — not detected on USB")

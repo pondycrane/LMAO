@@ -240,6 +240,8 @@ proto code generation. See `.bazelversion` and `MODULE.bazel`.
 | `//lma_core` | Shared Python wrapper re-exporting proto stubs |
 | `//lmao_server` | Server binary (RNode + LXMF) |
 | `//human_client:client` | Human CLI client (WiFi + optional RNode) |
+| `//tools:install_all` | Unified hardware flash orchestrator (Cardputer + RNode) |
+| `//tools:install_all_lib` | Shared library for install_all |
 | `//tests:test_lma_encoder` | Encoder compatibility tests |
 | `//tests:test_server_handler` | Server handler tests |
 | `//tests:test_human_client` | Human client tests |
