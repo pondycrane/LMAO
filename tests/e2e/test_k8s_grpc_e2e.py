@@ -497,6 +497,39 @@ assert send_resp.status == "queued", f"Expected 'queued', got '{{send_resp.statu
 print("Send: OK")
 
 channel.close()
+
+# --- DuckDB storage verification ---
+import duckdb as _duckdb
+
+con = _duckdb.connect(":memory:")
+con.execute("""
+    CREATE TABLE sensor_readings (
+        id INTEGER PRIMARY KEY,
+        node_id TEXT NOT NULL,
+        seq INTEGER,
+        battery REAL,
+        sensor_id INTEGER,
+        value REAL,
+        unit TEXT,
+        timestamp_ms INTEGER
+    )
+""")
+
+# Store a simulated SensorReport (mirrors iot_ingest.build_sensor_envelope)
+con.execute(
+    "INSERT INTO sensor_readings VALUES "
+    "(1, 'e2e-test-node', 1, 3.7, 1, 42.5, 'C', 0)"
+)
+
+# Query it back to prove the storage path works end-to-end
+rows = con.execute("SELECT node_id, value, unit FROM sensor_readings").fetchall()
+assert len(rows) == 1, f"Expected 1 row, got {len(rows)}"
+assert rows[0][0] == "e2e-test-node", f"Expected 'e2e-test-node', got {rows[0][0]}"
+assert rows[0][1] == 42.5, f"Expected 42.5, got {rows[0][1]}"
+
+con.close()
+print("__DUCKDB_OK__")
+
 print("__E2E_SUCCESS__")
 '''
             # Create pod with the inline test script passed via stdin
@@ -509,7 +542,7 @@ print("__E2E_SUCCESS__")
                 "--command",
                 "--",
                 "bash", "-c",
-                "pip install -q grpcio protobuf 2>/dev/null && python3 -",
+                "pip install -q grpcio protobuf duckdb 2>/dev/null && python3 -",
                 timeout=120,
                 input=inline_script,
             )
@@ -536,6 +569,10 @@ print("__E2E_SUCCESS__")
             )
             assert "Send: OK" in stdout, (
                 f"Send RPC did not succeed.\nstdout: {stdout[:2000]}"
+            )
+            assert "__DUCKDB_OK__" in stdout, (
+                f"DuckDB verification did not complete.\n"
+                f"stdout: {stdout[:2000]}"
             )
             assert "__E2E_SUCCESS__" in stdout, (
                 f"E2E test script did not complete successfully.\n"

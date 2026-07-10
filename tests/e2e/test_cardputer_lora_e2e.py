@@ -611,6 +611,7 @@ class TestCardputerLoRaE2E:
             # Shared state between server thread and test main thread
             received_messages = []
             sensor_messages = []
+            store_failures = 0
             message_event = threading.Event()
 
             # ── Temporary DuckDB for sensor pipeline validation ──
@@ -658,6 +659,8 @@ class TestCardputerLoRaE2E:
                                 "seq": envelope.sensor.seq,
                             })
                         except Exception:
+                            nonlocal store_failures
+                            store_failures += 1
                             import logging
                             logging.getLogger(__name__).warning(
                                 "DuckDB store failed", exc_info=True
@@ -847,6 +850,25 @@ class TestCardputerLoRaE2E:
                     "No sensor data found in DuckDB after LoRa E2E test. "
                     f"Received {len(sensor_messages)} SensorReport envelope(s) over LoRa. "
                     "Cardputer should have sent SensorReports with SEND_SENSOR=True."
+                )
+                # ── Validate real ESP32 die temperature ──
+                # Real die temperature from esp32.raw_temperature() should land
+                # in the realistic ESP32 die range (15–85°C).  The old synthetic
+                # pattern produced 25.0–29.5°C — reject that band explicitly to
+                # prove the Cardputer is using the real sensor.
+                for row in rows:
+                    temp = float(row[1])
+                    assert 15 <= temp <= 85, (
+                        f"Expected real ESP32 die temperature in [15, 85]°C, "
+                        f"got {temp}°C.  Value may be synthetic or corrupted."
+                    )
+                    assert temp != 25.0, (
+                        f"Temperature {temp}°C equals the CPython fallback constant. "
+                        f"Cardputer must use esp32.raw_temperature()."
+                    )
+                assert store_failures == 0, (
+                    f"DuckDB store failed {store_failures} time(s) — "
+                    f"partial data loss detected."
                 )
                 print(f"\n✅ Sensor data ingested to DuckDB: {len(rows)} row(s)")
 
