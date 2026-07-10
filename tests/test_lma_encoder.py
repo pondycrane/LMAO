@@ -313,6 +313,17 @@ class TestSensorReport:
         assert result is not None
         assert result["node_id"] == "n"
 
+    def test_sensor_envelope_round_trip(self):
+        """encode_sensor_envelope → decode_envelope round-trip with identity hex."""
+        identity_hex = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6"  # 32-char hex
+        readings = [{"sensor_id": 1, "value": 25.0, "unit": "C", "timestamp_ms": 1000}]
+        envelope = enc.encode_sensor_envelope(identity_hex, 7, 3.7, readings)
+        result = enc.decode_envelope(envelope)
+        assert result is not None
+        assert result["node_id"] == identity_hex
+        assert result["readings"][0]["value"] == 25.0
+        assert result["readings"][0]["unit"] == "C"
+
 
 class TestCommandRequest:
     def test_round_trip_simple(self):

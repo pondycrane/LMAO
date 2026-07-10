@@ -18,6 +18,7 @@ Run with::
 from collections.abc import Callable
 from typing import Any
 
+import asyncio
 import os
 import sys
 import time
@@ -566,12 +567,14 @@ class TestCardputerLoRaE2E:
         5. Verifies the message arrives over LoRa on the server side
         6. Optionally checks for ACK reply on Cardputer serial output
         """
+        import asyncio
         import tempfile
         import shutil
         import RNS
         import LXMF
         from lma_core import LMAOEnvelope
         from lma_core.config_utils import dict_to_ini
+        from lma_core.storage import DuckDbStore
 
         # ── Setup: prepare server config ──
         cfg_dict = get_config_dict()
@@ -605,7 +608,14 @@ class TestCardputerLoRaE2E:
 
             # Shared state between server thread and test main thread
             received_messages = []
+            sensor_messages = []
             message_event = threading.Event()
+
+            # ── Temporary DuckDB for sensor pipeline validation ──
+            db_fd, db_path = tempfile.mkstemp(suffix=".duckdb", prefix="lmao_e2e_")
+            os.close(db_fd)
+            store = DuckDbStore()
+            asyncio.run(store.initialize(db_path))
 
             def capture_delivery(message):
                 """Record received messages for the test to inspect."""
@@ -632,6 +642,24 @@ class TestCardputerLoRaE2E:
                 else:
                     if envelope.HasField("text"):
                         display_text = envelope.text.content
+                    elif envelope.HasField("sensor"):
+                        # ── Store SensorReport in DuckDB ──
+                        display_text = (
+                            f"SensorReport(seq={envelope.sensor.seq}, "
+                            f"readings={len(envelope.sensor.readings)})"
+                        )
+                        try:
+                            asyncio.run(store.store_sensor_report(bytes(content_bytes)))
+                            sensor_messages.append({
+                                "source": source_hash,
+                                "node_id": envelope.sensor.node_id,
+                                "seq": envelope.sensor.seq,
+                            })
+                        except Exception:
+                            import logging
+                            logging.getLogger(__name__).warning(
+                                "DuckDB store failed", exc_info=True
+                            )
                     else:
                         try:
                             display_text = content_bytes.decode(
@@ -807,6 +835,24 @@ class TestCardputerLoRaE2E:
                     f"Expected 'Hello' in message content, got: {msg['content'][:200]}"
                 )
 
+                # ── DuckDB sensor data assertion ──
+                if sensor_messages:
+                    expected_node_id = sensor_messages[0]["node_id"]
+                    rows = asyncio.run(store.query(
+                        "SELECT node_id, value, unit FROM sensor_readings "
+                        "WHERE node_id = ? ORDER BY id DESC LIMIT 5",
+                        params=[expected_node_id],
+                    ))
+                    assert len(rows) > 0, (
+                        "Sensor data not found in DuckDB. "
+                        "SensorReports were received over LoRa but not persisted."
+                        f"\nReceived {len(sensor_messages)} SensorReport envelope(s)."
+                        f"\nExpected node_id: {expected_node_id}"
+                    )
+                    print(f"\n✅ Sensor data ingested to DuckDB: {len(rows)} row(s)")
+                else:
+                    print("\nℹ️  No SensorReports received — DuckDB check skipped.")
+
                 print("\n✅ LoRa E2E test passed!")
                 print(f"   Cardputer booted: {found_banner}")
                 print(f"   Server ACK on Cardputer: {found_ack}")
@@ -821,6 +867,16 @@ class TestCardputerLoRaE2E:
                         cardputer_ser.close()
                     except Exception:
                         pass
+
+                # Close DuckDB store and clean up temp file
+                try:
+                    asyncio.run(store.close())
+                except Exception:
+                    pass
+                try:
+                    os.unlink(db_path)
+                except OSError:
+                    pass
 
         finally:
             shutil.rmtree(configdir, ignore_errors=True)

@@ -37,11 +37,28 @@ except ImportError:
 
 # Proto encoder (optional — gracefully degrades if not on device)
 try:
-    from proto.lma_encoder import make_poc_message
+    from proto.lma_encoder import make_poc_message, encode_sensor_envelope
 
     HAS_PROTO = True
 except ImportError:
     HAS_PROTO = False
+
+# Feature flag: set False to disable SensorReport sending
+SEND_SENSOR = True
+
+
+def make_sensor_message(identity_hex, seq, battery=3.7):
+    """Build a SensorReport protobuf payload with simulated temperature."""
+    import time as _time
+
+    temp = 25.0 + (seq % 10) * 0.5  # simulated: 25.0–29.5°C
+    readings = [{
+        "sensor_id": 1,
+        "value": temp,
+        "unit": "C",
+        "timestamp_ms": int(_time.time() * 1000),
+    }]
+    return encode_sensor_envelope(identity_hex, seq, battery, readings)
 
 
 # ---- Display helpers ----
@@ -345,6 +362,17 @@ def main():
                     log(f"Sent: {hello_text}", tft, status_lines)
                 else:
                     log("Send returned None", tft, status_lines)
+
+                # Send SensorReport if enabled
+                if SEND_SENSOR:
+                    sensor_content = make_sensor_message(identity_hex, seq)
+                    msg2 = router.send_message(
+                        destination_hash=DEST_HASH,
+                        content=sensor_content,
+                        title="p:Envelope",
+                    )
+                    if msg2:
+                        log(f"Sensor: seq={seq}", tft, status_lines)
 
             # Drain pending replies
             for reply in pending_replies:
