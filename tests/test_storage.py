@@ -7,7 +7,7 @@ are ``@pytest.mark.asyncio``.
 
 import sys
 import types
-from unittest.mock import MagicMock, AsyncMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 

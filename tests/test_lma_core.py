@@ -104,6 +104,7 @@ class TestLmaCoreImportError:
                 AudioMessage = MagicMock()
                 ImageMessage = MagicMock()
                 CallSignal = MagicMock()
+
             mock_pb2 = _MockPb2()
             sys.modules["proto.lma_pb2"] = mock_pb2
 
@@ -111,6 +112,7 @@ class TestLmaCoreImportError:
 
             # Capture log output via a StringIO handler on the root logger
             import io
+
             log_capture = io.StringIO()
             handler = logging.StreamHandler(log_capture)
             handler.setLevel(logging.WARNING)
@@ -130,7 +132,7 @@ class TestLmaCoreImportError:
 
             captured = log_capture.getvalue()
             assert len(captured) > 0, (
-                f"Should log at least one WARNING for missing gRPC types, got empty output"
+                "Should log at least one WARNING for missing gRPC types, got empty output"
             )
             assert "gRPC request/response types not found" in captured, (
                 f"Expected warning about gRPC types, got: {captured}"

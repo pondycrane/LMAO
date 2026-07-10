@@ -19,10 +19,10 @@ Run with::
 
     bazel test //tests:test_k8s_grpc_e2e --test_output=all
 """
+# ruff: noqa: F821 — false positives for code inside inline pod script f-string
 
 import json
 import logging
-import os
 import subprocess
 import sys
 import time
@@ -78,9 +78,7 @@ def _probe_cluster():
     # ── Determine host IP reachable from K8s ──
     _HOST_IP = _resolve_host_ip()
     if _HOST_IP is None:
-        _CLUSTER_REASON = (
-            "Could not determine host IP reachable from K8s cluster"
-        )
+        _CLUSTER_REASON = "Could not determine host IP reachable from K8s cluster"
         return
 
     _CLUSTER_READY = True
@@ -173,17 +171,16 @@ def _cleanup_resources():
     for rtype in resource_types:
         for name in ("lmao-e2e-server", "lmao-e2e-test"):
             try:
-                _kubectl("delete", rtype, name, "--ignore-not-found",
-                          timeout=10)
+                _kubectl("delete", rtype, name, "--ignore-not-found", timeout=10)
             except subprocess.TimeoutExpired:
                 logger.warning("Cleanup timeout deleting %s/%s", rtype, name)
             except FileNotFoundError:
-                logger.warning(
-                    "kubectl not found during cleanup of %s/%s", rtype, name
-                )
+                logger.warning("kubectl not found during cleanup of %s/%s", rtype, name)
             except Exception:
                 logger.warning(
-                    "Unexpected error deleting %s/%s", rtype, name,
+                    "Unexpected error deleting %s/%s",
+                    rtype,
+                    name,
                     exc_info=True,
                 )
 
@@ -197,6 +194,7 @@ class TestK8sClusterDetection:
     def test_kubectl_available(self):
         """kubectl must be in PATH for these tests to run."""
         import shutil
+
         assert shutil.which("kubectl") is not None, (
             "kubectl not found in PATH. Install kubectl and ensure "
             "it is on PATH when running E2E tests."
@@ -206,6 +204,7 @@ class TestK8sClusterDetection:
         """_probe_cluster() should set _CLUSTER_CHECKED after running."""
         # Save and restore globals to avoid side effects from probe.
         import sys as _sys
+
         mod = _sys.modules[__name__]
         _saved = {
             k: getattr(mod, k)
@@ -311,9 +310,7 @@ class TestK8sGrpcE2E:
                 try:
                     grpc_server.wait_for_termination()
                 except Exception as post_exc:
-                    logger.warning(
-                        "gRPC server error after startup: %s", post_exc
-                    )
+                    logger.warning("gRPC server error after startup: %s", post_exc)
             except Exception as exc:
                 grpc_error = exc
                 grpc_ready.set()
@@ -333,25 +330,31 @@ class TestK8sGrpcE2E:
             # ── 2. Create K8s Service + Endpoints ─────────────────
             # Create headless Service
             svc_result = _kubectl(
-                "apply", "-f", "-",
+                "apply",
+                "-f",
+                "-",
                 timeout=15,
-                input=json.dumps({
-                    "apiVersion": "v1",
-                    "kind": "Service",
-                    "metadata": {
-                        "name": "lmao-e2e-server",
-                        "labels": {"test": "lmao-e2e"},
-                    },
-                    "spec": {
-                        "clusterIP": "None",
-                        "ports": [{
-                            "port": server_port,
-                            "targetPort": server_port,
-                            "protocol": "TCP",
-                            "name": "grpc",
-                        }],
-                    },
-                }),
+                input=json.dumps(
+                    {
+                        "apiVersion": "v1",
+                        "kind": "Service",
+                        "metadata": {
+                            "name": "lmao-e2e-server",
+                            "labels": {"test": "lmao-e2e"},
+                        },
+                        "spec": {
+                            "clusterIP": "None",
+                            "ports": [
+                                {
+                                    "port": server_port,
+                                    "targetPort": server_port,
+                                    "protocol": "TCP",
+                                    "name": "grpc",
+                                }
+                            ],
+                        },
+                    }
+                ),
             )
             assert svc_result.returncode == 0, (
                 f"kubectl apply Service failed: {svc_result.stderr}"
@@ -359,20 +362,26 @@ class TestK8sGrpcE2E:
 
             # Create Endpoints pointing to host IP
             ep_result = _kubectl(
-                "apply", "-f", "-",
+                "apply",
+                "-f",
+                "-",
                 timeout=15,
-                input=json.dumps({
-                    "apiVersion": "v1",
-                    "kind": "Endpoints",
-                    "metadata": {
-                        "name": "lmao-e2e-server",
-                        "labels": {"test": "lmao-e2e"},
-                    },
-                    "subsets": [{
-                        "addresses": [{"ip": _HOST_IP}],
-                        "ports": [{"port": server_port, "name": "grpc"}],
-                    }],
-                }),
+                input=json.dumps(
+                    {
+                        "apiVersion": "v1",
+                        "kind": "Endpoints",
+                        "metadata": {
+                            "name": "lmao-e2e-server",
+                            "labels": {"test": "lmao-e2e"},
+                        },
+                        "subsets": [
+                            {
+                                "addresses": [{"ip": _HOST_IP}],
+                                "ports": [{"port": server_port, "name": "grpc"}],
+                            }
+                        ],
+                    }
+                ),
             )
             assert ep_result.returncode == 0, (
                 f"kubectl apply Endpoints failed: {ep_result.stderr}"
@@ -534,14 +543,16 @@ print("__E2E_SUCCESS__")
 '''
             # Create pod with the inline test script passed via stdin
             pod_result = _kubectl(
-                "run", "lmao-e2e-test",
+                "run",
+                "lmao-e2e-test",
                 "--rm",
                 "-i",
                 "--restart=Never",
                 "--image=python:3.12-slim",
                 "--command",
                 "--",
-                "bash", "-c",
+                "bash",
+                "-c",
                 "pip install -q grpcio protobuf duckdb 2>/dev/null && python3 -",
                 timeout=120,
                 input=inline_script,
@@ -571,8 +582,7 @@ print("__E2E_SUCCESS__")
                 f"Send RPC did not succeed.\nstdout: {stdout[:2000]}"
             )
             assert "__DUCKDB_OK__" in stdout, (
-                f"DuckDB verification did not complete.\n"
-                f"stdout: {stdout[:2000]}"
+                f"DuckDB verification did not complete.\nstdout: {stdout[:2000]}"
             )
             assert "__E2E_SUCCESS__" in stdout, (
                 f"E2E test script did not complete successfully.\n"

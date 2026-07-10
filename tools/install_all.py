@@ -51,6 +51,9 @@ from tests.e2e.e2e_helpers import (
     flash_rnode_firmware,
 )
 
+# Server-service install helpers (from tools/install_services.py).
+from tools.install_services import install_pi_server, install_k8s_services
+
 # ---- Result tracking ----
 
 
@@ -78,9 +81,7 @@ class DeviceResult:
 # ---- Cardputer operations ----
 
 
-def _flash_cardputer_client(
-    port: str, client_root: str, result: DeviceResult
-) -> None:
+def _flash_cardputer_client(port: str, client_root: str, result: DeviceResult) -> None:
     """Flash the LMAO MicroPython client to a Cardputer on *port*.
 
     Opens the serial connection, enters raw REPL, verifies the device,
@@ -162,6 +163,7 @@ def _flash_cardputer_client(
         print(f"  FAIL: {exc}")
     except Exception as exc:
         import traceback
+
         traceback.print_exc()
         result.fail(f"Unexpected error: {exc}")
         print(f"  FAIL: {exc}")
@@ -199,6 +201,7 @@ def _install_rnode_firmware(port: str, result: DeviceResult) -> None:
             print(f"  FAIL: {message}")
     except Exception as exc:
         import traceback
+
         traceback.print_exc()
         result.fail(f"Unexpected error during RNode flashing: {exc}")
         print(f"  FAIL: {exc}")
@@ -273,6 +276,21 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Path to cardputer_client/ directory (auto-detected when omitted).",
     )
+    parser.add_argument(
+        "--include-services",
+        action="store_true",
+        help="Also install Pi server (Docker) and apply K8s manifests.",
+    )
+    parser.add_argument(
+        "--skip-server",
+        action="store_true",
+        help="Skip Pi server Docker build/run (only meaningful with --include-services).",
+    )
+    parser.add_argument(
+        "--skip-k8s",
+        action="store_true",
+        help="Skip Kubernetes manifest apply (only meaningful with --include-services).",
+    )
     return parser.parse_args(argv)
 
 
@@ -296,8 +314,7 @@ def main(argv: list[str] | None = None) -> None:
         client_root = args.client_root or find_client_root()
         if not client_root:
             cp_result.fail(
-                "Cannot locate cardputer_client/ directory. "
-                "Specify with --client-root."
+                "Cannot locate cardputer_client/ directory. Specify with --client-root."
             )
             print("Cardputer: FAIL — cannot locate cardputer_client/ directory")
         else:
@@ -325,6 +342,33 @@ def main(argv: list[str] | None = None) -> None:
             print("RNode: SKIP — not detected on USB")
         else:
             _install_rnode_firmware(port, rn_result)
+
+    # ── Services (Pi server + K8s) ──
+    pi_result = DeviceResult("Pi Server")
+    results.append(pi_result)
+    k8s_result = DeviceResult("K8s Services")
+    results.append(k8s_result)
+
+    if args.include_services:
+        try:
+            if args.skip_server:
+                pi_result.skip("--skip-server")
+            else:
+                install_pi_server(pi_result)
+
+            if args.skip_k8s:
+                k8s_result.skip("--skip-k8s")
+            else:
+                install_k8s_services(k8s_result)
+        except Exception as exc:
+            import traceback
+
+            traceback.print_exc()
+            pi_result.fail(f"Pi Server install error: {exc}")
+            k8s_result.fail(f"K8s Services install error: {exc}")
+    else:
+        pi_result.skip("--include-services not set")
+        k8s_result.skip("--include-services not set")
 
     # ── Summary ──
     _print_summary(results)

@@ -1,4 +1,5 @@
 """Tests for human client message handler (with mocked RNS/LXMF)."""
+
 from unittest.mock import MagicMock, patch
 import pytest
 import sys
@@ -416,18 +417,30 @@ class TestValidateHash:
         yield Client
         cleanup_common_mocks()
 
-    @pytest.mark.parametrize("hash_str,expected_valid", [
-        ("a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4", True),
-        ("00000000000000000000000000000000", True),
-        ("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF", True),
-        ("", False),
-        ("abc", False),  # Too short
-        ("not-hex!!", False),  # Invalid hex
-        ("a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5", False),  # 31 chars — hex but wrong length
-        ("a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e", False),  # 31 chars — hex but wrong length
-        ("g1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4", False),  # 'g' not hex
-        ("a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6!", False),  # 33 chars — hex but wrong length
-    ])
+    @pytest.mark.parametrize(
+        "hash_str,expected_valid",
+        [
+            ("a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4", True),
+            ("00000000000000000000000000000000", True),
+            ("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF", True),
+            ("", False),
+            ("abc", False),  # Too short
+            ("not-hex!!", False),  # Invalid hex
+            (
+                "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5",
+                False,
+            ),  # 31 chars — hex but wrong length
+            (
+                "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e",
+                False,
+            ),  # 31 chars — hex but wrong length
+            ("g1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4", False),  # 'g' not hex
+            (
+                "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6!",
+                False,
+            ),  # 33 chars — hex but wrong length
+        ],
+    )
     def test_validates_hash(self, client_class, hash_str, expected_valid):
         """Verify hash validation for various inputs."""
         valid, err = client_class._validate_hash(hash_str)
