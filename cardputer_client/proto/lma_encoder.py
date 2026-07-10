@@ -518,6 +518,15 @@ def encode_envelope_text(textmessage_bytes):
     return encode_field(FIELD_TEXT, 2, encode_length_delimited(textmessage_bytes))
 
 
+def encode_sensor_envelope(node_id, seq, battery, readings):
+    """Wrap a SensorReport in an LMAOEnvelope (field 10, wire type 2).
+
+    Returns the full LMAOEnvelope bytes ready for LXMF Content.
+    """
+    sensor_bytes = encode_sensor_report(node_id, seq, battery, readings)
+    return encode_field(FIELD_SENSOR, 2, encode_length_delimited(sensor_bytes))
+
+
 def decode_envelope(data):
     """Decode an LMAOEnvelope, dispatching to the correct sub-message decoder.
 

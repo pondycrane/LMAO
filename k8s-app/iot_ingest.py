@@ -67,7 +67,14 @@ except ImportError:
 
 
 def build_sensor_envelope(node_id: str, temperature: float, humidity: float) -> bytes:
-    """Build a serialized LMAOEnvelope containing a SensorReport."""
+    """Build a serialized LMAOEnvelope containing a SensorReport.
+
+    Convention: *node_id* SHOULD be the device's Reticulum identity hex hash
+    (32 hex characters).  This guarantees global uniqueness and cryptographic
+    attribution since the LXMF ``source_hash`` already carries the same
+    identity.  Human-readable names are acceptable for testing but should
+    be replaced with identity hashes in production.
+    """
     envelope = LMAOEnvelope()
     envelope.sensor.node_id = node_id
     envelope.sensor.seq = int(time.time())
@@ -91,7 +98,7 @@ def build_sensor_envelope(node_id: str, temperature: float, humidity: float) -> 
 def send_example(stub: LMAOStub):
     """Send a sensor reading via gRPC."""
     print("=== Send Example (gRPC) ===")
-    payload = build_sensor_envelope("k8s-sensor-01", 22.5, 68.0)
+    payload = build_sensor_envelope("0000000000000000k8s_ingest_test01", 22.5, 68.0)
     request = SendRequest(envelope=payload)
     response = stub.Send(request)
     print(f"Send response: status={response.status}, dest={response.destination_hash}")
@@ -103,7 +110,7 @@ async def send_example_nats(nats_server: str, subject: str = "lmao.messages.env"
     print("=== Send Example (NATS) ===")
     from lma_core.queue import NatsQueue
 
-    payload = build_sensor_envelope("k8s-sensor-01", 22.5, 68.0)
+    payload = build_sensor_envelope("0000000000000000k8s_ingest_test01", 22.5, 68.0)
     nq = NatsQueue(name="iot-ingest-sender")
     try:
         await nq.connect(servers=nats_server)
