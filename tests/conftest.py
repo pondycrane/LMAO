@@ -55,8 +55,14 @@ def setup_common_mocks(with_grpc=True):
 
     # Re-bind proto types on lma_core so they reference the fresh mocks
     for _attr in (
-        "LMAOEnvelope", "TextMessage", "SensorReport", "SensorReading",
-        "CommandRequest", "CommandAck", "AudioMessage", "ImageMessage",
+        "LMAOEnvelope",
+        "TextMessage",
+        "SensorReport",
+        "SensorReading",
+        "CommandRequest",
+        "CommandAck",
+        "AudioMessage",
+        "ImageMessage",
         "CallSignal",
     ):
         setattr(_real_lma_core, _attr, getattr(_proto_pb2, _attr))
@@ -132,9 +138,16 @@ def setup_common_mocks(with_grpc=True):
 
         # Backward compat: set on lma_core for direct imports
         for _attr in (
-            "SendRequest", "SendResponse", "SubscribeRequest",
-            "SubscribeResponse", "GetIdentityRequest", "GetIdentityResponse",
-            "LMAOStub", "LMAOServicer", "LMAO", "add_LMAOServicer_to_server",
+            "SendRequest",
+            "SendResponse",
+            "SubscribeRequest",
+            "SubscribeResponse",
+            "GetIdentityRequest",
+            "GetIdentityResponse",
+            "LMAOStub",
+            "LMAOServicer",
+            "LMAO",
+            "add_LMAOServicer_to_server",
         ):
             setattr(_real_lma_core, _attr, getattr(_grpc_types, _attr))
 

@@ -351,16 +351,14 @@ class TestNatsQueuePublish:
         nq = await connected_queue()
         ack = await nq.publish("sensors.temp", b'{"v":22}')
 
-        nq._js.publish.assert_called_once_with(
-            "sensors.temp", b'{"v":22}'
-        )
+        nq._js.publish.assert_called_once_with("sensors.temp", b'{"v":22}')
         assert ack.seq == 1
 
     @pytest.mark.asyncio
     async def test_publish_empty_payload(self, connected_queue):
         """publish() should accept empty bytes."""
         nq = await connected_queue()
-        ack = await nq.publish("empty", b"")
+        await nq.publish("empty", b"")
 
         nq._js.publish.assert_called_once_with("empty", b"")
 
@@ -382,6 +380,7 @@ class TestNatsQueueSubscribe:
     async def _make_fetch_that_raises_timeout(self):
         """An async fetch that yields control before raising TimeoutError."""
         import asyncio
+
         await asyncio.sleep(0)
         raise TimeoutError
 
@@ -395,9 +394,8 @@ class TestNatsQueueSubscribe:
         callback = AsyncMock()
 
         import asyncio
-        task = asyncio.ensure_future(
-            nq.subscribe("sensors.>", "pod-1", callback)
-        )
+
+        task = asyncio.ensure_future(nq.subscribe("sensors.>", "pod-1", callback))
         await asyncio.sleep(0.05)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -418,6 +416,7 @@ class TestNatsQueueSubscribe:
         import asyncio
 
         call_count = 0
+
         async def _fetch_with_msg_then_timeout(batch=1, timeout=5):
             nonlocal call_count
             await asyncio.sleep(0)
@@ -430,9 +429,7 @@ class TestNatsQueueSubscribe:
 
         callback = AsyncMock()
 
-        task = asyncio.ensure_future(
-            nq.subscribe("sensors.>", "pod-1", callback)
-        )
+        task = asyncio.ensure_future(nq.subscribe("sensors.>", "pod-1", callback))
         await asyncio.sleep(0.1)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -453,6 +450,7 @@ class TestNatsQueueSubscribe:
         import asyncio
 
         call_count = 0
+
         async def _fetch_with_msg_then_timeout(batch=1, timeout=5):
             nonlocal call_count
             await asyncio.sleep(0)
@@ -466,9 +464,7 @@ class TestNatsQueueSubscribe:
         def failing_cb(m):
             raise ValueError("processing error")
 
-        task = asyncio.ensure_future(
-            nq.subscribe("err.>", "pod-err", failing_cb)
-        )
+        task = asyncio.ensure_future(nq.subscribe("err.>", "pod-err", failing_cb))
         await asyncio.sleep(0.1)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -504,9 +500,7 @@ class TestNatsQueueSubscribe:
         def sync_callback(m):
             pass  # sync, no return
 
-        task = asyncio.ensure_future(
-            nq.subscribe("sync.>", "pod-sync", sync_callback)
-        )
+        task = asyncio.ensure_future(nq.subscribe("sync.>", "pod-sync", sync_callback))
         await asyncio.sleep(0.1)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -567,9 +561,7 @@ class TestNatsQueueSubscribe:
 
         callback = AsyncMock()
 
-        task = asyncio.ensure_future(
-            nq.subscribe("recover.>", "pod-recover", callback)
-        )
+        task = asyncio.ensure_future(nq.subscribe("recover.>", "pod-recover", callback))
         await asyncio.sleep(1.5)  # enough time for backoff(1) + retry
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -597,9 +589,7 @@ class TestNatsQueueSubscribe:
 
         import asyncio
 
-        task = asyncio.ensure_future(
-            nq.subscribe("fatal.>", "pod-fatal", callback)
-        )
+        task = asyncio.ensure_future(nq.subscribe("fatal.>", "pod-fatal", callback))
         # Allow enough time for at least a few retry attempts before cancelling
         await asyncio.sleep(2)
         task.cancel()

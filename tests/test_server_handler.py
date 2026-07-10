@@ -1,4 +1,5 @@
 """Tests for server message handler (with mocked RNS/LXMF)."""
+
 import asyncio
 import logging
 from unittest.mock import MagicMock, patch

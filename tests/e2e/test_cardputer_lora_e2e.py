@@ -449,9 +449,7 @@ class TestHardwareDetection:
             # Firmware missing -> flash succeeds -> device disappears
             with (
                 patch.object(mod, "check_rnode_firmware", return_value=False),
-                patch.object(
-                    mod, "flash_rnode_firmware", return_value=(True, "ok")
-                ),
+                patch.object(mod, "flash_rnode_firmware", return_value=(True, "ok")),
                 patch.object(mod, "find_rnode_port", return_value=None),
             ):
                 _probe_hardware()
@@ -495,15 +493,9 @@ class TestHardwareDetection:
             # Firmware missing -> flash succeeds -> re-discovery finds port
             # -> post-flash verification fails
             with (
-                patch.object(
-                    mod, "check_rnode_firmware", side_effect=[False, False]
-                ),
-                patch.object(
-                    mod, "flash_rnode_firmware", return_value=(True, "ok")
-                ),
-                patch.object(
-                    mod, "find_rnode_port", return_value="/dev/fake_rnode2"
-                ),
+                patch.object(mod, "check_rnode_firmware", side_effect=[False, False]),
+                patch.object(mod, "flash_rnode_firmware", return_value=(True, "ok")),
+                patch.object(mod, "find_rnode_port", return_value="/dev/fake_rnode2"),
             ):
                 _probe_hardware()
 
@@ -632,6 +624,7 @@ class TestCardputerLoRaE2E:
                     envelope.ParseFromString(content_bytes)
                 except Exception as exc:
                     import traceback
+
                     print(
                         f"WARNING: capture_delivery: envelope parse failed: {exc}",
                         file=sys.stderr,
@@ -653,15 +646,18 @@ class TestCardputerLoRaE2E:
                         )
                         try:
                             asyncio.run(store.store_sensor_report(bytes(content_bytes)))
-                            sensor_messages.append({
-                                "source": source_hash,
-                                "node_id": envelope.sensor.node_id,
-                                "seq": envelope.sensor.seq,
-                            })
+                            sensor_messages.append(
+                                {
+                                    "source": source_hash,
+                                    "node_id": envelope.sensor.node_id,
+                                    "seq": envelope.sensor.seq,
+                                }
+                            )
                         except Exception:
                             nonlocal store_failures
                             store_failures += 1
                             import logging
+
                             logging.getLogger(__name__).warning(
                                 "DuckDB store failed", exc_info=True
                             )
@@ -842,10 +838,12 @@ class TestCardputerLoRaE2E:
 
                 # ── DuckDB sensor data assertion ──
                 # SensorReports are sent by default (SEND_SENSOR=True), validate ingestion
-                rows = asyncio.run(store.query(
-                    "SELECT node_id, value, unit FROM sensor_readings "
-                    "ORDER BY id DESC LIMIT 5",
-                ))
+                rows = asyncio.run(
+                    store.query(
+                        "SELECT node_id, value, unit FROM sensor_readings "
+                        "ORDER BY id DESC LIMIT 5",
+                    )
+                )
                 assert len(rows) > 0, (
                     "No sensor data found in DuckDB after LoRa E2E test. "
                     f"Received {len(sensor_messages)} SensorReport envelope(s) over LoRa. "

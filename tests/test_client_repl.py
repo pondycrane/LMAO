@@ -1,4 +1,5 @@
 """Tests for human client REPL parsing (with mocked RNS/LXMF)."""
+
 from unittest.mock import MagicMock, patch
 import pytest
 import sys

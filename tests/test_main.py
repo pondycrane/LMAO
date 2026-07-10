@@ -202,9 +202,7 @@ class TestInitRns:
         mock_config = {"interfaces": [{"type": "LoRaInterface"}]}
         mock_rns = MagicMock()
 
-        with patch.object(
-            lmao_client, "Reticulum", create=True, return_value=mock_rns
-        ):
+        with patch.object(lmao_client, "Reticulum", create=True, return_value=mock_rns):
             rns = lmao_client._init_rns(mock_config)
 
         assert rns is mock_rns
@@ -298,8 +296,9 @@ class TestMakeSensorMessage:
     def _call(identity_hex="a1b2", seq=0, battery=3.7):
         """Call make_sensor_message with a mocked encoder, return captured args."""
         mock_encode = MagicMock()
-        with patch.object(lmao_client, "encode_sensor_envelope", mock_encode,
-                          create=True):
+        with patch.object(
+            lmao_client, "encode_sensor_envelope", mock_encode, create=True
+        ):
             lmao_client.make_sensor_message(identity_hex, seq, battery)
         mock_encode.assert_called_once()
         return mock_encode.call_args[0]  # (identity_hex, seq, battery, readings)
@@ -384,16 +383,16 @@ class TestMakeSensorMessage:
 
         mock_encode = MagicMock()
         with patch.dict(sys.modules, {"esp32": mock_esp32}):
-            with patch.object(lmao_client, "encode_sensor_envelope", mock_encode,
-                              create=True):
+            with patch.object(
+                lmao_client, "encode_sensor_envelope", mock_encode, create=True
+            ):
                 lmao_client.make_sensor_message("a1b2", 0, 3.7)
 
         mock_encode.assert_called_once()
         readings = mock_encode.call_args[0][3]
         # 68°F → (68 - 32) * 5/9 = 20°C
         assert readings[0]["value"] == 20.0, (
-            f"Expected 20.0°C for raw_temperature=68°F, "
-            f"got {readings[0]['value']}"
+            f"Expected 20.0°C for raw_temperature=68°F, got {readings[0]['value']}"
         )
 
     def test_raw_temperature_exception_propagates(self):
@@ -404,6 +403,7 @@ class TestMakeSensorMessage:
         mock_esp32.raw_temperature.side_effect = OSError("Sensor read failed")
 
         import pytest
+
         with patch.dict(sys.modules, {"esp32": mock_esp32}):
             with pytest.raises(OSError, match="Sensor read failed"):
                 lmao_client.make_sensor_message("a1b2", 0, 3.7)
@@ -411,6 +411,7 @@ class TestMakeSensorMessage:
     def test_strict_mode_raises_on_cpython(self):
         """When strict=True and no esp32 module, RuntimeError is raised."""
         import pytest
+
         with pytest.raises(RuntimeError, match="strict=True"):
             lmao_client.make_sensor_message("a1b2", 0, 3.7, strict=True)
 
@@ -423,15 +424,15 @@ class TestMakeSensorMessage:
 
         mock_encode = MagicMock()
         with patch.dict(sys.modules, {"esp32": mock_esp32}):
-            with patch.object(lmao_client, "encode_sensor_envelope", mock_encode,
-                              create=True):
+            with patch.object(
+                lmao_client, "encode_sensor_envelope", mock_encode, create=True
+            ):
                 lmao_client.make_sensor_message("a1b2", 0, 3.7, strict=True)
 
         mock_encode.assert_called_once()
         readings = mock_encode.call_args[0][3]
         assert readings[0]["value"] == 30.0, (
-            f"Expected 30.0°C for raw_temperature=86°F, "
-            f"got {readings[0]['value']}"
+            f"Expected 30.0°C for raw_temperature=86°F, got {readings[0]['value']}"
         )
 
 
@@ -485,7 +486,6 @@ class TestSensorSendInMainLoop:
 
         Returns (mock_log, mock_print_exception) so callers can assert on both.
         """
-        import time
 
         with (
             patch.object(lmao_client, "SEND_SENSOR", sensor_flag),
@@ -514,17 +514,13 @@ class TestSensorSendInMainLoop:
                         lmao_client.log("Sensor send returned None", None, None)
                 except Exception as sensor_err:
                     lmao_client.sys.print_exception(sensor_err)
-                    lmao_client.log(
-                        f"Sensor send failed: {sensor_err}", None, None
-                    )
+                    lmao_client.log(f"Sensor send failed: {sensor_err}", None, None)
 
         return mock_log, mock_pe
 
     def test_sensor_send_success_logs_seq(self):
         """When send_message returns a truthy value, seq is logged."""
-        mock_log, _ = self._simulate_sensor_send(
-            send_message_returns=MagicMock()
-        )
+        mock_log, _ = self._simulate_sensor_send(send_message_returns=MagicMock())
         mock_log.assert_any_call("Sensor: seq=1", None, None)
 
     def test_sensor_send_returns_none_logs_warning(self):
@@ -537,9 +533,7 @@ class TestSensorSendInMainLoop:
         mock_log, mock_pe = self._simulate_sensor_send(
             send_message_side_effect=RuntimeError("LoRa busy")
         )
-        mock_log.assert_any_call(
-            "Sensor send failed: LoRa busy", None, None
-        )
+        mock_log.assert_any_call("Sensor send failed: LoRa busy", None, None)
         mock_pe.assert_called_once()
 
     def test_sensor_send_exception_calls_print_exception(self):
@@ -560,8 +554,7 @@ class TestSensorSendInMainLoop:
         )
         # No sensor-related logs should appear
         sensor_logs = [
-            call for call in mock_log.call_args_list
-            if "Sensor" in str(call)
+            call for call in mock_log.call_args_list if "Sensor" in str(call)
         ]
         assert len(sensor_logs) == 0
 

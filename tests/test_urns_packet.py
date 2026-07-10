@@ -59,7 +59,7 @@ _mp_ucryptolib.aes = _MockAESCipher
 sys.modules["ucryptolib"] = _mp_ucryptolib
 
 # Now import the urns modules under test
-from urns.const import (
+from urns.const import (  # noqa: E402
     HEADER_MINSIZE,
     PKT_DATA,
     PKT_ANNOUNCE,
@@ -67,7 +67,7 @@ from urns.const import (
     PKT_PROOF,
     TRUNCATED_HASHLENGTH,
     DEST_SINGLE,
-)  # noqa: E402
+)
 from urns.packet import Packet  # noqa: E402
 
 
