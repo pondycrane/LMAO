@@ -396,24 +396,17 @@ class TestMakeSensorMessage:
             f"got {readings[0]['value']}"
         )
 
-    def test_raw_temperature_exception_falls_back(self):
-        """When esp32.raw_temperature() raises, fall back to 25.0."""
+    def test_raw_temperature_exception_propagates(self):
+        """When esp32.raw_temperature() raises, exception propagates (no fallback)."""
         import sys
 
         mock_esp32 = MagicMock()
         mock_esp32.raw_temperature.side_effect = OSError("Sensor read failed")
 
-        mock_encode = MagicMock()
+        import pytest
         with patch.dict(sys.modules, {"esp32": mock_esp32}):
-            with patch.object(lmao_client, "encode_sensor_envelope", mock_encode,
-                              create=True):
+            with pytest.raises(OSError, match="Sensor read failed"):
                 lmao_client.make_sensor_message("a1b2", 0, 3.7)
-
-        mock_encode.assert_called_once()
-        assert mock_encode.call_args[0][3][0]["value"] == 25.0, (
-            f"Expected fallback 25.0 when raw_temperature raises, "
-            f"got {mock_encode.call_args[0][3][0]['value']}"
-        )
 
 
 # ── Module-level helpers ────────────────────────────────────────────
