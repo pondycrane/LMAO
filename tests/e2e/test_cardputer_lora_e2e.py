@@ -19,12 +19,15 @@ from collections.abc import Callable
 from typing import Any
 
 import asyncio
+import logging
 import os
 import sys
 import time
 import threading
 
 import pytest
+
+_logger = logging.getLogger(__name__)
 
 try:
     import serial
@@ -567,7 +570,6 @@ class TestCardputerLoRaE2E:
         5. Verifies the message arrives over LoRa on the server side
         6. Optionally checks for ACK reply on Cardputer serial output
         """
-        import asyncio
         import tempfile
         import shutil
         import RNS
@@ -615,7 +617,7 @@ class TestCardputerLoRaE2E:
             db_fd, db_path = tempfile.mkstemp(suffix=".duckdb", prefix="lmao_e2e_")
             os.close(db_fd)
             store = DuckDbStore()
-            asyncio.run(store.initialize(db_path))
+            store.initialize(db_path)
 
             def capture_delivery(message):
                 """Record received messages for the test to inspect."""
@@ -836,22 +838,18 @@ class TestCardputerLoRaE2E:
                 )
 
                 # ── DuckDB sensor data assertion ──
-                if sensor_messages:
-                    expected_node_id = sensor_messages[0]["node_id"]
-                    rows = asyncio.run(store.query(
-                        "SELECT node_id, value, unit FROM sensor_readings "
-                        "WHERE node_id = ? ORDER BY id DESC LIMIT 5",
-                        params=[expected_node_id],
-                    ))
-                    assert len(rows) > 0, (
-                        "Sensor data not found in DuckDB. "
-                        "SensorReports were received over LoRa but not persisted."
-                        f"\nReceived {len(sensor_messages)} SensorReport envelope(s)."
-                        f"\nExpected node_id: {expected_node_id}"
-                    )
-                    print(f"\n✅ Sensor data ingested to DuckDB: {len(rows)} row(s)")
-                else:
-                    print("\nℹ️  No SensorReports received — DuckDB check skipped.")
+                # SensorReports are sent by default (SEND_SENSOR=True), validate ingestion
+                max_node_id = sensor_messages[0]["node_id"] if sensor_messages else server_hash
+                rows = asyncio.run(store.query(
+                    "SELECT node_id, value, unit FROM sensor_readings "
+                    "ORDER BY id DESC LIMIT 5",
+                ))
+                assert len(rows) > 0, (
+                    "No sensor data found in DuckDB after LoRa E2E test. "
+                    f"Received {len(sensor_messages)} SensorReport envelope(s) over LoRa. "
+                    "Cardputer should have sent SensorReports with SEND_SENSOR=True."
+                )
+                print(f"\n✅ Sensor data ingested to DuckDB: {len(rows)} row(s)")
 
                 print("\n✅ LoRa E2E test passed!")
                 print(f"   Cardputer booted: {found_banner}")
@@ -870,9 +868,9 @@ class TestCardputerLoRaE2E:
 
                 # Close DuckDB store and clean up temp file
                 try:
-                    asyncio.run(store.close())
+                    store.close()
                 except Exception:
-                    pass
+                    _logger.warning("DuckDB store close failed", exc_info=True)
                 try:
                     os.unlink(db_path)
                 except OSError:
