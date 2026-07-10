@@ -156,8 +156,10 @@ def install_k8s_services(result: DeviceResult, repo_root: Optional[str] = None) 
         if not os.path.isfile(manifest_path):
             if applied:
                 print(f"  WARNING: {', '.join(applied)} were already applied.")
-                print(f"  Manual rollback: kubectl delete -f k8s/<manifest>"
-                      f" for each applied manifest")
+                print(
+                    "  Manual rollback: kubectl delete -f k8s/<manifest>"
+                    " for each applied manifest"
+                )
             result.fail(f"Manifest not found: {manifest}")
             print(f"  FAIL: Manifest not found: {manifest}")
             return

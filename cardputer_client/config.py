@@ -31,6 +31,18 @@ DEBUG = 2
 # main.py converts this to bytes at runtime for the urns LXMF router.
 DEST_HASH = None
 
+# Send interval in seconds — how often the Cardputer transmits sensor data.
+# Default 60s = 1 reading per minute. Minimum 10s to avoid LoRa congestion.
+INTERVAL_SECONDS = 60
+
+# External humidity/temperature sensor type on the Grove I2C port.
+# Supported values: "DHT20" (Grove DHT20 / AHT20), None (no sensor).
+# When None, only ESP32 die temperature is sent.
+SENSOR_TYPE = None
+
+# I2C address of the external sensor (0x38 is the default for DHT20/AHT20).
+SENSOR_I2C_ADDR = 0x38
+
 # ---- Reticulum config ----
 CONFIG = {
     "loglevel": 3,
