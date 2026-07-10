@@ -516,17 +516,6 @@ def decode_envelope(data):
     return None
 
 
-# ---- Verbosity control ----
-
-VERBOSE = False  # Set to True to enable debug prints in parse_poc_message()
-
-
-def _debug(msg):
-    """Print debug message when VERBOSE is enabled."""
-    if VERBOSE:
-        print(msg)
-
-
 # ---- Convenience function for the POC ----
 
 def make_poc_message(node_id, text, timestamp=None):
@@ -549,13 +538,11 @@ def parse_poc_message(data):
     except Exception:
         result = None
     if result is not None:
-        _debug("parse_poc_message — protobuf decode success")
         return result.get("content") if isinstance(result, dict) else None
     # Fallback: treat raw content as plain text
     print("WARNING: parse_poc_message — protobuf decode returned None, trying raw UTF-8 fallback")
     try:
         text = data.decode("utf-8")
-        _debug("parse_poc_message — raw UTF-8 decode success (fallback path)")
         return text
     except UnicodeDecodeError as e:
         print(f"ERROR: parse_poc_message — both protobuf and UTF-8 decode failed: {e}")
