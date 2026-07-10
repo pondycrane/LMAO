@@ -208,31 +208,19 @@ class TestMakeSensorMessage:
         mock_encode.assert_called_once()
         return mock_encode.call_args[0]  # (identity_hex, seq, battery, readings)
 
-    def test_temperature_formula_zero_seq(self):
-        """seq=0 should produce temperature 25.0°C."""
+    def test_temperature_fallback_on_cpython(self):
+        """On CPython (no esp32 module), temperature falls back to 25.0°C."""
         args = self._call(seq=0)
         readings = args[3]
         assert readings[0]["value"] == 25.0
 
-    def test_temperature_formula_seq_1(self):
-        """seq=1 should produce 25.5°C."""
-        args = self._call(seq=1)
-        assert args[3][0]["value"] == 25.5
-
-    def test_temperature_formula_seq_7(self):
-        """seq=7 should produce 28.5°C."""
-        args = self._call(seq=7)
-        assert args[3][0]["value"] == 28.5
-
-    def test_temperature_formula_seq_9(self):
-        """seq=9 should produce 29.5°C (maximum)."""
-        args = self._call(seq=9)
-        assert args[3][0]["value"] == 29.5
-
-    def test_temperature_formula_seq_10_wraps(self):
-        """seq=10 should wrap back to 25.0°C (seq % 10 = 0)."""
-        args = self._call(seq=10)
-        assert args[3][0]["value"] == 25.0
+    def test_temperature_is_not_seq_dependent_on_cpython(self):
+        """Fallback temperature is constant 25.0°C regardless of seq."""
+        for seq in (1, 7, 9, 10):
+            args = self._call(seq=seq)
+            assert args[3][0]["value"] == 25.0, (
+                f"seq={seq}: expected fallback 25.0, got {args[3][0]['value']}"
+            )
 
     def test_identity_hex_passthrough(self):
         """node_id should match the identity_hex argument exactly."""
@@ -290,6 +278,46 @@ class TestMakeSensorMessage:
         """Temperature value should be a float type."""
         args = self._call(seq=5)
         assert isinstance(args[3][0]["value"], float)
+
+    def test_temperature_with_mocked_esp32(self):
+        """When esp32 module is available, raw_temperature() is converted to Celsius."""
+        import sys
+
+        mock_esp32 = MagicMock()
+        mock_esp32.raw_temperature.return_value = 68  # 68°F → 20°C
+
+        mock_encode = MagicMock()
+        with patch.dict(sys.modules, {"esp32": mock_esp32}):
+            with patch.object(lmao_client, "encode_sensor_envelope", mock_encode,
+                              create=True):
+                lmao_client.make_sensor_message("a1b2", 0, 3.7)
+
+        mock_encode.assert_called_once()
+        readings = mock_encode.call_args[0][3]
+        # 68°F → (68 - 32) * 5/9 = 20°C
+        assert readings[0]["value"] == 20.0, (
+            f"Expected 20.0°C for raw_temperature=68°F, "
+            f"got {readings[0]['value']}"
+        )
+
+    def test_raw_temperature_exception_falls_back(self):
+        """When esp32.raw_temperature() raises, fall back to 25.0."""
+        import sys
+
+        mock_esp32 = MagicMock()
+        mock_esp32.raw_temperature.side_effect = OSError("Sensor read failed")
+
+        mock_encode = MagicMock()
+        with patch.dict(sys.modules, {"esp32": mock_esp32}):
+            with patch.object(lmao_client, "encode_sensor_envelope", mock_encode,
+                              create=True):
+                lmao_client.make_sensor_message("a1b2", 0, 3.7)
+
+        mock_encode.assert_called_once()
+        assert mock_encode.call_args[0][3][0]["value"] == 25.0, (
+            f"Expected fallback 25.0 when raw_temperature raises, "
+            f"got {mock_encode.call_args[0][3][0]['value']}"
+        )
 
 
 # ── Module-level helpers ────────────────────────────────────────────
