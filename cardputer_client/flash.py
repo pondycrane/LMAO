@@ -107,7 +107,7 @@ def _sanitize_path_for_script(path: str) -> str:
     return path
 
 
-def _verify_files_exist(client_root, file_list):
+def verify_files_exist(client_root, file_list):
     """Check that every file in *file_list* exists under *client_root*.
 
     Raises:
@@ -453,7 +453,7 @@ def main():
 
     # Verify all files exist before opening the serial port
     try:
-        _verify_files_exist(client_root, FILES_TO_UPLOAD + lib_files)
+        verify_files_exist(client_root, FILES_TO_UPLOAD + lib_files)
     except FileNotFoundError as e:
         print(f"ERROR: {e}")
         sys.exit(1)
