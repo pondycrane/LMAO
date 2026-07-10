@@ -521,7 +521,23 @@ def encode_envelope_text(textmessage_bytes):
 def encode_sensor_envelope(node_id, seq, battery, readings):
     """Wrap a SensorReport in an LMAOEnvelope (field 10, wire type 2).
 
-    Returns the full LMAOEnvelope bytes ready for LXMF Content.
+    Parameters
+    ----------
+    node_id : str
+        Sensor node identity hex string (RNS identity hash format).
+    seq : int
+        Message sequence number.
+    battery : float
+        Battery voltage at time of reading.
+    readings : list[dict]
+        List of SensorReading dicts with keys: sensor_id, value, unit, timestamp_ms.
+
+    Returns
+    -------
+    bytes
+        The full LMAOEnvelope bytes ready for LXMF Content.
+
+    @see encode_sensor_report  -- builds the inner SensorReport bytes
     """
     sensor_bytes = encode_sensor_report(node_id, seq, battery, readings)
     return encode_field(FIELD_SENSOR, 2, encode_length_delimited(sensor_bytes))

@@ -519,6 +519,55 @@ class TestBackwardCompatibility:
         assert payload == expected
 
 
+class TestEncodeSensorEnvelope:
+    """Edge-case tests for encode_sensor_envelope."""
+
+    def test_empty_readings(self):
+        """Empty readings list should produce valid envelope."""
+        envelope = enc.encode_sensor_envelope("node-1", 1, 3.7, [])
+        decoded = enc.decode_envelope(envelope)
+        assert decoded is not None
+        assert decoded["node_id"] == "node-1"
+        assert decoded["seq"] == 1
+        assert decoded["battery"] == pytest.approx(3.7)
+        assert decoded["readings"] == []
+
+    def test_long_node_id(self):
+        """64-char hex node_id (boundary test)."""
+        long_id = "a" * 64
+        envelope = enc.encode_sensor_envelope(long_id, 0, 0.0, [])
+        decoded = enc.decode_envelope(envelope)
+        assert decoded is not None
+        assert decoded["node_id"] == long_id
+
+    def test_high_seq_values(self):
+        """Max uint32 seq values should round-trip correctly."""
+        for seq in [2**32 - 1, 0, 1, 65535]:
+            envelope = enc.encode_sensor_envelope("n", seq, 0.0, [])
+            decoded = enc.decode_envelope(envelope)
+            assert decoded is not None
+            assert decoded["seq"] == seq
+
+    def test_round_trip_envelope_to_sensor_report(self):
+        """Envelope → decode → verify all fields including readings."""
+        readings = [
+            {"sensor_id": 1, "value": 25.5, "unit": "C", "timestamp_ms": 1000},
+            {"sensor_id": 2, "value": 68.0, "unit": "%", "timestamp_ms": 1000},
+        ]
+        envelope = enc.encode_sensor_envelope("node-xyz", 42, 3.9, readings)
+        decoded = enc.decode_envelope(envelope)
+        assert decoded is not None
+        assert decoded["node_id"] == "node-xyz"
+        assert decoded["seq"] == 42
+        assert decoded["battery"] == pytest.approx(3.9)
+        assert len(decoded["readings"]) == 2
+        assert decoded["readings"][0]["sensor_id"] == 1
+        assert decoded["readings"][0]["value"] == pytest.approx(25.5)
+        assert decoded["readings"][0]["unit"] == "C"
+        assert decoded["readings"][1]["sensor_id"] == 2
+        assert decoded["readings"][1]["unit"] == "%"
+
+
 if __name__ == "__main__":
     import pytest
     import sys

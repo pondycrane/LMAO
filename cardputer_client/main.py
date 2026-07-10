@@ -43,20 +43,19 @@ try:
 except ImportError:
     HAS_PROTO = False
 
-# Feature flag: set False to disable SensorReport sending
+# Feature flag to disable SensorReport sending; defaults True for backward compatibility
 SEND_SENSOR = True
 
 
 def make_sensor_message(identity_hex, seq, battery=3.7):
-    """Build a SensorReport protobuf payload with simulated temperature."""
-    import time as _time
+    """Build an LMAOEnvelope containing a SensorReport with simulated temperature."""
 
     temp = 25.0 + (seq % 10) * 0.5  # simulated: 25.0–29.5°C
     readings = [{
         "sensor_id": 1,
         "value": temp,
         "unit": "C",
-        "timestamp_ms": int(_time.time() * 1000),
+        "timestamp_ms": int(time.time() * 1000),
     }]
     return encode_sensor_envelope(identity_hex, seq, battery, readings)
 
@@ -363,16 +362,21 @@ def main():
                 else:
                     log("Send returned None", tft, status_lines)
 
-                # Send SensorReport if enabled
+                # Also send SensorReport if enabled (dual-send alongside TextMessage)
                 if SEND_SENSOR:
-                    sensor_content = make_sensor_message(identity_hex, seq)
-                    msg2 = router.send_message(
-                        destination_hash=DEST_HASH,
-                        content=sensor_content,
-                        title="p:Envelope",
-                    )
-                    if msg2:
-                        log(f"Sensor: seq={seq}", tft, status_lines)
+                    try:
+                        sensor_content = make_sensor_message(identity_hex, seq)
+                        msg2 = router.send_message(
+                            destination_hash=DEST_HASH,
+                            content=sensor_content,
+                            title="p:Envelope",
+                        )
+                        if msg2:
+                            log(f"Sensor: seq={seq}", tft, status_lines)
+                        else:
+                            log("Sensor send returned None", tft, status_lines)
+                    except Exception as sensor_err:
+                        log(f"Sensor send failed: {sensor_err}", tft, status_lines)
 
             # Drain pending replies
             for reply in pending_replies:
