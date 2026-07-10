@@ -84,18 +84,36 @@ def _init_wifi(ssid, password, config, debug=0):
     return True
 
 
-def make_sensor_message(identity_hex, seq, battery=3.7):
+def make_sensor_message(identity_hex, seq, battery=3.7, strict=False):
     """Build an LMAOEnvelope containing a SensorReport with real ESP32 die temperature.
 
-    On MicroPython with the ``esp32`` module (i.e., on a real Cardputer), reads the
-    internal die temperature sensor and converts from Fahrenheit to Celsius.  On
-    CPython (testing) falls back to a constant 25.0°C.
+    When *strict* is ``False`` (default): on CPython (no ``esp32`` module) falls back
+    to a constant 25.0°C for test environments.  On real hardware, sensor read
+    failures propagate as exceptions regardless of the flag.
+
+    When *strict* is ``True``: raises ``RuntimeError`` if the ESP32 die temperature
+    cannot be read, even on CPython.  Use this in E2E tests or production configs
+    that must never see synthetic data.
+
+    Args:
+        identity_hex: Hex identity string of the sending node.
+        seq: Sequence number.
+        battery: Battery voltage (default 3.7 V).
+        strict: If ``True``, fail hard when temperature can't be read from hardware.
+
+    Returns:
+        bytes: Serialized LMAOEnvelope protobuf.
     """
 
     try:
         import esp32
 
     except ImportError:
+        if strict:
+            raise RuntimeError(
+                "esp32 module not available and strict=True — cannot read "
+                "CPU temperature without a real ESP32 device"
+            )
         temp = 25.0  # Fallback for non-ESP32 environments; preserves backward compatibility
                       # with old synthetic formula minimum (seq=0 → 25.0°C)
         readings = [{
