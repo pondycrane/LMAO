@@ -1,0 +1,4 @@
+# Bazel configuration for LMAO monorepo
+# Explicitly set C++ compiler paths for proper toolchain detection
+build --repo_env=CC=/usr/bin/gcc
+build --repo_env=CXX=/usr/bin/g++
