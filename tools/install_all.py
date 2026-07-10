@@ -350,15 +350,22 @@ def main(argv: list[str] | None = None) -> None:
     results.append(k8s_result)
 
     if args.include_services:
-        if args.skip_server:
-            pi_result.skip("--skip-server")
-        else:
-            install_pi_server(pi_result)
+        try:
+            if args.skip_server:
+                pi_result.skip("--skip-server")
+            else:
+                install_pi_server(pi_result)
 
-        if args.skip_k8s:
-            k8s_result.skip("--skip-k8s")
-        else:
-            install_k8s_services(k8s_result)
+            if args.skip_k8s:
+                k8s_result.skip("--skip-k8s")
+            else:
+                install_k8s_services(k8s_result)
+        except Exception as exc:
+            import traceback
+
+            traceback.print_exc()
+            pi_result.fail(f"Pi Server install error: {exc}")
+            k8s_result.fail(f"K8s Services install error: {exc}")
     else:
         pi_result.skip("--include-services not set")
         k8s_result.skip("--include-services not set")
