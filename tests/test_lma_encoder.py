@@ -564,8 +564,46 @@ class TestEncodeSensorEnvelope:
         assert decoded["readings"][0]["sensor_id"] == 1
         assert decoded["readings"][0]["value"] == pytest.approx(25.5)
         assert decoded["readings"][0]["unit"] == "C"
+        assert decoded["readings"][0]["timestamp_ms"] == 1000
         assert decoded["readings"][1]["sensor_id"] == 2
+        assert decoded["readings"][1]["value"] == pytest.approx(68.0)
         assert decoded["readings"][1]["unit"] == "%"
+        assert decoded["readings"][1]["timestamp_ms"] == 1000
+
+
+class TestEncodeSensorEnvelopeEdgeCases:
+    """Invalid/malformed input edge-case tests for encode_sensor_envelope."""
+
+    def test_none_readings_raises(self):
+        """Passing None as readings should raise TypeError."""
+        with pytest.raises(TypeError):
+            enc.encode_sensor_envelope("node-1", 1, 3.7, None)
+
+    def test_non_dict_in_readings_raises(self):
+        """Non-dict items in readings list should raise TypeError."""
+        with pytest.raises(TypeError):
+            enc.encode_sensor_envelope("node-1", 1, 3.7, ["not-a-dict"])
+
+    def test_reading_missing_keys_raises_key_error(self):
+        """Reading dicts missing required keys should raise KeyError."""
+        readings = [{}]
+        with pytest.raises(KeyError):
+            enc.encode_sensor_envelope("node-1", 1, 3.7, readings)
+
+    def test_empty_string_node_id(self):
+        """Empty string node_id should be preserved in round-trip."""
+        envelope = enc.encode_sensor_envelope("", 0, 0.0, [])
+        decoded = enc.decode_envelope(envelope)
+        assert decoded is not None
+        assert decoded["node_id"] == ""
+
+    def test_negative_seq_encoded_as_positive(self):
+        """Negative seq is encoded as signed byte due to varint encoding."""
+        # The minimal varint encoder doesn't handle negative uint32 specially;
+        # -1 encodes as 127 (since (-1 & 0x7F) = 127).
+        envelope = enc.encode_sensor_envelope("n", -1, 0.0, [])
+        decoded = enc.decode_envelope(envelope)
+        assert decoded["seq"] == 127
 
 
 if __name__ == "__main__":

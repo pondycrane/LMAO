@@ -376,6 +376,7 @@ def main():
                         else:
                             log("Sensor send returned None", tft, status_lines)
                     except Exception as sensor_err:
+                        sys.print_exception(sensor_err)
                         log(f"Sensor send failed: {sensor_err}", tft, status_lines)
 
             # Drain pending replies
