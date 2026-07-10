@@ -5,10 +5,12 @@ py_library(
     srcs = [
         "__init__.py",
         "config_utils.py",
+        "grpc_types.py",
         "message_utils.py",
         "queue.py",
-        "storage.py",
         "rns_di.py",
+        "rns_init.py",
+        "storage.py",
     ],
     visibility = ["//visibility:public"],
     deps = ["//proto:lma_py_proto"],

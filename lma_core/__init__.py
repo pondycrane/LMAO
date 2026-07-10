@@ -38,8 +38,9 @@ except ImportError:
     raise
 
 # gRPC transport types — imported lazily from lma_core.grpc_types
+_grpc_available = False
 try:
-    from lma_core.grpc_types import (  # noqa: F401
+    from .grpc_types import (  # noqa: F401
         SendRequest,
         SendResponse,
         SubscribeRequest,
@@ -51,6 +52,7 @@ try:
         LMAO,
         add_LMAOServicer_to_server,
     )
+    _grpc_available = True
 except ImportError:
     pass
 
@@ -65,15 +67,19 @@ __all__ = [
     "AudioMessage",
     "ImageMessage",
     "CallSignal",
-    # gRPC transport types (conditionally available)
-    "SendRequest",
-    "SendResponse",
-    "SubscribeRequest",
-    "SubscribeResponse",
-    "GetIdentityRequest",
-    "GetIdentityResponse",
-    "LMAOStub",
-    "LMAOServicer",
-    "LMAO",
-    "add_LMAOServicer_to_server",
 ]
+
+# gRPC transport types (conditionally available)
+if _grpc_available:
+    __all__ += [
+        "SendRequest",
+        "SendResponse",
+        "SubscribeRequest",
+        "SubscribeResponse",
+        "GetIdentityRequest",
+        "GetIdentityResponse",
+        "LMAOStub",
+        "LMAOServicer",
+        "LMAO",
+        "add_LMAOServicer_to_server",
+    ]
