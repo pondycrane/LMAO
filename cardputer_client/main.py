@@ -106,15 +106,7 @@ def make_sensor_message(identity_hex, seq, battery=3.7):
         }]
         return encode_sensor_envelope(identity_hex, seq, battery, readings)
 
-    try:
-        temp = (esp32.raw_temperature() - 32) * 5.0 / 9.0  # Fahrenheit to Celsius
-    except Exception:
-        # esp32 module exists but raw_temperature() failed — use fallback
-        try:
-            sys.print_exception(sys.exc_info()[1])
-        except Exception:
-            pass
-        temp = 25.0
+    temp = (esp32.raw_temperature() - 32) * 5.0 / 9.0  # Fahrenheit to Celsius
 
     readings = [{
         "sensor_id": 1,
