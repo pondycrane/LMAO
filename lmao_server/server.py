@@ -11,15 +11,13 @@ for K8s pod integration. The gRPC service provides:
   - GetIdentity: Return the server's Reticulum identity hex
 """
 
-import sys
 import os
 import logging
 import time
 import asyncio
-import atexit
-import shutil
 
 from lma_core.rns_di import RNS, LXMF
+from lma_core.rns_init import warn_if_rnode_missing, init_rns_and_lxmf as _shared_init
 
 # Local imports
 import config
@@ -49,88 +47,17 @@ except ImportError:
 
 
 def _warn_if_rnode_missing(rnode_port):
-    """Warn if the RNode port does not exist."""
-    if os.path.exists(rnode_port):
-        return
-    logger.warning(
-        "RNode port %s not found. LoRa messaging will be unavailable.", rnode_port
-    )
-    print(
-        f"\u26a0\ufe0f  RNode port {rnode_port} not found.\n"
-        f"   The server will start with WiFi AutoInterface only.\n"
-        f"   Set the LMAO_RNODE_PORT environment variable if your RNode is on a different port.\n"
-        f"   Example: LMAO_RNODE_PORT=/dev/ttyACM0 python3 server.py\n"
-        f"   LoRa messaging will be unavailable until an RNode is connected.\n"
-    )
+    """Warn if the RNode port does not exist (delegates to shared helper)."""
+    warn_if_rnode_missing(rnode_port, role="server")
 
 
 def _init_rns_and_lxmf(rnode_port, identity_storage_path="/tmp/lmao_server_lxmf"):
-    """Shared Reticulum + LXMF initialization returning (identity, router).
-
-    Handles config directory creation, Reticulum bootstrap, identity creation,
-    and LXMF router startup with specific error messages for common failures.
-    Calls sys.exit(1) on any unrecoverable error — does not return.
-    """
-    print("Initializing Reticulum...")
-    try:
-        configdir = config.get_configdir()
-        atexit.register(lambda: shutil.rmtree(configdir, ignore_errors=True))
-        RNS.Reticulum(configdir=configdir)
-    except (OSError, PermissionError) as e:
-        logger.critical(
-            "Failed to create config directory for Reticulum: %s", e, exc_info=True
-        )
-        print(
-            f"FATAL: Failed to create config directory for Reticulum: {e}",
-            file=sys.stderr,
-        )
-        print("Check that /tmp is writable and disk is not full.", file=sys.stderr)
-        sys.exit(1)
-    except RNS.RNSException as e:
-        logger.critical("Reticulum initialization failed: %s", e, exc_info=True)
-        print(f"FATAL: Reticulum initialization failed: {e}", file=sys.stderr)
-        print(
-            f"This is often caused by a missing or misconfigured RNode on {rnode_port}."
-        )
-        print("Check that:")
-        print(f"  1. The RNode is plugged in and on the correct port ({rnode_port})")
-        print("  2. You have permission: sudo usermod -a -G dialout $USER")
-        print("  3. The RNode firmware is flashed correctly")
-        print("  See rnode_firmware/README.md and README Troubleshooting.")
-        sys.exit(1)
-    except Exception as e:
-        logger.critical("Failed to initialize Reticulum: %s", e, exc_info=True)
-        print(f"FATAL: Failed to initialize Reticulum: {e}", file=sys.stderr)
-        print(
-            "Check your config and RNode connection. See README Troubleshooting.",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-    print("Reticulum initialized.")
-
-    # Create server identity
-    try:
-        identity = RNS.Identity()
-    except (RNS.RNSException, OSError) as e:
-        logger.critical("Failed to create identity: %s", e, exc_info=True)
-        print(
-            "FATAL: Failed to create server identity. See log for details.",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
-    # Create LXMF router
-    print("Starting LXMF router...")
-    try:
-        router = LXMF.LXMRouter(identity=identity, storagepath=identity_storage_path)
-    except (RNS.RNSException, LXMF.LXMFException, OSError) as e:
-        logger.critical("Failed to start LXMF router: %s", e, exc_info=True)
-        print(
-            "FATAL: Failed to start LXMF router. See log for details.", file=sys.stderr
-        )
-        sys.exit(1)
-
-    return identity, router
+    """Initialize Reticulum + LXMF for the server (delegates to shared helper)."""
+    return _shared_init(
+        rnode_port=rnode_port,
+        configdir_factory=config.get_configdir,
+        identity_storage_path=identity_storage_path,
+    )
 
 
 def _print_startup_banner(identity_hex, rnode_port, grpc_available):

@@ -48,11 +48,13 @@ def setup_common_mocks(with_grpc=True):
     # The lazy import of LMAOEnvelope inside decode_lmao_message picks up
     # the mock configured below at call time.
     import lma_core.message_utils as _real_msg_utils
+    import lma_core.rns_init as _real_rns_init
 
     sys.modules["lma_core"] = MagicMock()
     sys.modules["lma_core"].LMAOEnvelope = MagicMock()
     sys.modules["lma_core"].TextMessage = MagicMock()
     sys.modules["lma_core.message_utils"] = _real_msg_utils
+    sys.modules["lma_core.rns_init"] = _real_rns_init
 
     # Mock RNS types
     sys.modules["RNS"].RNSException = type("RNSException", (Exception,), {})
@@ -108,6 +110,7 @@ def cleanup_common_mocks():
         "lma_core",
         "lma_core.message_utils",
         "lma_core.rns_di",
+        "lma_core.rns_init",
         "grpc",
         "proto",
         "proto.lma_pb2_grpc",
