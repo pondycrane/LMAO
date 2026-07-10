@@ -48,9 +48,14 @@ SEND_SENSOR = True
 
 
 def make_sensor_message(identity_hex, seq, battery=3.7):
-    """Build an LMAOEnvelope containing a SensorReport with simulated temperature."""
+    """Build an LMAOEnvelope containing a SensorReport with real ESP32 die temperature."""
 
-    temp = 25.0 + (seq % 10) * 0.5  # simulated: 25.0–29.5°C
+    try:
+        import esp32
+
+        temp = (esp32.raw_temperature() - 32) * 5.0 / 9.0  # Fahrenheit to Celsius
+    except ImportError:
+        temp = 25.0  # Fallback for non-ESP32 environments
     readings = [{
         "sensor_id": 1,
         "value": temp,

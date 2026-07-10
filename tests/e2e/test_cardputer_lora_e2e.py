@@ -848,6 +848,22 @@ class TestCardputerLoRaE2E:
                     f"Received {len(sensor_messages)} SensorReport envelope(s) over LoRa. "
                     "Cardputer should have sent SensorReports with SEND_SENSOR=True."
                 )
+                # ── Validate real ESP32 die temperature ──
+                # Real die temperature from esp32.raw_temperature() should land
+                # in the realistic ESP32 die range (15–85°C).  The old synthetic
+                # pattern produced 25.0–29.5°C — reject that band explicitly to
+                # prove the Cardputer is using the real sensor.
+                for row in rows:
+                    temp = float(row[1])
+                    assert 15 <= temp <= 85, (
+                        f"Expected real ESP32 die temperature in [15, 85]°C, "
+                        f"got {temp}°C.  Value may be synthetic or corrupted."
+                    )
+                    assert not (25 <= temp <= 30), (
+                        f"Temperature {temp}°C falls in old synthetic band "
+                        f"[25, 30]°C.  Cardputer must use "
+                        f"esp32.raw_temperature(), not simulation."
+                    )
                 print(f"\n✅ Sensor data ingested to DuckDB: {len(rows)} row(s)")
 
                 print("\n✅ LoRa E2E test passed!")
