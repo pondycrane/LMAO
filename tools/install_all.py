@@ -57,7 +57,11 @@ from tests.e2e.e2e_helpers import (
 )
 
 # Server-service install helpers (from tools/install_services.py).
-from tools.install_services import install_k8s_services, install_pi_server
+from tools.install_services import (
+    install_iot_ingest_consumer,
+    install_k8s_services,
+    install_pi_server,
+)
 
 # ---- Result tracking ----
 
@@ -300,6 +304,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Skip Kubernetes manifest apply (only meaningful with --include-services).",
     )
+    parser.add_argument(
+        "--skip-iot-ingest",
+        action="store_true",
+        help="Skip IoT Ingest Consumer deploy (only meaningful with --include-services).",
+    )
     return parser.parse_args(argv)
 
 
@@ -356,6 +365,8 @@ def main(argv: list[str] | None = None) -> None:
     results.append(pi_result)
     k8s_result = DeviceResult("K8s Services")
     results.append(k8s_result)
+    iot_result = DeviceResult("IoT Ingest Consumer")
+    results.append(iot_result)
 
     if args.include_services:
         try:
@@ -368,15 +379,24 @@ def main(argv: list[str] | None = None) -> None:
                 k8s_result.skip("--skip-k8s")
             else:
                 install_k8s_services(k8s_result)
+
+            if args.skip_iot_ingest:
+                iot_result.skip("--skip-iot-ingest")
+            elif args.skip_k8s:
+                iot_result.skip("--skip-k8s (K8s services skipped)")
+            else:
+                install_iot_ingest_consumer(iot_result)
         except Exception as exc:
             import traceback
 
             traceback.print_exc()
             pi_result.fail(f"Pi Server install error: {exc}")
             k8s_result.fail(f"K8s Services install error: {exc}")
+            iot_result.fail(f"IoT Ingest Consumer install error: {exc}")
     else:
         pi_result.skip("--include-services not set")
         k8s_result.skip("--include-services not set")
+        iot_result.skip("--include-services not set")
 
     # ── Summary ──
     _print_summary(results)

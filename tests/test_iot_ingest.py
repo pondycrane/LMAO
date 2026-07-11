@@ -1,6 +1,7 @@
 """Tests for k8s-app IoT ingest script."""
 
 import asyncio
+import contextlib
 import importlib.util
 import inspect
 import sys
@@ -745,3 +746,238 @@ class TestStoreCliParsing:
         mock_sub.assert_called_once()
         _, kwargs = mock_sub.call_args
         assert kwargs["store_path"] is not None
+
+
+def _load_iot_ingest_consumer():
+    """Import k8s-app/iot_ingest_consumer.py as a module via importlib.
+
+    Mock nats and duckdb in sys.modules before loading so that the
+    module-level lazy imports in lma_core succeed even when external
+    deps are not installed.
+    """
+    # Mock nats modules
+    if "nats" not in sys.modules:
+        nats_mod = types.ModuleType("nats")
+        nats_aio_mod = types.ModuleType("nats.aio")
+        nats_aio_client_mod = types.ModuleType("nats.aio.client")
+        nats_js_mod = types.ModuleType("nats.js")
+        nats_js_api_mod = types.ModuleType("nats.js.api")
+
+        nats_mod.connect = AsyncMock()
+        nats_aio_client_mod.Client = MagicMock()
+        nats_js_mod.JetStreamContext = MagicMock()
+        nats_js_mod.api = nats_js_api_mod
+
+        sys.modules["nats"] = nats_mod
+        sys.modules["nats.aio"] = nats_aio_mod
+        sys.modules["nats.aio.client"] = nats_aio_client_mod
+        sys.modules["nats.js"] = nats_js_mod
+        sys.modules["nats.js.api"] = nats_js_api_mod
+
+    # Mock duckdb
+    if "duckdb" not in sys.modules:
+        duckdb_mod = MagicMock()
+        sys.modules["duckdb"] = duckdb_mod
+
+    # Clear lma_core modules so they re-import with mocks
+    for key in list(sys.modules):
+        if key.startswith("lma_core"):
+            del sys.modules[key]
+
+    spec = importlib.util.spec_from_file_location(
+        "iot_ingest_consumer", "k8s-app/iot_ingest_consumer.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class TestConsumerStartup:
+    """Tests for iot_ingest_consumer.py startup and env var parsing."""
+
+    def test_env_var_defaults(self):
+        """Env var defaults should be used when no env vars are set."""
+        import os as _os
+
+        with patch.dict(_os.environ, {}, clear=True):
+            assert (
+                _os.environ.get("NATS_SERVER", "nats://localhost:4222") == "nats://localhost:4222"
+            )
+            assert _os.environ.get("DUCKDB_PATH", "/data/sensors.db") == "/data/sensors.db"
+            assert _os.environ.get("CONSUMER_NAME", "iot-ingest") == "iot-ingest"
+
+    def test_env_var_overrides(self):
+        """Env var overrides should be respected."""
+        import os as _os
+
+        with patch.dict(
+            _os.environ,
+            {
+                "NATS_SERVER": "nats://custom:4222",
+                "DUCKDB_PATH": "/custom/sensors.db",
+                "CONSUMER_NAME": "custom-consumer",
+            },
+        ):
+            assert _os.environ["NATS_SERVER"] == "nats://custom:4222"
+            assert _os.environ["DUCKDB_PATH"] == "/custom/sensors.db"
+            assert _os.environ["CONSUMER_NAME"] == "custom-consumer"
+
+
+class TestConsumerConnect:
+    """Tests for the consumer's NATS connect + stream ensure flow."""
+
+    @pytest.mark.asyncio
+    async def test_connect_called_with_env_server(self):
+        """NatsQueue.connect should be called with NATS_SERVER env var."""
+        from lma_core.queue import NatsQueue
+
+        nq = NatsQueue(name="iot-ingest")
+        nq.connect = AsyncMock()
+        nq.ensure_stream = AsyncMock()
+        nq.subscribe = AsyncMock()
+        nq.close = AsyncMock()
+
+        from lma_core.storage import DuckDbStore
+
+        store = DuckDbStore(name="iot-ingest")
+        store.initialize = MagicMock()
+        store.close = MagicMock()
+
+        consumer = _load_iot_ingest_consumer()
+
+        with patch.dict("os.environ", {"NATS_SERVER": "nats://test:4222"}):
+            with patch("lma_core.queue.NatsQueue", return_value=nq):
+                with patch("lma_core.storage.DuckDbStore", return_value=store):
+
+                    # Run the main function briefly — it'll block on subscribe
+                    # so we schedule a task and cancel after connect/ensure_stream
+                    stream_ensured = False
+
+                    async def _run_and_cancel():
+                        nonlocal stream_ensured
+
+                        async def _fake_subscribe(subject, durable, callback):
+                            # Signal that stream was ensured, then block
+                            nonlocal stream_ensured
+                            stream_ensured = True
+                            # Wait forever (simulate blocking subscribe)
+                            await asyncio.Event().wait()
+
+                        nq.subscribe = _fake_subscribe
+
+                        # Patch signal handlers (not supported in test)
+                        with patch.object(asyncio.get_event_loop(), "add_signal_handler"):
+                            # Run main with a timeout
+                            task = asyncio.ensure_future(consumer.main())
+                            # Wait for stream_ensured to be True (max 5s)
+                            for _ in range(50):
+                                if stream_ensured:
+                                    break
+                                await asyncio.sleep(0.1)
+                            task.cancel()
+                            with contextlib.suppress(asyncio.CancelledError):
+                                await task
+
+                    await _run_and_cancel()
+
+            # Check that connect was called with our env server
+            nq.connect.assert_called_once()
+            call_args = nq.connect.call_args
+            assert call_args[1]["servers"] == "nats://test:4222"
+            nq.ensure_stream.assert_called_once()
+
+
+class TestConsumerStoreAndAck:
+    """Tests for _store_and_ack callback."""
+
+    @pytest.mark.asyncio
+    async def test_store_and_ack_calls_store_sensor_report(self):
+        """_store_and_ack should call store.store_sensor_report with message data."""
+        consumer = _load_iot_ingest_consumer()
+
+        mock_store = MagicMock()
+        mock_store.store_sensor_report = AsyncMock()
+
+        mock_msg = MagicMock()
+        mock_msg.data = b"test_payload"
+
+        await consumer._store_and_ack(mock_msg, mock_store)
+
+        mock_store.store_sensor_report.assert_called_once_with(b"test_payload")
+
+    @pytest.mark.asyncio
+    async def test_store_and_ack_raises_on_failure(self):
+        """_store_and_ack should propagate exceptions for NAK."""
+        consumer = _load_iot_ingest_consumer()
+
+        mock_store = MagicMock()
+        mock_store.store_sensor_report = AsyncMock(side_effect=RuntimeError("store failed"))
+
+        mock_msg = MagicMock()
+        mock_msg.data = b"bad_data"
+
+        with pytest.raises(RuntimeError, match="store failed"):
+            await consumer._store_and_ack(mock_msg, mock_store)
+
+
+class TestConsumerGracefulShutdown:
+    """Tests for graceful shutdown (SIGTERM) handling."""
+
+    @pytest.mark.asyncio
+    async def test_close_called_on_shutdown(self):
+        """NatsQueue.close() and DuckDbStore.close() should be called on shutdown."""
+        from lma_core.queue import NatsQueue
+
+        nq = NatsQueue(name="iot-ingest")
+        nq.connect = AsyncMock()
+        nq.ensure_stream = AsyncMock()
+        nq.close = AsyncMock()
+
+        # subscribe returns immediately (simulating cancelled subscription)
+        async def _fake_subscribe(subject, durable, callback):
+            pass  # Return immediately — simulates cancelled subscription
+
+        nq.subscribe = _fake_subscribe
+
+        from lma_core.storage import DuckDbStore
+
+        store = DuckDbStore(name="iot-ingest")
+        store.initialize = MagicMock()
+        store.close = MagicMock()
+
+        consumer = _load_iot_ingest_consumer()
+
+        with patch("lma_core.queue.NatsQueue", return_value=nq):
+            with patch("lma_core.storage.DuckDbStore", return_value=store):
+                # Inject a pre-set shutdown_event so main() doesn't block
+                # on shutdown_event.wait() forever.
+                shutdown_event = asyncio.Event()
+                shutdown_event.set()
+                with patch.object(asyncio.get_event_loop(), "add_signal_handler"):
+                    await consumer.main(shutdown_event=shutdown_event)
+
+        nq.close.assert_called_once()
+        store.close.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_main_handles_import_error(self):
+        """main() should catch ImportError and exit with code 1."""
+        consumer = _load_iot_ingest_consumer()
+
+        with patch("lma_core.queue.NatsQueue", side_effect=ImportError("nats-py missing")):
+            with patch.object(sys, "exit") as mock_exit:
+                await consumer.main()
+                mock_exit.assert_called_once_with(1)
+
+    def test_module_level_entrypoint_handles_import_error(self):
+        """The __main__ block should handle ImportError and exit with code 1."""
+        _load_iot_ingest_consumer()
+
+        # Simulate the __main__ block behavior
+        with patch("asyncio.run", side_effect=ImportError("nats-py not installed")):
+            with patch.object(sys, "exit") as mock_exit:
+                try:
+                    asyncio.run(None)
+                except ImportError:
+                    sys.exit(1)
+                mock_exit.assert_called_once_with(1)

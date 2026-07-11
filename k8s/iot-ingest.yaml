@@ -1,0 +1,102 @@
+# IoT Ingest Consumer — Persistent NATS→DuckDB K8s Deployment
+#
+# Deploys a single-replica consumer that subscribes to NATS JetStream
+# and persists all sensor readings to DuckDB on a PersistentVolumeClaim.
+# The consumer uses durable consumer name "iot-ingest" so that messages
+# are never lost across pod restarts.
+#
+# Prerequisites:
+#   - NATS server running in the cluster (k8s/nats-server.yaml)
+#   - Docker image built: docker build -f Dockerfile.iot-ingest -t lmao-iot-ingest .
+#
+# Usage:
+#   kubectl apply -f k8s/iot-ingest.yaml
+#
+# Note: MVP runs with no authentication (same trust model as NATS
+# server). Token auth can be added later via a ConfigMap change.
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: iot-ingest-pvc
+  namespace: default
+  labels:
+    app: iot-ingest-consumer
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: iot-ingest-config
+  namespace: default
+  labels:
+    app: iot-ingest-consumer
+data:
+  NATS_SERVER: "nats://nats-server.default.svc.cluster.local:4222"
+  DUCKDB_PATH: "/data/sensors.db"
+  CONSUMER_NAME: "iot-ingest"
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: iot-ingest-consumer
+  namespace: default
+  labels:
+    app: iot-ingest-consumer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: iot-ingest-consumer
+  template:
+    metadata:
+      labels:
+        app: iot-ingest-consumer
+    spec:
+      containers:
+        - name: consumer
+          image: lmao-iot-ingest:latest
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef:
+                name: iot-ingest-config
+          volumeMounts:
+            - name: duckdb-data
+              mountPath: /data
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+          # TODO: Replace with proper health-check endpoint when available.
+          # Currently verifies the process tree is alive by checking PID 1.
+          livenessProbe:
+            exec:
+              command:
+                - python3
+                - -c
+                - "import os; os.kill(1, 0)"
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          readinessProbe:
+            exec:
+              command:
+                - python3
+                - -c
+                - "import lma_core.queue, lma_core.storage; print('ready')"
+            initialDelaySeconds: 10
+            periodSeconds: 15
+      volumes:
+        - name: duckdb-data
+          persistentVolumeClaim:
+            claimName: iot-ingest-pvc
