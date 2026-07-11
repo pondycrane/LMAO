@@ -115,9 +115,18 @@ list_images() {
     echo "$repos"
     echo ""
     # Show tags for each repo
-    for repo in $(echo "$catalog" | python3 -c "import sys,json; data=json.load(sys.stdin); [print(r) for r in data.get('repositories',[])]" 2>/dev/null); do
+    echo "$catalog" | python3 -c "
+import sys,json
+data = json.load(sys.stdin)
+for r in data.get('repositories', []):
+    print(r)
+" 2>/dev/null | while IFS= read -r repo; do
         local tags
-        tags="$(curl -sf "http://${REGISTRY}/v2/${repo}/tags/list" | python3 -c "import sys,json; data=json.load(sys.stdin); print(', '.join(data.get('tags',[])))" 2>/dev/null || echo "no tags")"
+        tags="$(curl -sf "http://${REGISTRY}/v2/${repo}/tags/list" 2>/dev/null | python3 -c "
+import sys,json
+data = json.load(sys.stdin)
+print(', '.join(data.get('tags', [])))
+" 2>/dev/null || echo "no tags")"
         echo "    ${repo}: ${tags}"
     done
 }

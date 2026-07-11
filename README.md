@@ -239,6 +239,10 @@ bazel run //tools:install_all -- --include-services
 bazel run //tools:install_all -- --include-services --skip-server
 bazel run //tools:install_all -- --include-services --skip-k8s
 bazel run //tools:install_all -- --include-services --skip-iot-ingest
+
+# Set up local Docker registry (see §13)
+bazel run //tools:install_all -- --setup-registry
+bazel run //tools:install_all -- --setup-registry --include-services
 ```
 
 Output shows a per-device summary table with OK/FAIL/SKIP status:

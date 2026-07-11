@@ -45,12 +45,6 @@ def _find_repo_root() -> str | None:
         print(f"  DEBUG: Found repo root via BUILD_WORKSPACE_DIRECTORY: {bw}")
         return bw
 
-    # Also check the known project path as a fast-path
-    known = "/home/pondycrane/LMAO"
-    if os.path.isdir(os.path.join(known, ".git")):
-        print(f"  DEBUG: Found repo root via known path: {known}")
-        return known
-
     current = os.path.dirname(os.path.abspath(__file__))
     print(f"  DEBUG: Searching for repo root, starting at {current}")
     for _ in range(10):
@@ -346,8 +340,8 @@ def setup_registry(result: DeviceResult, repo_root: str | None = None) -> None:
 
     The caller must pass a ``DeviceResult`` instance (imported lazily
     from ``install_all``) as *result*.  On success the result is set to
-    OK; on failure it is set to FAIL.  Missing prerequisites result in
-    SKIP.
+    OK; on failure it is set to FAIL.  Missing ``docker`` CLI on PATH
+    results in SKIP; missing ``manage.sh`` or repo root results in FAIL.
 
     Args:
         result: A ``DeviceResult`` instance (from ``tools.install_all``).
