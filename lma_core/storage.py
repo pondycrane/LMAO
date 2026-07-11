@@ -64,14 +64,13 @@ except ImportError as exc:
 
 _CREATE_SENSOR_READINGS_TABLE = """
 CREATE TABLE IF NOT EXISTS sensor_readings (
-    id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     node_id TEXT NOT NULL,
     seq INTEGER,
     battery REAL,
     sensor_id INTEGER,
     value REAL,
     unit TEXT,
-    timestamp_ms INTEGER,
+    timestamp_ms BIGINT,
     ingested_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 """
