@@ -239,6 +239,10 @@ bazel run //tools:install_all -- --include-services
 bazel run //tools:install_all -- --include-services --skip-server
 bazel run //tools:install_all -- --include-services --skip-k8s
 bazel run //tools:install_all -- --include-services --skip-iot-ingest
+
+# Set up local Docker registry (see §13)
+bazel run //tools:install_all -- --setup-registry
+bazel run //tools:install_all -- --setup-registry --include-services
 ```
 
 Output shows a per-device summary table with OK/FAIL/SKIP status:
@@ -480,7 +484,16 @@ kubectl apply -f k8s/iot-ingest.yaml
 bazel run //tools:install_all -- --include-services
 ```
 
-**Environment variables** (configured via ``k8s/iot-ingest.yaml`` ConfigMap):
+> **Using the local registry:** If you have the [local Docker registry](#13-local-docker-registry)
+> running, push the image and update the Deployment manifest before applying:
+> ```bash
+> ./docker/registry/manage.sh push-ingest
+> # Edit k8s/iot-ingest.yaml — change image to:
+> #   image: 192.168.0.36:5000/lmao-iot-ingest:latest
+> kubectl apply -f k8s/iot-ingest.yaml
+> ```
+> This replaces the manual `docker save | k3s ctr image import -` workflow.
+> See [Section 13](#13-local-docker-registry) for full setup instructions.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -547,6 +560,116 @@ LMAO_RNODE_PORT=/dev/ttyACM0 bazel run //human_client:client
 
 The Human Client starts with WiFi AutoInterface (no RNode required).
 If an RNode is connected, LoRa messaging is available.
+
+### 13. Local Docker Registry
+
+A **self-hosted Docker registry** runs on the Pi server (`selfhost`, `192.168.0.36:5000`)
+for local image storage and distribution to the K3s cluster. This eliminates the need to
+pull from Docker Hub on cluster nodes or use the manual `docker save | k3s ctr image import -`
+workflow.
+
+#### Quick start
+
+```bash
+# 1. Start the registry
+./docker/registry/manage.sh start
+
+# 2. Build and push all LMAO images to the registry
+./docker/registry/manage.sh push
+
+# 3. Verify
+curl http://192.168.0.36:5000/v2/_catalog
+# → {"repositories":["lmao-server","lmao-iot-ingest"]}
+```
+
+The registry runs as a Docker container managed by docker-compose and restarts
+automatically on reboot (`restart: unless-stopped`).
+
+#### Usage
+
+```bash
+# Start / stop
+./docker/registry/manage.sh start
+./docker/registry/manage.sh stop
+
+# Build & push images
+./docker/registry/manage.sh push            # all images
+./docker/registry/manage.sh push-server     # lmao-server only
+./docker/registry/manage.sh push-ingest     # lmao-iot-ingest only
+
+# Inspect
+./docker/registry/manage.sh list            # list images + tags
+./docker/registry/manage.sh status          # container + API health
+./docker/registry/manage.sh k3s-config      # print K3s registries.yaml
+```
+
+#### Pushing images
+
+```bash
+docker tag lmao-server 192.168.0.36:5000/lmao-server:latest
+docker push 192.168.0.36:5000/lmao-server:latest
+```
+
+#### Pulling from the Pi itself
+
+The Pi's Docker daemon is configured to trust `192.168.0.36:5000` as an insecure
+registry (see `/etc/docker/daemon.json`). Images pushed to the registry are
+immediately pullable on the Pi without any extra setup.
+
+#### Pulling from K3s cluster nodes
+
+For cluster nodes to pull from the local registry, place this file at
+`/etc/rancher/k3s/registries.yaml` **on every node** and restart K3s:
+
+```bash
+# On control-plane nodes:
+sudo cp k3s-registries.yaml /etc/rancher/k3s/registries.yaml
+sudo systemctl restart k3s
+
+# On worker nodes:
+sudo cp k3s-registries.yaml /etc/rancher/k3s/registries.yaml
+sudo systemctl restart k3s-agent
+```
+
+Or generate the config with the helper:
+
+```bash
+./docker/registry/manage.sh k3s-config | sudo tee /etc/rancher/k3s/registries.yaml
+```
+
+The config tells containerd to reach the Pi's registry (`192.168.0.36:5000`)
+via plain HTTP. After restarting K8s services, update your Deployments to
+reference `192.168.0.36:5000/lmao-server:latest` instead of `lmao-server:latest`.
+
+#### Deploying from the registry
+
+```yaml
+# In your K8s Deployment YAML:
+image: 192.168.0.36:5000/lmao-server:latest
+imagePullPolicy: Always
+```
+
+#### Script reference
+
+| Command | Description |
+|---------|-------------|
+| `start` | Start the registry container |
+| `stop` | Stop the registry container |
+| `push` | Build & push all LMAO images |
+| `push-server` | Build & push lmao-server only |
+| `push-ingest` | Build & push lmao-iot-ingest only |
+| `list` | List images and tags in the registry |
+| `status` | Check container and API health |
+| `k3s-config` | Print `registries.yaml` for cluster nodes |
+
+#### Configuration
+
+The registry is configured via environment variables:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `REGISTRY_HOST` | `192.168.0.36` | Registry hostname/IP |
+| `REGISTRY_PORT` | `5000` | Registry port |
 
 ---
 
@@ -625,6 +748,11 @@ If an RNode is connected, LoRa messaging is available.
 │   ├── test_client_startup.py         # Human client startup lifecycle tests
 │   └── e2e/
 │       └── test_cardputer_flash.py    # E2E flash + boot validation test
+│
+├── docker/                            # Docker infrastructure
+│   └── registry/                      # Local Docker registry (self-hosted on Pi)
+│       ├── docker-compose.yml         # Registry container + persistent volume
+│       └── manage.sh                  # CLI helper: start/stop/push/list/k3s-config
 │
 ├── tools/                             # Build/install tools
 │   ├── BUILD                          # Bazel: py_binary + py_library targets
