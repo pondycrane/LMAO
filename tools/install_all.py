@@ -62,6 +62,8 @@ from tests.e2e.e2e_helpers import (
 
 # Server-service install helpers (from tools/install_services.py).
 from tools.install_services import (
+    _DEFAULT_REGISTRY_HOST,
+    _DEFAULT_REGISTRY_PORT,
     install_iot_ingest_consumer,
     install_k8s_services,
     install_pi_server,
@@ -379,6 +381,7 @@ def main(argv: list[str] | None = None) -> None:
             setup_registry(registry_result)
         except Exception as exc:
             import traceback
+
             traceback.print_exc()
             registry_result.fail(f"Registry setup error: {exc}")
     else:
@@ -408,6 +411,12 @@ def main(argv: list[str] | None = None) -> None:
                 iot_result.skip("--skip-iot-ingest")
             elif args.skip_k8s:
                 iot_result.skip("--skip-k8s (K8s services skipped)")
+            elif args.setup_registry:
+                install_iot_ingest_consumer(
+                    iot_result,
+                    registry_host=_DEFAULT_REGISTRY_HOST,
+                    registry_port=_DEFAULT_REGISTRY_PORT,
+                )
             else:
                 install_iot_ingest_consumer(iot_result)
         except Exception as exc:
