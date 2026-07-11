@@ -50,7 +50,7 @@ def _find_system_python() -> str:
             )
             if result.returncode == 0:
                 return candidate
-        except (FileNotFoundError, subprocess.TimeoutExpired):
+        except Exception:
             continue
 
     # Fallback — will likely produce the same ModuleNotFoundError as before.
@@ -120,8 +120,8 @@ def check_rnode_firmware(port: str, timeout: int = 15) -> bool:
         (including when ``rnodeconf`` is not importable or the subprocess
         times out).
     """
-    system_python = _find_system_python()
     try:
+        system_python = _find_system_python()
         result = subprocess.run(
             [
                 system_python,
@@ -180,8 +180,8 @@ def flash_rnode_firmware(port: str, timeout: int = 120) -> tuple[bool, str]:
         error summary.
     """
     print(f"\nAuto-flashing RNode firmware on {port} ...", flush=True)
-    system_python = _find_system_python()
     try:
+        system_python = _find_system_python()
         result = subprocess.run(
             [
                 system_python,
