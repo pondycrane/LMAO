@@ -18,7 +18,7 @@ import pytest
 try:
     from cardputer_client import flash as cardputer_flash
 except ImportError:
-    cardputer_flash = None
+    cardputer_flash = None  # type: ignore[assignment]
 
 
 # ── helpers ─────────────────────────────────────────────────────────
@@ -272,9 +272,7 @@ class TestFindCardputerPort:
     @pytest.mark.parametrize("preferred", [None, "/dev/ttyACM0", ""])
     def test_comports_exception_returns_none(self, preferred):
         """When comports() raises, return None with a warning."""
-        with patch(
-            "serial.tools.list_ports.comports", side_effect=OSError("permission denied")
-        ):
+        with patch("serial.tools.list_ports.comports", side_effect=OSError("permission denied")):
             result = cardputer_flash.find_cardputer_port(preferred=preferred)
         if preferred:
             # If preferred is given, it's returned before comports() is called
@@ -284,9 +282,7 @@ class TestFindCardputerPort:
 
     def test_comports_exception_when_no_preferred(self, capsys):
         """Warning message is printed when comports() fails."""
-        with patch(
-            "serial.tools.list_ports.comports", side_effect=OSError("permission denied")
-        ):
+        with patch("serial.tools.list_ports.comports", side_effect=OSError("permission denied")):
             result = cardputer_flash.find_cardputer_port()
         assert result is None
         captured = capsys.readouterr()
@@ -452,9 +448,9 @@ class TestMain:
         with (
             patch("cardputer_client.flash.find_client_root", return_value=fake_root),
             patch("os.path.isfile", return_value=False),
+            pytest.raises(SystemExit) as exc,
         ):
-            with pytest.raises(SystemExit) as exc:
-                cardputer_flash.main()
+            cardputer_flash.main()
         assert exc.value.code == 1
         captured = capsys.readouterr()
         assert "not found" in captured.out
@@ -535,9 +531,9 @@ class TestMain:
             patch("cardputer_client.flash.verify_device", return_value=(True, "ESP32")),
             patch("cardputer_client.flash.upload_file", return_value=False),
             patch("os.path.getsize", return_value=0),
+            pytest.raises(SystemExit) as exc,
         ):
-            with pytest.raises(SystemExit) as exc:
-                cardputer_flash.main()
+            cardputer_flash.main()
         assert exc.value.code == 1
         captured = capsys.readouterr()
         assert "FAILED" in captured.out
@@ -553,12 +549,10 @@ class TestMain:
             patch("os.path.isfile", return_value=True),
             patch("cardputer_client.flash.find_cardputer_port", return_value=port),
             patch("serial.Serial", return_value=mock_ser),
-            patch(
-                "cardputer_client.flash.enter_raw_repl", side_effect=KeyboardInterrupt
-            ),
+            patch("cardputer_client.flash.enter_raw_repl", side_effect=KeyboardInterrupt),
+            pytest.raises(SystemExit) as exc,
         ):
-            with pytest.raises(SystemExit) as exc:
-                cardputer_flash.main()
+            cardputer_flash.main()
         assert exc.value.code == 1
         captured = capsys.readouterr()
         assert "Aborted by user" in captured.out
@@ -586,9 +580,9 @@ class TestMain:
                 "cardputer_client.flash.enter_raw_repl",
                 side_effect=exc_cls("device disconnected"),
             ),
+            pytest.raises(SystemExit) as exc,
         ):
-            with pytest.raises(SystemExit) as exc:
-                cardputer_flash.main()
+            cardputer_flash.main()
         assert exc.value.code == 1
         captured = capsys.readouterr()
         assert "Lost connection" in captured.out
@@ -609,9 +603,9 @@ class TestMain:
                 "cardputer_client.flash.enter_raw_repl",
                 side_effect=RuntimeError("something unexpected"),
             ),
+            pytest.raises(SystemExit) as exc,
         ):
-            with pytest.raises(SystemExit) as exc:
-                cardputer_flash.main()
+            cardputer_flash.main()
         assert exc.value.code == 1
         captured = capsys.readouterr()
         assert "Unexpected error" in captured.out
@@ -628,12 +622,10 @@ class TestMain:
             patch("os.path.isfile", return_value=True),
             patch("cardputer_client.flash.find_cardputer_port", return_value=port),
             patch("serial.Serial", return_value=mock_ser),
-            patch(
-                "cardputer_client.flash.enter_raw_repl", side_effect=KeyboardInterrupt
-            ),
+            patch("cardputer_client.flash.enter_raw_repl", side_effect=KeyboardInterrupt),
+            pytest.raises(SystemExit),
         ):
-            with pytest.raises(SystemExit):
-                cardputer_flash.main()
+            cardputer_flash.main()
         mock_ser.close.assert_called_once()
 
 
@@ -820,9 +812,7 @@ class TestUploadFileChunked:
             with patch("cardputer_client.flash.exec_raw") as mock_exec_raw:
                 mock_exec_raw.side_effect = lambda *args, **kw: next(response_iter)
 
-                result = cardputer_flash.upload_file(
-                    mock_ser, "/fake/local.py", "/main.py"
-                )
+                result = cardputer_flash.upload_file(mock_ser, "/fake/local.py", "/main.py")
 
         assert result is True
         assert mock_exec_raw.call_count == 4
@@ -831,13 +821,11 @@ class TestUploadFileChunked:
         """upload_file should return False when directory creation fails."""
         mock_ser = self._make_ser()
 
-        with patch("builtins.open", mock_open(read_data=b"data")):
-            with patch(
-                "cardputer_client.flash.exec_raw", return_value=(False, "MKDIR_ERR")
-            ):
-                result = cardputer_flash.upload_file(
-                    mock_ser, "/fake/local.py", "/main.py"
-                )
+        with (
+            patch("builtins.open", mock_open(read_data=b"data")),
+            patch("cardputer_client.flash.exec_raw", return_value=(False, "MKDIR_ERR")),
+        ):
+            result = cardputer_flash.upload_file(mock_ser, "/fake/local.py", "/main.py")
 
         assert result is False
 
@@ -854,9 +842,7 @@ class TestUploadFileChunked:
             with patch("cardputer_client.flash.exec_raw") as mock_exec_raw:
                 mock_exec_raw.side_effect = lambda *args, **kw: next(response_iter)
 
-                result = cardputer_flash.upload_file(
-                    mock_ser, "/fake/local.py", "/main.py"
-                )
+                result = cardputer_flash.upload_file(mock_ser, "/fake/local.py", "/main.py")
 
         assert result is False
         assert mock_exec_raw.call_count == 1
@@ -875,9 +861,7 @@ class TestUploadFileChunked:
             with patch("cardputer_client.flash.exec_raw") as mock_exec_raw:
                 mock_exec_raw.side_effect = lambda *args, **kw: next(response_iter)
 
-                result = cardputer_flash.upload_file(
-                    mock_ser, "/fake/local.py", "/main.py"
-                )
+                result = cardputer_flash.upload_file(mock_ser, "/fake/local.py", "/main.py")
 
         assert result is False
 
@@ -892,15 +876,13 @@ class TestUploadFileChunked:
         ]
         response_iter = iter(responses)
 
-        with patch(
-            "builtins.open", mock_open(read_data=b"test data longer than one chunk")
+        with (
+            patch("builtins.open", mock_open(read_data=b"test data longer than one chunk")),
+            patch("cardputer_client.flash.exec_raw") as mock_exec_raw,
         ):
-            with patch("cardputer_client.flash.exec_raw") as mock_exec_raw:
-                mock_exec_raw.side_effect = lambda *args, **kw: next(response_iter)
+            mock_exec_raw.side_effect = lambda *args, **kw: next(response_iter)
 
-                result = cardputer_flash.upload_file(
-                    mock_ser, "/fake/local.py", "/main.py"
-                )
+            result = cardputer_flash.upload_file(mock_ser, "/fake/local.py", "/main.py")
 
         assert result is False
         # Should attempt to close the dangling handle via ser.write
@@ -911,9 +893,7 @@ class TestUploadFileChunked:
         mock_ser = self._make_ser()
 
         with patch("builtins.open", side_effect=OSError("No such file")):
-            result = cardputer_flash.upload_file(
-                mock_ser, "/fake/nonexistent.py", "/main.py"
-            )
+            result = cardputer_flash.upload_file(mock_ser, "/fake/nonexistent.py", "/main.py")
 
         assert result is False
 
@@ -964,9 +944,7 @@ class TestUploadFileChunked:
             if b"print('CHUNK_OK')" in (script if isinstance(script, bytes) else b""):
                 chunk_count[0] += 1
                 return (True, "CHUNK_OK")
-            elif b"print('UPLOAD_OK')" in (
-                script if isinstance(script, bytes) else b""
-            ):
+            elif b"print('UPLOAD_OK')" in (script if isinstance(script, bytes) else b""):
                 return (True, "UPLOAD_OK")
             elif b"print('OPEN_OK')" in (script if isinstance(script, bytes) else b""):
                 return (True, "OPEN_OK")
@@ -1005,9 +983,7 @@ class TestUploadFileChunked:
             with patch("cardputer_client.flash.exec_raw") as mock_exec_raw:
                 mock_exec_raw.side_effect = lambda *args, **kw: next(response_iter)
 
-                result = cardputer_flash.upload_file(
-                    mock_ser, "/fake/local.py", "main.py"
-                )
+                result = cardputer_flash.upload_file(mock_ser, "/fake/local.py", "main.py")
 
         assert result is True
 
@@ -1028,15 +1004,14 @@ class TestUploadFileChunked:
             with patch("cardputer_client.flash.exec_raw") as mock_exec_raw:
                 mock_exec_raw.side_effect = lambda *args, **kw: next(response_iter)
 
-                result = cardputer_flash.upload_file(
-                    mock_ser, "/fake/local.py", "\\foo\\main.py"
-                )
+                result = cardputer_flash.upload_file(mock_ser, "/fake/local.py", "\\foo\\main.py")
 
         assert result is True
 
 
 if __name__ == "__main__":
-    import pytest as _pytest
     import sys as _sys
+
+    import pytest as _pytest
 
     _sys.exit(_pytest.main([__file__] + _sys.argv[1:]))

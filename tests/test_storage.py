@@ -11,7 +11,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-
 # ---------------------------------------------------------------------------
 # Fixture — mock duckdb module so DuckDbStore imports
 # ---------------------------------------------------------------------------
@@ -341,9 +340,7 @@ class TestDuckDbStoreQuery:
 
         rows = await store.query("SELECT node_id, seq FROM sensor_readings")
 
-        mock_conn.execute.assert_called_once_with(
-            "SELECT node_id, seq FROM sensor_readings"
-        )
+        mock_conn.execute.assert_called_once_with("SELECT node_id, seq FROM sensor_readings")
         assert len(rows) == 2
         assert rows[0] == ("node-1", 42)
         assert rows[1] == ("node-2", 99)

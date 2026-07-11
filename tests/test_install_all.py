@@ -8,18 +8,17 @@ Run with::
     bazel test //tests:test_install_all --test_output=all
 """
 
-from unittest.mock import MagicMock, patch
 import subprocess
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 # Import the install_all module (available under Bazel via deps).
 try:
-    from tools import install_all
-    from tools import install_services
+    from tools import install_all, install_services
 except ImportError:
-    install_all = None
-    install_services = None
+    install_all = None  # type: ignore[assignment]
+    install_services = None  # type: ignore[assignment]
 
 
 # ── helpers ─────────────────────────────────────────────────────────
@@ -34,15 +33,9 @@ def _patch_imports():
     patches = {
         "serial": patch("tools.install_all.serial", MagicMock()),
         "serial.tools": patch("tools.install_all.serial.tools", MagicMock()),
-        "serial.tools.list_ports": patch(
-            "tools.install_all.serial.tools.list_ports", MagicMock()
-        ),
-        "find_cardputer_port": patch.object(
-            install_all, "find_cardputer_port", return_value=None
-        ),
-        "find_rnode_port": patch.object(
-            install_all, "find_rnode_port", return_value=None
-        ),
+        "serial.tools.list_ports": patch("tools.install_all.serial.tools.list_ports", MagicMock()),
+        "find_cardputer_port": patch.object(install_all, "find_cardputer_port", return_value=None),
+        "find_rnode_port": patch.object(install_all, "find_rnode_port", return_value=None),
         "check_rnode_firmware": patch.object(
             install_all, "check_rnode_firmware", return_value=False
         ),
@@ -155,9 +148,7 @@ class TestParseArgs:
 
     def test_combined_flags(self):
         """Multiple flags can be combined."""
-        args = install_all._parse_args(
-            ["--cardputer-port", "/dev/ttyACM0", "--skip-rnode"]
-        )
+        args = install_all._parse_args(["--cardputer-port", "/dev/ttyACM0", "--skip-rnode"])
         assert args.cardputer_port == "/dev/ttyACM0"
         assert args.skip_rnode is True
         assert args.skip_cardputer is False
@@ -292,16 +283,12 @@ class TestFlashCardputerClient:
 
         patches = {
             "time.sleep": patch("tools.install_all.time.sleep", return_value=None),
-            "enter_raw_repl": patch.object(
-                install_all, "enter_raw_repl", return_value=True
-            ),
+            "enter_raw_repl": patch.object(install_all, "enter_raw_repl", return_value=True),
             "verify_device": patch.object(
                 install_all, "verify_device", return_value=(True, "ESP32 detected")
             ),
             "upload_file": patch.object(install_all, "upload_file", return_value=True),
-            "exit_raw_repl": patch.object(
-                install_all, "exit_raw_repl", return_value=None
-            ),
+            "exit_raw_repl": patch.object(install_all, "exit_raw_repl", return_value=None),
             "verify_files_exist": patch.object(
                 install_all, "verify_files_exist", return_value=None
             ),
@@ -315,9 +302,7 @@ class TestFlashCardputerClient:
         for key, p in patches.items():
             self.mocks[key] = p.start()
         # serial.Serial needs special handling (returns self.mock_ser)
-        self._serial_patch = patch(
-            "tools.install_all.serial.Serial", self.mock_serial_class
-        )
+        self._serial_patch = patch("tools.install_all.serial.Serial", self.mock_serial_class)
         self._serial_patch.start()
         # FILES_TO_UPLOAD is a list, not compatible with patch.object dict stop
         self._saved_files = install_all.FILES_TO_UPLOAD
@@ -374,9 +359,7 @@ class TestFlashCardputerClient:
 
     def test_missing_source_file_sets_fail(self):
         """Missing source file should set FAIL and close port."""
-        self.mocks["verify_files_exist"].side_effect = FileNotFoundError(
-            "main.py not found"
-        )
+        self.mocks["verify_files_exist"].side_effect = FileNotFoundError("main.py not found")
         result = self._make_result()
         install_all._flash_cardputer_client("/dev/ttyACM0", "/fake/root", result)
         assert result.status == "FAIL"
@@ -401,9 +384,7 @@ class TestFlashCardputerClient:
         """Serial exception mid-operation should set FAIL and close port."""
         import serial as pyserial
 
-        self.mocks["enter_raw_repl"].side_effect = pyserial.SerialException(
-            "disconnected"
-        )
+        self.mocks["enter_raw_repl"].side_effect = pyserial.SerialException("disconnected")
         result = self._make_result()
         install_all._flash_cardputer_client("/dev/ttyACM0", "/fake/root", result)
         assert result.status == "FAIL"
@@ -452,9 +433,7 @@ class TestMainPipeline:
             "find_cardputer_port": patch.object(
                 install_all, "find_cardputer_port", return_value=None
             ),
-            "find_rnode_port": patch.object(
-                install_all, "find_rnode_port", return_value=None
-            ),
+            "find_rnode_port": patch.object(install_all, "find_rnode_port", return_value=None),
             "check_rnode_firmware": patch.object(
                 install_all, "check_rnode_firmware", return_value=False
             ),
@@ -464,16 +443,12 @@ class TestMainPipeline:
             "find_client_root": patch.object(
                 install_all, "find_client_root", return_value="/fake/client_root"
             ),
-            "enter_raw_repl": patch.object(
-                install_all, "enter_raw_repl", return_value=True
-            ),
+            "enter_raw_repl": patch.object(install_all, "enter_raw_repl", return_value=True),
             "verify_device": patch.object(
                 install_all, "verify_device", return_value=(True, "ESP32 detected")
             ),
             "upload_file": patch.object(install_all, "upload_file", return_value=True),
-            "exit_raw_repl": patch.object(
-                install_all, "exit_raw_repl", return_value=None
-            ),
+            "exit_raw_repl": patch.object(install_all, "exit_raw_repl", return_value=None),
             "verify_files_exist": patch.object(
                 install_all, "verify_files_exist", return_value=None
             ),
@@ -751,9 +726,7 @@ class TestMainWithServicesSkipped:
         patches = _patch_imports()
         # Also mock the service install functions
         patches["install_pi_server"] = patch.object(install_all, "install_pi_server")
-        patches["install_k8s_services"] = patch.object(
-            install_all, "install_k8s_services"
-        )
+        patches["install_k8s_services"] = patch.object(install_all, "install_k8s_services")
         self.mocks = _start_patches(patches)
         self.mocks["find_cardputer_port"].return_value = None
         self.mocks["find_rnode_port"].return_value = None
@@ -784,9 +757,7 @@ class TestMainWithServices:
         patches = _patch_imports()
         # Mock the service install functions
         patches["install_pi_server"] = patch.object(install_all, "install_pi_server")
-        patches["install_k8s_services"] = patch.object(
-            install_all, "install_k8s_services"
-        )
+        patches["install_k8s_services"] = patch.object(install_all, "install_k8s_services")
         self.mocks = _start_patches(patches)
         self.mocks["find_cardputer_port"].return_value = None
         self.mocks["find_rnode_port"].return_value = None
@@ -879,9 +850,7 @@ class TestInstallRNodeFirmware:
     def test_exception_during_check_sets_fail(self):
         """check_rnode_firmware raises → status FAIL, traceback printed."""
         result = self._make_result()
-        with patch.object(
-            install_all, "check_rnode_firmware", side_effect=OSError("serial error")
-        ):
+        with patch.object(install_all, "check_rnode_firmware", side_effect=OSError("serial error")):
             install_all._install_rnode_firmware("/dev/ttyUSB0", result)
         assert result.status == "FAIL"
         assert "Unexpected error" in result.detail

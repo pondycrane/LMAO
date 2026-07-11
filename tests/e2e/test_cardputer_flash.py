@@ -105,9 +105,7 @@ class TestHardwareDetection:
 
     def test_pyserial_available(self):
         """pyserial must be importable in the Bazel test environment."""
-        assert HAS_PYSERIAL, (
-            "pyserial not available. Add '@lmao_pip//pyserial' to test deps."
-        )
+        assert HAS_PYSERIAL, "pyserial not available. Add '@lmao_pip//pyserial' to test deps."
 
     def test_flash_lib_available(self):
         """The flash_lib must be importable."""
@@ -319,7 +317,8 @@ except:
 
 
 if __name__ == "__main__":
-    import pytest
     import sys
+
+    import pytest
 
     sys.exit(pytest.main([__file__] + sys.argv[1:]))

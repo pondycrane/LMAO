@@ -2,31 +2,32 @@
 # Endpoint addressing and announce management
 
 import time
+
 from . import const
-from .log import log, LOG_VERBOSE, LOG_DEBUG, LOG_ERROR
-from .identity import Identity
 from .crypto import Token
+from .identity import Identity
+from .log import LOG_DEBUG, LOG_ERROR, LOG_VERBOSE, log
 
 
 class Destination:
     # Type constants
     SINGLE = const.DEST_SINGLE
-    GROUP  = const.DEST_GROUP
-    PLAIN  = const.DEST_PLAIN
-    LINK   = const.DEST_LINK
+    GROUP = const.DEST_GROUP
+    PLAIN = const.DEST_PLAIN
+    LINK = const.DEST_LINK
 
     # Direction constants
-    IN  = const.DIR_IN
+    IN = const.DIR_IN
     OUT = const.DIR_OUT
 
     # Proof strategies
     PROVE_NONE = const.PROVE_NONE
-    PROVE_APP  = const.PROVE_APP
-    PROVE_ALL  = const.PROVE_ALL
+    PROVE_APP = const.PROVE_APP
+    PROVE_ALL = const.PROVE_ALL
 
     # Request policies
     ALLOW_NONE = 0x00
-    ALLOW_ALL  = 0x01
+    ALLOW_ALL = 0x01
     ALLOW_LIST = 0x02
 
     PR_TAG_WINDOW = 30
@@ -50,7 +51,7 @@ class Destination:
     def hash(identity, app_name, *aspects):
         name_hash = Identity.full_hash(
             Destination.expand_name(None, app_name, *aspects).encode("utf-8")
-        )[:(Identity.NAME_HASH_LENGTH // 8)]
+        )[: (Identity.NAME_HASH_LENGTH // 8)]
         addr_hash_material = name_hash
         if identity is not None:
             if isinstance(identity, Identity):
@@ -59,7 +60,7 @@ class Destination:
                 addr_hash_material += identity
             else:
                 raise TypeError("Invalid identity material for hash")
-        return Identity.full_hash(addr_hash_material)[:const.TRUNCATED_HASHLENGTH // 8]
+        return Identity.full_hash(addr_hash_material)[: const.TRUNCATED_HASHLENGTH // 8]
 
     def __init__(self, identity, direction, type, app_name, *aspects):
         if "." in app_name:
@@ -105,25 +106,28 @@ class Destination:
         self.hash = Destination.hash(self.identity, app_name, *aspects)
         self.name_hash = Identity.full_hash(
             Destination.expand_name(None, app_name, *aspects).encode("utf-8")
-        )[:(Identity.NAME_HASH_LENGTH // 8)]
+        )[: (Identity.NAME_HASH_LENGTH // 8)]
         self.hexhash = self.hash.hex()
         self.default_app_data = None
 
         from .transport import Transport
+
         Transport.register_destination(self)
 
     def __str__(self):
         return "<" + self.name + ":" + self.hexhash + ">"
 
-    def announce(self, app_data=None, path_response=False, attached_interface=None, tag=None, send=True):
+    def announce(
+        self, app_data=None, path_response=False, attached_interface=None, tag=None, send=True
+    ):
         if self.type != Destination.SINGLE:
             raise TypeError("Only SINGLE destinations can be announced")
         if self.direction != Destination.IN:
             raise TypeError("Only IN destinations can be announced")
 
         import sys
+
         ratchet = b""
-        destination_hash = self.hash
         t = int(time.time())
         if sys.platform == "esp32":
             t += 946684800  # ESP32 MicroPython uses 2000 epoch, convert to Unix
@@ -142,12 +146,16 @@ class Destination:
                 if isinstance(returned, bytes):
                     app_data = returned
 
-        signed_data = self.hash + self.identity.get_public_key() + self.name_hash + random_hash + ratchet
+        signed_data = (
+            self.hash + self.identity.get_public_key() + self.name_hash + random_hash + ratchet
+        )
         if app_data is not None:
             signed_data += app_data
 
         try:
-            import gc; gc.collect()
+            import gc
+
+            gc.collect()
         except Exception as e:
             log("Destination sign error: " + str(e), LOG_DEBUG)
         signature = self.identity.sign(signed_data)
@@ -155,21 +163,23 @@ class Destination:
             gc.collect()
         except Exception as e:
             log("Destination announce construction error: " + str(e), LOG_DEBUG)
-        announce_data = self.identity.get_public_key() + self.name_hash + random_hash + ratchet + signature
+        announce_data = (
+            self.identity.get_public_key() + self.name_hash + random_hash + ratchet + signature
+        )
 
         if app_data is not None:
             announce_data += app_data
 
-        if ratchet:
-            context_flag = const.FLAG_SET
-        else:
-            context_flag = const.FLAG_UNSET
+        context_flag = const.FLAG_SET if ratchet else const.FLAG_UNSET
 
         announce_context = const.CTX_PATH_RESPONSE if path_response else const.CTX_NONE
 
         from .packet import Packet
+
         announce_packet = Packet(
-            self, announce_data, const.PKT_ANNOUNCE,
+            self,
+            announce_data,
+            const.PKT_ANNOUNCE,
             context=announce_context,
             attached_interface=attached_interface,
             context_flag=context_flag,
@@ -183,12 +193,15 @@ class Destination:
     def rotate_ratchets(self):
         if self.ratchets is not None:
             now = time.time()
-            if self.latest_ratchet_time is None or now > self.latest_ratchet_time + self.ratchet_interval:
+            if (
+                self.latest_ratchet_time is None
+                or now > self.latest_ratchet_time + self.ratchet_interval
+            ):
                 new_ratchet = Identity._generate_ratchet()
                 self.ratchets.insert(0, new_ratchet)
                 self.latest_ratchet_time = now
                 if len(self.ratchets) > self.retained_ratchets:
-                    self.ratchets = self.ratchets[:self.retained_ratchets]
+                    self.ratchets = self.ratchets[: self.retained_ratchets]
 
     def enable_ratchets(self):
         self.ratchets = []
@@ -203,7 +216,7 @@ class Destination:
                 self.latest_ratchet_id = Identity._get_ratchet_id(selected_ratchet)
             return self.identity.encrypt(plaintext, ratchet=selected_ratchet)
         if self.type == Destination.GROUP:
-            if hasattr(self, 'prv') and self.prv is not None:
+            if hasattr(self, "prv") and self.prv is not None:
                 return self.prv.encrypt(plaintext)
             else:
                 raise ValueError("No key for GROUP destination")
@@ -215,7 +228,8 @@ class Destination:
             if self.ratchets:
                 try:
                     return self.identity.decrypt(
-                        ciphertext, ratchets=self.ratchets,
+                        ciphertext,
+                        ratchets=self.ratchets,
                         enforce_ratchets=self._enforce_ratchets,
                         ratchet_id_receiver=self,
                     )
@@ -224,12 +238,13 @@ class Destination:
                     return None
             else:
                 return self.identity.decrypt(
-                    ciphertext, ratchets=None,
+                    ciphertext,
+                    ratchets=None,
                     enforce_ratchets=self._enforce_ratchets,
                     ratchet_id_receiver=self,
                 )
         if self.type == Destination.GROUP:
-            if hasattr(self, 'prv') and self.prv is not None:
+            if hasattr(self, "prv") and self.prv is not None:
                 return self.prv.decrypt(ciphertext)
             else:
                 raise ValueError("No key for GROUP destination")
@@ -253,8 +268,10 @@ class Destination:
             if self.accept_link_requests:
                 try:
                     from .link import Link
-                    import gc; gc.collect()
-                    link = Link(self, packet)
+                    import gc
+
+                    gc.collect()
+                    Link(self, packet)
                     gc.collect()
                 except Exception as e:
                     log("Link creation failed: " + str(e), LOG_ERROR)

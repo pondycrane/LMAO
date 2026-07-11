@@ -1,14 +1,15 @@
 # µReticulum Serial Interface
 # HDLC-framed serial communication, wire-compatible with RNS SerialInterface
 
+import contextlib
 import time
-from . import Interface
-from ..log import log, LOG_VERBOSE, LOG_ERROR, LOG_NOTICE
 
+from ..log import LOG_ERROR, LOG_NOTICE, LOG_VERBOSE, log
+from . import Interface
 
 # Simplified HDLC framing (same as reference RNS)
-FLAG     = 0x7E
-ESC      = 0x7D
+FLAG = 0x7E
+ESC = 0x7D
 ESC_MASK = 0x20
 
 
@@ -86,7 +87,10 @@ class SerialInterface(Interface):
 
         self._uart = UART(self.uart_id, **kwargs)
         self.online = True
-        log("Serial port UART" + str(self.uart_id) + " opened at " + str(self.speed) + " baud", LOG_NOTICE)
+        log(
+            "Serial port UART" + str(self.uart_id) + " opened at " + str(self.speed) + " baud",
+            LOG_NOTICE,
+        )
 
     def process_outgoing(self, data):
         """Send HDLC-framed data"""
@@ -172,8 +176,15 @@ class SerialInterface(Interface):
                     _err_count = 0
             except Exception as e:
                 _err_count += 1
-                log("Serial poll error (" + str(_err_count) + "/"
-                    + str(self.MAX_ERROR_RETRIES) + "): " + str(e), LOG_ERROR)
+                log(
+                    "Serial poll error ("
+                    + str(_err_count)
+                    + "/"
+                    + str(self.MAX_ERROR_RETRIES)
+                    + "): "
+                    + str(e),
+                    LOG_ERROR,
+                )
 
                 if _err_count >= self.MAX_ERROR_RETRIES:
                     _reopen_count += 1
@@ -182,8 +193,14 @@ class SerialInterface(Interface):
                         self.online = False
                         break
 
-                    log("Serial UART reopening (" + str(_reopen_count) + "/"
-                        + str(self.MAX_REOPEN_RETRIES) + ")", LOG_NOTICE)
+                    log(
+                        "Serial UART reopening ("
+                        + str(_reopen_count)
+                        + "/"
+                        + str(self.MAX_REOPEN_RETRIES)
+                        + ")",
+                        LOG_NOTICE,
+                    )
                     try:
                         self._open_port()
                         _err_count = 0
@@ -197,10 +214,8 @@ class SerialInterface(Interface):
     def close(self):
         super().close()
         if self._uart:
-            try:
+            with contextlib.suppress(BaseException):
                 self._uart.deinit()
-            except:
-                pass
             self._uart = None
             log("Serial Interface " + self.name + " closed", LOG_VERBOSE)
 

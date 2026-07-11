@@ -1,8 +1,8 @@
 """Smoke tests for urns LXMessage — pack/unpack round-trip on CPython."""
 
-import sys
-import os
 import hashlib
+import os
+import sys
 from unittest.mock import MagicMock
 
 # Ensure the urns package is importable
@@ -23,7 +23,7 @@ class _MockMicroPython:
         return f
 
 
-sys.modules["micropython"] = _MockMicroPython()
+sys.modules["micropython"] = _MockMicroPython()  # type: ignore[assignment]
 
 _mp_uhashlib = MagicMock()
 _mp_uhashlib.sha256 = hashlib.sha256
@@ -45,9 +45,9 @@ _mp_ucryptolib = MagicMock()
 _mp_ucryptolib.aes = _MockAESCipher
 sys.modules["ucryptolib"] = _mp_ucryptolib
 
-from urns.identity import Identity  # noqa: E402
 from urns.destination import Destination  # noqa: E402
-from urns.lxmf import LXMessage, APP_NAME  # noqa: E402
+from urns.identity import Identity  # noqa: E402
+from urns.lxmf import APP_NAME, LXMessage  # noqa: E402
 
 
 class TestLXMessageRoundTrip:
@@ -56,9 +56,7 @@ class TestLXMessageRoundTrip:
     def setup_method(self):
         self.source = Identity()
         self.destination = Identity()
-        self.dest_obj = Destination(
-            self.destination, Destination.OUT, Destination.SINGLE, APP_NAME
-        )
+        self.dest_obj = Destination(self.destination, Destination.OUT, Destination.SINGLE, APP_NAME)
 
     def test_text_message_round_trip(self):
         msg = LXMessage(

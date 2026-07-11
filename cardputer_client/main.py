@@ -7,20 +7,19 @@ Uses the urns µReticulum port for MicroPython.
 Sends periodic "Hello" messages and displays received replies.
 """
 
-import time
-import sys
-
 # µReticulum imports (urns MicroPython port)
 import gc
+import sys
+import time
 
 gc.collect()
 
 # Try to import the urns library from /lib (where the flash tool places it)
 try:
     sys.path.insert(0, "/lib")
-    from urns import Reticulum, Identity  # noqa: F401
-    from urns.lxmf import LXMRouter, LXMessage  # noqa: F401
-    from urns.log import LOG_NOTICE, LOG_INFO  # noqa: F401
+    from urns import Identity, Reticulum  # noqa: F401
+    from urns.log import LOG_INFO, LOG_NOTICE  # noqa: F401
+    from urns.lxmf import LXMessage, LXMRouter  # noqa: F401
 
     HAS_URNS = True
 except ImportError:
@@ -28,8 +27,8 @@ except ImportError:
 
 # Display support (if available)
 try:
-    from machine import Pin, SPI
     import st7789
+    from machine import SPI, Pin
 
     HAS_DISPLAY = True
 except ImportError:
@@ -37,7 +36,7 @@ except ImportError:
 
 # Proto encoder (optional — gracefully degrades if not on device)
 try:
-    from proto.lma_encoder import make_poc_message, encode_sensor_envelope
+    from proto.lma_encoder import encode_sensor_envelope, make_poc_message
 
     HAS_PROTO = True
 except ImportError:
@@ -260,7 +259,7 @@ def handle_reply(message):
         pending_replies.append(content)
 
 
-pending_replies = []
+pending_replies: list[str] = []
 
 
 # ---- Helpers ----
@@ -340,8 +339,7 @@ def _convert_dest_hash(hex_val):
         return hex_val
     if not isinstance(hex_val, str):
         raise ValueError(
-            f"DEST_HASH must be a hex string, bytes, or None, "
-            f"got {type(hex_val).__name__}"
+            f"DEST_HASH must be a hex string, bytes, or None, got {type(hex_val).__name__}"
         )
     try:
         import ubinascii
@@ -372,16 +370,14 @@ def main():
 
     # ---- Load config (must be on device as /config.py) ----
     try:
-        from config import WIFI_SSID, WIFI_PASS, NODE_NAME, DEBUG, CONFIG
-
-        from config import DEST_HASH
+        from config import CONFIG, DEBUG, DEST_HASH, NODE_NAME, WIFI_PASS, WIFI_SSID
 
         raw_dest = DEST_HASH  # captured for error messages
         DEST_HASH = _convert_dest_hash(DEST_HASH)
 
         # Optional new config constants — gracefully handle missing values
         try:
-            from config import INTERVAL_SECONDS, SENSOR_TYPE, SENSOR_I2C_ADDR
+            from config import INTERVAL_SECONDS, SENSOR_I2C_ADDR, SENSOR_TYPE
         except ImportError:
             INTERVAL_SECONDS = 60
             SENSOR_TYPE = None

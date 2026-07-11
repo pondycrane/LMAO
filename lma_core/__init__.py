@@ -17,15 +17,15 @@ _logger = logging.getLogger(__name__)
 
 try:
     from proto.lma_pb2 import (  # type: ignore[attr-defined]
-        LMAOEnvelope,
-        TextMessage,
-        SensorReport,
-        SensorReading,
-        CommandRequest,
-        CommandAck,
         AudioMessage,
-        ImageMessage,
         CallSignal,
+        CommandAck,
+        CommandRequest,
+        ImageMessage,
+        LMAOEnvelope,
+        SensorReading,
+        SensorReport,
+        TextMessage,
     )
 except ImportError:
     _logger.critical(
@@ -41,15 +41,15 @@ except ImportError:
 _grpc_available = False
 try:
     from .grpc_types import (  # noqa: F401
+        LMAO,
+        GetIdentityRequest,
+        GetIdentityResponse,
+        LMAOServicer,
+        LMAOStub,
         SendRequest,
         SendResponse,
         SubscribeRequest,
         SubscribeResponse,
-        GetIdentityRequest,
-        GetIdentityResponse,
-        LMAOStub,
-        LMAOServicer,
-        LMAO,
         add_LMAOServicer_to_server,
     )
 

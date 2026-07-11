@@ -3,10 +3,10 @@
 # Supports segmented data transfer over Links for payloads > single packet
 
 import time
-from . import const, umsgpack
-from .log import log, LOG_VERBOSE, LOG_DEBUG, LOG_ERROR, LOG_NOTICE
-from .identity import Identity
 
+from . import const, umsgpack
+from .identity import Identity
+from .log import LOG_DEBUG, LOG_ERROR, LOG_NOTICE, LOG_VERBOSE, log
 
 # Constants (wire-compatible with reference RNS)
 MAPHASH_LEN = 4
@@ -71,11 +71,21 @@ class Resource:
         self.compressed = False
         try:
             from .bz2dec import compress as bz2_compress
+
             compressed = bz2_compress(data)
             if compressed and len(compressed) < len(data):
                 data = compressed
                 self.compressed = True
-                log("Resource compressed " + self.hash.hex()[:8] + ": " + str(self.total_data_size) + "B -> " + str(len(data)) + "B", LOG_DEBUG)
+                log(
+                    "Resource compressed "
+                    + self.hash.hex()[:8]
+                    + ": "
+                    + str(self.total_data_size)
+                    + "B -> "
+                    + str(len(data))
+                    + "B",
+                    LOG_DEBUG,
+                )
             if compressed:
                 del compressed
         except Exception:
@@ -122,8 +132,15 @@ class Resource:
         # Register with link
         self.link.register_outgoing_resource(self)
 
-        log("Resource created: " + str(len(data)) + "B -> " +
-            str(self.total_parts) + " parts, hash=" + self.hash.hex()[:8], LOG_VERBOSE)
+        log(
+            "Resource created: "
+            + str(len(data))
+            + "B -> "
+            + str(self.total_parts)
+            + " parts, hash="
+            + self.hash.hex()[:8],
+            LOG_VERBOSE,
+        )
 
         # Free original data — we have encrypted form
         self.data = data  # Keep for proof verification
@@ -136,6 +153,7 @@ class Resource:
     def accept(adv_data, link):
         """Create a receiver-side Resource from an advertisement."""
         import gc
+
         gc.collect()
 
         r = object.__new__(Resource)
@@ -151,7 +169,7 @@ class Resource:
             log("Resource adv unpack failed: " + str(e), LOG_ERROR)
             return None
 
-        r.total_size = adv["t"]     # encrypted size
+        r.total_size = adv["t"]  # encrypted size
         r.total_data_size = adv["d"]  # original data size
         r.total_parts = adv["n"]
         r.hash = adv["h"]
@@ -175,10 +193,14 @@ class Resource:
         if reject:
             log("Resource rejected: " + reject, LOG_ERROR)
             cancel_data = link._token.encrypt(r.hash)
-            from .packet import Packet, LinkDestination
+            from .packet import LinkDestination, Packet
+
             cancel_pkt = Packet(
-                LinkDestination(link.link_id), cancel_data,
-                const.PKT_DATA, context=const.CTX_RESOURCE_RCL, create_receipt=False,
+                LinkDestination(link.link_id),
+                cancel_data,
+                const.PKT_DATA,
+                context=const.CTX_RESOURCE_RCL,
+                create_receipt=False,
             )
             cancel_pkt.send()
             return None
@@ -186,10 +208,13 @@ class Resource:
         # Parse hashmap
         r.hashmap = []
         for i in range(0, len(hashmap_raw), MAPHASH_LEN):
-            r.hashmap.append(hashmap_raw[i:i + MAPHASH_LEN])
+            r.hashmap.append(hashmap_raw[i : i + MAPHASH_LEN])
 
         if len(r.hashmap) != r.total_parts:
-            log("Resource hashmap mismatch: " + str(len(r.hashmap)) + " != " + str(r.total_parts), LOG_ERROR)
+            log(
+                "Resource hashmap mismatch: " + str(len(r.hashmap)) + " != " + str(r.total_parts),
+                LOG_ERROR,
+            )
             return None
 
         # Allocate parts
@@ -206,8 +231,15 @@ class Resource:
         # Register with link
         link.register_incoming_resource(r)
 
-        log("Resource accepted: " + str(r.total_data_size) + "B, " +
-            str(r.total_parts) + " parts, hash=" + r.hash.hex()[:8], LOG_VERBOSE)
+        log(
+            "Resource accepted: "
+            + str(r.total_data_size)
+            + "B, "
+            + str(r.total_parts)
+            + " parts, hash="
+            + r.hash.hex()[:8],
+            LOG_VERBOSE,
+        )
 
         # Request first window
         r.request_next()
@@ -222,8 +254,8 @@ class Resource:
             "h": self.hash,
             "r": self.random_hash,
             "o": self.hash,  # original_hash = hash (single segment)
-            "i": 1,          # segment_index
-            "l": 1,          # total_segments
+            "i": 1,  # segment_index
+            "l": 1,  # total_segments
             "q": self.request_id,
             "f": self.flags,
             "m": self.hashmap,
@@ -259,7 +291,11 @@ class Resource:
                 break
 
         if need_hmu:
-            last_map_hash = self.hashmap[self.received_count - 1] if self.received_count > 0 else self.hashmap[0]
+            last_map_hash = (
+                self.hashmap[self.received_count - 1]
+                if self.received_count > 0
+                else self.hashmap[0]
+            )
             req_data = bytes([HASHMAP_IS_EXHAUSTED])
             req_data += last_map_hash
         else:
@@ -272,7 +308,10 @@ class Resource:
         self.last_request_at = time.time()
         self.request_retries += 1
         self.link.send(req_data, const.CTX_RESOURCE_REQ)
-        log("Resource request: " + str(len(missing)) + " parts for " + self.hash.hex()[:8], LOG_DEBUG)
+        log(
+            "Resource request: " + str(len(missing)) + " parts for " + self.hash.hex()[:8],
+            LOG_DEBUG,
+        )
 
     def get_progress(self):
         """Return transfer progress as a float 0.0 to 1.0."""
@@ -295,7 +334,15 @@ class Resource:
             log("Resource request max retries reached: " + self.hash.hex()[:8], LOG_ERROR)
             self.cancel()
             return
-        log("Resource request retry " + str(self.request_retries) + "/" + str(MAX_REQUEST_RETRIES) + " for " + self.hash.hex()[:8], LOG_DEBUG)
+        log(
+            "Resource request retry "
+            + str(self.request_retries)
+            + "/"
+            + str(MAX_REQUEST_RETRIES)
+            + " for "
+            + self.hash.hex()[:8],
+            LOG_DEBUG,
+        )
         self.request_next()
 
     def receive_part(self, data):
@@ -312,8 +359,17 @@ class Resource:
                 self.received_count += 1
                 self.window_count += 1
                 pct = int(self.received_count * 100 / self.total_parts)
-                log("Resource RX " + str(self.received_count) + "/" + str(self.total_parts) +
-                    " (" + str(pct) + "%) " + self.hash.hex()[:8], LOG_DEBUG)
+                log(
+                    "Resource RX "
+                    + str(self.received_count)
+                    + "/"
+                    + str(self.total_parts)
+                    + " ("
+                    + str(pct)
+                    + "%) "
+                    + self.hash.hex()[:8],
+                    LOG_DEBUG,
+                )
 
                 if self.received_count == self.total_parts:
                     self.assemble()
@@ -353,15 +409,23 @@ class Resource:
         t1 = time.time()
 
         # Strip random hash
-        received_random = plaintext[:RANDOM_HASH_SIZE]
+        plaintext[:RANDOM_HASH_SIZE]
         self.data = plaintext[RANDOM_HASH_SIZE:]
         del plaintext
         gc.collect()
 
         # Decompress before verification (hash is of original uncompressed data)
         if self.flags & FLAG_COMPRESSED:
-            log("Resource decompressing " + self.hash.hex()[:8] + " (" + str(len(self.data)) + "B compressed)", LOG_DEBUG)
+            log(
+                "Resource decompressing "
+                + self.hash.hex()[:8]
+                + " ("
+                + str(len(self.data))
+                + "B compressed)",
+                LOG_DEBUG,
+            )
             from .bz2dec import decompress as bz2_decompress
+
             self.data = bz2_decompress(self.data)
             gc.collect()
         t2 = time.time()
@@ -377,10 +441,24 @@ class Resource:
         # Prove (uses decompressed data)
         self.prove()
         t3 = time.time()
-        log("Resource timing: decrypt=" + str(int((t1-t0)*1000)) + "ms decompress=" + str(int((t2-t1)*1000)) + "ms prove=" + str(int((t3-t2)*1000)) + "ms total=" + str(int((t3-t0)*1000)) + "ms", LOG_NOTICE)
+        log(
+            "Resource timing: decrypt="
+            + str(int((t1 - t0) * 1000))
+            + "ms decompress="
+            + str(int((t2 - t1) * 1000))
+            + "ms prove="
+            + str(int((t3 - t2) * 1000))
+            + "ms total="
+            + str(int((t3 - t0) * 1000))
+            + "ms",
+            LOG_NOTICE,
+        )
 
         self.status = COMPLETE
-        log("Resource complete: " + str(len(self.data)) + "B, hash=" + self.hash.hex()[:8], LOG_NOTICE)
+        log(
+            "Resource complete: " + str(len(self.data)) + "B, hash=" + self.hash.hex()[:8],
+            LOG_NOTICE,
+        )
         self._conclude()
 
     def prove(self):
@@ -388,13 +466,26 @@ class Resource:
         proof = Identity.full_hash(self.data + self.hash)
         proof_data = self.hash + proof
 
-        from .packet import Packet, LinkDestination
+        from .packet import LinkDestination, Packet
+
         proof_pkt = Packet(
-            LinkDestination(self.link.link_id), proof_data,
-            const.PKT_PROOF, context=const.CTX_RESOURCE_PRF, create_receipt=False,
+            LinkDestination(self.link.link_id),
+            proof_data,
+            const.PKT_PROOF,
+            context=const.CTX_RESOURCE_PRF,
+            create_receipt=False,
         )
         proof_pkt.send()
-        log("Resource proof sent for " + self.hash.hex()[:8] + " link=" + self.link.link_id.hex()[:8] + " " + str(len(proof_data)) + "B", LOG_NOTICE)
+        log(
+            "Resource proof sent for "
+            + self.hash.hex()[:8]
+            + " link="
+            + self.link.link_id.hex()[:8]
+            + " "
+            + str(len(proof_data))
+            + "B",
+            LOG_NOTICE,
+        )
 
     def validate_proof(self, proof_data):
         """(Sender) Validate proof from receiver."""
@@ -420,7 +511,9 @@ class Resource:
         # Free encrypted data
         self.encrypted = None
         self.parts = None
-        import gc; gc.collect()
+        import gc
+
+        gc.collect()
 
         self._conclude()
         return True
@@ -442,7 +535,7 @@ class Resource:
             offset += MAPHASH_LEN  # skip last_map_hash
 
         hash_len = 32
-        req_hash = plaintext[offset:offset + hash_len]
+        req_hash = plaintext[offset : offset + hash_len]
         offset += hash_len
 
         if req_hash != self.hash:
@@ -455,15 +548,16 @@ class Resource:
         # Extract requested part hashes
         requested_hashes = []
         while offset + MAPHASH_LEN <= len(plaintext):
-            requested_hashes.append(plaintext[offset:offset + MAPHASH_LEN])
+            requested_hashes.append(plaintext[offset : offset + MAPHASH_LEN])
             offset += MAPHASH_LEN
 
         # Send matching parts. Count unique parts served (not raw TX events)
         # so progress stays in [0, total_parts].
-        from .packet import Packet, LinkDestination
+        from .packet import LinkDestination, Packet
+
         for req_hash_part in requested_hashes:
             for i in range(self.total_parts):
-                part_map_hash = self.hashmap[i * MAPHASH_LEN:(i + 1) * MAPHASH_LEN]
+                part_map_hash = self.hashmap[i * MAPHASH_LEN : (i + 1) * MAPHASH_LEN]
                 if part_map_hash == req_hash_part:
                     pkt = Packet(
                         LinkDestination(self.link.link_id),
@@ -484,8 +578,18 @@ class Resource:
         pct = int(served * 100 / self.total_parts)
         retx = self.sent_count - served
         suffix = " retx=" + str(retx) if retx else ""
-        log("Resource TX " + str(served) + "/" + str(self.total_parts) +
-            " (" + str(pct) + "%) " + self.hash.hex()[:8] + suffix, LOG_DEBUG)
+        log(
+            "Resource TX "
+            + str(served)
+            + "/"
+            + str(self.total_parts)
+            + " ("
+            + str(pct)
+            + "%) "
+            + self.hash.hex()[:8]
+            + suffix,
+            LOG_DEBUG,
+        )
 
     def cancel(self):
         """Cancel this resource transfer."""

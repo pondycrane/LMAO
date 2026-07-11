@@ -8,10 +8,9 @@ is ``async def``.
 
 import sys
 import types
-from unittest.mock import MagicMock, AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-
 
 # ---------------------------------------------------------------------------
 # Fixture — set up mocks for nats and nats.js, then clean up

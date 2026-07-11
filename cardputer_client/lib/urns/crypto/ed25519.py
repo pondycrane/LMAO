@@ -9,6 +9,7 @@ import sys
 
 _native = None
 
+
 # Try to load native C module (Monocypher Ed25519 with SHA-512, RFC 8032 compatible)
 def _try_native():
     global _native
@@ -16,22 +17,27 @@ def _try_native():
     try:
         if sys.platform == "esp32":
             import ed25519_fast_xtensawin
+
             mod = ed25519_fast_xtensawin
         elif sys.platform == "rp2":
             import ed25519_fast_armv6m
+
             mod = ed25519_fast_armv6m
         else:
             import ed25519_fast
+
             mod = ed25519_fast
     except ImportError:
         pass
     if mod is None:
         try:
             import ed25519_fast
+
             mod = ed25519_fast
         except ImportError:
             pass
     _native = mod
+
 
 _try_native()
 
@@ -41,7 +47,8 @@ def have_native():
 
 
 if _native:
-    from ..log import log, LOG_VERBOSE
+    from ..log import LOG_VERBOSE, log
+
     log("Ed25519/X25519: native C module loaded", LOG_VERBOSE)
 
 
@@ -52,6 +59,7 @@ class Ed25519PrivateKey:
             self._pk = _native.publickey(seed)
         else:
             from .pure25519 import ed25519_oop as ed25519
+
             self.sk = ed25519.SigningKey(seed)
 
     @classmethod
@@ -81,6 +89,7 @@ class Ed25519PublicKey:
         self._data = data
         if not _native:
             from .pure25519 import ed25519_oop as ed25519
+
             self.vk = ed25519.VerifyingKey(data)
 
     @classmethod

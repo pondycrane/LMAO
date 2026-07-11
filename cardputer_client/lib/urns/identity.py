@@ -3,13 +3,18 @@
 
 import os
 import time
+
 from . import const
-from .log import log, LOG_VERBOSE, LOG_DEBUG, LOG_ERROR
 from .crypto import (
-    X25519PrivateKey, X25519PublicKey,
-    Ed25519PrivateKey, Ed25519PublicKey,
-    Token, sha256, hkdf,
+    Ed25519PrivateKey,
+    Ed25519PublicKey,
+    Token,
+    X25519PrivateKey,
+    X25519PublicKey,
+    hkdf,
+    sha256,
 )
+from .log import LOG_DEBUG, LOG_ERROR, LOG_VERBOSE, log
 
 
 class Identity:
@@ -33,7 +38,12 @@ class Identity:
     def remember(packet_hash, destination_hash, public_key, app_data=None):
         if len(public_key) != Identity.KEYSIZE // 8:
             raise TypeError("Invalid public key size: " + str(len(public_key)))
-        Identity.known_destinations[destination_hash] = [time.time(), packet_hash, public_key, app_data]
+        Identity.known_destinations[destination_hash] = [
+            time.time(),
+            packet_hash,
+            public_key,
+            app_data,
+        ]
 
     @staticmethod
     def recall(target_hash, from_identity_hash=False):
@@ -55,6 +65,7 @@ class Identity:
                 return identity
             # Check registered destinations
             from . import transport
+
             for dest in transport.Transport.destinations:
                 if target_hash == dest.hash:
                     identity = Identity(create_keys=False)
@@ -75,7 +86,7 @@ class Identity:
 
     @staticmethod
     def truncated_hash(data):
-        return Identity.full_hash(data)[:(Identity.TRUNCATED_HASHLENGTH // 8)]
+        return Identity.full_hash(data)[: (Identity.TRUNCATED_HASHLENGTH // 8)]
 
     @staticmethod
     def get_random_hash():
@@ -90,7 +101,7 @@ class Identity:
 
     @staticmethod
     def _get_ratchet_id(ratchet_pub_bytes):
-        return Identity.full_hash(ratchet_pub_bytes)[:Identity.NAME_HASH_LENGTH // 8]
+        return Identity.full_hash(ratchet_pub_bytes)[: Identity.NAME_HASH_LENGTH // 8]
 
     @staticmethod
     def _ratchet_public_bytes(ratchet):
@@ -130,32 +141,59 @@ class Identity:
 
             public_key = packet.data[:keysize]
 
-            log("Announce validate: data=" + str(len(packet.data)) + "B hdr=" + str(packet.header_type) + " ctx_flag=" + str(packet.context_flag) + " ctx=" + str(packet.context), LOG_DEBUG)
+            log(
+                "Announce validate: data="
+                + str(len(packet.data))
+                + "B hdr="
+                + str(packet.header_type)
+                + " ctx_flag="
+                + str(packet.context_flag)
+                + " ctx="
+                + str(packet.context),
+                LOG_DEBUG,
+            )
 
             base = keysize + name_hash_len + 10
             has_ratchet = packet.context_flag == const.FLAG_SET
-            name_hash = packet.data[keysize:keysize + name_hash_len]
-            random_hash = packet.data[keysize + name_hash_len:keysize + name_hash_len + 10]
+            name_hash = packet.data[keysize : keysize + name_hash_len]
+            random_hash = packet.data[keysize + name_hash_len : keysize + name_hash_len + 10]
             if has_ratchet:
-                ratchet = packet.data[base:base + ratchetsize]
-                signature = packet.data[base + ratchetsize:base + ratchetsize + sig_len]
+                ratchet = packet.data[base : base + ratchetsize]
+                signature = packet.data[base + ratchetsize : base + ratchetsize + sig_len]
                 app_data = b""
                 if len(packet.data) > base + ratchetsize + sig_len:
-                    app_data = packet.data[base + ratchetsize + sig_len:]
+                    app_data = packet.data[base + ratchetsize + sig_len :]
             else:
                 ratchet = b""
-                signature = packet.data[base:base + sig_len]
+                signature = packet.data[base : base + sig_len]
                 app_data = b""
                 if len(packet.data) > base + sig_len:
-                    app_data = packet.data[base + sig_len:]
+                    app_data = packet.data[base + sig_len :]
 
-            log("Announce fields: ratchet=" + str(len(ratchet)) + " sig=" + str(len(signature)) + " app=" + str(len(app_data)), LOG_DEBUG)
+            log(
+                "Announce fields: ratchet="
+                + str(len(ratchet))
+                + " sig="
+                + str(len(signature))
+                + " app="
+                + str(len(app_data)),
+                LOG_DEBUG,
+            )
 
             if len(signature) != sig_len:
-                log("Announce rejected: bad sig length " + str(len(signature)) + " (expected " + str(sig_len) + ")", LOG_DEBUG)
+                log(
+                    "Announce rejected: bad sig length "
+                    + str(len(signature))
+                    + " (expected "
+                    + str(sig_len)
+                    + ")",
+                    LOG_DEBUG,
+                )
                 return False
 
-            signed_data = destination_hash + public_key + name_hash + random_hash + ratchet + app_data
+            signed_data = (
+                destination_hash + public_key + name_hash + random_hash + ratchet + app_data
+            )
 
             if not len(packet.data) > keysize + name_hash_len + 10 + sig_len:
                 app_data = None
@@ -168,7 +206,10 @@ class Identity:
             if not only_validate_signature and destination_hash in Identity.known_destinations:
                 cached = Identity.known_destinations[destination_hash]
                 if cached[2] == public_key:
-                    log("Announce from known dest " + destination_hash.hex()[:8] + ", skip verify", LOG_VERBOSE)
+                    log(
+                        "Announce from known dest " + destination_hash.hex()[:8] + ", skip verify",
+                        LOG_VERBOSE,
+                    )
                     Identity.remember(packet.get_hash(), destination_hash, public_key, app_data)
                     if ratchet:
                         Identity._remember_ratchet(destination_hash, ratchet)
@@ -180,7 +221,9 @@ class Identity:
 
             sig_valid = announced_identity.validate(signature, signed_data)
             try:
-                import gc; gc.collect()
+                import gc
+
+                gc.collect()
             except Exception as e:
                 log("Announce sig validation error: " + str(e), LOG_DEBUG)
             log("Announce sig_valid=" + str(sig_valid), LOG_DEBUG)
@@ -193,24 +236,28 @@ class Identity:
                 if has_ratchet:
                     log("Ratchet path failed, retrying without ratchet", LOG_DEBUG)
                     ratchet = b""
-                    signature = packet.data[base:base + sig_len]
+                    signature = packet.data[base : base + sig_len]
                     app_data = b""
                     if len(packet.data) > base + sig_len:
-                        app_data = packet.data[base + sig_len:]
+                        app_data = packet.data[base + sig_len :]
                     alternate_layout = True
                 elif len(packet.data) >= base + ratchetsize + sig_len:
                     log("No-ratchet path failed, retrying with ratchet", LOG_DEBUG)
-                    ratchet = packet.data[base:base + ratchetsize]
-                    signature = packet.data[base + ratchetsize:base + ratchetsize + sig_len]
+                    ratchet = packet.data[base : base + ratchetsize]
+                    signature = packet.data[base + ratchetsize : base + ratchetsize + sig_len]
                     app_data = b""
                     if len(packet.data) > base + ratchetsize + sig_len:
-                        app_data = packet.data[base + ratchetsize + sig_len:]
+                        app_data = packet.data[base + ratchetsize + sig_len :]
                     alternate_layout = True
                 if alternate_layout and len(signature) == sig_len:
-                    signed_data = destination_hash + public_key + name_hash + random_hash + ratchet + app_data
+                    signed_data = (
+                        destination_hash + public_key + name_hash + random_hash + ratchet + app_data
+                    )
                     sig_valid = announced_identity.validate(signature, signed_data)
                     try:
-                        import gc; gc.collect()
+                        import gc
+
+                        gc.collect()
                     except Exception as e:
                         log("Signature validation error: " + str(e), LOG_DEBUG)
                     if sig_valid:
@@ -223,7 +270,7 @@ class Identity:
                     return True
 
                 hash_material = name_hash + announced_identity.hash
-                expected_hash = Identity.full_hash(hash_material)[:const.TRUNCATED_HASHLENGTH // 8]
+                expected_hash = Identity.full_hash(hash_material)[: const.TRUNCATED_HASHLENGTH // 8]
 
                 if destination_hash == expected_hash:
                     if destination_hash in Identity.known_destinations:
@@ -253,6 +300,7 @@ class Identity:
         """Persist known destinations to flash storage"""
         try:
             import json
+
             data = {}
             for dh in Identity.known_destinations:
                 entry = Identity.known_destinations[dh]
@@ -275,7 +323,8 @@ class Identity:
         """Load known destinations from flash storage"""
         try:
             import json
-            with open(Identity.storagepath + "/known_destinations.json", "r") as f:
+
+            with open(Identity.storagepath + "/known_destinations.json") as f:
                 data = json.load(f)
             for key_hex in data:
                 entry = data[key_hex]
@@ -286,7 +335,10 @@ class Identity:
                     bytes.fromhex(entry[2]) if entry[2] else None,
                     bytes.fromhex(entry[3]) if entry[3] else None,
                 ]
-            log("Loaded " + str(len(Identity.known_destinations)) + " known destinations", LOG_VERBOSE)
+            log(
+                "Loaded " + str(len(Identity.known_destinations)) + " known destinations",
+                LOG_VERBOSE,
+            )
         except OSError:
             log("No known destinations file found", LOG_VERBOSE)
         except Exception as e:
@@ -404,7 +456,9 @@ class Identity:
             ephemeral_key = X25519PrivateKey.generate()
             ephemeral_pub_bytes = ephemeral_key.public_key().public_bytes()
             try:
-                import gc; gc.collect()
+                import gc
+
+                gc.collect()
             except Exception as e:
                 log("Identity encrypt error: " + str(e), LOG_DEBUG)
 
@@ -415,7 +469,9 @@ class Identity:
 
             shared_key = ephemeral_key.exchange(target_public_key)
             try:
-                import gc; gc.collect()
+                import gc
+
+                gc.collect()
             except Exception as e:
                 log("Identity encrypt error: " + str(e), LOG_DEBUG)
             derived_key = hkdf(
@@ -426,7 +482,9 @@ class Identity:
             )
             token = Token(derived_key)
             try:
-                import gc; gc.collect()
+                import gc
+
+                gc.collect()
             except Exception as e:
                 log("Identity encrypt error: " + str(e), LOG_DEBUG)
             ciphertext = token.encrypt(plaintext)
@@ -444,7 +502,9 @@ class Identity:
         token = Token(derived_key)
         return token.decrypt(ciphertext)
 
-    def decrypt(self, ciphertext_token, ratchets=None, enforce_ratchets=False, ratchet_id_receiver=None):
+    def decrypt(
+        self, ciphertext_token, ratchets=None, enforce_ratchets=False, ratchet_id_receiver=None
+    ):
         if self.prv is not None:
             if len(ciphertext_token) > Identity.KEYSIZE // 8 // 2:
                 plaintext = None
@@ -458,7 +518,9 @@ class Identity:
                         for ratchet in ratchets:
                             try:
                                 ratchet_prv = X25519PrivateKey.from_private_bytes(ratchet)
-                                ratchet_id = Identity._get_ratchet_id(ratchet_prv.public_key().public_bytes())
+                                ratchet_id = Identity._get_ratchet_id(
+                                    ratchet_prv.public_key().public_bytes()
+                                )
                                 shared_key = ratchet_prv.exchange(peer_pub)
                                 plaintext = self._do_decrypt(shared_key, ciphertext)
                                 if ratchet_id_receiver:

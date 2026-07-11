@@ -7,15 +7,26 @@
 # Packets > 254 bytes are split across exactly 2 frames (max 508B).
 # Compatible with RNode firmware and reference Reticulum.
 
-import os
+import contextlib
 import gc
+import os
 import time
+
+from ..log import LOG_DEBUG, LOG_ERROR, LOG_NOTICE, LOG_VERBOSE, log
 from . import Interface
-from ..log import log, LOG_VERBOSE, LOG_DEBUG, LOG_ERROR, LOG_NOTICE
+
+# MicroPython const() support — no-op under CPython
+try:
+    from micropython import const
+except ImportError:
+
+    def const(x):
+        return x  # type: ignore[assignment]
+
 
 # RNode header constants (matches RNode_Firmware Framing.h)
 _FLAG_SPLIT = const(0x01)
-_SEQ_MASK   = const(0xF0)
+_SEQ_MASK = const(0xF0)
 
 # Max payload per LoRa frame (255 - 1 byte RNode header)
 _FRAME_PAYLOAD = const(254)
@@ -25,7 +36,6 @@ _REASM_TIMEOUT = const(15)
 
 
 class LoRaInterface(Interface):
-
     def __init__(self, config):
         name = config.get("name", "LoRa SX1262")
         super().__init__(name)
@@ -77,16 +87,28 @@ class LoRaInterface(Interface):
         try:
             self._init_modem()
             self.online = True
-            log("LoRa " + self.name + " on " + str(self._freq_khz) + "kHz"
-                + " SF" + str(self._sf) + " BW" + str(self._bw)
-                + " TX" + str(self._tx_power) + "dBm", LOG_NOTICE)
+            log(
+                "LoRa "
+                + self.name
+                + " on "
+                + str(self._freq_khz)
+                + "kHz"
+                + " SF"
+                + str(self._sf)
+                + " BW"
+                + str(self._bw)
+                + " TX"
+                + str(self._tx_power)
+                + "dBm",
+                LOG_NOTICE,
+            )
         except Exception as e:
             log("LoRa modem init failed: " + str(e), LOG_ERROR)
             self.online = False
 
     def _init_modem(self):
-        from machine import SPI, Pin
         from lora import SX1262
+        from machine import SPI, Pin
 
         if self._external_spi:
             spi = self._external_spi
@@ -127,6 +149,7 @@ class LoRaInterface(Interface):
         # for TX on many boards (e.g. T-Deck SX1262).
         if self._use_dcdc:
             import time
+
             self._modem._cmd("BB", 0x96, 0x01)
             time.sleep_ms(5)
             self._modem.calibrate()
@@ -153,7 +176,10 @@ class LoRaInterface(Interface):
         self._acquire()
         try:
             if len(data) > 2 * _FRAME_PAYLOAD:
-                log("LoRa drop: " + str(len(data)) + "B exceeds " + str(2 * _FRAME_PAYLOAD), LOG_DEBUG)
+                log(
+                    "LoRa drop: " + str(len(data)) + "B exceeds " + str(2 * _FRAME_PAYLOAD),
+                    LOG_DEBUG,
+                )
                 return False
 
             data = self.ifac_sign(data)
@@ -184,10 +210,8 @@ class LoRaInterface(Interface):
             return True
         except Exception as e:
             log("LoRa send error: " + str(e), LOG_ERROR)
-            try:
+            with contextlib.suppress(BaseException):
                 self._modem.start_recv(continuous=True)
-            except:
-                pass
             return False
         finally:
             self._release()
@@ -214,16 +238,21 @@ class LoRaInterface(Interface):
                 # Periodic diagnostics
                 if now - _last_diag >= 10:
                     _crc_errs = getattr(self._modem, "crc_errors", 0)
-                    log("LoRa diag: poll_recv True=" + str(_rx_true_count)
-                        + " pkts=" + str(_rx_pkt_count)
-                        + " crc_err=" + str(_crc_errs), LOG_DEBUG)
+                    log(
+                        "LoRa diag: poll_recv True="
+                        + str(_rx_true_count)
+                        + " pkts="
+                        + str(_rx_pkt_count)
+                        + " crc_err="
+                        + str(_crc_errs),
+                        LOG_DEBUG,
+                    )
                     _rx_true_count = 0
                     _rx_pkt_count = 0
                     _last_diag = now
 
                 # Stale reassembly cleanup
-                if (self._reasm_buf is not None
-                        and now - self._reasm_time > _REASM_TIMEOUT):
+                if self._reasm_buf is not None and now - self._reasm_time > _REASM_TIMEOUT:
                     log("LoRa discarding stale split fragment", LOG_DEBUG)
                     self._reasm_buf = None
                     self._reasm_seq = None
@@ -248,9 +277,16 @@ class LoRaInterface(Interface):
                         self.snr = rx.snr
 
                     raw = bytes(rx)
-                    log("LoRa RX raw " + str(len(raw)) + "B"
-                        + " RSSI=" + str(getattr(rx, "rssi", "?"))
-                        + " SNR=" + str(getattr(rx, "snr", "?")), LOG_DEBUG)
+                    log(
+                        "LoRa RX raw "
+                        + str(len(raw))
+                        + "B"
+                        + " RSSI="
+                        + str(getattr(rx, "rssi", "?"))
+                        + " SNR="
+                        + str(getattr(rx, "snr", "?")),
+                        LOG_DEBUG,
+                    )
 
                     if hasattr(rx, "valid_crc") and not rx.valid_crc:
                         log("LoRa CRC fail, discarding", LOG_DEBUG)
@@ -280,7 +316,13 @@ class LoRaInterface(Interface):
                             self._reasm_buf = bytearray(payload)
                             self._reasm_seq = seq
                             self._reasm_time = time.time()
-                            log("LoRa split frame 1: " + str(len(payload)) + "B seq=" + hex(seq >> 4), LOG_DEBUG)
+                            log(
+                                "LoRa split frame 1: "
+                                + str(len(payload))
+                                + "B seq="
+                                + hex(seq >> 4),
+                                LOG_DEBUG,
+                            )
                             pkt = None
                         else:
                             # Second fragment — matching sequence
@@ -288,16 +330,30 @@ class LoRaInterface(Interface):
                             pkt = bytes(self._reasm_buf)
                             self._reasm_buf = None
                             self._reasm_seq = None
-                            log("LoRa split frame 2: " + str(len(payload)) + "B -> " + str(len(pkt)) + "B total", LOG_DEBUG)
+                            log(
+                                "LoRa split frame 2: "
+                                + str(len(payload))
+                                + "B -> "
+                                + str(len(pkt))
+                                + "B total",
+                                LOG_DEBUG,
+                            )
                     else:
                         # Non-split packet
                         pkt = payload
 
                     if pkt is not None:
                         _rx_pkt_count += 1
-                        log("LoRa recv " + str(len(pkt)) + "B"
-                            + " RSSI=" + str(self.rssi)
-                            + " SNR=" + str(self.snr), LOG_DEBUG)
+                        log(
+                            "LoRa recv "
+                            + str(len(pkt))
+                            + "B"
+                            + " RSSI="
+                            + str(self.rssi)
+                            + " SNR="
+                            + str(self.snr),
+                            LOG_DEBUG,
+                        )
                         self.process_incoming(pkt)
                         gc.collect()
 
@@ -311,10 +367,8 @@ class LoRaInterface(Interface):
     def close(self):
         super().close()
         if self._modem:
-            try:
+            with contextlib.suppress(BaseException):
                 self._modem.sleep()
-            except:
-                pass
         log("LoRa " + self.name + " closed", LOG_VERBOSE)
 
     def __str__(self):

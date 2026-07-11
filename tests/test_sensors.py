@@ -10,9 +10,9 @@ Run with::
 
 import sys
 import time as _real_time
-from unittest.mock import MagicMock, patch, call
-import pytest
+from unittest.mock import MagicMock
 
+import pytest
 
 # ── DHT20 driver tests ──────────────────────────────────────────────
 # These tests mock machine.SoftI2C and verify the data sheet formulas.
@@ -31,6 +31,7 @@ class TestDHT20Driver:
 
         # MicroPython time.sleep_ms doesn't exist on CPython — monkey-patch it
         import time
+
         if not hasattr(time, "sleep_ms"):
             time.sleep_ms = lambda ms: _real_time.sleep(ms / 1000.0)
 
@@ -48,17 +49,11 @@ class TestDHT20Driver:
     # ── Constructor tests ────────────────────────────────────────
     def test_constructor_sends_soft_reset(self):
         """Constructor should send soft-reset command (0xBA)."""
-        sensor = self.DHT20(self.mock_soft_i2c)
+        self.DHT20(self.mock_soft_i2c)
 
         # Check that writeto was called with 0xBA at some point (soft reset)
-        reset_calls = [
-            c
-            for c in self.mock_soft_i2c.writeto.call_args_list
-            if c[0][1] == b"\xba"
-        ]
-        assert len(reset_calls) >= 1, (
-            "Expected soft reset command (0xBA) during init"
-        )
+        reset_calls = [c for c in self.mock_soft_i2c.writeto.call_args_list if c[0][1] == b"\xba"]
+        assert len(reset_calls) >= 1, "Expected soft reset command (0xBA) during init"
 
     def test_constructor_uses_custom_address(self):
         """Constructor should use the provided I2C address."""
@@ -75,25 +70,23 @@ class TestDHT20Driver:
     def test_constructor_sends_calibration_command(self):
         """Constructor should send AHT20 calibration command (0xE1 0x08 0x00)
         when sensor status register shows calibration needed."""
+
         # Simulate the readfrom_mem_into callback to fill buf with 0x07
         # (0x07 & 0x18 == 0x00, so calibration path is triggered)
         def fill_cal_needed(addr, reg, buf):
             buf[0] = 0x07
             buf[1] = 0x00
             buf[2] = 0x00
+
         self.mock_soft_i2c.readfrom_mem_into.side_effect = fill_cal_needed
 
         self.mock_soft_i2c.reset_mock()
-        sensor = self.DHT20(self.mock_soft_i2c)
+        self.DHT20(self.mock_soft_i2c)
 
         cal_calls = [
-            c
-            for c in self.mock_soft_i2c.writeto.call_args_list
-            if c[0][1] == b"\xe1\x08\x00"
+            c for c in self.mock_soft_i2c.writeto.call_args_list if c[0][1] == b"\xe1\x08\x00"
         ]
-        assert len(cal_calls) >= 1, (
-            "Expected calibration command (0xE1 0x08 0x00) during init"
-        )
+        assert len(cal_calls) >= 1, "Expected calibration command (0xE1 0x08 0x00) during init"
 
     # ── read() tests ─────────────────────────────────────────────
     def test_read_sends_measurement_trigger(self):
@@ -104,13 +97,9 @@ class TestDHT20Driver:
         sensor.read()
 
         trigger_calls = [
-            c
-            for c in self.mock_soft_i2c.writeto.call_args_list
-            if c[0][1] == b"\xac\x33\x00"
+            c for c in self.mock_soft_i2c.writeto.call_args_list if c[0][1] == b"\xac\x33\x00"
         ]
-        assert len(trigger_calls) >= 1, (
-            "Expected measurement trigger (0xAC 0x33 0x00)"
-        )
+        assert len(trigger_calls) >= 1, "Expected measurement trigger (0xAC 0x33 0x00)"
 
     def test_read_returns_correct_temperature_and_humidity(self):
         """read() should decode raw bytes into (temp, humidity) floats."""
@@ -126,9 +115,7 @@ class TestDHT20Driver:
         assert humidity == pytest.approx(50.0, rel=0.01), (
             f"Expected humidity ~50.0%, got {humidity}"
         )
-        assert temp == pytest.approx(-50.0, rel=0.01), (
-            f"Expected temperature ~-50.0°C, got {temp}"
-        )
+        assert temp == pytest.approx(-50.0, rel=0.01), f"Expected temperature ~-50.0°C, got {temp}"
 
     def test_read_returns_none_when_sensor_busy(self):
         """read() returns (None, None) when sensor status bit 7 is set."""
@@ -160,10 +147,7 @@ class TestDHT20Driver:
         sensor.read()
 
         # readfrom should be called with addr=0x38
-        read_calls = [
-            c for c in self.mock_soft_i2c.readfrom.call_args_list
-            if c[0][0] == 0x38
-        ]
+        read_calls = [c for c in self.mock_soft_i2c.readfrom.call_args_list if c[0][0] == 0x38]
         assert len(read_calls) >= 1
 
     # ── Temperature decoding at known values ─────────────────────
@@ -189,12 +173,8 @@ class TestDHT20Driver:
         sensor = self.DHT20(self.mock_soft_i2c)
         temp, humidity = sensor.read()
 
-        assert temp == pytest.approx(25.0, rel=0.05), (
-            f"Expected temperature ~25.0°C, got {temp}"
-        )
-        assert humidity == pytest.approx(0.0, abs=0.1), (
-            f"Expected humidity ~0.0%, got {humidity}"
-        )
+        assert temp == pytest.approx(25.0, rel=0.05), f"Expected temperature ~25.0°C, got {temp}"
+        assert humidity == pytest.approx(0.0, abs=0.1), f"Expected humidity ~0.0%, got {humidity}"
 
     def test_humidity_100pct_decoded_correctly(self):
         """At max humidity (99.9999%): hum_raw = 1048575 = 0xFFFFF."""
@@ -211,9 +191,7 @@ class TestDHT20Driver:
         assert humidity == pytest.approx(100.0, rel=0.01), (
             f"Expected humidity ~100.0%, got {humidity}"
         )
-        assert temp == pytest.approx(-50.0, rel=0.01), (
-            f"Expected temperature ~-50.0°C, got {temp}"
-        )
+        assert temp == pytest.approx(-50.0, rel=0.01), f"Expected temperature ~-50.0°C, got {temp}"
 
 
 # ── Sensor dispatch tests ───────────────────────────────────────────
@@ -234,6 +212,7 @@ class TestSensorDispatch:
 
         # MicroPython time.sleep_ms doesn't exist on CPython — monkey-patch it
         import time
+
         if not hasattr(time, "sleep_ms"):
             time.sleep_ms = lambda ms: _real_time.sleep(ms / 1000.0)
 

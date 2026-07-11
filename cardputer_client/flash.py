@@ -96,9 +96,7 @@ def _sanitize_path_for_script(path: str) -> str:
     they do not break the generated MicroPython string.
     """
     if "\\" in path:
-        raise ValueError(
-            f"Path contains backslash, cannot safely embed in script: {path!r}"
-        )
+        raise ValueError(f"Path contains backslash, cannot safely embed in script: {path!r}")
     # Escape single quotes for the MicroPython string literal
     path = path.replace("'", "\\'")
     # Basic sanity: reject non-printable characters
@@ -378,10 +376,7 @@ def upload_file(ser, local_path, remote_path, chunk_size=1024):
         return False
 
     # Step 3 — open file, keep handle in global ``_lmao_f``
-    script = (
-        b"_lmao_f = open('" + remote_path_esc.encode("utf-8") + b"', 'wb')\n"
-        b"print('OPEN_OK')\n"
-    )
+    script = b"_lmao_f = open('" + remote_path_esc.encode("utf-8") + b"', 'wb')\nprint('OPEN_OK')\n"
     ok, _out = exec_raw(ser, script)
     if not ok or "OPEN_OK" not in _out:
         return False
@@ -488,9 +483,7 @@ def main():
         if not enter_raw_repl(ser):
             print("ERROR: Could not enter raw REPL.")
             print("Is MicroPython firmware installed on the Cardputer?")
-            print(
-                "The device might be in bootloader mode or running a different firmware."
-            )
+            print("The device might be in bootloader mode or running a different firmware.")
             sys.exit(1)
 
         # — Verify device —
@@ -518,9 +511,7 @@ def main():
         ser.write(b"\x04")  # Ctrl+D = soft reset in friendly REPL
 
         print("Done. The Cardputer will reboot and run the LMAO client automatically.")
-        print(
-            f"Uploaded {len(FILES_TO_UPLOAD)} client + {len(lib_files)} library file(s)."
-        )
+        print(f"Uploaded {len(FILES_TO_UPLOAD)} client + {len(lib_files)} library file(s).")
 
     except KeyboardInterrupt:
         print("\nAborted by user.")
