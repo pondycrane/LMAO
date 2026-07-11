@@ -1,0 +1,41 @@
+# LMAO IoT Ingest Consumer — Docker image
+#
+# Build:
+#   docker build -f Dockerfile.iot-ingest -t lmao-iot-ingest .
+#
+# Run:
+#   docker run --rm -it --network host \
+#     -e NATS_SERVER=nats://localhost:4222 \
+#     -e DUCKDB_PATH=/data/sensors.db \
+#     -v /tmp/iot-data:/data \
+#     lmao-iot-ingest
+#
+# This image contains only the dependencies needed for NATS→DuckDB
+# persistence — nats-py, duckdb, and protobuf. It does NOT include
+# gRPC or RNS/LXMF (those are in the lmao-server image).
+
+FROM python:3.12-slim
+
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy only the files needed by the consumer
+COPY lma_core/ lma_core/
+COPY proto/ proto/
+COPY k8s-app/ k8s-app/
+
+# Install Python dependencies
+RUN pip install --no-cache-dir \
+    nats-py \
+    duckdb \
+    protobuf
+
+# Set PYTHONPATH so that lma_core and proto are importable
+ENV PYTHONPATH="/app:${PYTHONPATH}"
+
+# Run the persistent consumer
+CMD ["python", "k8s-app/iot_ingest_consumer.py"]

@@ -114,6 +114,111 @@ def install_pi_server(result: DeviceResult, repo_root: str | None = None) -> Non
         print(f"  FAIL: {exc}")
 
 
+def install_iot_ingest_consumer(result: DeviceResult, repo_root: str | None = None) -> None:
+    """Build the iot-ingest Docker image and apply its K8s manifest.
+
+    Builds ``Dockerfile.iot-ingest`` via ``docker build``, then applies
+    ``k8s/iot-ingest.yaml`` via ``kubectl apply -f``.
+
+    The caller must pass a ``DeviceResult`` instance (imported lazily
+    from ``install_all``) as *result*.  On success the result is set to
+    OK; on failure it is set to FAIL.  Missing prerequisites (Docker,
+    kubectl) result in SKIP.
+
+    Args:
+        result: A ``DeviceResult`` instance (from ``tools.install_all``).
+        repo_root: Path to the repository root containing ``Dockerfile.iot-ingest``
+            and ``k8s/``.  When ``None``, auto-detected via ``_find_repo_root()``.
+    """
+
+    print("\n--- IoT Ingest Consumer: Docker build + K8s apply ---")
+
+    if repo_root is None:
+        repo_root = _find_repo_root()
+
+    if not repo_root:
+        result.fail("Cannot locate repo root (no Dockerfile found)")
+        print("  FAIL: Cannot locate repo root (no Dockerfile found)")
+        return
+
+    # ── Docker build ───────────────────────────────────────────
+    dockerfile = os.path.join(repo_root, "Dockerfile.iot-ingest")
+
+    if shutil.which("docker") is None:
+        result.skip("Docker not found on PATH — install with: apt-get install docker.io")
+        print("  SKIP: Docker not found on PATH")
+        return
+
+    if not os.path.isfile(dockerfile):
+        result.fail(f"Dockerfile not found: {dockerfile}")
+        print(f"  FAIL: Dockerfile not found: {dockerfile}")
+        return
+
+    try:
+        proc = subprocess.run(
+            ["docker", "build", "-f", dockerfile, "-t", "lmao-iot-ingest", "."],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+        )
+        if proc.returncode == 0:
+            print("  OK: Docker image built (lmao-iot-ingest:latest)")
+        else:
+            stderr_tail = proc.stderr.strip().split("\n")[-3:]
+            stderr_msg = "; ".join(stderr_tail) if stderr_tail else "unknown error"
+            result.fail(f"Docker build failed: {stderr_msg}")
+            print(f"  FAIL: Docker build failed — {stderr_msg}")
+            return
+    except subprocess.SubprocessError as exc:
+        result.fail(f"Docker build error: {exc}")
+        print(f"  FAIL: {exc}")
+        return
+    except Exception as exc:
+        import traceback
+
+        traceback.print_exc()
+        result.fail(f"Unexpected error during Docker build: {exc}")
+        print(f"  FAIL: {exc}")
+        return
+
+    # ── kubectl apply ──────────────────────────────────────────
+    if shutil.which("kubectl") is None:
+        result.skip("kubectl not found on PATH — install with: apt-get install kubectl")
+        print("  SKIP: kubectl not found on PATH")
+        return
+
+    manifest_path = os.path.join(repo_root, "k8s", "iot-ingest.yaml")
+    if not os.path.isfile(manifest_path):
+        result.fail(f"Manifest not found: {manifest_path}")
+        print(f"  FAIL: Manifest not found: {manifest_path}")
+        return
+
+    try:
+        proc = subprocess.run(
+            ["kubectl", "apply", "-f", manifest_path],
+            capture_output=True,
+            text=True,
+        )
+        if proc.returncode != 0:
+            stderr_tail = proc.stderr.strip().split("\n")[-3:]
+            stderr_msg = "; ".join(stderr_tail) if stderr_tail else "unknown error"
+            result.fail(f"kubectl apply -f k8s/iot-ingest.yaml failed: {stderr_msg}")
+            print(f"  FAIL: kubectl apply failed — {stderr_msg}")
+            return
+
+        result.ok("IoT Ingest Consumer deployed (Docker build + kubectl apply)")
+        print("  OK: IoT Ingest Consumer deployed")
+    except subprocess.SubprocessError as exc:
+        result.fail(f"kubectl error: {exc}")
+        print(f"  FAIL: {exc}")
+    except Exception as exc:
+        import traceback
+
+        traceback.print_exc()
+        result.fail(f"Unexpected error during kubectl apply: {exc}")
+        print(f"  FAIL: {exc}")
+
+
 def install_k8s_services(result: DeviceResult, repo_root: str | None = None) -> None:
     """Apply Kubernetes manifests via ``kubectl apply -f``.
 
