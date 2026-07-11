@@ -9,6 +9,7 @@ Run with::
 """
 
 from unittest.mock import MagicMock, patch
+import subprocess
 
 import pytest
 
@@ -827,6 +828,83 @@ class TestMainWithServices:
 # ── Unit tests for install_services.py ─────────────────────────────
 
 
+class TestInstallRNodeFirmware:
+    """Direct unit tests for _install_rnode_firmware()."""
+
+    def _make_result(self):
+        return install_all.DeviceResult("RNode (Heltec)")
+
+    def test_already_rnode_returns_ok(self):
+        """check_rnode_firmware returns True → status OK, no flash called."""
+        result = self._make_result()
+        with (
+            patch.object(install_all, "check_rnode_firmware", return_value=True),
+            patch.object(install_all, "flash_rnode_firmware") as mock_flash,
+        ):
+            install_all._install_rnode_firmware("/dev/ttyUSB0", result)
+        assert result.status == "OK"
+        assert "already installed" in result.detail
+        mock_flash.assert_not_called()
+
+    def test_flash_success_sets_ok(self):
+        """check returns False, flash returns (True, "OK") → status OK."""
+        result = self._make_result()
+        with (
+            patch.object(install_all, "check_rnode_firmware", return_value=False),
+            patch.object(
+                install_all,
+                "flash_rnode_firmware",
+                return_value=(True, "Flashed successfully"),
+            ),
+        ):
+            install_all._install_rnode_firmware("/dev/ttyUSB0", result)
+        assert result.status == "OK"
+        assert "Flashed" in result.detail
+
+    def test_flash_failure_sets_fail(self):
+        """check returns False, flash returns (False, "error") → status FAIL."""
+        result = self._make_result()
+        with (
+            patch.object(install_all, "check_rnode_firmware", return_value=False),
+            patch.object(
+                install_all,
+                "flash_rnode_firmware",
+                return_value=(False, "Flash error: device not found"),
+            ),
+        ):
+            install_all._install_rnode_firmware("/dev/ttyUSB0", result)
+        assert result.status == "FAIL"
+        assert "Flash error" in result.detail
+
+    def test_exception_during_check_sets_fail(self):
+        """check_rnode_firmware raises → status FAIL, traceback printed."""
+        result = self._make_result()
+        with patch.object(
+            install_all, "check_rnode_firmware", side_effect=OSError("serial error")
+        ):
+            install_all._install_rnode_firmware("/dev/ttyUSB0", result)
+        assert result.status == "FAIL"
+        assert "Unexpected error" in result.detail
+
+    def test_exception_during_flash_sets_fail(self):
+        """flash_rnode_firmware raises → status FAIL."""
+        result = self._make_result()
+        with (
+            patch.object(install_all, "check_rnode_firmware", return_value=False),
+            patch.object(
+                install_all,
+                "flash_rnode_firmware",
+                side_effect=RuntimeError("timeout"),
+            ),
+        ):
+            install_all._install_rnode_firmware("/dev/ttyUSB0", result)
+        assert result.status == "FAIL"
+        assert "Unexpected error" in result.detail
+
+
+# ── Unit tests for install_services.py ─────────────────────────────
+
+
 class TestFindRepoRoot:
     """Direct unit tests for install_services._find_repo_root()."""
 
@@ -933,7 +1011,7 @@ class TestInstallPiServer:
             assert "Docker build failed" in result.detail
 
     def test_fails_when_subprocess_raises(self):
-        """Result should be FAIL when subprocess.run raises an error."""
+        """Result should be FAIL when subprocess.run raises an OSError."""
         with (
             patch("shutil.which", return_value="/usr/bin/docker"),
             patch("subprocess.run", side_effect=OSError("no such file")),
@@ -941,6 +1019,20 @@ class TestInstallPiServer:
             result = self._make_result()
             install_services.install_pi_server(result, "/fake/repo")
             assert result.status == "FAIL"
+
+    def test_fails_when_subprocess_error_raised(self):
+        """Result should be FAIL when subprocess.run raises SubprocessError."""
+        with (
+            patch("shutil.which", return_value="/usr/bin/docker"),
+            patch(
+                "subprocess.run",
+                side_effect=subprocess.SubprocessError("command failed"),
+            ),
+        ):
+            result = self._make_result()
+            install_services.install_pi_server(result, "/fake/repo")
+            assert result.status == "FAIL"
+            assert "Docker build error" in result.detail
 
 
 class TestInstallK8sServices:
@@ -1008,7 +1100,7 @@ class TestInstallK8sServices:
             assert "kubectl apply" in result.detail.lower()
 
     def test_fails_when_subprocess_raises(self):
-        """Result should be FAIL when subprocess.run raises an error."""
+        """Result should be FAIL when subprocess.run raises an OSError."""
         with (
             patch("shutil.which", return_value="/usr/bin/kubectl"),
             patch("os.path.isfile", return_value=True),
@@ -1017,3 +1109,18 @@ class TestInstallK8sServices:
             result = self._make_result()
             install_services.install_k8s_services(result, "/fake/repo")
             assert result.status == "FAIL"
+
+    def test_fails_when_subprocess_error_raised(self):
+        """Result should be FAIL when subprocess.run raises SubprocessError."""
+        with (
+            patch("shutil.which", return_value="/usr/bin/kubectl"),
+            patch("os.path.isfile", return_value=True),
+            patch(
+                "subprocess.run",
+                side_effect=subprocess.SubprocessError("kubectl error"),
+            ),
+        ):
+            result = self._make_result()
+            install_services.install_k8s_services(result, "/fake/repo")
+            assert result.status == "FAIL"
+            assert "kubectl error" in result.detail

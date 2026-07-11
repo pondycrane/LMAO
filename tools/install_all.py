@@ -5,12 +5,17 @@ Auto-detects connected devices (Cardputer, Heltec RNode) and installs the
 appropriate software to each.  Runs detection and flashing in a single pass,
 then prints a summary table of per-device results.
 
+When --include-services is set, also builds the Pi server Docker image and
+applies Kubernetes manifests to the cluster.
+
 Usage (via Bazel):
     bazel run //tools:install_all
     bazel run //tools:install_all -- --cardputer-port /dev/ttyACM0
     bazel run //tools:install_all -- --rnode-port /dev/ttyUSB0
     bazel run //tools:install_all -- --skip-cardputer
     bazel run //tools:install_all -- --skip-rnode
+    bazel run //tools:install_all -- --include-services
+    bazel run //tools:install_all -- --include-services --skip-k8s
 
 Prerequisites:
     - Cardputer with MicroPython installed, connected via USB
@@ -247,7 +252,11 @@ def _print_summary(results: list[DeviceResult]) -> None:
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    """Parse command-line arguments."""
+    """Parse command-line arguments.
+
+    Returns:
+        argparse.Namespace with all parsed flags.
+    """
     parser = argparse.ArgumentParser(
         description="Install LMAO client/services to all connected USB hardware",
     )
@@ -298,7 +307,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def main(argv: list[str] | None = None) -> None:
-    """Run the install-all pipeline: detect hardware, flash each device, print summary."""
+    """Run the install-all pipeline.
+
+    Detects hardware, flashes each device, optionally deploys services,
+    and prints a per-device summary table.
+    """
     args = _parse_args(argv)
 
     results: list[DeviceResult] = []

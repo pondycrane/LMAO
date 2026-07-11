@@ -900,7 +900,7 @@ class TestCardputerLoRaE2E:
                         )
                     # Verify at least one SensorReport had 2 readings
                     multi_reading_msgs = [
-                        m for m in sensor_messages if "readings" in str(m)
+                        m for m in sensor_messages if "sensor_id" in str(m)
                     ]
                     print(
                         f"   SensorReports with multiple readings: {len(multi_reading_msgs)}"

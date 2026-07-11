@@ -72,6 +72,29 @@ class TestDHT20Driver:
         sensor = self.DHT20(self.mock_soft_i2c)
         assert sensor.addr == 0x38
 
+    def test_constructor_sends_calibration_command(self):
+        """Constructor should send AHT20 calibration command (0xE1 0x08 0x00)
+        when sensor status register shows calibration needed."""
+        # Simulate the readfrom_mem_into callback to fill buf with 0x07
+        # (0x07 & 0x18 == 0x00, so calibration path is triggered)
+        def fill_cal_needed(addr, reg, buf):
+            buf[0] = 0x07
+            buf[1] = 0x00
+            buf[2] = 0x00
+        self.mock_soft_i2c.readfrom_mem_into.side_effect = fill_cal_needed
+
+        self.mock_soft_i2c.reset_mock()
+        sensor = self.DHT20(self.mock_soft_i2c)
+
+        cal_calls = [
+            c
+            for c in self.mock_soft_i2c.writeto.call_args_list
+            if c[0][1] == b"\xe1\x08\x00"
+        ]
+        assert len(cal_calls) >= 1, (
+            "Expected calibration command (0xE1 0x08 0x00) during init"
+        )
+
     # ── read() tests ─────────────────────────────────────────────
     def test_read_sends_measurement_trigger(self):
         """read() should send the measurement trigger command: 0xAC 0x33 0x00."""
