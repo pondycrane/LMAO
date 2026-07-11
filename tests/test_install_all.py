@@ -1775,6 +1775,10 @@ class TestMainWithRegistryAndServices:
     def test_registry_with_services_passes_registry_to_iot(self):
         """When both --setup-registry and --include-services are set,
         install_iot_ingest_consumer should receive registry_host and registry_port."""
+        # Simulate successful registry setup (sets result.status to "OK")
+        self.mocks["setup_registry"].side_effect = lambda result: setattr(
+            result, "status", "OK"
+        )
         with pytest.raises(SystemExit):
             install_all.main(["--setup-registry", "--include-services"])
         self.mocks["install_iot_ingest_consumer"].assert_called_once()
@@ -1801,6 +1805,24 @@ class TestMainWithRegistryAndServices:
 
     def test_registry_with_services_and_skip_iot(self):
         """--skip-iot-ingest should prevent iot install even with registry."""
+        self.mocks["setup_registry"].side_effect = lambda result: setattr(
+            result, "status", "OK"
+        )
         with pytest.raises(SystemExit):
             install_all.main(["--setup-registry", "--include-services", "--skip-iot-ingest"])
         self.mocks["install_iot_ingest_consumer"].assert_not_called()
+
+    def test_registry_failure_falls_back_to_local_build(self):
+        """When registry setup fails, IoT deploy should fall back to local Docker build
+        without registry params."""
+        # Simulate registry failure (status stays SKIP or becomes FAIL)
+        self.mocks["setup_registry"].side_effect = lambda result: setattr(
+            result, "status", "FAIL"
+        )
+        with pytest.raises(SystemExit):
+            install_all.main(["--setup-registry", "--include-services"])
+        self.mocks["install_iot_ingest_consumer"].assert_called_once()
+        call_kwargs = self.mocks["install_iot_ingest_consumer"].call_args.kwargs
+        # Should NOT pass registry params on fallback
+        assert "registry_host" not in call_kwargs
+        assert "registry_port" not in call_kwargs

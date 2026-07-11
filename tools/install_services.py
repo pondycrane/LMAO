@@ -26,8 +26,54 @@ if TYPE_CHECKING:
     from tools.install_all import DeviceResult
 
 # Default local Docker registry address (used when --setup-registry is set).
-_DEFAULT_REGISTRY_HOST = "192.168.0.36"
-_DEFAULT_REGISTRY_PORT = 5000
+DEFAULT_REGISTRY_HOST = "192.168.0.36"
+DEFAULT_REGISTRY_PORT = 5000
+
+
+def _run_kubectl_step(
+    result: DeviceResult,
+    step_name: str,
+    cmd: list[str],
+) -> subprocess.CompletedProcess | None:
+    """Run a kubectl subcommand and handle errors consistently.
+
+    On success, returns the ``CompletedProcess``.  On failure (non-zero
+    return code, ``SubprocessError``, or unexpected exception), updates
+    *result* to FAIL, prints diagnostics, and returns ``None``.
+
+    The caller must check the return value and return early if ``None``.
+
+    Args:
+        result: A ``DeviceResult`` instance (from ``tools.install_all``).
+        step_name: Human-readable name for the step (e.g. "apply").
+        cmd: The command list to pass to ``subprocess.run``.
+
+    Returns:
+        ``CompletedProcess`` on success, ``None`` on failure.
+    """
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        if proc.returncode != 0:
+            stderr_tail = proc.stderr.strip().split("\n")[-3:]
+            stderr_msg = "; ".join(stderr_tail) if stderr_tail else "unknown error"
+            result.fail(f"kubectl {step_name} failed: {stderr_msg}")
+            print(f"  FAIL: kubectl {step_name} failed — {stderr_msg}")
+            return None
+        return proc
+    except subprocess.SubprocessError as exc:
+        import traceback
+
+        traceback.print_exc()
+        result.fail(f"kubectl error ({step_name}): {exc}")
+        print(f"  FAIL: {exc}")
+        return None
+    except Exception as exc:
+        import traceback
+
+        traceback.print_exc()
+        result.fail(f"Unexpected error during kubectl {step_name}: {exc}")
+        print(f"  FAIL: {exc}")
+        return None
 
 
 def _find_repo_root() -> str | None:
@@ -164,96 +210,61 @@ def _apply_iot_ingest_manifest(
         print(f"  FAIL: Manifest not found: {manifest_path}")
         return
 
-    # Step 1 — apply the base manifest (PVC, ConfigMap, Deployment)
-    try:
-        proc = subprocess.run(
-            ["kubectl", "apply", "-f", manifest_path],
-            capture_output=True,
-            text=True,
-        )
-        if proc.returncode != 0:
-            stderr_tail = proc.stderr.strip().split("\n")[-3:]
-            stderr_msg = "; ".join(stderr_tail) if stderr_tail else "unknown error"
-            result.fail(f"kubectl apply failed: {stderr_msg}")
-            print(f"  FAIL: kubectl apply failed — {stderr_msg}")
-            return
-    except subprocess.SubprocessError as exc:
-        result.fail(f"kubectl error: {exc}")
-        print(f"  FAIL: {exc}")
-        return
-    except Exception as exc:
-        import traceback
+    _applied = False  # Track whether base manifest was applied
 
-        traceback.print_exc()
-        result.fail(f"Unexpected error during kubectl apply: {exc}")
-        print(f"  FAIL: {exc}")
+    # Step 1 — apply the base manifest (PVC, ConfigMap, Deployment)
+    proc = _run_kubectl_step(result, "apply", ["kubectl", "apply", "-f", manifest_path])
+    if proc is None:
         return
+    _applied = True
 
     # Step 2 — set container image to registry reference
     registry_image = f"{registry_host}:{registry_port}/lmao-iot-ingest:latest"
-    try:
-        proc = subprocess.run(
-            [
-                "kubectl",
-                "set",
-                "image",
-                "deployment/iot-ingest-consumer",
-                f"consumer={registry_image}",
-            ],
-            capture_output=True,
-            text=True,
-        )
-        if proc.returncode != 0:
-            stderr_tail = proc.stderr.strip().split("\n")[-3:]
-            stderr_msg = "; ".join(stderr_tail) if stderr_tail else "unknown error"
-            result.fail(f"kubectl set image failed: {stderr_msg}")
-            print(f"  FAIL: kubectl set image failed — {stderr_msg}")
-            return
-        print(f"  Image set to: {registry_image}")
-    except subprocess.SubprocessError as exc:
-        result.fail(f"kubectl error (set image): {exc}")
-        print(f"  FAIL: {exc}")
+    proc = _run_kubectl_step(
+        result,
+        "set image",
+        [
+            "kubectl",
+            "set",
+            "image",
+            "deployment/iot-ingest-consumer",
+            f"consumer={registry_image}",
+        ],
+    )
+    if proc is None:
+        if _applied:
+            warning = (
+                "  WARNING: k8s/iot-ingest.yaml was already applied. "
+                "Manual rollback: kubectl delete -f k8s/iot-ingest.yaml"
+            )
+            print(warning)
+            result.detail += " " + warning
         return
-    except Exception as exc:
-        import traceback
-
-        traceback.print_exc()
-        result.fail(f"Unexpected error during kubectl set image: {exc}")
-        print(f"  FAIL: {exc}")
-        return
+    print(f"  Image set to: {registry_image}")
 
     # Step 3 — patch imagePullPolicy to Always
-    try:
-        proc = subprocess.run(
-            [
-                "kubectl",
-                "patch",
-                "deployment",
-                "iot-ingest-consumer",
-                "-p",
-                '{"spec":{"template":{"spec":{"containers":[{"name":"consumer","imagePullPolicy":"Always"}]}}}}',
-            ],
-            capture_output=True,
-            text=True,
-        )
-        if proc.returncode != 0:
-            stderr_tail = proc.stderr.strip().split("\n")[-3:]
-            stderr_msg = "; ".join(stderr_tail) if stderr_tail else "unknown error"
-            result.fail(f"kubectl patch failed: {stderr_msg}")
-            print(f"  FAIL: kubectl patch failed — {stderr_msg}")
-            return
-        print("  imagePullPolicy patched to Always")
-    except subprocess.SubprocessError as exc:
-        result.fail(f"kubectl error (patch): {exc}")
-        print(f"  FAIL: {exc}")
+    proc = _run_kubectl_step(
+        result,
+        "patch",
+        [
+            "kubectl",
+            "patch",
+            "deployment",
+            "iot-ingest-consumer",
+            "-p",
+            '{"spec":{"template":{"spec":{"containers":[{"name":"consumer","imagePullPolicy":"Always"}]}}}}',
+        ],
+    )
+    if proc is None:
+        if _applied:
+            warning = (
+                "  WARNING: k8s/iot-ingest.yaml was already applied. "
+                "Manual rollback: kubectl delete -f k8s/iot-ingest.yaml"
+            )
+            print(warning)
+            result.detail += " " + warning
         return
-    except Exception as exc:
-        import traceback
-
-        traceback.print_exc()
-        result.fail(f"Unexpected error during kubectl patch: {exc}")
-        print(f"  FAIL: {exc}")
-        return
+    print("  imagePullPolicy patched to Always")
 
     result.ok(f"IoT Ingest Consumer deployed from registry ({registry_image})")
     print(f"  OK: IoT Ingest Consumer deployed from registry ({registry_image})")
