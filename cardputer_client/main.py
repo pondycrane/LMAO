@@ -46,12 +46,33 @@ except ImportError:
 # Feature flag to disable SensorReport sending; defaults True for backward compatibility
 SEND_SENSOR = True
 
+# Default interval and sensor settings; updated from config.py at boot time.
+# Module-level defaults allow make_sensor_message() to function even when
+# no config.py is present (e.g., in test environments).
+INTERVAL_SECONDS = 60
+SENSOR_TYPE = None
+SENSOR_I2C_ADDR = 0x38
+
+# ---- Sensor library detection ----
+try:
+    from lib.sensors import read_humidity_temperature
+
+    HAS_SENSOR_LIB = True
+except ImportError:
+    HAS_SENSOR_LIB = False
+    read_humidity_temperature = None  # type: ignore[assignment]
+
+
+def _min_interval(val):
+    """Clamp the send interval to at least 10 seconds to avoid LoRa congestion."""
+    return max(val, 10)
+
 
 def _init_rns(config):
     """Initialize µReticulum with the given config dict.
 
-    Returns the Reticulum instance.  On failure calls ``log(...)``
-    and enters an infinite sleep — does NOT return.
+    Returns the Reticulum instance.  Raises on failure — the
+    caller (``main()``) is responsible for error handling.
     """
     rns = Reticulum(loglevel=3)
     rns.config = config
@@ -63,8 +84,8 @@ def _init_lxmf_router(identity, storage_path="/flash/lxmf_state", display_name="
     """Create and configure an LXMF router bound to *identity*.
 
     Registers the delivery identity, attaches the reply callback,
-    and returns the router.  On failure calls ``log(...)`` and
-    enters an infinite sleep — does NOT return.
+    and returns the router.  Raises on failure — the caller
+    (``main()``) is responsible for error handling.
     """
     router = LXMRouter(identity=identity, storagepath=storage_path)
     router.register_delivery_identity(identity, display_name=display_name)
@@ -114,24 +135,41 @@ def make_sensor_message(identity_hex, seq, battery=3.7, strict=False):
                 "esp32 module not available and strict=True — cannot read "
                 "CPU temperature without a real ESP32 device"
             )
-        temp = 25.0  # Fallback for non-ESP32 environments; preserves backward compatibility
-                      # with old synthetic formula minimum (seq=0 → 25.0°C)
-        readings = [{
+        # Fallback for non-ESP32 environments; preserves backward compatibility
+        temp = 25.0
+
+    else:
+        temp = (esp32.raw_temperature() - 32) * 5.0 / 9.0  # Fahrenheit to Celsius
+
+    readings = [
+        {
             "sensor_id": 1,
             "value": temp,
             "unit": "C",
             "timestamp_ms": int(time.time() * 1000),
-        }]
-        return encode_sensor_envelope(identity_hex, seq, battery, readings)
+        }
+    ]
 
-    temp = (esp32.raw_temperature() - 32) * 5.0 / 9.0  # Fahrenheit to Celsius
+    # ---- Humidity sensor (external Grove I2C) ----
+    if SENSOR_TYPE is not None and HAS_SENSOR_LIB:
+        try:
+            _, humidity = read_humidity_temperature(
+                SENSOR_TYPE, SENSOR_I2C_ADDR
+            )
+            if humidity is not None:
+                readings.append(
+                    {
+                        "sensor_id": 2,
+                        "value": humidity,
+                        "unit": "%",
+                        "timestamp_ms": int(time.time() * 1000),
+                    }
+                )
+        except (OSError, ValueError) as e:
+            if hasattr(sys, "print_exception"):
+                sys.print_exception(e)
+            print(f"Humidity sensor read failed: {e}")
 
-    readings = [{
-        "sensor_id": 1,
-        "value": temp,
-        "unit": "C",
-        "timestamp_ms": int(time.time() * 1000),
-    }]
     return encode_sensor_envelope(identity_hex, seq, battery, readings)
 
 
@@ -335,12 +373,15 @@ def main():
         from config import WIFI_SSID, WIFI_PASS, NODE_NAME, DEBUG, CONFIG
 
         try:
-            from config import DEST_HASH
+            from config import DEST_HASH, INTERVAL_SECONDS, SENSOR_TYPE, SENSOR_I2C_ADDR
 
             raw_dest = DEST_HASH  # captured for error messages
             DEST_HASH = _convert_dest_hash(DEST_HASH)
         except ImportError:
             DEST_HASH = None  # Legacy config without DEST_HASH
+            INTERVAL_SECONDS = 60
+            SENSOR_TYPE = None
+            SENSOR_I2C_ADDR = 0x38
         except ValueError:
             log(
                 f"ERROR: DEST_HASH is not a valid hex string: {raw_dest!r}. "
@@ -351,6 +392,16 @@ def main():
             )
             while True:
                 time.sleep(1)
+
+        # ---- Apply config values ----
+        # Clamp interval to minimum 10s to avoid LoRa congestion
+        INTERVAL_SECONDS = _min_interval(INTERVAL_SECONDS)
+
+        # Sync sensor config to module-level globals (needed by make_sensor_message)
+        globals()["SENSOR_TYPE"] = SENSOR_TYPE
+        globals()["SENSOR_I2C_ADDR"] = SENSOR_I2C_ADDR
+        globals()["INTERVAL_SECONDS"] = INTERVAL_SECONDS
+
     except ImportError:
         log("ERROR: Cannot import config — is config.py on device?", tft, status_lines)
         while True:
@@ -455,7 +506,7 @@ def main():
                 tft = log(f"Reply: {reply}", tft, status_lines)
             pending_replies.clear()
 
-            time.sleep(10)
+            time.sleep(INTERVAL_SECONDS)
 
         except KeyboardInterrupt:
             log("Shutting down...", tft, status_lines)

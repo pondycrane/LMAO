@@ -69,7 +69,7 @@ def _encode_float(value):
 
 def _decode_float(data, offset=0):
     """Decode a 32-bit float from 4 bytes at offset."""
-    return _struct.unpack("<f", data[offset:offset + 4])[0]
+    return _struct.unpack("<f", data[offset : offset + 4])[0]
 
 
 def _decode_proto_message(data, field_map):
@@ -141,7 +141,7 @@ def _decode_proto_message(data, field_map):
         elif wire_type == 2:  # Length-delimited
             length, llen = decode_varint(data, pos)
             pos += llen
-            value = data[pos:pos + length]
+            value = data[pos : pos + length]
             pos += length
         elif wire_type == 5:  # 32-bit float
             value = _decode_float(data, pos)
@@ -164,13 +164,16 @@ def _decode_proto_message(data, field_map):
 #  SensorReport (field 10)
 # ═══════════════════════════════════════════════════════════════════════════════
 
+
 def encode_sensor_reading(sensor_id, value, unit, timestamp_ms):
     """Encode a single SensorReading sub-message."""
     result = bytearray()
-    result.extend(encode_field(1, 0, encode_varint(sensor_id)))           # uint32
-    result.extend(encode_field(2, 5, _encode_float(value)))                # float
-    result.extend(encode_field(3, 2, encode_length_delimited(unit.encode("utf-8"))))  # string
-    result.extend(encode_field(4, 0, encode_varint(timestamp_ms)))        # uint64
+    result.extend(encode_field(1, 0, encode_varint(sensor_id)))  # uint32
+    result.extend(encode_field(2, 5, _encode_float(value)))  # float
+    result.extend(
+        encode_field(3, 2, encode_length_delimited(unit.encode("utf-8")))
+    )  # string
+    result.extend(encode_field(4, 0, encode_varint(timestamp_ms)))  # uint64
     return bytes(result)
 
 
@@ -180,25 +183,32 @@ def encode_sensor_report(node_id, seq, battery, readings):
     readings is a list of dicts: [{sensor_id, value, unit, timestamp_ms}, ...]
     """
     result = bytearray()
-    result.extend(encode_field(1, 2, encode_length_delimited(node_id.encode("utf-8"))))  # string
-    result.extend(encode_field(2, 0, encode_varint(seq)))                  # uint32
-    result.extend(encode_field(3, 5, _encode_float(battery)))             # float
+    result.extend(
+        encode_field(1, 2, encode_length_delimited(node_id.encode("utf-8")))
+    )  # string
+    result.extend(encode_field(2, 0, encode_varint(seq)))  # uint32
+    result.extend(encode_field(3, 5, _encode_float(battery)))  # float
     for r in readings:
         inner = encode_sensor_reading(
             r["sensor_id"], r["value"], r["unit"], r["timestamp_ms"]
         )
-        result.extend(encode_field(4, 2, encode_length_delimited(inner)))  # repeated SensorReading
+        result.extend(
+            encode_field(4, 2, encode_length_delimited(inner))
+        )  # repeated SensorReading
     return bytes(result)
 
 
 def decode_sensor_reading(data):
     """Decode a single SensorReading from bytes. Returns dict or None."""
-    return _decode_proto_message(data, {
-        1: (0, "sensor_id", int, 0),
-        2: (5, "value", None, 0.0),
-        3: (2, "unit", lambda b: b.decode("utf-8", "replace"), ""),
-        4: (0, "timestamp_ms", int, 0),
-    })
+    return _decode_proto_message(
+        data,
+        {
+            1: (0, "sensor_id", int, 0),
+            2: (5, "value", None, 0.0),
+            3: (2, "unit", lambda b: b.decode("utf-8", "replace"), ""),
+            4: (0, "timestamp_ms", int, 0),
+        },
+    )
 
 
 def decode_sensor_report(data):
@@ -206,17 +216,21 @@ def decode_sensor_report(data):
 
     Returns dict with keys: node_id, seq, battery, readings (list of dicts).
     """
-    return _decode_proto_message(data, {
-        1: (2, "node_id", lambda b: b.decode("utf-8", "replace"), ""),
-        2: (0, "seq", int, 0),
-        3: (5, "battery", None, 0.0),
-        4: (2, "readings", decode_sensor_reading, [], _REPEATED),
-    })
+    return _decode_proto_message(
+        data,
+        {
+            1: (2, "node_id", lambda b: b.decode("utf-8", "replace"), ""),
+            2: (0, "seq", int, 0),
+            3: (5, "battery", None, 0.0),
+            4: (2, "readings", decode_sensor_reading, [], _REPEATED),
+        },
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  CommandRequest (field 11)
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 def encode_command_request(cmd_id, target, action, params, issued_ms, expires_ms):
     """Encode a CommandRequest protobuf message.
@@ -224,9 +238,15 @@ def encode_command_request(cmd_id, target, action, params, issued_ms, expires_ms
     params is a dict of string→string.
     """
     result = bytearray()
-    result.extend(encode_field(1, 2, encode_length_delimited(cmd_id.encode("utf-8"))))     # string
-    result.extend(encode_field(2, 2, encode_length_delimited(target.encode("utf-8"))))     # string
-    result.extend(encode_field(3, 2, encode_length_delimited(action.encode("utf-8"))))     # string
+    result.extend(
+        encode_field(1, 2, encode_length_delimited(cmd_id.encode("utf-8")))
+    )  # string
+    result.extend(
+        encode_field(2, 2, encode_length_delimited(target.encode("utf-8")))
+    )  # string
+    result.extend(
+        encode_field(3, 2, encode_length_delimited(action.encode("utf-8")))
+    )  # string
     # map<string, string> params = 4 — encoded as repeated length-delimited entries
     # each entry is a sub-message: key (field 1) + value (field 2)
     for k, v in params.items():
@@ -234,8 +254,8 @@ def encode_command_request(cmd_id, target, action, params, issued_ms, expires_ms
         entry.extend(encode_field(1, 2, encode_length_delimited(k.encode("utf-8"))))
         entry.extend(encode_field(2, 2, encode_length_delimited(v.encode("utf-8"))))
         result.extend(encode_field(4, 2, encode_length_delimited(bytes(entry))))
-    result.extend(encode_field(5, 0, encode_varint(issued_ms)))                            # uint64
-    result.extend(encode_field(6, 0, encode_varint(expires_ms)))                           # uint64
+    result.extend(encode_field(5, 0, encode_varint(issued_ms)))  # uint64
+    result.extend(encode_field(6, 0, encode_varint(expires_ms)))  # uint64
     return bytes(result)
 
 
@@ -252,7 +272,7 @@ def _decode_map_entry(data):
         if wire_type == 2:
             length, llen = decode_varint(data, pos)
             pos += llen
-            s = data[pos:pos + length].decode("utf-8", "replace")
+            s = data[pos : pos + length].decode("utf-8", "replace")
             if field_number == 1:
                 key = s
             elif field_number == 2:
@@ -268,27 +288,39 @@ def decode_command_request(data):
 
     Returns dict with keys: cmd_id, target, action, params (dict), issued_ms, expires_ms.
     """
-    return _decode_proto_message(data, {
-        1: (2, "cmd_id", lambda b: b.decode("utf-8", "replace"), ""),
-        2: (2, "target", lambda b: b.decode("utf-8", "replace"), ""),
-        3: (2, "action", lambda b: b.decode("utf-8", "replace"), ""),
-        4: (2, "params", lambda b: dict([_decode_map_entry(b)]), {}, _REPEATED),
-        5: (0, "issued_ms", int, 0),
-        6: (0, "expires_ms", int, 0),
-    })
+    return _decode_proto_message(
+        data,
+        {
+            1: (2, "cmd_id", lambda b: b.decode("utf-8", "replace"), ""),
+            2: (2, "target", lambda b: b.decode("utf-8", "replace"), ""),
+            3: (2, "action", lambda b: b.decode("utf-8", "replace"), ""),
+            4: (2, "params", lambda b: dict([_decode_map_entry(b)]), {}, _REPEATED),
+            5: (0, "issued_ms", int, 0),
+            6: (0, "expires_ms", int, 0),
+        },
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  CommandAck (field 12)
 # ═══════════════════════════════════════════════════════════════════════════════
 
+
 def encode_command_ack(cmd_id, node_id, success, message):
     """Encode a CommandAck protobuf message."""
     result = bytearray()
-    result.extend(encode_field(1, 2, encode_length_delimited(cmd_id.encode("utf-8"))))   # string
-    result.extend(encode_field(2, 2, encode_length_delimited(node_id.encode("utf-8"))))  # string
-    result.extend(encode_field(3, 0, encode_varint(1 if success else 0)))                 # bool (varint)
-    result.extend(encode_field(4, 2, encode_length_delimited(message.encode("utf-8"))))  # string
+    result.extend(
+        encode_field(1, 2, encode_length_delimited(cmd_id.encode("utf-8")))
+    )  # string
+    result.extend(
+        encode_field(2, 2, encode_length_delimited(node_id.encode("utf-8")))
+    )  # string
+    result.extend(
+        encode_field(3, 0, encode_varint(1 if success else 0))
+    )  # bool (varint)
+    result.extend(
+        encode_field(4, 2, encode_length_delimited(message.encode("utf-8")))
+    )  # string
     return bytes(result)
 
 
@@ -297,17 +329,21 @@ def decode_command_ack(data):
 
     Returns dict with keys: cmd_id, node_id, success (bool), message.
     """
-    return _decode_proto_message(data, {
-        1: (2, "cmd_id", lambda b: b.decode("utf-8", "replace"), ""),
-        2: (2, "node_id", lambda b: b.decode("utf-8", "replace"), ""),
-        3: (0, "success", bool, False),
-        4: (2, "message", lambda b: b.decode("utf-8", "replace"), ""),
-    })
+    return _decode_proto_message(
+        data,
+        {
+            1: (2, "cmd_id", lambda b: b.decode("utf-8", "replace"), ""),
+            2: (2, "node_id", lambda b: b.decode("utf-8", "replace"), ""),
+            3: (0, "success", bool, False),
+            4: (2, "message", lambda b: b.decode("utf-8", "replace"), ""),
+        },
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  TextMessage (field 20)
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 def encode_text_message(node_id, content, timestamp):
     """Encode a TextMessage protobuf message.
@@ -333,16 +369,20 @@ def decode_text_message(data):
 
     Returns dict with keys: node_id, content, timestamp.
     """
-    return _decode_proto_message(data, {
-        1: (2, "node_id", lambda b: b.decode("utf-8"), ""),
-        2: (2, "content", lambda b: b.decode("utf-8"), ""),
-        3: (0, "timestamp", int, 0),
-    })
+    return _decode_proto_message(
+        data,
+        {
+            1: (2, "node_id", lambda b: b.decode("utf-8"), ""),
+            2: (2, "content", lambda b: b.decode("utf-8"), ""),
+            3: (0, "timestamp", int, 0),
+        },
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  AudioMessage (field 21)
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 def encode_audio_message(node_id, audio_data, codec, duration_ms, timestamp):
     """Encode an AudioMessage protobuf message.
@@ -350,11 +390,15 @@ def encode_audio_message(node_id, audio_data, codec, duration_ms, timestamp):
     audio_data is bytes (not str).
     """
     result = bytearray()
-    result.extend(encode_field(1, 2, encode_length_delimited(node_id.encode("utf-8"))))      # string
-    result.extend(encode_field(2, 2, encode_length_delimited(audio_data)))                    # bytes
-    result.extend(encode_field(3, 2, encode_length_delimited(codec.encode("utf-8"))))        # string
-    result.extend(encode_field(4, 0, encode_varint(duration_ms)))                            # uint32
-    result.extend(encode_field(5, 0, encode_varint(timestamp)))                              # uint64
+    result.extend(
+        encode_field(1, 2, encode_length_delimited(node_id.encode("utf-8")))
+    )  # string
+    result.extend(encode_field(2, 2, encode_length_delimited(audio_data)))  # bytes
+    result.extend(
+        encode_field(3, 2, encode_length_delimited(codec.encode("utf-8")))
+    )  # string
+    result.extend(encode_field(4, 0, encode_varint(duration_ms)))  # uint32
+    result.extend(encode_field(5, 0, encode_varint(timestamp)))  # uint64
     return bytes(result)
 
 
@@ -363,18 +407,22 @@ def decode_audio_message(data):
 
     Returns dict with keys: node_id, audio_data (bytes), codec, duration_ms, timestamp.
     """
-    return _decode_proto_message(data, {
-        1: (2, "node_id", lambda b: b.decode("utf-8", "replace"), ""),
-        2: (2, "audio_data", None, b""),
-        3: (2, "codec", lambda b: b.decode("utf-8", "replace"), ""),
-        4: (0, "duration_ms", int, 0),
-        5: (0, "timestamp", int, 0),
-    })
+    return _decode_proto_message(
+        data,
+        {
+            1: (2, "node_id", lambda b: b.decode("utf-8", "replace"), ""),
+            2: (2, "audio_data", None, b""),
+            3: (2, "codec", lambda b: b.decode("utf-8", "replace"), ""),
+            4: (0, "duration_ms", int, 0),
+            5: (0, "timestamp", int, 0),
+        },
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  ImageMessage (field 22)
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 def encode_image_message(node_id, image_data, fmt, width, height, timestamp):
     """Encode an ImageMessage protobuf message.
@@ -382,12 +430,16 @@ def encode_image_message(node_id, image_data, fmt, width, height, timestamp):
     image_data is bytes.
     """
     result = bytearray()
-    result.extend(encode_field(1, 2, encode_length_delimited(node_id.encode("utf-8"))))      # string
-    result.extend(encode_field(2, 2, encode_length_delimited(image_data)))                    # bytes
-    result.extend(encode_field(3, 2, encode_length_delimited(fmt.encode("utf-8"))))          # string
-    result.extend(encode_field(4, 0, encode_varint(width)))                                  # uint32
-    result.extend(encode_field(5, 0, encode_varint(height)))                                 # uint32
-    result.extend(encode_field(6, 0, encode_varint(timestamp)))                              # uint64
+    result.extend(
+        encode_field(1, 2, encode_length_delimited(node_id.encode("utf-8")))
+    )  # string
+    result.extend(encode_field(2, 2, encode_length_delimited(image_data)))  # bytes
+    result.extend(
+        encode_field(3, 2, encode_length_delimited(fmt.encode("utf-8")))
+    )  # string
+    result.extend(encode_field(4, 0, encode_varint(width)))  # uint32
+    result.extend(encode_field(5, 0, encode_varint(height)))  # uint32
+    result.extend(encode_field(6, 0, encode_varint(timestamp)))  # uint64
     return bytes(result)
 
 
@@ -396,14 +448,17 @@ def decode_image_message(data):
 
     Returns dict with keys: node_id, image_data (bytes), format, width, height, timestamp.
     """
-    return _decode_proto_message(data, {
-        1: (2, "node_id", lambda b: b.decode("utf-8", "replace"), ""),
-        2: (2, "image_data", None, b""),
-        3: (2, "format", lambda b: b.decode("utf-8", "replace"), ""),
-        4: (0, "width", int, 0),
-        5: (0, "height", int, 0),
-        6: (0, "timestamp", int, 0),
-    })
+    return _decode_proto_message(
+        data,
+        {
+            1: (2, "node_id", lambda b: b.decode("utf-8", "replace"), ""),
+            2: (2, "image_data", None, b""),
+            3: (2, "format", lambda b: b.decode("utf-8", "replace"), ""),
+            4: (0, "width", int, 0),
+            5: (0, "height", int, 0),
+            6: (0, "timestamp", int, 0),
+        },
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -411,10 +466,10 @@ def decode_image_message(data):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 # Enum values for CallSignal.Signal
-SIGNAL_OFFER     = 0
-SIGNAL_ANSWER    = 1
-SIGNAL_ICE       = 2
-SIGNAL_HANGUP    = 3
+SIGNAL_OFFER = 0
+SIGNAL_ANSWER = 1
+SIGNAL_ICE = 2
+SIGNAL_HANGUP = 3
 SIGNAL_KEEPALIVE = 4
 
 
@@ -424,9 +479,13 @@ def encode_call_signal(signal, sdp_or_ice, media_type):
     signal is an int (0-4).
     """
     result = bytearray()
-    result.extend(encode_field(1, 0, encode_varint(signal)))                                 # enum (varint)
-    result.extend(encode_field(2, 2, encode_length_delimited(sdp_or_ice.encode("utf-8"))))  # string
-    result.extend(encode_field(3, 2, encode_length_delimited(media_type.encode("utf-8"))))  # string
+    result.extend(encode_field(1, 0, encode_varint(signal)))  # enum (varint)
+    result.extend(
+        encode_field(2, 2, encode_length_delimited(sdp_or_ice.encode("utf-8")))
+    )  # string
+    result.extend(
+        encode_field(3, 2, encode_length_delimited(media_type.encode("utf-8")))
+    )  # string
     return bytes(result)
 
 
@@ -435,11 +494,14 @@ def decode_call_signal(data):
 
     Returns dict with keys: signal (int), sdp_or_ice, media_type.
     """
-    return _decode_proto_message(data, {
-        1: (0, "signal", int, 0),
-        2: (2, "sdp_or_ice", lambda b: b.decode("utf-8", "replace"), ""),
-        3: (2, "media_type", lambda b: b.decode("utf-8", "replace"), ""),
-    })
+    return _decode_proto_message(
+        data,
+        {
+            1: (0, "signal", int, 0),
+            2: (2, "sdp_or_ice", lambda b: b.decode("utf-8", "replace"), ""),
+            3: (2, "media_type", lambda b: b.decode("utf-8", "replace"), ""),
+        },
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -447,24 +509,25 @@ def decode_call_signal(data):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 # Field numbers for oneof dispatch
-FIELD_SENSOR   = 10
-FIELD_COMMAND  = 11
-FIELD_ACK      = 12
-FIELD_TEXT     = 20
-FIELD_AUDIO    = 21
-FIELD_IMAGE    = 22
-FIELD_CALL     = 30
+FIELD_SENSOR = 10
+FIELD_COMMAND = 11
+FIELD_ACK = 12
+FIELD_TEXT = 20
+FIELD_AUDIO = 21
+FIELD_IMAGE = 22
+FIELD_CALL = 30
 
 # Decoder dispatch table: field_number → decoder function
 _DECODERS = {
-    FIELD_SENSOR:  decode_sensor_report,
+    FIELD_SENSOR: decode_sensor_report,
     FIELD_COMMAND: decode_command_request,
-    FIELD_ACK:     decode_command_ack,
-    FIELD_TEXT:    decode_text_message,
-    FIELD_AUDIO:   decode_audio_message,
-    FIELD_IMAGE:   decode_image_message,
-    FIELD_CALL:    decode_call_signal,
+    FIELD_ACK: decode_command_ack,
+    FIELD_TEXT: decode_text_message,
+    FIELD_AUDIO: decode_audio_message,
+    FIELD_IMAGE: decode_image_message,
+    FIELD_CALL: decode_call_signal,
 }
+
 
 def encode_envelope_text(textmessage_bytes):
     """Wrap a TextMessage in an LMAOEnvelope (field 20, wire type 2).
@@ -498,7 +561,7 @@ def decode_envelope(data):
         if wire_type == 2:
             length, llen = decode_varint(data, pos)
             pos += llen
-            value = data[pos:pos + length]
+            value = data[pos : pos + length]
             pos += length
             decoder = _DECODERS.get(field_number)
             if decoder is not None:
@@ -518,12 +581,14 @@ def decode_envelope(data):
 
 # ---- Convenience function for the POC ----
 
+
 def make_poc_message(node_id, text, timestamp=None):
     """Create the full protobuf payload for a POC text message.
 
     Returns bytes suitable for LXMF Content field.
     """
     import time as _time
+
     if timestamp is None:
         timestamp = int(_time.time() * 1000)
 
@@ -540,7 +605,9 @@ def parse_poc_message(data):
     if result is not None:
         return result.get("content") if isinstance(result, dict) else None
     # Fallback: treat raw content as plain text
-    print("WARNING: parse_poc_message — protobuf decode returned None, trying raw UTF-8 fallback")
+    print(
+        "WARNING: parse_poc_message — protobuf decode returned None, trying raw UTF-8 fallback"
+    )
     try:
         text = data.decode("utf-8")
         return text

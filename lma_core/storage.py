@@ -153,7 +153,9 @@ class DuckDbStore:
         if not _DUCKDB_AVAILABLE:
             raise ImportError(_DUCKDB_IMPORT_ERROR)
 
-        _logger.info("Opening DuckDB database at %s (read_only=%s) ...", db_path, read_only)
+        _logger.info(
+            "Opening DuckDB database at %s (read_only=%s) ...", db_path, read_only
+        )
         try:
             self._conn = duckdb.connect(db_path, read_only=read_only)
             self._db_path = db_path
@@ -174,9 +176,7 @@ class DuckDbStore:
             )
             raise
 
-        _logger.info(
-            "DuckDB store '%s' initialized at %s", self._name, db_path
-        )
+        _logger.info("DuckDB store '%s' initialized at %s", self._name, db_path)
 
     def close(self) -> None:
         """Close the DuckDB connection.
@@ -239,15 +239,17 @@ class DuckDbStore:
         rows_to_insert: List[tuple] = []
 
         for reading in sensor.readings:
-            rows_to_insert.append((
-                sensor.node_id,
-                sensor.seq,
-                sensor.battery,
-                reading.sensor_id,
-                reading.value,
-                reading.unit,
-                reading.timestamp_ms,
-            ))
+            rows_to_insert.append(
+                (
+                    sensor.node_id,
+                    sensor.seq,
+                    sensor.battery,
+                    reading.sensor_id,
+                    reading.value,
+                    reading.unit,
+                    reading.timestamp_ms,
+                )
+            )
 
         if not rows_to_insert:
             _logger.debug(

@@ -833,23 +833,32 @@ class TestFindRepoRoot:
     def test_finds_by_dockerfile(self, tmp_path):
         """Should detect repo root by finding a Dockerfile marker."""
         (tmp_path / "Dockerfile").write_text("FROM ubuntu")
-        with patch.object(install_services, "__file__",
-                          str(tmp_path / "tools" / "install_services.py")):
+        with patch.object(
+            install_services,
+            "__file__",
+            str(tmp_path / "tools" / "install_services.py"),
+        ):
             root = install_services._find_repo_root()
         assert root == str(tmp_path)
 
     def test_finds_by_git_dir(self, tmp_path):
         """Should detect repo root by finding a .git directory."""
         (tmp_path / ".git").mkdir()
-        with patch.object(install_services, "__file__",
-                          str(tmp_path / "tools" / "install_services.py")):
+        with patch.object(
+            install_services,
+            "__file__",
+            str(tmp_path / "tools" / "install_services.py"),
+        ):
             root = install_services._find_repo_root()
         assert root == str(tmp_path)
 
     def test_returns_none_when_not_found(self, tmp_path):
         """Should return None when no marker is found within depth limit."""
-        with patch.object(install_services, "__file__",
-                          str(tmp_path / "tools" / "install_services.py")):
+        with patch.object(
+            install_services,
+            "__file__",
+            str(tmp_path / "tools" / "install_services.py"),
+        ):
             root = install_services._find_repo_root()
         assert root is None
 
@@ -864,8 +873,11 @@ class TestFindRepoRoot:
         (tmp_path / "Dockerfile").write_text("FROM ubuntu")
         (tmp_path / ".git").mkdir()
         (tmp_path / "tools").mkdir()
-        with patch.object(install_services, "__file__",
-                          str(tmp_path / "tools" / "install_services.py")):
+        with patch.object(
+            install_services,
+            "__file__",
+            str(tmp_path / "tools" / "install_services.py"),
+        ):
             root = install_services._find_repo_root()
         # Should find the Dockerfile (checked first) before reaching .git
         assert root == str(tmp_path)

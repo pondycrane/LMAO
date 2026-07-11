@@ -700,6 +700,19 @@ class TestCardputerLoRaE2E:
                 f'DEST_HASH = "{server_hash}"',
             )
 
+            # Set a shorter interval for E2E tests (avoids exceeding the 30s serial deadline)
+            # and enable the external sensor if one is configured via env var.
+            patched_config = patched_config.replace(
+                "INTERVAL_SECONDS = 60",
+                "INTERVAL_SECONDS = 15",
+            )
+            _e2e_sensor_type = os.environ.get("E2E_SENSOR_TYPE", "None")
+            if _e2e_sensor_type not in ("None", ""):
+                patched_config = patched_config.replace(
+                    "SENSOR_TYPE = None",
+                    f'SENSOR_TYPE = "{_e2e_sensor_type}"',
+                )
+
             cardputer_ser = None
             try:
                 # Flash the Cardputer with client files
@@ -864,6 +877,41 @@ class TestCardputerLoRaE2E:
                         f"Temperature {temp}°C equals the CPython fallback constant. "
                         f"Cardputer must use esp32.raw_temperature()."
                     )
+
+                # ── Humidity sensor validation (conditional on sensor presence) ──
+                # When an external humidity sensor (DHT20, BME280, etc.) is
+                # connected and SENSOR_TYPE is set, the Cardputer sends 2 readings
+                # per SensorReport: sensor_id=1 (temp, unit="C") and sensor_id=2
+                # (humidity, unit="%").  When no sensor is connected, only
+                # sensor_id=1 readings are produced — this is the normal case.
+                # Use index-based access — DuckDB fetchall() returns tuples, not objects
+                humidity_rows = [
+                    r for r in rows if len(r) >= 3 and r[2] == "%"
+                ]
+                if humidity_rows:
+                    # External sensor IS connected — validate humidity data
+                    print(
+                        f"\n💧 Humidity sensor detected: {len(humidity_rows)} reading(s)"
+                    )
+                    for row in humidity_rows:
+                        hum = float(row[1])
+                        assert 0.0 <= hum <= 100.0, (
+                            f"Expected humidity in [0, 100]%, got {hum}%"
+                        )
+                    # Verify at least one SensorReport had 2 readings
+                    multi_reading_msgs = [
+                        m for m in sensor_messages if "readings" in str(m)
+                    ]
+                    print(
+                        f"   SensorReports with multiple readings: {len(multi_reading_msgs)}"
+                    )
+                else:
+                    # No external sensor — this is the standard configuration
+                    print(
+                        "\nℹ️  No humidity sensor detected (SENSOR_TYPE=None or not connected)."
+                    )
+                    print("   Single-reading mode (die temp only) — normal operation.")
+
                 assert store_failures == 0, (
                     f"DuckDB store failed {store_failures} time(s) — "
                     f"partial data loss detected."

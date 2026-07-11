@@ -160,6 +160,12 @@ Listening for LXMF messages...
   automated flash+test workflow. Obtain the server identity from its startup
   log (`Node identity: ...`).
 - Optionally adjust `NODE_NAME` and `DEBUG` level
+- Optionally adjust `INTERVAL_SECONDS` (how often the Cardputer sends sensor data).
+  Default 60s = 1 reading per minute. Minimum 10s (clamped automatically) to
+  avoid LoRa congestion.
+- To attach an external Grove I2C humidity/temperature sensor (e.g., DHT20),
+  set `SENSOR_TYPE = "DHT20"` and `SENSOR_I2C_ADDR = 0x38`. Leave
+  `SENSOR_TYPE = None` (default) to send only the ESP32's internal die temperature.
 
 **Option A — MicroPython + cardputer_client** (lighter weight, requires setup):
 
@@ -259,7 +265,7 @@ The test auto-skips when hardware is not detected.  See
 Manual verification steps:
 
 1. Both devices powered on and within LoRa range
-2. Cardputer sends "Hello from Cardputer — seq 1" every 10 seconds
+2. Cardputer sends "Hello from Cardputer — seq 1" at the configured interval (default: 60s, configurable via `INTERVAL_SECONDS` in `config.py`, minimum: 10s)
 3. Server displays: `MSG from <hash>: Hello from Cardputer`
 4. Server replies: `ACK from LMAO Server — received your message`
 5. Cardputer displays the reply on screen
