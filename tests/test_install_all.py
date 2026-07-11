@@ -8,6 +8,7 @@ Run with::
     bazel test //tests:test_install_all --test_output=all
 """
 
+import os
 import subprocess
 from unittest.mock import MagicMock, patch
 
@@ -197,6 +198,18 @@ class TestParseArgs:
         args = install_all._parse_args(["--skip-server", "--skip-k8s"])
         assert args.skip_server is True
         assert args.include_services is False
+
+    # ── setup-registry flags ──
+
+    def test_setup_registry_default_false(self):
+        """--setup-registry defaults to False."""
+        args = install_all._parse_args([])
+        assert args.setup_registry is False
+
+    def test_setup_registry_flag(self):
+        """--setup-registry sets the flag to True."""
+        args = install_all._parse_args(["--setup-registry"])
+        assert args.setup_registry is True
 
 
 # ── Summary output ───────────────────────────────────────────────────
@@ -726,12 +739,16 @@ class TestMainWithoutServices:
         assert "K8s Services" in captured
         assert "--include-services not set" in captured
 
-    def test_summary_has_five_rows_when_nothing_detected(self, capsys):
-        """Summary should show all five rows even when nothing is connected."""
+    def test_summary_has_six_rows_when_nothing_detected(self, capsys):
+        """Summary should show all six rows even when nothing is connected.
+
+        Six rows: Cardputer, RNode (Heltec), Local Registry, Pi Server,
+        K8s Services, IoT Ingest Consumer.
+        """
         with pytest.raises(SystemExit):
             install_all.main([])
         captured = capsys.readouterr().out
-        assert captured.count("[SKIP]") == 5
+        assert captured.count("[SKIP]") == 6
 
 
 class TestMainWithServicesSkipped:
@@ -960,6 +977,42 @@ class TestFindRepoRoot:
         ):
             root = install_services._find_repo_root()
         # Should find the Dockerfile (checked first) before reaching .git
+        assert root == str(tmp_path)
+
+    # ── Fast-path tests (BUILD_WORKSPACE_DIRECTORY) ──
+
+    def test_finds_via_build_workspace_env(self, tmp_path):
+        """BUILD_WORKSPACE_DIRECTORY env var should be used when set."""
+        with (
+            patch.dict(os.environ, {"BUILD_WORKSPACE_DIRECTORY": str(tmp_path)}, clear=False),
+            patch.object(install_services, "__file__", "/nonexistent/tools/install_services.py"),
+        ):
+            root = install_services._find_repo_root()
+        assert root == str(tmp_path)
+
+    def test_build_workspace_env_skipped_when_not_dir(self):
+        """BUILD_WORKSPACE_DIRECTORY is set but not a directory → fall through."""
+        with (
+            patch.dict(os.environ, {"BUILD_WORKSPACE_DIRECTORY": "/nonexistent/path"}, clear=False),
+            patch.object(install_services, "__file__", "/"),
+        ):
+            root = install_services._find_repo_root()
+        # Should fall through (no Dockerfile or .git found at /)
+        assert root is None
+
+    def test_build_workspace_env_not_set_falls_through(self, tmp_path):
+        """Without BUILD_WORKSPACE_DIRECTORY, should walk directories as normal."""
+        (tmp_path / "Dockerfile").write_text("FROM ubuntu")
+        # Ensure env var is not set
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(
+                install_services,
+                "__file__",
+                str(tmp_path / "tools" / "install_services.py"),
+            ),
+        ):
+            root = install_services._find_repo_root()
         assert root == str(tmp_path)
 
 
@@ -1304,3 +1357,159 @@ class TestInstallIotIngestConsumer:
             install_services.install_iot_ingest_consumer(result, "/fake/repo")
             assert result.status == "FAIL"
             assert "iot-ingest.yaml" in result.detail.lower()
+
+
+# ── Unit tests for setup_registry() ─────────────────────────────────
+
+
+class TestSetupRegistry:
+    """Unit tests for install_services.setup_registry()."""
+
+    def _make_result(self):
+        return install_all.DeviceResult("Local Registry")
+
+    def test_skips_when_docker_not_found(self):
+        """Result should be SKIP when docker is not on PATH."""
+        with patch("shutil.which", return_value=None):
+            result = self._make_result()
+            install_services.setup_registry(result, "/fake/repo")
+            assert result.status == "SKIP"
+            assert "docker" in result.detail.lower()
+
+    def test_fails_when_repo_root_none_and_not_found(self):
+        """Result should be FAIL when repo_root cannot be located."""
+        with patch.object(install_services, "_find_repo_root", return_value=None):
+            result = self._make_result()
+            install_services.setup_registry(result, None)
+            assert result.status == "FAIL"
+            assert "repo root" in result.detail.lower()
+
+    def test_fails_when_manage_script_not_found(self):
+        """Result should be FAIL when manage.sh does not exist."""
+        with (
+            patch("shutil.which", return_value="/usr/bin/docker"),
+            patch("os.path.isfile", return_value=False),
+        ):
+            result = self._make_result()
+            install_services.setup_registry(result, "/fake/repo")
+            assert result.status == "FAIL"
+            assert "manage.sh" in result.detail.lower()
+
+    def test_ok_when_start_and_push_succeed(self):
+        """Result should be OK when both start and push succeed."""
+        mock_proc = MagicMock()
+        mock_proc.returncode = 0
+        with (
+            patch("shutil.which", return_value="/usr/bin/docker"),
+            patch("os.path.isfile", return_value=True),
+            patch("subprocess.run", return_value=mock_proc),
+        ):
+            result = self._make_result()
+            install_services.setup_registry(result, "/fake/repo")
+            assert result.status == "OK"
+            assert "pushed" in result.detail.lower()
+
+    def test_fails_when_start_returns_nonzero(self):
+        """Result should be FAIL when manage.sh start fails."""
+        mock_fail = MagicMock()
+        mock_fail.returncode = 1
+        mock_fail.stderr = "Error: port in use"
+        with (
+            patch("shutil.which", return_value="/usr/bin/docker"),
+            patch("os.path.isfile", return_value=True),
+            patch("subprocess.run", return_value=mock_fail),
+        ):
+            result = self._make_result()
+            install_services.setup_registry(result, "/fake/repo")
+            assert result.status == "FAIL"
+            assert "start failed" in result.detail.lower()
+
+    def test_fails_when_push_returns_nonzero(self):
+        """Result should be FAIL when manage.sh push fails after start succeeds."""
+        mock_ok = MagicMock()
+        mock_ok.returncode = 0
+        mock_fail = MagicMock()
+        mock_fail.returncode = 1
+        mock_fail.stderr = "Error: connection refused"
+        with (
+            patch("shutil.which", return_value="/usr/bin/docker"),
+            patch("os.path.isfile", return_value=True),
+            patch("subprocess.run", side_effect=[mock_ok, mock_fail]),
+        ):
+            result = self._make_result()
+            install_services.setup_registry(result, "/fake/repo")
+            assert result.status == "FAIL"
+            assert "push failed" in result.detail.lower()
+
+    def test_fails_when_subprocess_raises(self):
+        """Result should be FAIL when subprocess.run raises SubprocessError."""
+        with (
+            patch("shutil.which", return_value="/usr/bin/docker"),
+            patch("os.path.isfile", return_value=True),
+            patch("subprocess.run", side_effect=subprocess.SubprocessError("timeout")),
+        ):
+            result = self._make_result()
+            install_services.setup_registry(result, "/fake/repo")
+            assert result.status == "FAIL"
+            assert "Registry setup error" in result.detail
+
+    def test_fails_when_generic_exception_raised(self):
+        """Result should be FAIL when an unexpected exception occurs."""
+        with (
+            patch("shutil.which", return_value="/usr/bin/docker"),
+            patch("os.path.isfile", return_value=True),
+            patch("subprocess.run", side_effect=RuntimeError("kernel panic")),
+        ):
+            result = self._make_result()
+            install_services.setup_registry(result, "/fake/repo")
+            assert result.status == "FAIL"
+            assert "Unexpected error" in result.detail
+
+
+# ── Main pipeline — registry integration ────────────────────────────
+
+
+class TestMainWithRegistry:
+    """Test main() with --setup-registry flag."""
+
+    @pytest.fixture(autouse=True)
+    def _setup_mocks(self):
+        patches = _patch_imports()
+        patches["setup_registry"] = patch.object(install_all, "setup_registry")
+        self.mocks, self._patches = _start_patches(patches)
+        self.mocks["find_cardputer_port"].return_value = None
+        self.mocks["find_rnode_port"].return_value = None
+        yield
+        _stop_patches(self._patches)
+
+    def test_registry_skipped_when_flag_not_set(self, capsys):
+        """Local Registry should show SKIP when --setup-registry not set."""
+        with pytest.raises(SystemExit):
+            install_all.main([])
+        captured = capsys.readouterr().out
+        assert "Local Registry" in captured
+        assert "--setup-registry not set" in captured
+        self.mocks["setup_registry"].assert_not_called()
+
+    def test_registry_called_when_flag_set(self):
+        """--setup-registry should call setup_registry()."""
+        with pytest.raises(SystemExit):
+            install_all.main(["--setup-registry"])
+        self.mocks["setup_registry"].assert_called_once()
+
+    def test_registry_in_summary_when_set(self, capsys):
+        """Local Registry should appear in summary when flag is set."""
+        with pytest.raises(SystemExit):
+            install_all.main(["--setup-registry"])
+        captured = capsys.readouterr().out
+        assert "Local Registry" in captured
+
+    def test_registry_failure_does_not_block_services(self, capsys):
+        """Registry failure should not prevent service install."""
+        # setup_registry raises an exception
+        self.mocks["setup_registry"].side_effect = RuntimeError("Docker daemon not running")
+        with pytest.raises(SystemExit):
+            install_all.main(["--setup-registry"])
+        captured = capsys.readouterr().out
+        assert "FAIL" in captured
+        assert "Docker daemon not running" in captured
