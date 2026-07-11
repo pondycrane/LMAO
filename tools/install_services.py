@@ -36,11 +36,16 @@ def _find_repo_root() -> Optional[str]:
         Absolute path to the repo root, or ``None`` if not found.
     """
     current = os.path.dirname(os.path.abspath(__file__))
+    import sys
+    print(f"  DEBUG: Searching for repo root, starting at {current}")
     for _ in range(10):
         if os.path.isfile(os.path.join(current, "Dockerfile")):
+            print(f"  DEBUG: Found repo root via Dockerfile at {current}")
             return current
         if os.path.isdir(os.path.join(current, ".git")):
+            print(f"  DEBUG: Found repo root via .git at {current}")
             return current
+        print(f"  DEBUG: Checked {current}, no Dockerfile/.git found")
         parent = os.path.dirname(current)
         if parent == current:
             break

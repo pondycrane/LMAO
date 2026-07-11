@@ -589,7 +589,7 @@ class TestMakeSensorMessageWithHumidity:
         mock_humidity = MagicMock(return_value=(hum_temp, humidity))
 
         with (
-            patch.object(lmao_client, "SENSOR_TYPE", sensor_type),
+            patch.dict(lmao_client._CONFIG, {"sensor_type": sensor_type}),
             patch.object(lmao_client, "HAS_SENSOR_LIB", True),
             patch.object(lmao_client, "read_humidity_temperature", mock_humidity),
             patch.object(
@@ -607,7 +607,7 @@ class TestMakeSensorMessageWithHumidity:
         mock_encode = MagicMock()
 
         with (
-            patch.object(lmao_client, "SENSOR_TYPE", None),
+            patch.dict(lmao_client._CONFIG, {"sensor_type": None}),
             patch.object(lmao_client, "HAS_SENSOR_LIB", True),
             patch.object(
                 lmao_client, "encode_sensor_envelope", mock_encode, create=True
@@ -647,7 +647,7 @@ class TestMakeSensorMessageWithHumidity:
         mock_encode = MagicMock()
 
         with (
-            patch.object(lmao_client, "SENSOR_TYPE", "DHT20"),
+            patch.dict(lmao_client._CONFIG, {"sensor_type": "DHT20"}),
             patch.object(lmao_client, "HAS_SENSOR_LIB", False),
             patch.object(
                 lmao_client, "encode_sensor_envelope", mock_encode, create=True
@@ -665,7 +665,7 @@ class TestMakeSensorMessageWithHumidity:
         mock_humidity = MagicMock(return_value=(None, None))
 
         with (
-            patch.object(lmao_client, "SENSOR_TYPE", "DHT20"),
+            patch.dict(lmao_client._CONFIG, {"sensor_type": "DHT20"}),
             patch.object(lmao_client, "HAS_SENSOR_LIB", True),
             patch.object(lmao_client, "read_humidity_temperature", mock_humidity),
             patch.object(
@@ -684,7 +684,7 @@ class TestMakeSensorMessageWithHumidity:
         mock_humidity = MagicMock(side_effect=OSError("I2C bus error"))
 
         with (
-            patch.object(lmao_client, "SENSOR_TYPE", "DHT20"),
+            patch.dict(lmao_client._CONFIG, {"sensor_type": "DHT20"}),
             patch.object(lmao_client, "HAS_SENSOR_LIB", True),
             patch.object(lmao_client, "read_humidity_temperature", mock_humidity),
             patch.object(
@@ -731,7 +731,7 @@ class TestIntervalSeconds:
 
     def test_default_interval_is_60(self):
         """Default INTERVAL_SECONDS should be 60."""
-        assert lmao_client.INTERVAL_SECONDS == 60
+        assert lmao_client._CONFIG["interval_seconds"] == 60
 
     def test_min_interval_clamps_below_10(self):
         """_min_interval(3) clamps to 10."""

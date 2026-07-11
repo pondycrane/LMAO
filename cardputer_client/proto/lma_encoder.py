@@ -199,7 +199,7 @@ def encode_sensor_report(node_id, seq, battery, readings):
 
 
 def decode_sensor_reading(data):
-    """Decode a single SensorReading from bytes. Returns dict or None."""
+    """Decode a single SensorReading from bytes. Returns dict (never None)."""
     return _decode_proto_message(
         data,
         {
