@@ -78,12 +78,14 @@ spec:
             limits:
               cpu: 200m
               memory: 256Mi
+          # TODO: Replace with proper health-check endpoint when available.
+          # Currently verifies the process tree is alive by checking PID 1.
           livenessProbe:
             exec:
               command:
                 - python3
                 - -c
-                - "import sys; sys.exit(0)"
+                - "import os; os.kill(1, 0)"
             initialDelaySeconds: 15
             periodSeconds: 30
           readinessProbe:
