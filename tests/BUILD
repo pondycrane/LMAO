@@ -65,7 +65,10 @@ py_test(
 py_test(
     name = "test_iot_ingest",
     srcs = ["test_iot_ingest.py"],
-    data = ["//k8s-app:iot_ingest.py"],
+    data = [
+        "//k8s-app:iot_ingest.py",
+        "//k8s-app:iot_ingest_consumer.py",
+    ],
     deps = [
         "//lma_core",
         "//proto:lma_py_proto",

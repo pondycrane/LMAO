@@ -45,6 +45,9 @@ def _patch_imports():
         "find_client_root": patch.object(
             install_all, "find_client_root", return_value="/fake/client_root"
         ),
+        "enter_raw_repl": patch.object(
+            install_all, "enter_raw_repl", return_value=True
+        ),
     }
     return patches
 
@@ -709,12 +712,12 @@ class TestMainWithoutServices:
         assert "K8s Services" in captured
         assert "--include-services not set" in captured
 
-    def test_summary_has_four_rows_when_nothing_detected(self, capsys):
-        """Summary should show all four rows even when nothing is connected."""
+    def test_summary_has_five_rows_when_nothing_detected(self, capsys):
+        """Summary should show all five rows even when nothing is connected."""
         with pytest.raises(SystemExit):
             install_all.main([])
         captured = capsys.readouterr().out
-        assert captured.count("[SKIP]") == 4
+        assert captured.count("[SKIP]") == 5
 
 
 class TestMainWithServicesSkipped:

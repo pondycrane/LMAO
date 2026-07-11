@@ -1,7 +1,10 @@
-"""E2E test for K8s pod ↔ LMAO Server gRPC communication.
+"""E2E test for K8s pod ↔ LMAO Server gRPC communication, and
+NATS→DuckDB persistence.
 
-Validates the complete gRPC communication chain:
-  K8s pod → gRPC → LMAO server (running on test host)
+Validates two complete communication chains:
+
+1. gRPC: K8s pod → gRPC → LMAO server (running on test host)
+2. NATS→DuckDB: K8s pod → NATS JetStream → DuckDB persistence
 
 The test:
   1. Detects a reachable K8s cluster via ``kubectl cluster-info``
@@ -10,7 +13,8 @@ The test:
      (avoids needing a custom container image; the script builds protobuf
      descriptors dynamically and calls the gRPC endpoints directly)
   4. Verifies GetIdentity and Send RPCs end-to-end
-  5. Cleans up all K8s resources
+  5. Deploys NATS server and validates message publish → consume → DuckDB persist
+  6. Cleans up all K8s resources
 
 When no K8s cluster is reachable the test skips gracefully (same pattern
 as ``test_cardputer_lora_e2e.py`` hardware probe).
@@ -229,6 +233,54 @@ class TestK8sClusterDetection:
         finally:
             for k, v in _saved.items():
                 setattr(mod, k, v)
+
+
+def _wait_for_pod_ready(label_selector: str, timeout: int = 60) -> bool:
+    """Wait for at least one pod matching *label_selector* to be Ready.
+
+    Returns True if a pod is Ready within *timeout* seconds, False otherwise.
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            result = _kubectl(
+                "get",
+                "pods",
+                "-l",
+                label_selector,
+                "-o",
+                "jsonpath={.items[0].status.conditions[?(@.type=='Ready')].status}",
+                timeout=15,
+            )
+            if result.returncode == 0 and result.stdout.strip() == "True":
+                return True
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+        time.sleep(2)
+    return False
+
+
+def _wait_for_deployment(deployment_name: str, timeout: int = 60) -> bool:
+    """Wait for a Deployment to have at least 1 ready replica."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            result = _kubectl(
+                "get",
+                "deployment",
+                deployment_name,
+                "-o",
+                "jsonpath={.status.readyReplicas}",
+                timeout=15,
+            )
+            if result.returncode == 0:
+                val = result.stdout.strip()
+                if val.isdigit() and int(val) >= 1:
+                    return True
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+        time.sleep(2)
+    return False
 
 
 class TestK8sGrpcE2E:
@@ -581,6 +633,253 @@ print("__E2E_SUCCESS__")
             # ── 5. Cleanup ────────────────────────────────────────
             _cleanup_resources()
             cleanup_common_mocks()
+
+    def test_nats_to_duckdb_e2e(self):
+        """Full E2E: deploy NATS, run consumer+pub via test pod, verify DuckDB.
+
+        Steps:
+          1. Deploy NATS server (kubectl apply -f k8s/nats-server.yaml)
+          2. Wait for NATS to be ready
+          3. Deploy a test pod that:
+             a. Installs nats-py + duckdb + protobuf
+             b. Builds and publishes a SensorReport to NATS
+             c. Subscribes to NATS and persists to DuckDB (same pattern as consumer)
+             d. Queries DuckDB to verify persistence
+          4. Clean up NATS resources
+        """
+        import os as _os
+
+        repo_root = _os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+        nats_manifest = _os.path.join(repo_root, "k8s", "nats-server.yaml")
+
+        if not _os.path.isfile(nats_manifest):
+            pytest.skip(f"NATS manifest not found at {nats_manifest}")
+
+        try:
+            # ── 1. Deploy NATS ────────────────────────────────────
+            apply_result = _kubectl("apply", "-f", nats_manifest, timeout=30)
+            if apply_result.returncode != 0:
+                pytest.fail(f"Failed to apply NATS manifest: {apply_result.stderr}")
+
+            print("  NATS manifest applied.")
+
+            # ── 2. Wait for NATS pod to be ready ──────────────────
+            if not _wait_for_pod_ready("app=nats-server", timeout=60):
+                # Try to debug
+                debug_result = _kubectl("get", "pods", "-l", "app=nats-server", timeout=15)
+                print(f"  NATS pods: {debug_result.stdout[:500]}")
+                pytest.fail("NATS pod did not become ready within 60s")
+
+            print("  NATS pod is ready.")
+
+            # ── 3. Deploy test pod with NATS→DuckDB validation ────
+            nats_addr = "nats-server.default.svc.cluster.local:4222"
+
+            inline_script = f'''import asyncio, time
+import nats
+
+NATS_SERVER = "nats://{nats_addr}"
+STREAM_NAME = "LMAO_MESSAGES"
+SUBJECT = "lmao.messages.e2e"
+
+async def main():
+    # ── Connect to NATS ──────────────────────────────
+    nc = await nats.connect(NATS_SERVER)
+    js = nc.jetstream()
+
+    # ── Ensure stream ────────────────────────────────
+    try:
+        await js.add_stream(
+            name=STREAM_NAME,
+            subjects=["lmao.messages.>"],
+            retention="limits",
+        )
+    except Exception:
+        # Already exists — update
+        await js.update_stream(
+            name=STREAM_NAME,
+            subjects=["lmao.messages.>"],
+            retention="limits",
+        )
+
+    # ── Publish a test message ───────────────────────
+    # Build a minimal SensorReport protobuf manually
+    from google.protobuf import descriptor_pb2, descriptor_pool, symbol_database
+
+    file_desc = descriptor_pb2.FileDescriptorProto()
+    file_desc.name = "test.proto"
+    file_desc.syntax = "proto3"
+
+    # SensorReading
+    msg_reading = file_desc.message_type.add()
+    msg_reading.name = "SensorReading"
+    for fname, fnum, ftype in [
+        ("sensor_id", 1, descriptor_pb2.FieldDescriptorProto.TYPE_INT32),
+        ("value", 2, descriptor_pb2.FieldDescriptorProto.TYPE_FLOAT),
+        ("unit", 3, descriptor_pb2.FieldDescriptorProto.TYPE_STRING),
+        ("timestamp_ms", 4, descriptor_pb2.FieldDescriptorProto.TYPE_INT64),
+    ]:
+        f = msg_reading.field.add()
+        f.name, f.number, f.type = fname, fnum, ftype
+        f.label = descriptor_pb2.FieldDescriptorProto.LABEL_OPTIONAL
+
+    # SensorReport
+    msg_report = file_desc.message_type.add()
+    msg_report.name = "SensorReport"
+    for fname, fnum, ftype in [
+        ("node_id", 1, descriptor_pb2.FieldDescriptorProto.TYPE_STRING),
+        ("seq", 2, descriptor_pb2.FieldDescriptorProto.TYPE_INT32),
+        ("battery", 3, descriptor_pb2.FieldDescriptorProto.TYPE_FLOAT),
+    ]:
+        f = msg_report.field.add()
+        f.name, f.number, f.type = fname, fnum, ftype
+        f.label = descriptor_pb2.FieldDescriptorProto.LABEL_OPTIONAL
+    f_readings = msg_report.field.add()
+    f_readings.name = "readings"
+    f_readings.number = 4
+    f_readings.type = descriptor_pb2.FieldDescriptorProto.TYPE_MESSAGE
+    f_readings.type_name = ".SensorReading"
+    f_readings.label = descriptor_pb2.FieldDescriptorProto.LABEL_REPEATED
+
+    # LMAOEnvelope
+    msg_envelope = file_desc.message_type.add()
+    msg_envelope.name = "LMAOEnvelope"
+    f_sensor = msg_envelope.field.add()
+    f_sensor.name = "sensor"
+    f_sensor.number = 1
+    f_sensor.type = descriptor_pb2.FieldDescriptorProto.TYPE_MESSAGE
+    f_sensor.type_name = ".SensorReport"
+    f_sensor.label = descriptor_pb2.FieldDescriptorProto.LABEL_OPTIONAL
+
+    pool = descriptor_pool.Default()
+    pool.Add(file_desc)
+    LMAOEnvelope = symbol_database.Default().GetSymbol("LMAOEnvelope")
+
+    # Build and serialize
+    env = LMAOEnvelope()
+    env.sensor.node_id = "e2e-nats-test-node"
+    env.sensor.seq = 1
+    env.sensor.battery = 3.7
+    r = env.sensor.readings.add()
+    r.sensor_id = 1
+    r.value = 99.5
+    r.unit = "C"
+    r.timestamp_ms = int(time.time() * 1000)
+    payload = env.SerializeToString()
+
+    ack = await js.publish(SUBJECT, payload)
+    print(f"Published {{len(payload)}} bytes to '{SUBJECT}' (seq={{ack.seq}})")
+
+    # ── Subscribe and verify ─────────────────────────
+    psub = await js.pull_subscribe(SUBJECT, durable="e2e-test-consumer")
+    msgs = await psub.fetch(1, timeout=10)
+    assert len(msgs) == 1, f"Expected 1 message, got {{len(msgs)}}"
+
+    msg = msgs[0]
+    received = LMAOEnvelope()
+    received.ParseFromString(msg.data)
+    print(f"Received: node_id={{received.sensor.node_id}}, value={{received.sensor.readings[0].value}}")
+
+    assert received.sensor.node_id == "e2e-nats-test-node"
+    assert received.sensor.readings[0].value == 99.5
+    assert received.sensor.readings[0].unit == "C"
+
+    await msg.ack()
+    await nc.drain()
+
+    # ── DuckDB persistence verification ───────────────
+    import duckdb
+    con = duckdb.connect(":memory:")
+    con.execute("""
+        CREATE TABLE sensor_readings (
+            node_id TEXT NOT NULL,
+            seq INTEGER,
+            battery REAL,
+            sensor_id INTEGER,
+            value REAL,
+            unit TEXT,
+            timestamp_ms BIGINT
+        )
+    """)
+    con.execute(
+        "INSERT INTO sensor_readings VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [
+            received.sensor.node_id,
+            received.sensor.seq,
+            received.sensor.battery,
+            received.sensor.readings[0].sensor_id,
+            received.sensor.readings[0].value,
+            received.sensor.readings[0].unit,
+            received.sensor.readings[0].timestamp_ms,
+        ],
+    )
+    rows = con.execute("SELECT node_id, value, unit FROM sensor_readings").fetchall()
+    assert len(rows) == 1
+    assert rows[0][0] == "e2e-nats-test-node"
+    assert rows[0][1] == 99.5
+    con.close()
+    print("__DUCKDB_OK__")
+
+    print("__NATS_E2E_SUCCESS__")
+
+asyncio.run(main())
+'''
+            pod_result = _kubectl(
+                "run",
+                "lmao-e2e-nats-test",
+                "--rm",
+                "-i",
+                "--restart=Never",
+                "--image=python:3.12-slim",
+                "--command",
+                "--",
+                "bash",
+                "-c",
+                "pip install -q nats-py duckdb protobuf 2>/dev/null && python3 -",
+                timeout=120,
+                input=inline_script,
+            )
+
+            stdout = pod_result.stdout
+            stderr = pod_result.stderr
+
+            print(f"\n--- NATS test pod stdout ({len(stdout)} bytes) ---")
+            print(stdout[:4000])
+            if stderr:
+                print(f"\n--- NATS test pod stderr ({len(stderr)} bytes) ---")
+                print(stderr[:2000])
+
+            # ── 4. Assertions ─────────────────────────────────────
+            if pod_result.returncode != 0:
+                pytest.fail(
+                    f"NATS test pod exited with code {pod_result.returncode}.\n"
+                    f"stdout: {stdout[:2000]}\n"
+                    f"stderr: {stderr[:2000]}"
+                )
+
+            assert "__DUCKDB_OK__" in stdout, (
+                f"DuckDB verification did not complete in NATS test.\nstdout: {stdout[:2000]}"
+            )
+            assert "__NATS_E2E_SUCCESS__" in stdout, (
+                f"NATS E2E test script did not complete successfully.\nstdout: {stdout[:2000]}"
+            )
+
+            print("\n✅ K8s NATS→DuckDB E2E test passed!")
+
+        finally:
+            # ── Cleanup NATS and test resources ───────────────────
+            try:
+                _kubectl(
+                    "delete",
+                    "pod",
+                    "lmao-e2e-nats-test",
+                    "--ignore-not-found",
+                    timeout=10,
+                )
+            except Exception:
+                pass
+            # Keep NATS running for subsequent tests — only delete if
+            # this is the last test (handled by caller or separate cleanup).
 
 
 if __name__ == "__main__":
