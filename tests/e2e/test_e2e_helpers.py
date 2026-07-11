@@ -10,14 +10,13 @@ import sys
 from types import SimpleNamespace
 from unittest.mock import patch
 
-
 # Ensure the e2e/ directory is on sys.path for sibling imports
 sys.path.insert(0, os.path.dirname(__file__))
 from e2e_helpers import (
     RNODE_VIDS,
-    find_rnode_port,
     case_insensitive_contains,
     check_rnode_firmware,
+    find_rnode_port,
     flash_rnode_firmware,
 )
 
@@ -165,9 +164,7 @@ class TestFindRNodePort:
 
     def test_comports_exception_prints_warning(self, capsys):
         """When comports() raises, return None with a warning."""
-        with patch(
-            "serial.tools.list_ports.comports", side_effect=OSError("permission denied")
-        ):
+        with patch("serial.tools.list_ports.comports", side_effect=OSError("permission denied")):
             result = find_rnode_port()
         assert result is None
         captured = capsys.readouterr()
@@ -346,7 +343,8 @@ class TestFlashRNodeFirmware:
 
 
 if __name__ == "__main__":
-    import pytest as _pytest
     import sys as _sys
+
+    import pytest as _pytest
 
     _sys.exit(_pytest.main([__file__] + _sys.argv[1:]))

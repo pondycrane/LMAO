@@ -2,71 +2,84 @@
 # Wire-compatible with reference LXMF for MeshChat/Sideband interop
 # Supports opportunistic (single-packet) and direct (link) message delivery
 
-import time
 import sys
+import time
+
 from . import umsgpack
-from .identity import Identity
-from .destination import Destination
-from .packet import Packet
-from .log import log, LOG_VERBOSE, LOG_DEBUG, LOG_ERROR, LOG_NOTICE
-from .crypto.hashes import sha256
 from .crypto import ed25519
+from .crypto.hashes import sha256
+from .destination import Destination
+from .identity import Identity
+from .log import LOG_DEBUG, LOG_ERROR, LOG_NOTICE, LOG_VERBOSE, log
+from .packet import Packet
 
 APP_NAME = "lxmf"
 
 # Standard LXMF fields
-FIELD_EMBEDDED_LXMS    = 0x01
-FIELD_TELEMETRY        = 0x02
+FIELD_EMBEDDED_LXMS = 0x01
+FIELD_TELEMETRY = 0x02
 FIELD_TELEMETRY_STREAM = 0x03
-FIELD_ICON_APPEARANCE  = 0x04
+FIELD_ICON_APPEARANCE = 0x04
 FIELD_FILE_ATTACHMENTS = 0x05
-FIELD_IMAGE            = 0x06
-FIELD_AUDIO            = 0x07
-FIELD_THREAD           = 0x08
-FIELD_COMMANDS         = 0x09
-FIELD_RESULTS          = 0x0A
-FIELD_GROUP            = 0x0B
-FIELD_TICKET           = 0x0C
+FIELD_IMAGE = 0x06
+FIELD_AUDIO = 0x07
+FIELD_THREAD = 0x08
+FIELD_COMMANDS = 0x09
+FIELD_RESULTS = 0x0A
+FIELD_GROUP = 0x0B
+FIELD_TICKET = 0x0C
 
 
 class LXMessage:
     """LXMF message - wire-compatible with reference implementation"""
 
     # States
-    GENERATING  = 0x00
-    OUTBOUND    = 0x01
-    SENDING     = 0x02
-    SENT        = 0x04
-    DELIVERED   = 0x08
-    FAILED      = 0xFF
+    GENERATING = 0x00
+    OUTBOUND = 0x01
+    SENDING = 0x02
+    SENT = 0x04
+    DELIVERED = 0x08
+    FAILED = 0xFF
 
     # Delivery methods
-    UNKNOWN       = 0x00
+    UNKNOWN = 0x00
     OPPORTUNISTIC = 0x01
-    DIRECT        = 0x02
-    PROPAGATED    = 0x03
+    DIRECT = 0x02
+    PROPAGATED = 0x03
 
     # Representation
-    PACKET   = 0x01
+    PACKET = 0x01
     RESOURCE = 0x02
 
     # Verification
-    SOURCE_UNKNOWN    = 0x01
+    SOURCE_UNKNOWN = 0x01
     SIGNATURE_INVALID = 0x02
 
     # Sizes
-    DESTINATION_LENGTH = Identity.TRUNCATED_HASHLENGTH // 8   # 16
-    SIGNATURE_LENGTH   = Identity.SIGLENGTH // 8              # 64
-    TIMESTAMP_SIZE     = 8
-    STRUCT_OVERHEAD    = 8
-    LXMF_OVERHEAD      = 2 * DESTINATION_LENGTH + SIGNATURE_LENGTH + TIMESTAMP_SIZE + STRUCT_OVERHEAD  # 112
+    DESTINATION_LENGTH = Identity.TRUNCATED_HASHLENGTH // 8  # 16
+    SIGNATURE_LENGTH = Identity.SIGLENGTH // 8  # 64
+    TIMESTAMP_SIZE = 8
+    STRUCT_OVERHEAD = 8
+    LXMF_OVERHEAD = (
+        2 * DESTINATION_LENGTH + SIGNATURE_LENGTH + TIMESTAMP_SIZE + STRUCT_OVERHEAD
+    )  # 112
 
     # Max content that fits in a single encrypted packet (opportunistic)
-    ENCRYPTED_PACKET_MAX_CONTENT = Packet.ENCRYPTED_MDU + TIMESTAMP_SIZE - LXMF_OVERHEAD + DESTINATION_LENGTH
+    ENCRYPTED_PACKET_MAX_CONTENT = (
+        Packet.ENCRYPTED_MDU + TIMESTAMP_SIZE - LXMF_OVERHEAD + DESTINATION_LENGTH
+    )
 
-    def __init__(self, destination=None, source=None, content=b"", title=b"",
-                 fields=None, desired_method=None,
-                 destination_hash=None, source_hash=None):
+    def __init__(
+        self,
+        destination=None,
+        source=None,
+        content=b"",
+        title=b"",
+        fields=None,
+        desired_method=None,
+        destination_hash=None,
+        source_hash=None,
+    ):
 
         self._destination = destination
         self._source = source
@@ -175,7 +188,9 @@ class LXMessage:
         signed_part = hashed_part + self.hash
         self.signature = self._source.sign(signed_part)
         try:
-            import gc; gc.collect()
+            import gc
+
+            gc.collect()
         except Exception as e:
             log("gc.collect failed: " + str(e), LOG_DEBUG)
         self.signature_validated = True
@@ -209,7 +224,7 @@ class LXMessage:
         if self.method == LXMessage.OPPORTUNISTIC:
             # For opportunistic, we send to the destination directly
             # The packet data excludes the destination hash (inferred from packet header)
-            data = self.packed[self.DESTINATION_LENGTH:]
+            data = self.packed[self.DESTINATION_LENGTH :]
             pkt = Packet(self._destination, data)
             pkt.send()
             self.state = LXMessage.SENT
@@ -237,16 +252,15 @@ class LXMessage:
         SL = LXMessage.SIGNATURE_LENGTH
 
         destination_hash = lxmf_bytes[:DL]
-        source_hash = lxmf_bytes[DL:2 * DL]
-        signature = lxmf_bytes[2 * DL:2 * DL + SL]
-        packed_payload = lxmf_bytes[2 * DL + SL:]
+        source_hash = lxmf_bytes[DL : 2 * DL]
+        signature = lxmf_bytes[2 * DL : 2 * DL + SL]
+        packed_payload = lxmf_bytes[2 * DL + SL :]
 
         unpacked_payload = umsgpack.unpackb(packed_payload)
 
         # Extract stamp if present (5th element)
-        stamp = None
         if len(unpacked_payload) > 4:
-            stamp = unpacked_payload[4]
+            unpacked_payload[4]
             unpacked_payload = unpacked_payload[:4]
             packed_payload = umsgpack.packb(unpacked_payload)
 
@@ -266,15 +280,17 @@ class LXMessage:
         # Build source destination if identity known
         source_dest = None
         if source_identity:
-            source_dest = Destination(source_identity, Destination.OUT,
-                                       Destination.SINGLE, APP_NAME, "delivery")
+            source_dest = Destination(
+                source_identity, Destination.OUT, Destination.SINGLE, APP_NAME, "delivery"
+            )
 
         # Build destination object if identity known
         dest_identity = Identity.recall(destination_hash)
         dest_obj = None
         if dest_identity:
-            dest_obj = Destination(dest_identity, Destination.OUT,
-                                    Destination.SINGLE, APP_NAME, "delivery")
+            dest_obj = Destination(
+                dest_identity, Destination.OUT, Destination.SINGLE, APP_NAME, "delivery"
+            )
 
         message = LXMessage(
             destination=dest_obj,
@@ -288,8 +304,20 @@ class LXMessage:
         message.signature = signature
         message.incoming = True
         message.timestamp = timestamp
-        message.title = title_bytes if isinstance(title_bytes, bytes) else title_bytes.encode("utf-8") if title_bytes else b""
-        message.content = content_bytes if isinstance(content_bytes, bytes) else content_bytes.encode("utf-8") if content_bytes else b""
+        message.title = (
+            title_bytes
+            if isinstance(title_bytes, bytes)
+            else title_bytes.encode("utf-8")
+            if title_bytes
+            else b""
+        )
+        message.content = (
+            content_bytes
+            if isinstance(content_bytes, bytes)
+            else content_bytes.encode("utf-8")
+            if content_bytes
+            else b""
+        )
         message.fields = fields if isinstance(fields, dict) else {}
         message.packed = lxmf_bytes
 
@@ -319,6 +347,7 @@ class LXMessage:
         if message.signature_validated:
             try:
                 from .transport import Transport
+
                 Transport.sync_clock_from(timestamp, source_hash)
             except Exception:
                 pass
@@ -333,7 +362,7 @@ class LXMessage:
 
 class LXMRouter:
     """Simplified LXMF router for µReticulum
-    
+
     Handles:
     - Registering delivery identity (makes node visible in MeshChat)
     - Receiving opportunistic LXMF messages
@@ -369,8 +398,7 @@ class LXMRouter:
         self.display_name = display_name
 
         self.delivery_destination = Destination(
-            identity, Destination.IN, Destination.SINGLE,
-            APP_NAME, "delivery"
+            identity, Destination.IN, Destination.SINGLE, APP_NAME, "delivery"
         )
 
         # Set the packet callback for incoming opportunistic messages
@@ -413,11 +441,14 @@ class LXMRouter:
         functionality list tells peers we don't support LXMF compression."""
         dn = None
         if self.display_name:
-            dn = self.display_name.encode("utf-8") if isinstance(self.display_name, str) else self.display_name
+            dn = (
+                self.display_name.encode("utf-8")
+                if isinstance(self.display_name, str)
+                else self.display_name
+            )
         return umsgpack.packb([dn, None, []])
 
-    def send_message(self, destination_hash, content, title="",
-                     fields=None, desired_method=None):
+    def send_message(self, destination_hash, content, title="", fields=None, desired_method=None):
         """Send an LXMF message to a destination hash.
 
         Resilient delivery chain:
@@ -440,12 +471,13 @@ class LXMRouter:
             Transport.ensure_path(
                 destination_hash,
                 on_found=lambda: self.send_message(
-                    destination_hash, content, title, fields, desired_method),
+                    destination_hash, content, title, fields, desired_method
+                ),
                 on_timeout=lambda: log(
-                    "LXMF send to " + destination_hash.hex()[:8]
-                    + " failed: no path", LOG_ERROR),
+                    "LXMF send to " + destination_hash.hex()[:8] + " failed: no path", LOG_ERROR
+                ),
             )
-            return True   # queued
+            return True  # queued
 
         # Reachable — we need the peer's keys to encrypt.
         dest_identity = Identity.recall(destination_hash)
@@ -453,11 +485,11 @@ class LXMRouter:
             log("Cannot send LXMF: unknown identity for " + destination_hash.hex()[:8], LOG_ERROR)
             return None
 
-        dest = Destination(dest_identity, Destination.OUT,
-                           Destination.SINGLE, APP_NAME, "delivery")
+        dest = Destination(dest_identity, Destination.OUT, Destination.SINGLE, APP_NAME, "delivery")
 
-        source = Destination(self.delivery_identity, Destination.OUT,
-                             Destination.SINGLE, APP_NAME, "delivery")
+        source = Destination(
+            self.delivery_identity, Destination.OUT, Destination.SINGLE, APP_NAME, "delivery"
+        )
 
         # Prefer an already-open link when the caller hasn't forced a method:
         # avoids a redundant path request when we can answer over the link.
@@ -487,8 +519,9 @@ class LXMRouter:
         this LXMF peer, or None. Used to reply to incoming link-borne
         messages without opening a fresh OutLink (which can fail when
         path_table has no route to the peer yet)."""
-        from .transport import Transport
         from .link import OutgoingLink
+        from .transport import Transport
+
         for link in Transport.active_links:
             if link.status != 0x01:  # ACTIVE
                 continue
@@ -510,8 +543,8 @@ class LXMRouter:
         peer is only reachable via a transport node we have no path entry
         for yet.
         """
-        from .link import OutgoingLink
         from . import const
+        from .link import OutgoingLink
 
         def deliver_on(link, owns_link):
             packed = message.packed
@@ -524,23 +557,31 @@ class LXMRouter:
                     link.teardown()
             else:
                 from .resource import Resource
+
                 # Chain with any existing resource-concluded callback (e.g. the
                 # router's incoming-delivery handler on a peer-initiated link)
                 # so future incoming resources still fire their handler.
                 previous_cb = link.resource_concluded_callback
+
                 def on_resource_done(r):
                     if getattr(r, "is_initiator", False):
                         self._direct_resource_concluded(r, message, link, owns_link)
                     elif previous_cb is not None:
                         previous_cb(r)
+
                 link.resource_concluded_callback = on_resource_done
                 Resource(link, packed, is_response=False)
                 log("LXMF DIRECT sending as resource: " + str(len(packed)) + "B", LOG_VERBOSE)
 
         existing = self._find_active_link_for(message.destination_hash)
         if existing is not None:
-            log("LXMF DIRECT reusing active link " + existing.link_id.hex()[:8] +
-                " to " + message.destination_hash.hex()[:8], LOG_NOTICE)
+            log(
+                "LXMF DIRECT reusing active link "
+                + existing.link_id.hex()[:8]
+                + " to "
+                + message.destination_hash.hex()[:8],
+                LOG_NOTICE,
+            )
             deliver_on(existing, owns_link=False)
             return
 
@@ -558,6 +599,7 @@ class LXMRouter:
     def _direct_resource_concluded(self, resource, message, link, owns_link=True):
         """Called when outgoing DIRECT Resource transfer completes."""
         from .resource import COMPLETE
+
         if resource.status == COMPLETE:
             message.state = LXMessage.DELIVERED
             log("LXMF DIRECT delivered: " + message.destination_hash.hex()[:8], LOG_NOTICE)
@@ -588,17 +630,32 @@ class LXMRouter:
             message.transport_encryption = "Curve25519"
 
             if message.signature_validated:
-                log("LXMF link message from " + message.source_hash.hex()[:8] +
-                    ": " + (message.content_as_string() or "(binary)"), LOG_NOTICE)
+                log(
+                    "LXMF link message from "
+                    + message.source_hash.hex()[:8]
+                    + ": "
+                    + (message.content_as_string() or "(binary)"),
+                    LOG_NOTICE,
+                )
             else:
-                reason = "unknown source" if message.unverified_reason == LXMessage.SOURCE_UNKNOWN else "invalid signature"
-                log("LXMF unverified link message (" + reason + ") from " +
-                    message.source_hash.hex()[:8], LOG_NOTICE)
+                reason = (
+                    "unknown source"
+                    if message.unverified_reason == LXMessage.SOURCE_UNKNOWN
+                    else "invalid signature"
+                )
+                log(
+                    "LXMF unverified link message ("
+                    + reason
+                    + ") from "
+                    + message.source_hash.hex()[:8],
+                    LOG_NOTICE,
+                )
 
             # Remember which LXMF peer this link carries so we can reuse it
             # for replies instead of opening a new OutLink (which may fail
             # when path_table doesn't yet have a route to the peer).
             from .transport import Transport
+
             for l in Transport.active_links:
                 if l.link_id == packet.destination_hash:
                     l.set_tag("lxmf_source_hash", message.source_hash)
@@ -624,13 +681,17 @@ class LXMRouter:
     def _handle_resource_concluded(self, resource):
         """Called when a Resource transfer completes on a link."""
         from .resource import COMPLETE
+
         if resource.status != COMPLETE:
             log("LXMF resource not complete, ignoring", LOG_DEBUG)
             return
 
         try:
             data = resource.data
-            if data is None or len(data) < 2 * LXMessage.DESTINATION_LENGTH + LXMessage.SIGNATURE_LENGTH:
+            if (
+                data is None
+                or len(data) < 2 * LXMessage.DESTINATION_LENGTH + LXMessage.SIGNATURE_LENGTH
+            ):
                 log("LXMF resource data too short", LOG_DEBUG)
                 return
 
@@ -648,12 +709,26 @@ class LXMRouter:
             message.transport_encryption = "Curve25519"
 
             if message.signature_validated:
-                log("LXMF resource message from " + message.source_hash.hex()[:8] +
-                    ": " + (message.content_as_string() or "(binary)"), LOG_NOTICE)
+                log(
+                    "LXMF resource message from "
+                    + message.source_hash.hex()[:8]
+                    + ": "
+                    + (message.content_as_string() or "(binary)"),
+                    LOG_NOTICE,
+                )
             else:
-                reason = "unknown source" if message.unverified_reason == LXMessage.SOURCE_UNKNOWN else "invalid signature"
-                log("LXMF unverified resource message (" + reason + ") from " +
-                    message.source_hash.hex()[:8], LOG_NOTICE)
+                reason = (
+                    "unknown source"
+                    if message.unverified_reason == LXMessage.SOURCE_UNKNOWN
+                    else "invalid signature"
+                )
+                log(
+                    "LXMF unverified resource message ("
+                    + reason
+                    + ") from "
+                    + message.source_hash.hex()[:8],
+                    LOG_NOTICE,
+                )
 
             # Remember which LXMF peer this link carries (see _link_packet_received).
             link = getattr(resource, "link", None)
@@ -691,12 +766,26 @@ class LXMRouter:
             message = LXMessage.unpack_from_bytes(lxmf_data)
 
             if message.signature_validated:
-                log("LXMF message from " + message.source_hash.hex()[:8] +
-                    ": " + (message.content_as_string() or "(binary)"), LOG_NOTICE)
+                log(
+                    "LXMF message from "
+                    + message.source_hash.hex()[:8]
+                    + ": "
+                    + (message.content_as_string() or "(binary)"),
+                    LOG_NOTICE,
+                )
             else:
-                reason = "unknown source" if message.unverified_reason == LXMessage.SOURCE_UNKNOWN else "invalid signature"
-                log("LXMF unverified message (" + reason + ") from " +
-                    message.source_hash.hex()[:8], LOG_NOTICE)
+                reason = (
+                    "unknown source"
+                    if message.unverified_reason == LXMessage.SOURCE_UNKNOWN
+                    else "invalid signature"
+                )
+                log(
+                    "LXMF unverified message ("
+                    + reason
+                    + ") from "
+                    + message.source_hash.hex()[:8],
+                    LOG_NOTICE,
+                )
 
             # Dedup check
             if message.hash in self.delivered_ids:
@@ -708,7 +797,9 @@ class LXMRouter:
 
             # Send delivery proof (so sender knows we received it)
             try:
-                import gc; gc.collect()
+                import gc
+
+                gc.collect()
             except Exception as e:
                 log("gc.collect failed: " + str(e), LOG_DEBUG)
             packet.prove()
@@ -739,8 +830,10 @@ class LXMRouter:
             "timestamp": time.time(),
         }
 
-        log("LXMF peer: " + (display_name or "?") +
-            " [" + destination_hash.hex()[:8] + "]", LOG_VERBOSE)
+        log(
+            "LXMF peer: " + (display_name or "?") + " [" + destination_hash.hex()[:8] + "]",
+            LOG_VERBOSE,
+        )
 
         if self._announce_callback:
             try:
@@ -757,7 +850,7 @@ class LXMRouter:
 
             # Version 0.5.0+ format: msgpack [name_bytes, stamp_cost]
             first = app_data[0]
-            if (0x90 <= first <= 0x9f) or first == 0xdc:
+            if (0x90 <= first <= 0x9F) or first == 0xDC:
                 peer_data = umsgpack.unpackb(app_data)
                 if isinstance(peer_data, list) and len(peer_data) >= 1:
                     dn = peer_data[0]
@@ -776,8 +869,7 @@ class LXMRouter:
     def _clean_delivered_ids(self):
         """Remove expired message IDs from dedup cache"""
         now = time.time()
-        expired = [h for h, ts in self.delivered_ids.items()
-                   if now - ts > self.MESSAGE_EXPIRY]
+        expired = [h for h, ts in self.delivered_ids.items() if now - ts > self.MESSAGE_EXPIRY]
         for h in expired:
             del self.delivered_ids[h]
 

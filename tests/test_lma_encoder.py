@@ -1,6 +1,7 @@
 """Test suite for lma_encoder — protobuf compatibility tests."""
 
 import logging
+
 import pytest
 
 from cardputer_client.proto import lma_encoder as enc
@@ -214,9 +215,7 @@ class TestEdgeCases:
         expected = b"\x0a\x01\x61\x12\x01\x62\x18\x01"
         actual = enc.encode_text_message("a", "b", 1)
         assert actual == expected, (
-            f"Known-answer mismatch!\n"
-            f"Expected: {expected.hex()}\n"
-            f"Actual:   {actual.hex()}"
+            f"Known-answer mismatch!\nExpected: {expected.hex()}\nActual:   {actual.hex()}"
         )
 
     def test_known_answer_envelope(self):
@@ -227,9 +226,7 @@ class TestEdgeCases:
         expected = b"\xa2\x01\x08" + inner
         actual = enc.encode_envelope_text(inner)
         assert actual == expected, (
-            f"Envelope known-answer mismatch!\n"
-            f"Expected: {expected.hex()}\n"
-            f"Actual:   {actual.hex()}"
+            f"Envelope known-answer mismatch!\nExpected: {expected.hex()}\nActual:   {actual.hex()}"
         )
 
     def test_encode_field_round_trip(self):
@@ -376,9 +373,7 @@ class TestAudioMessage:
     def test_round_trip(self):
         """Encode/decode AudioMessage with binary audio data."""
         audio_data = b"\x00\x01\x02\x03"
-        encoded = enc.encode_audio_message(
-            "node-a", audio_data, "opus", 5000, 123456789
-        )
+        encoded = enc.encode_audio_message("node-a", audio_data, "opus", 5000, 123456789)
         decoded = enc.decode_audio_message(encoded)
         assert decoded["node_id"] == "node-a"
         assert decoded["audio_data"] == audio_data
@@ -600,7 +595,8 @@ class TestEncodeSensorEnvelopeEdgeCases:
 
 
 if __name__ == "__main__":
-    import pytest
     import sys
+
+    import pytest
 
     sys.exit(pytest.main([__file__] + sys.argv[1:]))

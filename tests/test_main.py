@@ -13,14 +13,14 @@ Run with::
 """
 
 from unittest.mock import MagicMock, patch
-import pytest
 
+import pytest
 
 # Import the module under test (works when running under Bazel with proper deps)
 try:
     from cardputer_client import main as lmao_client
 except ImportError:
-    lmao_client = None
+    lmao_client = None  # type: ignore[assignment]
 
 
 # ── _needs_wifi ─────────────────────────────────────────────────────
@@ -211,11 +211,11 @@ class TestInitRns:
 
     def test_init_rns_logs_and_hangs_on_failure(self):
         """_init_rns should let exceptions propagate (caller handles hang)."""
-        with patch.object(
-            lmao_client, "Reticulum", create=True, side_effect=RuntimeError("fail")
+        with (
+            patch.object(lmao_client, "Reticulum", create=True, side_effect=RuntimeError("fail")),
+            pytest.raises(RuntimeError, match="fail"),
         ):
-            with pytest.raises(RuntimeError, match="fail"):
-                lmao_client._init_rns({})
+            lmao_client._init_rns({})
 
 
 class TestInitLxmfRouter:
@@ -233,15 +233,11 @@ class TestInitLxmfRouter:
                 mock_identity, storage_path="/tmp/test", display_name="my-node"
             )
             assert router is mock_router
-            mock_lxmr.assert_called_once_with(
-                identity=mock_identity, storagepath="/tmp/test"
-            )
+            mock_lxmr.assert_called_once_with(identity=mock_identity, storagepath="/tmp/test")
             mock_router.register_delivery_identity.assert_called_once_with(
                 mock_identity, display_name="my-node"
             )
-            mock_router.register_delivery_callback.assert_called_once_with(
-                lmao_client.handle_reply
-            )
+            mock_router.register_delivery_callback.assert_called_once_with(lmao_client.handle_reply)
 
     def test_uses_default_storage_path(self):
         """_init_lxmf_router should default to /flash/lxmf_state."""
@@ -296,9 +292,7 @@ class TestMakeSensorMessage:
     def _call(identity_hex="a1b2", seq=0, battery=3.7):
         """Call make_sensor_message with a mocked encoder, return captured args."""
         mock_encode = MagicMock()
-        with patch.object(
-            lmao_client, "encode_sensor_envelope", mock_encode, create=True
-        ):
+        with patch.object(lmao_client, "encode_sensor_envelope", mock_encode, create=True):
             lmao_client.make_sensor_message(identity_hex, seq, battery)
         mock_encode.assert_called_once()
         return mock_encode.call_args[0]  # (identity_hex, seq, battery, readings)
@@ -365,9 +359,7 @@ class TestMakeSensorMessage:
         args = self._call(seq=0)
         now_ms = int(time.time() * 1000)
         ts = args[3][0]["timestamp_ms"]
-        assert abs(now_ms - ts) < 5000, (
-            f"Timestamp {ts} is more than 5s from now ({now_ms})"
-        )
+        assert abs(now_ms - ts) < 5000, f"Timestamp {ts} is more than 5s from now ({now_ms})"
 
     def test_temperature_is_float(self):
         """Temperature value should be a float type."""
@@ -382,11 +374,11 @@ class TestMakeSensorMessage:
         mock_esp32.raw_temperature.return_value = 68  # 68°F → 20°C
 
         mock_encode = MagicMock()
-        with patch.dict(sys.modules, {"esp32": mock_esp32}):
-            with patch.object(
-                lmao_client, "encode_sensor_envelope", mock_encode, create=True
-            ):
-                lmao_client.make_sensor_message("a1b2", 0, 3.7)
+        with (
+            patch.dict(sys.modules, {"esp32": mock_esp32}),
+            patch.object(lmao_client, "encode_sensor_envelope", mock_encode, create=True),
+        ):
+            lmao_client.make_sensor_message("a1b2", 0, 3.7)
 
         mock_encode.assert_called_once()
         readings = mock_encode.call_args[0][3]
@@ -423,11 +415,11 @@ class TestMakeSensorMessage:
         mock_esp32.raw_temperature.return_value = 86  # 86°F → 30°C
 
         mock_encode = MagicMock()
-        with patch.dict(sys.modules, {"esp32": mock_esp32}):
-            with patch.object(
-                lmao_client, "encode_sensor_envelope", mock_encode, create=True
-            ):
-                lmao_client.make_sensor_message("a1b2", 0, 3.7, strict=True)
+        with (
+            patch.dict(sys.modules, {"esp32": mock_esp32}),
+            patch.object(lmao_client, "encode_sensor_envelope", mock_encode, create=True),
+        ):
+            lmao_client.make_sensor_message("a1b2", 0, 3.7, strict=True)
 
         mock_encode.assert_called_once()
         readings = mock_encode.call_args[0][3]
@@ -538,9 +530,7 @@ class TestSensorSendInMainLoop:
 
     def test_sensor_send_exception_calls_print_exception(self):
         """sys.print_exception is called when an exception occurs."""
-        _, mock_pe = self._simulate_sensor_send(
-            send_message_side_effect=RuntimeError("test err")
-        )
+        _, mock_pe = self._simulate_sensor_send(send_message_side_effect=RuntimeError("test err"))
         mock_pe.assert_called_once()
         # Verify the exception object was passed
         args, _ = mock_pe.call_args
@@ -549,20 +539,14 @@ class TestSensorSendInMainLoop:
 
     def test_sensor_flag_false_skips_send(self):
         """When SEND_SENSOR=False, sensor code is not reached."""
-        mock_log, _ = self._simulate_sensor_send(
-            send_message_returns=None, sensor_flag=False
-        )
+        mock_log, _ = self._simulate_sensor_send(send_message_returns=None, sensor_flag=False)
         # No sensor-related logs should appear
-        sensor_logs = [
-            call for call in mock_log.call_args_list if "Sensor" in str(call)
-        ]
+        sensor_logs = [call for call in mock_log.call_args_list if "Sensor" in str(call)]
         assert len(sensor_logs) == 0
 
     def test_sensor_flag_true_sends(self):
         """When SEND_SENSOR=True, sensor code executes (smoke test)."""
-        mock_log, _ = self._simulate_sensor_send(
-            send_message_returns=MagicMock(), sensor_flag=True
-        )
+        mock_log, _ = self._simulate_sensor_send(send_message_returns=MagicMock(), sensor_flag=True)
         mock_log.assert_any_call("Sensor: seq=1", None, None)
 
 
@@ -592,9 +576,7 @@ class TestMakeSensorMessageWithHumidity:
             patch.dict(lmao_client._CONFIG, {"sensor_type": sensor_type}),
             patch.object(lmao_client, "HAS_SENSOR_LIB", True),
             patch.object(lmao_client, "read_humidity_temperature", mock_humidity),
-            patch.object(
-                lmao_client, "encode_sensor_envelope", mock_encode, create=True
-            ),
+            patch.object(lmao_client, "encode_sensor_envelope", mock_encode, create=True),
         ):
             lmao_client.make_sensor_message(identity_hex, seq, battery)
 
@@ -609,9 +591,7 @@ class TestMakeSensorMessageWithHumidity:
         with (
             patch.dict(lmao_client._CONFIG, {"sensor_type": None}),
             patch.object(lmao_client, "HAS_SENSOR_LIB", True),
-            patch.object(
-                lmao_client, "encode_sensor_envelope", mock_encode, create=True
-            ),
+            patch.object(lmao_client, "encode_sensor_envelope", mock_encode, create=True),
         ):
             lmao_client.make_sensor_message(identity_hex, seq, battery)
 
@@ -649,9 +629,7 @@ class TestMakeSensorMessageWithHumidity:
         with (
             patch.dict(lmao_client._CONFIG, {"sensor_type": "DHT20"}),
             patch.object(lmao_client, "HAS_SENSOR_LIB", False),
-            patch.object(
-                lmao_client, "encode_sensor_envelope", mock_encode, create=True
-            ),
+            patch.object(lmao_client, "encode_sensor_envelope", mock_encode, create=True),
         ):
             lmao_client.make_sensor_message("a1b2", 0, 3.7)
 
@@ -668,9 +646,7 @@ class TestMakeSensorMessageWithHumidity:
             patch.dict(lmao_client._CONFIG, {"sensor_type": "DHT20"}),
             patch.object(lmao_client, "HAS_SENSOR_LIB", True),
             patch.object(lmao_client, "read_humidity_temperature", mock_humidity),
-            patch.object(
-                lmao_client, "encode_sensor_envelope", mock_encode, create=True
-            ),
+            patch.object(lmao_client, "encode_sensor_envelope", mock_encode, create=True),
         ):
             lmao_client.make_sensor_message("a1b2", 0, 3.7)
 
@@ -687,9 +663,7 @@ class TestMakeSensorMessageWithHumidity:
             patch.dict(lmao_client._CONFIG, {"sensor_type": "DHT20"}),
             patch.object(lmao_client, "HAS_SENSOR_LIB", True),
             patch.object(lmao_client, "read_humidity_temperature", mock_humidity),
-            patch.object(
-                lmao_client, "encode_sensor_envelope", mock_encode, create=True
-            ),
+            patch.object(lmao_client, "encode_sensor_envelope", mock_encode, create=True),
         ):
             lmao_client.make_sensor_message("a1b2", 0, 3.7)
 

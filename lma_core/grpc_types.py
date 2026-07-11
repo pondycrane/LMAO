@@ -14,12 +14,12 @@ _logger = logging.getLogger(__name__)
 
 try:
     from proto.lma_pb2 import (  # noqa: F401  # type: ignore[attr-defined]
+        GetIdentityRequest,
+        GetIdentityResponse,
         SendRequest,
         SendResponse,
         SubscribeRequest,
         SubscribeResponse,
-        GetIdentityRequest,
-        GetIdentityResponse,
     )
 except ImportError:
     _logger.warning(
@@ -29,9 +29,9 @@ except ImportError:
 
 try:
     from proto.lma_pb2_grpc import (  # noqa: F401  # type: ignore[attr-defined]
-        LMAOStub,
-        LMAOServicer,
         LMAO,
+        LMAOServicer,
+        LMAOStub,
         add_LMAOServicer_to_server,
     )
 except ImportError:

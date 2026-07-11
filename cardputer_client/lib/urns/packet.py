@@ -3,54 +3,65 @@
 
 import struct
 import time
+
 from . import const
-from .log import log, LOG_DEBUG, LOG_ERROR, LOG_EXTREME
+from .log import LOG_DEBUG, LOG_ERROR, LOG_EXTREME, log
 
 
 class Packet:
     # Types (re-exported for convenience)
-    DATA        = const.PKT_DATA
-    ANNOUNCE    = const.PKT_ANNOUNCE
+    DATA = const.PKT_DATA
+    ANNOUNCE = const.PKT_ANNOUNCE
     LINKREQUEST = const.PKT_LINKREQUEST
-    PROOF       = const.PKT_PROOF
+    PROOF = const.PKT_PROOF
 
     # Header types
     HEADER_1 = const.HDR_1
     HEADER_2 = const.HDR_2
 
     # Contexts
-    NONE          = const.CTX_NONE
-    RESOURCE      = const.CTX_RESOURCE
-    RESOURCE_ADV  = const.CTX_RESOURCE_ADV
-    RESOURCE_REQ  = const.CTX_RESOURCE_REQ
-    RESOURCE_PRF  = const.CTX_RESOURCE_PRF
+    NONE = const.CTX_NONE
+    RESOURCE = const.CTX_RESOURCE
+    RESOURCE_ADV = const.CTX_RESOURCE_ADV
+    RESOURCE_REQ = const.CTX_RESOURCE_REQ
+    RESOURCE_PRF = const.CTX_RESOURCE_PRF
     CACHE_REQUEST = const.CTX_CACHE_REQUEST
-    REQUEST       = const.CTX_REQUEST
-    RESPONSE      = const.CTX_RESPONSE
+    REQUEST = const.CTX_REQUEST
+    RESPONSE = const.CTX_RESPONSE
     PATH_RESPONSE = const.CTX_PATH_RESPONSE
-    CHANNEL       = const.CTX_CHANNEL
-    KEEPALIVE     = const.CTX_KEEPALIVE
-    LINKIDENTIFY  = const.CTX_LINKIDENTIFY
-    LINKCLOSE     = const.CTX_LINKCLOSE
-    LINKPROOF     = const.CTX_LINKPROOF
-    LRRTT         = const.CTX_LRRTT
-    LRPROOF       = const.CTX_LRPROOF
+    CHANNEL = const.CTX_CHANNEL
+    KEEPALIVE = const.CTX_KEEPALIVE
+    LINKIDENTIFY = const.CTX_LINKIDENTIFY
+    LINKCLOSE = const.CTX_LINKCLOSE
+    LINKPROOF = const.CTX_LINKPROOF
+    LRRTT = const.CTX_LRRTT
+    LRPROOF = const.CTX_LRPROOF
 
     # Flags
-    FLAG_SET   = const.FLAG_SET
+    FLAG_SET = const.FLAG_SET
     FLAG_UNSET = const.FLAG_UNSET
 
     # Size constants
     HEADER_MAXSIZE = const.HEADER_MAXSIZE
-    MDU           = const.MDU
+    MDU = const.MDU
     ENCRYPTED_MDU = const.ENCRYPTED_MDU
-    PLAIN_MDU     = const.PLAIN_MDU
+    PLAIN_MDU = const.PLAIN_MDU
 
     TIMEOUT_PER_HOP = const.DEFAULT_PER_HOP_TIMEOUT
 
-    def __init__(self, destination, data, packet_type=None, context=None,
-                 transport_type=None, header_type=None, transport_id=None,
-                 attached_interface=None, create_receipt=True, context_flag=None):
+    def __init__(
+        self,
+        destination,
+        data,
+        packet_type=None,
+        context=None,
+        transport_type=None,
+        header_type=None,
+        transport_id=None,
+        attached_interface=None,
+        create_receipt=True,
+        context_flag=None,
+    ):
 
         if packet_type is None:
             packet_type = const.PKT_DATA
@@ -61,7 +72,9 @@ class Packet:
         if header_type is None:
             header_type = const.HDR_1
         if context_flag is None:
-            context_flag = const.FLAG_SET if context and context != const.CTX_NONE else const.FLAG_UNSET
+            context_flag = (
+                const.FLAG_SET if context and context != const.CTX_NONE else const.FLAG_UNSET
+            )
 
         if destination is not None:
             self.header_type = header_type
@@ -106,21 +119,27 @@ class Packet:
         self.plaintext = None
 
     def _get_packed_flags(self):
-        if self.context == const.CTX_LRPROOF:
-            dest_type = const.DEST_LINK
-        else:
-            dest_type = self.destination.type
-        return (self.header_type << 6) | (self.context_flag << 5) | (self.transport_type << 4) | (dest_type << 2) | self.packet_type
+        dest_type = const.DEST_LINK if self.context == const.CTX_LRPROOF else self.destination.type
+        return (
+            (self.header_type << 6)
+            | (self.context_flag << 5)
+            | (self.transport_type << 4)
+            | (dest_type << 2)
+            | self.packet_type
+        )
 
     def pack(self):
         self.destination_hash = self.destination.hash
 
         # Auto-upgrade to HDR_2 if destination is reachable via a transport
         # node (learned from HDR_2 announces stored in Transport.path_table).
-        if (self.header_type == const.HDR_1
-                and self.transport_id is None
-                and self.packet_type in (const.PKT_DATA, const.PKT_LINKREQUEST)):
+        if (
+            self.header_type == const.HDR_1
+            and self.transport_id is None
+            and self.packet_type in (const.PKT_DATA, const.PKT_LINKREQUEST)
+        ):
             from .transport import Transport
+
             _entry = Transport.path_table.get(self.destination_hash)
             if _entry is not None:
                 self.header_type = const.HDR_2
@@ -138,17 +157,19 @@ class Packet:
             if self.header_type == const.HDR_1:
                 self.header += self.destination.hash
 
-                if self.packet_type in (const.PKT_ANNOUNCE, const.PKT_LINKREQUEST):
-                    self.ciphertext = self.data
-                elif self.packet_type == const.PKT_PROOF and self.context == const.CTX_RESOURCE_PRF:
-                    self.ciphertext = self.data
-                elif self.packet_type == const.PKT_PROOF and self.destination.type == const.DEST_LINK:
-                    self.ciphertext = self.data
-                elif self.context in (const.CTX_RESOURCE, const.CTX_KEEPALIVE, const.CTX_CACHE_REQUEST):
+                if (
+                    self.packet_type in (const.PKT_ANNOUNCE, const.PKT_LINKREQUEST)
+                    or self.packet_type == const.PKT_PROOF
+                    and self.context == const.CTX_RESOURCE_PRF
+                    or self.packet_type == const.PKT_PROOF
+                    and self.destination.type == const.DEST_LINK
+                    or self.context
+                    in (const.CTX_RESOURCE, const.CTX_KEEPALIVE, const.CTX_CACHE_REQUEST)
+                ):
                     self.ciphertext = self.data
                 else:
                     self.ciphertext = self.destination.encrypt(self.data)
-                    if hasattr(self.destination, 'latest_ratchet_id'):
+                    if hasattr(self.destination, "latest_ratchet_id"):
                         self.ratchet_id = self.destination.latest_ratchet_id
 
             elif self.header_type == const.HDR_2:
@@ -160,7 +181,7 @@ class Packet:
                     else:
                         # Encrypt data packets (same as HDR_1 path)
                         self.ciphertext = self.destination.encrypt(self.data)
-                        if hasattr(self.destination, 'latest_ratchet_id'):
+                        if hasattr(self.destination, "latest_ratchet_id"):
                             self.ratchet_id = self.destination.latest_ratchet_id
                 else:
                     raise OSError("Header type 2 requires transport ID")
@@ -183,20 +204,20 @@ class Packet:
             self.context_flag = (self.flags & 0b00100000) >> 5
             self.transport_type = (self.flags & 0b00010000) >> 4
             self.destination_type = (self.flags & 0b00001100) >> 2
-            self.packet_type = (self.flags & 0b00000011)
+            self.packet_type = self.flags & 0b00000011
 
             DST_LEN = const.TRUNCATED_HASHLENGTH // 8
 
             if self.header_type == const.HDR_2:
-                self.transport_id = self.raw[2:DST_LEN + 2]
-                self.destination_hash = self.raw[DST_LEN + 2:2 * DST_LEN + 2]
+                self.transport_id = self.raw[2 : DST_LEN + 2]
+                self.destination_hash = self.raw[DST_LEN + 2 : 2 * DST_LEN + 2]
                 self.context = self.raw[2 * DST_LEN + 2]
-                self.data = self.raw[2 * DST_LEN + 3:]
+                self.data = self.raw[2 * DST_LEN + 3 :]
             else:
                 self.transport_id = None
-                self.destination_hash = self.raw[2:DST_LEN + 2]
+                self.destination_hash = self.raw[2 : DST_LEN + 2]
                 self.context = self.raw[DST_LEN + 2]
-                self.data = self.raw[DST_LEN + 3:]
+                self.data = self.raw[DST_LEN + 3 :]
 
             self.packed = False
             self.update_hash()
@@ -211,6 +232,7 @@ class Packet:
             if not self.packed:
                 self.pack()
             from .transport import Transport
+
             if Transport.outbound(self):
                 return self.receipt
             else:
@@ -224,6 +246,7 @@ class Packet:
         if self.sent:
             self.pack()
             from .transport import Transport
+
             if Transport.outbound(self):
                 return self.receipt
             else:
@@ -238,16 +261,18 @@ class Packet:
 
     def get_hash(self):
         from .identity import Identity
+
         return Identity.full_hash(self.get_hashable_part())
 
     def getTruncatedHash(self):
         from .identity import Identity
+
         return Identity.truncated_hash(self.get_hashable_part())
 
     def get_hashable_part(self):
         hashable_part = bytes([self.raw[0] & 0b00001111])
         if self.header_type == const.HDR_2:
-            hashable_part += self.raw[(const.TRUNCATED_HASHLENGTH // 8) + 2:]
+            hashable_part += self.raw[(const.TRUNCATED_HASHLENGTH // 8) + 2 :]
         else:
             hashable_part += self.raw[2:]
         return hashable_part
@@ -257,7 +282,9 @@ class Packet:
         if self.destination and self.destination.identity and self.destination.identity.prv:
             signature = self.destination.identity.sign(self.packet_hash)
             try:
-                import gc; gc.collect()
+                import gc
+
+                gc.collect()
             except Exception as e:
                 log("Packet prove error: " + str(e), LOG_DEBUG)
             # Implicit proof: just the signature
@@ -266,10 +293,16 @@ class Packet:
             if destination is None:
                 destination = self.generate_proof_destination()
 
-            proof = Packet(destination, proof_data, const.PKT_PROOF,
-                           attached_interface=self.receiving_interface)
+            proof = Packet(
+                destination,
+                proof_data,
+                const.PKT_PROOF,
+                attached_interface=self.receiving_interface,
+            )
             try:
-                import gc; gc.collect()
+                import gc
+
+                gc.collect()
             except Exception as e:
                 log("Proof send error: " + str(e), LOG_DEBUG)
             proof.send()
@@ -283,7 +316,7 @@ class Packet:
 
 class ProofDestination:
     def __init__(self, packet):
-        self.hash = packet.get_hash()[:const.TRUNCATED_HASHLENGTH // 8]
+        self.hash = packet.get_hash()[: const.TRUNCATED_HASHLENGTH // 8]
         self.type = const.DEST_SINGLE
 
     def encrypt(self, plaintext):
@@ -292,6 +325,7 @@ class ProofDestination:
 
 class LinkDestination:
     """Pseudo-destination for packets addressed to a link_id."""
+
     def __init__(self, link_id):
         self.hash = link_id
         self.link_id = link_id
@@ -302,10 +336,10 @@ class LinkDestination:
 
 
 class PacketReceipt:
-    FAILED    = 0x00
-    SENT      = 0x01
+    FAILED = 0x00
+    SENT = 0x01
     DELIVERED = 0x02
-    CULLED    = 0xFF
+    CULLED = 0xFF
 
     def __init__(self, packet):
         self.hash = packet.get_hash()
@@ -329,13 +363,18 @@ class PacketReceipt:
 
     def validate_proof(self, proof, proof_packet=None):
         from .identity import Identity
+
         EXPL_LENGTH = Identity.HASHLENGTH // 8 + Identity.SIGLENGTH // 8
         IMPL_LENGTH = Identity.SIGLENGTH // 8
 
         if len(proof) == EXPL_LENGTH:
-            proof_hash = proof[:Identity.HASHLENGTH // 8]
-            signature = proof[Identity.HASHLENGTH // 8:]
-            if proof_hash == self.hash and hasattr(self.destination, 'identity') and self.destination.identity:
+            proof_hash = proof[: Identity.HASHLENGTH // 8]
+            signature = proof[Identity.HASHLENGTH // 8 :]
+            if (
+                proof_hash == self.hash
+                and hasattr(self.destination, "identity")
+                and self.destination.identity
+            ):
                 if self.destination.identity.validate(signature, self.hash):
                     self.status = PacketReceipt.DELIVERED
                     self.proved = True
@@ -349,9 +388,9 @@ class PacketReceipt:
                     return True
             return False
         elif len(proof) == IMPL_LENGTH:
-            if not hasattr(self.destination, 'identity') or not self.destination.identity:
+            if not hasattr(self.destination, "identity") or not self.destination.identity:
                 return False
-            signature = proof[:Identity.SIGLENGTH // 8]
+            signature = proof[: Identity.SIGLENGTH // 8]
             if self.destination.identity.validate(signature, self.hash):
                 self.status = PacketReceipt.DELIVERED
                 self.proved = True

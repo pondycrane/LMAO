@@ -1,8 +1,8 @@
 """Smoke tests for urns Transport — routing, registration, and packet filtering."""
 
-import sys
-import os
 import hashlib
+import os
+import sys
 from unittest.mock import MagicMock
 
 # Ensure the urns package is importable
@@ -23,7 +23,7 @@ class _MockMicroPython:
         return f
 
 
-sys.modules["micropython"] = _MockMicroPython()
+sys.modules["micropython"] = _MockMicroPython()  # type: ignore[assignment]
 
 _mp_uhashlib = MagicMock()
 _mp_uhashlib.sha256 = hashlib.sha256
@@ -49,9 +49,8 @@ sys.modules["machine"] = MagicMock()
 sys.modules["network"] = MagicMock()
 
 from urns import const  # noqa: E402
-from urns.transport import Transport  # noqa: E402
 from urns.identity import Identity  # noqa: E402
-
+from urns.transport import Transport  # noqa: E402
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
 

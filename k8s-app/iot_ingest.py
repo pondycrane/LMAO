@@ -21,6 +21,7 @@ Environment Variables:
 
 import argparse
 import asyncio
+import contextlib
 import logging
 import os
 import sys
@@ -45,22 +46,22 @@ except ImportError:
 try:
     from lma_core import LMAOEnvelope
     from lma_core.grpc_types import (
+        GetIdentityRequest,
+        LMAOServicer,
+        LMAOStub,
         SendRequest,
         SubscribeRequest,
-        GetIdentityRequest,
-        LMAOStub,
-        LMAOServicer,
     )
 except ImportError:
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
     try:
         from lma_core import LMAOEnvelope
         from lma_core.grpc_types import (
+            GetIdentityRequest,
+            LMAOServicer,  # noqa: F401
+            LMAOStub,
             SendRequest,
             SubscribeRequest,
-            GetIdentityRequest,
-            LMAOStub,
-            LMAOServicer,  # noqa: F401
         )
     except ImportError:
         print(
@@ -145,14 +146,10 @@ def subscribe_example(stub: LMAOStub, timeout: int = 5):
             logger.warning("gRPC subscribe failed (UNAVAILABLE): %s", e.details())
         elif e.code() == grpc.StatusCode.DEADLINE_EXCEEDED:
             print(f"  Subscribe timeout: {e.details()}")
-            logger.warning(
-                "gRPC subscribe timeout (DEADLINE_EXCEEDED): %s", e.details()
-            )
+            logger.warning("gRPC subscribe timeout (DEADLINE_EXCEEDED): %s", e.details())
         else:
             print(f"  Subscribe error: code={e.code()} details={e.details()}")
-            logger.warning(
-                "gRPC subscribe error: code=%s details=%s", e.code(), e.details()
-            )
+            logger.warning("gRPC subscribe error: code=%s details=%s", e.code(), e.details())
     print()
 
 
@@ -205,15 +202,11 @@ async def subscribe_example_nats(
         await nq.ensure_stream("LMAO_MESSAGES", [subject])
 
         # Subscribe as a background task, cancel after timeout
-        task = asyncio.ensure_future(
-            nq.subscribe(subject, "iot-ingest", _store_and_ack)
-        )
+        task = asyncio.ensure_future(nq.subscribe(subject, "iot-ingest", _store_and_ack))
         await asyncio.sleep(timeout)
         task.cancel()
-        try:
+        with contextlib.suppress(asyncio.CancelledError):
             await task
-        except asyncio.CancelledError:
-            pass
 
         print(f"  Total received: {len(received)} message(s)")
     finally:
@@ -241,18 +234,12 @@ def main():
     )
     parser.add_argument(
         "--nats-server",
-        default=os.environ.get(
-            "NATS_SERVER", "nats://nats-server.default.svc.cluster.local:4222"
-        ),
+        default=os.environ.get("NATS_SERVER", "nats://nats-server.default.svc.cluster.local:4222"),
         help="NATS server address (used when --use-nats is set)",
     )
     parser.add_argument("--send", action="store_true", help="Run Send example")
-    parser.add_argument(
-        "--subscribe", action="store_true", help="Run Subscribe example"
-    )
-    parser.add_argument(
-        "--get-identity", action="store_true", help="Run GetIdentity example"
-    )
+    parser.add_argument("--subscribe", action="store_true", help="Run Subscribe example")
+    parser.add_argument("--get-identity", action="store_true", help="Run GetIdentity example")
     parser.add_argument(
         "--subscribe-timeout",
         type=int,

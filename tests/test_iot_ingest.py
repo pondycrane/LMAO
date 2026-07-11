@@ -255,9 +255,7 @@ class TestSendExample:
     def test_send_example_calls_stub(self, capsys):
         """send_example should call stub.Send with a valid request."""
         mock_stub = MagicMock()
-        mock_stub.Send.return_value = MagicMock(
-            status="queued", destination_hash="abc123"
-        )
+        mock_stub.Send.return_value = MagicMock(status="queued", destination_hash="abc123")
 
         iot_ingest.send_example(mock_stub)
 
@@ -354,9 +352,7 @@ class TestSendExampleNats:
         assert "seq=42" in captured.out
 
     @pytest.mark.asyncio
-    async def test_send_example_nats_uses_custom_subject(
-        self, mock_nats_for_iot, capsys
-    ):
+    async def test_send_example_nats_uses_custom_subject(self, mock_nats_for_iot, capsys):
         """send_example_nats should publish to the custom subject provided."""
         from lma_core.queue import NatsQueue
 
@@ -367,9 +363,7 @@ class TestSendExampleNats:
         nq.close = AsyncMock()
 
         with patch("lma_core.queue.NatsQueue", return_value=nq):
-            await iot_ingest.send_example_nats(
-                "nats://test:4222", subject="custom.subject.test"
-            )
+            await iot_ingest.send_example_nats("nats://test:4222", subject="custom.subject.test")
 
         # Publish should use the custom subject, but stream filter stays fixed
         nq.publish.assert_called_once()
@@ -418,9 +412,7 @@ class TestSubscribeExampleNats:
         assert "lmao.messages.env" in captured.out
 
     @pytest.mark.asyncio
-    async def test_subscribe_example_nats_reports_count(
-        self, mock_nats_for_iot, capsys
-    ):
+    async def test_subscribe_example_nats_reports_count(self, mock_nats_for_iot, capsys):
         """subscribe_example_nats should report total received message count."""
         from lma_core.queue import NatsQueue
 
@@ -573,14 +565,10 @@ class TestSubscribeExampleNatsWithStore:
                     store_path="/tmp/test.db",
                 )
 
-        mock_duckdb_store.store_sensor_report.assert_called_once_with(
-            b"test_sensor_data"
-        )
+        mock_duckdb_store.store_sensor_report.assert_called_once_with(b"test_sensor_data")
 
     @pytest.mark.asyncio
-    async def test_store_failure_raises_for_nak(
-        self, mock_nats_for_iot, mock_duckdb_store
-    ):
+    async def test_store_failure_raises_for_nak(self, mock_nats_for_iot, mock_duckdb_store):
         """_store_and_ack should raise when store_sensor_report fails, triggering NAK."""
         from lma_core.queue import NatsQueue
 
@@ -650,13 +638,15 @@ class TestQueryOnlyMode:
         cannot be imported."""
         test_args = ["iot_ingest.py", "--query", "SELECT 1"]
 
-        with patch.object(sys, "argv", test_args):
-            with patch(
+        with (
+            patch.object(sys, "argv", test_args),
+            patch(
                 "lma_core.storage.DuckDbStore",
                 side_effect=ImportError("duckdb is not installed"),
-            ):
-                with pytest.raises(SystemExit) as exc_info:
-                    iot_ingest.main()
+            ),
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            iot_ingest.main()
 
         assert exc_info.value.code == 1
 

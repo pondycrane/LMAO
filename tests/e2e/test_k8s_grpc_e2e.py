@@ -28,8 +28,7 @@ import sys
 import time
 
 import pytest
-
-from conftest import setup_common_mocks, cleanup_common_mocks
+from conftest import cleanup_common_mocks, setup_common_mocks
 
 logger = logging.getLogger(__name__)
 
@@ -61,8 +60,7 @@ def _probe_cluster():
         )
         if result.returncode != 0:
             _CLUSTER_REASON = (
-                f"kubectl cluster-info failed (exit {result.returncode}): "
-                f"{result.stderr.strip()}"
+                f"kubectl cluster-info failed (exit {result.returncode}): {result.stderr.strip()}"
             )
             return
     except FileNotFoundError:
@@ -221,9 +219,7 @@ class TestK8sClusterDetection:
             mod._CLUSTER_REASON = None
             mod._HOST_IP = None
             _probe_cluster()
-            assert mod._CLUSTER_CHECKED is True, (
-                "_CLUSTER_CHECKED should be True after probe"
-            )
+            assert mod._CLUSTER_CHECKED is True, "_CLUSTER_CHECKED should be True after probe"
             # Either ready with reason None, or not ready with reason set.
             if mod._CLUSTER_READY:
                 assert mod._CLUSTER_REASON is None
@@ -246,9 +242,7 @@ class TestK8sGrpcE2E:
 
     def test_host_ip_resolved(self):
         """Host IP must be resolved when cluster is available."""
-        assert _HOST_IP is not None, (
-            "Host IP should be resolved when cluster is reachable"
-        )
+        assert _HOST_IP is not None, "Host IP should be resolved when cluster is reachable"
 
     def test_grpc_e2e(self):
         """Full E2E: deploy pod, exercise gRPC RPCs, verify output.
@@ -276,9 +270,7 @@ class TestK8sGrpcE2E:
         try:
             from lmao_server import server as _server_mod
 
-            assert _server_mod.GRPC_AVAILABLE, (
-                "GRPC_AVAILABLE must be True for gRPC E2E tests"
-            )
+            assert _server_mod.GRPC_AVAILABLE, "GRPC_AVAILABLE must be True for gRPC E2E tests"
 
             server_inst = _server_mod.Server()
             server_inst.router = MagicMock()
@@ -297,8 +289,9 @@ class TestK8sGrpcE2E:
         def _run_grpc_server():
             nonlocal grpc_error
             try:
-                import grpc
                 from concurrent import futures
+
+                import grpc
 
                 # Create gRPC server bound to 0.0.0.0 so K8s pods can reach it
                 grpc_server = grpc.server(futures.ThreadPoolExecutor(max_workers=2))
@@ -356,9 +349,7 @@ class TestK8sGrpcE2E:
                     }
                 ),
             )
-            assert svc_result.returncode == 0, (
-                f"kubectl apply Service failed: {svc_result.stderr}"
-            )
+            assert svc_result.returncode == 0, f"kubectl apply Service failed: {svc_result.stderr}"
 
             # Create Endpoints pointing to host IP
             ep_result = _kubectl(
@@ -383,9 +374,7 @@ class TestK8sGrpcE2E:
                     }
                 ),
             )
-            assert ep_result.returncode == 0, (
-                f"kubectl apply Endpoints failed: {ep_result.stderr}"
-            )
+            assert ep_result.returncode == 0, f"kubectl apply Endpoints failed: {ep_result.stderr}"
 
             # ── 3. Deploy test pod ────────────────────────────────
             server_addr = f"lmao-e2e-server.default.svc.cluster.local:{server_port}"
@@ -578,15 +567,12 @@ print("__E2E_SUCCESS__")
             assert "GetIdentity: OK" in stdout, (
                 f"GetIdentity RPC did not succeed.\nstdout: {stdout[:2000]}"
             )
-            assert "Send: OK" in stdout, (
-                f"Send RPC did not succeed.\nstdout: {stdout[:2000]}"
-            )
+            assert "Send: OK" in stdout, f"Send RPC did not succeed.\nstdout: {stdout[:2000]}"
             assert "__DUCKDB_OK__" in stdout, (
                 f"DuckDB verification did not complete.\nstdout: {stdout[:2000]}"
             )
             assert "__E2E_SUCCESS__" in stdout, (
-                f"E2E test script did not complete successfully.\n"
-                f"stdout: {stdout[:2000]}"
+                f"E2E test script did not complete successfully.\nstdout: {stdout[:2000]}"
             )
 
             # All checks passed - print success before cleanup

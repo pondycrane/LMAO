@@ -13,6 +13,7 @@ compatibility (auto-detects key size to choose 128 vs 256).
 """
 
 from ucryptolib import aes as _aes_impl
+
 _MODE_CBC = 2
 
 

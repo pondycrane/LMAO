@@ -1,0 +1,33 @@
+line-length = 100
+target-version = "py310"
+
+[lint]
+select = ["E", "F", "I", "N", "W", "UP", "B", "SIM"]
+
+# MicroPython-specific code (Reticulum µurns port) uses patterns like
+# `import gc; gc.collect()` (E702), bare `except:` (E722), ambiguous
+# names `l` and `I` (E741), and `lambda` fallback assignments (E731)
+# that are standard MicroPython idioms.  These are pre-existing in the
+# vendored RNS µurns library and should not be lint-checked with CPython
+# rules.
+per-file-ignores = {
+  # MicroPython-specific Reticulum µurns library — uses patterns like
+  # `import gc; gc.collect()` (E702), bare `except:` (E722), ambiguous
+  # names `l` and `I` (E741), and `lambda` fallback assignments (E731)
+  # that are standard MicroPython idioms.
+  "cardputer_client/lib/urns/**" = ["E702", "E722", "E741", "E731", "F401", "F841", "E402", "N801", "N806", "N802", "N803", "N816", "N818", "E501", "UP031", "B904", "I001", "SIM102", "SIM105", "SIM115"],
+  # Cardputer client main.py — uses config variable names like DEST_HASH,
+  # SENSOR_TYPE etc. from config.py imports (N806), and B904 for MicroPython.
+  "cardputer_client/main.py" = ["N806", "B904", "E501"],
+  # Test files use patterns like capturing class names from sys.modules
+  # (N806), importing inside functions (E402), and multi-line `with`
+  # statements (SIM117) that are standard test idioms.
+  "tests/**" = ["I001", "N806", "N802", "N803", "E402", "SIM102", "SIM105", "SIM108", "SIM114", "SIM115", "SIM117", "SIM300", "UP031", "B904", "E501"],
+  # Tool scripts
+  "tools/**" = ["I001", "UP045", "SIM108", "E501"],
+  # Server and library files
+  "lmao_server/**" = ["N802", "SIM105", "E501"],
+  "human_client/**" = ["E501"],
+  "lma_core/**" = ["N802"],
+  "k8s-app/**" = ["E501"],
+}

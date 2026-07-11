@@ -1,11 +1,11 @@
 """Tests for human client REPL parsing (with mocked RNS/LXMF)."""
 
-from unittest.mock import MagicMock, patch
-import pytest
 import sys
-from google.protobuf.message import DecodeError
+from unittest.mock import MagicMock, patch
 
-from conftest import setup_common_mocks, cleanup_common_mocks
+import pytest
+from conftest import cleanup_common_mocks, setup_common_mocks
+from google.protobuf.message import DecodeError
 
 
 @pytest.fixture
@@ -272,9 +272,7 @@ class TestInputParsing:
             result = client._parse_input("Lazy recall test")
 
             assert result is True
-            assert client._default_dest_identity == mock_recalled, (
-                "Should cache recalled identity"
-            )
+            assert client._default_dest_identity == mock_recalled, "Should cache recalled identity"
             mock_send.assert_called_once_with(mock_recalled, "Lazy recall test")
 
     def test_plain_text_lazy_recall_failure(self, client_parsed, capsys):
@@ -309,7 +307,8 @@ class TestInputParsing:
 
 
 if __name__ == "__main__":
-    import pytest
     import sys
+
+    import pytest
 
     sys.exit(pytest.main([__file__] + sys.argv[1:]))

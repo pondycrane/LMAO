@@ -1,14 +1,16 @@
 # µReticulum TCP Client Interface
 # HDLC-framed TCP connection to a remote RNS TCPServerInterface
 
-import time
+import contextlib
 import socket
+import time
+
+from ..log import LOG_DEBUG, LOG_ERROR, LOG_NOTICE, LOG_VERBOSE, log
 from . import Interface
-from ..log import log, LOG_VERBOSE, LOG_DEBUG, LOG_ERROR, LOG_NOTICE
 
 # HDLC framing constants (inlined to keep module self-contained)
-FLAG     = 0x7E
-ESC      = 0x7D
+FLAG = 0x7E
+ESC = 0x7D
 ESC_MASK = 0x20
 
 
@@ -31,7 +33,7 @@ class TCPClientInterface(Interface):
     HW_MTU = 16384
     CONNECT_TIMEOUT = 5
     RECONNECT_WAIT = 5
-    MAX_RECONNECTS = 0       # 0 = unlimited
+    MAX_RECONNECTS = 0  # 0 = unlimited
 
     def __init__(self, config):
         name = config.get("name", "TCP")
@@ -80,10 +82,8 @@ class TCPClientInterface(Interface):
 
     def _close_socket(self):
         if self._socket:
-            try:
+            with contextlib.suppress(BaseException):
                 self._socket.close()
-            except:
-                pass
             self._socket = None
 
     def _reconnect(self):
@@ -117,8 +117,9 @@ class TCPClientInterface(Interface):
             # Link-addressed packets (link_id as dest) are NOT wrapped —
             # the transport server routes these via its link_table.
             if len(data) >= 19 and (data[0] & 0x40) == 0x00 and (data[0] & 0x03) != 0x01:
-                from ..transport import Transport
                 from .. import const
+                from ..transport import Transport
+
                 _entry = Transport.path_table.get(data[2:18])
                 if _entry:
                     # Set HDR_2 (bit 6) + TRANSPORT (bit 4), keep other bits
@@ -140,14 +141,22 @@ class TCPClientInterface(Interface):
             self.tx += 1
             self._last_activity = time.time()
             if len(data) >= 18:
-                log("TCP TX " + str(len(data)) + "B frame=" + str(len(frame)) + "B flags=0x" + ("%02x" % data[0]) + " dest=" + data[2:18].hex(), LOG_DEBUG)
+                log(
+                    "TCP TX "
+                    + str(len(data))
+                    + "B frame="
+                    + str(len(frame))
+                    + "B flags=0x"
+                    + (f"{data[0]:02x}")
+                    + " dest="
+                    + data[2:18].hex(),
+                    LOG_DEBUG,
+                )
             return True
         except Exception as e:
             log("TCP send error: " + str(e), LOG_ERROR)
-            try:
+            with contextlib.suppress(BaseException):
                 self._socket.settimeout(0)
-            except:
-                pass
             self.online = False
             return False
 
@@ -157,7 +166,15 @@ class TCPClientInterface(Interface):
             if len(self._buffer) > 0:
                 raw = bytes(self._buffer)
                 if len(raw) >= 18:
-                    log("TCP RX " + str(len(raw)) + "B flags=0x" + ("%02x" % raw[0]) + " dest=" + raw[2:18].hex(), LOG_DEBUG)
+                    log(
+                        "TCP RX "
+                        + str(len(raw))
+                        + "B flags=0x"
+                        + (f"{raw[0]:02x}")
+                        + " dest="
+                        + raw[2:18].hex(),
+                        LOG_DEBUG,
+                    )
                 else:
                     log("TCP RX " + str(len(raw)) + "B", LOG_DEBUG)
                 self.process_incoming(raw)

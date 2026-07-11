@@ -9,38 +9,45 @@ import sys
 
 _native = None
 
+
 def _try_native():
     global _native
     mod = None
     try:
         if sys.platform == "esp32":
             import bz2_fast_xtensawin
+
             mod = bz2_fast_xtensawin
         elif sys.platform == "rp2":
             import bz2_fast_armv6m
+
             mod = bz2_fast_armv6m
         else:
             import bz2_fast
+
             mod = bz2_fast
     except ImportError:
         pass
     if mod is None:
         try:
             import bz2_fast
+
             mod = bz2_fast
         except ImportError:
             pass
     _native = mod
 
+
 _try_native()
 
 if _native:
-    from .log import log, LOG_VERBOSE
+    from .log import LOG_VERBOSE, log
+
     log("bz2: native C module loaded", LOG_VERBOSE)
 
 
 class _Bitfield:
-    __slots__ = ('f', 'bits', 'bitfield')
+    __slots__ = ("f", "bits", "bitfield")
 
     def __init__(self, f):
         self.f = f
@@ -87,7 +94,7 @@ def _reverse_bits(v, n):
 
 
 class _HL:
-    __slots__ = ('code', 'bits', 'symbol')
+    __slots__ = ("code", "bits", "symbol")
 
     def __init__(self, code, bits):
         self.code = code
@@ -115,7 +122,7 @@ class _HuffTable:
         for x in self.table:
             symbol += 1
             if x.bits != bits:
-                symbol <<= (x.bits - bits)
+                symbol <<= x.bits - bits
                 bits = x.bits
             x.symbol = symbol
 
@@ -183,7 +190,7 @@ def decompress(data):
 
 def compress(data):
     """Compress bytes with bz2. Requires native C module. Returns bytes or None."""
-    if _native and hasattr(_native, 'compress'):
+    if _native and hasattr(_native, "compress"):
         return _native.compress(data)
     return None
 
@@ -193,7 +200,7 @@ def _decompress_python(data):
     f = io.BytesIO(data)
 
     magic = f.read(2)
-    if magic != b'BZ':
+    if magic != b"BZ":
         raise ValueError("bz2: bad magic")
 
     b = _Bitfield(f)
@@ -301,7 +308,9 @@ def _decompress_python(data):
                     buf.append(favourites[0])
 
             # Inverse BWT
-            import gc; gc.collect()
+            import gc
+
+            gc.collect()
             decoded_block = _bwt_reverse(buf, pointer)
             del buf
             gc.collect()
@@ -310,9 +319,13 @@ def _decompress_python(data):
             i = 0
             n = len(decoded_block)
             while i < n:
-                if i < n - 4 and \
-                   decoded_block[i] == decoded_block[i + 1] == \
-                   decoded_block[i + 2] == decoded_block[i + 3]:
+                if (
+                    i < n - 4
+                    and decoded_block[i]
+                    == decoded_block[i + 1]
+                    == decoded_block[i + 2]
+                    == decoded_block[i + 3]
+                ):
                     v = decoded_block[i]
                     count = decoded_block[i + 4] + 4
                     output.extend(bytes([v]) * count)
@@ -322,7 +335,9 @@ def _decompress_python(data):
                     i += 1
 
             del decoded_block
-            import gc; gc.collect()
+            import gc
+
+            gc.collect()
 
         elif blocktype == 0x177245385090:  # end of stream
             b.align()

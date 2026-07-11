@@ -11,20 +11,20 @@ for K8s pod integration. The gRPC service provides:
   - GetIdentity: Return the server's Reticulum identity hex
 """
 
-import os
-import logging
-import time
 import asyncio
-
-from lma_core.rns_di import RNS, LXMF
-from lma_core.rns_init import warn_if_rnode_missing, init_rns_and_lxmf as _shared_init
+import logging
+import os
+import time
 
 # Local imports
 import config
+from google.protobuf.message import DecodeError
+
 from lma_core import LMAOEnvelope
 from lma_core.message_utils import decode_lmao_message
-
-from google.protobuf.message import DecodeError
+from lma_core.rns_di import LXMF, RNS
+from lma_core.rns_init import init_rns_and_lxmf as _shared_init
+from lma_core.rns_init import warn_if_rnode_missing
 
 logger = logging.getLogger(__name__)
 
@@ -33,11 +33,12 @@ logger = logging.getLogger(__name__)
 # ──────────────────────────────────────────────────────────────
 try:
     import grpc
+
     from lma_core.grpc_types import (
-        SendResponse,
-        SubscribeResponse,
         GetIdentityResponse,
         LMAOServicer,
+        SendResponse,
+        SubscribeResponse,
     )
 
     GRPC_AVAILABLE = True
@@ -114,9 +115,7 @@ class Server:
             try:
                 queue.put_nowait(message)
             except Exception:
-                logger.warning(
-                    "gRPC subscriber error — dropping subscriber", exc_info=True
-                )
+                logger.warning("gRPC subscriber error — dropping subscriber", exc_info=True)
                 dead.append(queue)
         for q in dead:
             self.unregister_grpc_subscriber(q)
@@ -133,14 +132,10 @@ class Server:
         try:
             source_identity = message.get_source()
             source_hash = (
-                RNS.hexrep(source_identity.hash, delimit=False)
-                if source_identity
-                else "<unknown>"
+                RNS.hexrep(source_identity.hash, delimit=False) if source_identity else "<unknown>"
             )
             content_bytes = message.content if hasattr(message, "content") else b""
-            title = (
-                message.title_as_string() if hasattr(message, "title_as_string") else ""
-            )
+            title = message.title_as_string() if hasattr(message, "title_as_string") else ""
 
             logger.info(
                 "Message received — From: %s  Title: %s  Content length: %d bytes",
@@ -153,7 +148,9 @@ class Server:
             decode_lmao_message(content_bytes)
 
             # Build and send a protobuf-encoded ACK reply
-            reply_text = f"ACK from LMAO Server — received your message ({len(content_bytes)} bytes)"
+            reply_text = (
+                f"ACK from LMAO Server — received your message ({len(content_bytes)} bytes)"
+            )
             logger.info("Reply: %s", reply_text)
 
             if source_identity is not None and self.router is not None:
@@ -179,15 +176,11 @@ class Server:
             self._fanout_to_grpc_subscribers(message)
 
         except AttributeError as e:
-            logger.error(
-                "LXMF message missing expected attributes: %s", e, exc_info=True
-            )
+            logger.error("LXMF message missing expected attributes: %s", e, exc_info=True)
         except (RNS.RNSException, LXMF.LXMFException) as e:
             logger.error("RNS/LXMF error processing message: %s", e, exc_info=True)
         except Exception as e:
-            logger.error(
-                "Unexpected error in handle_lxmf_delivery: %s", e, exc_info=True
-            )
+            logger.error("Unexpected error in handle_lxmf_delivery: %s", e, exc_info=True)
 
 
 # ──────────────────────────────────────────────────────────────
@@ -209,9 +202,7 @@ if GRPC_AVAILABLE:
             try:
                 envelope.ParseFromString(request.envelope)
             except (DecodeError, ValueError) as e:
-                await context.abort(
-                    grpc.StatusCode.INVALID_ARGUMENT, f"Bad envelope: {e}"
-                )
+                await context.abort(grpc.StatusCode.INVALID_ARGUMENT, f"Bad envelope: {e}")
 
             # Resolve destination identity from the request hash
             dest_hash = request.destination_hash

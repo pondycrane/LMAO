@@ -8,13 +8,13 @@ Provides a single source of truth for:
   - LXMF router startup with optional delivery-callback registration
 """
 
-import sys
-import os
-import logging
 import atexit
+import logging
+import os
 import shutil
+import sys
 
-from lma_core.rns_di import RNS, LXMF
+from lma_core.rns_di import LXMF, RNS
 
 logger = logging.getLogger(__name__)
 
@@ -23,9 +23,7 @@ def warn_if_rnode_missing(rnode_port, role="node"):
     """Warn if the RNode port does not exist."""
     if os.path.exists(rnode_port):
         return
-    logger.warning(
-        "RNode port %s not found. LoRa messaging will be unavailable.", rnode_port
-    )
+    logger.warning("RNode port %s not found. LoRa messaging will be unavailable.", rnode_port)
     print(
         f"\u26a0\ufe0f  RNode port {rnode_port} not found.\n"
         f"   The {role} will start with WiFi AutoInterface only.\n"
@@ -68,9 +66,7 @@ def init_rns_and_lxmf(
             atexit.register(lambda: shutil.rmtree(configdir, ignore_errors=True))
         RNS.Reticulum(configdir=configdir)
     except (OSError, PermissionError) as e:
-        logger.critical(
-            "Failed to create config directory for Reticulum: %s", e, exc_info=True
-        )
+        logger.critical("Failed to create config directory for Reticulum: %s", e, exc_info=True)
         print(
             f"FATAL: Failed to create config directory for Reticulum: {e}",
             file=sys.stderr,
@@ -81,13 +77,9 @@ def init_rns_and_lxmf(
         logger.critical("Reticulum initialization failed: %s", e, exc_info=True)
         print(f"FATAL: Reticulum initialization failed: {e}", file=sys.stderr)
         if rnode_exists:
-            print(
-                f"This is often caused by a missing or misconfigured RNode on {rnode_port}."
-            )
+            print(f"This is often caused by a missing or misconfigured RNode on {rnode_port}.")
             print("Check that:")
-            print(
-                f"  1. The RNode is plugged in and on the correct port ({rnode_port})"
-            )
+            print(f"  1. The RNode is plugged in and on the correct port ({rnode_port})")
             print("  2. You have permission: sudo usermod -a -G dialout $USER")
             print("  3. The RNode firmware is flashed correctly")
             print("  See rnode_firmware/README.md and README Troubleshooting.")
@@ -119,9 +111,7 @@ def init_rns_and_lxmf(
         router = LXMF.LXMRouter(identity=identity, storagepath=identity_storage_path)
     except (RNS.RNSException, LXMF.LXMFException, OSError) as e:
         logger.critical("Failed to start LXMF router: %s", e, exc_info=True)
-        print(
-            "FATAL: Failed to start LXMF router. See log for details.", file=sys.stderr
-        )
+        print("FATAL: Failed to start LXMF router. See log for details.", file=sys.stderr)
         sys.exit(1)
 
     # Register delivery callback if provided

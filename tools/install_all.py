@@ -57,7 +57,7 @@ from tests.e2e.e2e_helpers import (
 )
 
 # Server-service install helpers (from tools/install_services.py).
-from tools.install_services import install_pi_server, install_k8s_services
+from tools.install_services import install_k8s_services, install_pi_server
 
 # ---- Result tracking ----
 
@@ -326,9 +326,7 @@ def main(argv: list[str] | None = None) -> None:
     else:
         client_root = args.client_root or find_client_root()
         if not client_root:
-            cp_result.fail(
-                "Cannot locate cardputer_client/ directory. Specify with --client-root."
-            )
+            cp_result.fail("Cannot locate cardputer_client/ directory. Specify with --client-root.")
             print("Cardputer: FAIL — cannot locate cardputer_client/ directory")
         else:
             port = find_cardputer_port(args.cardputer_port)
@@ -346,10 +344,7 @@ def main(argv: list[str] | None = None) -> None:
         rn_result.skip("--skip-rnode")
         print("RNode: SKIP (--skip-rnode)")
     else:
-        if args.rnode_port:
-            port = args.rnode_port
-        else:
-            port = find_rnode_port()
+        port = args.rnode_port or find_rnode_port()
         if not port:
             rn_result.skip("No RNode/Heltec detected on USB")
             print("RNode: SKIP — not detected on USB")

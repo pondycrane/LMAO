@@ -20,4 +20,4 @@ class PKCS7:
         n = data[-1]
         if n > bs:
             raise ValueError("Invalid padding length: " + str(n))
-        return data[:len(data) - n]
+        return data[: len(data) - n]
