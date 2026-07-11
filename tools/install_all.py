@@ -62,6 +62,8 @@ from tests.e2e.e2e_helpers import (
 
 # Server-service install helpers (from tools/install_services.py).
 from tools.install_services import (
+    DEFAULT_REGISTRY_HOST,
+    DEFAULT_REGISTRY_PORT,
     install_iot_ingest_consumer,
     install_k8s_services,
     install_pi_server,
@@ -373,12 +375,16 @@ def main(argv: list[str] | None = None) -> None:
     # ── Local Registry ──
     registry_result = DeviceResult("Local Registry")
     results.append(registry_result)
+    registry_ready = False
 
     if args.setup_registry:
         try:
             setup_registry(registry_result)
+            if registry_result.status == "OK":
+                registry_ready = True
         except Exception as exc:
             import traceback
+
             traceback.print_exc()
             registry_result.fail(f"Registry setup error: {exc}")
     else:
@@ -408,7 +414,15 @@ def main(argv: list[str] | None = None) -> None:
                 iot_result.skip("--skip-iot-ingest")
             elif args.skip_k8s:
                 iot_result.skip("--skip-k8s (K8s services skipped)")
+            elif args.setup_registry and registry_ready:
+                install_iot_ingest_consumer(
+                    iot_result,
+                    registry_host=DEFAULT_REGISTRY_HOST,
+                    registry_port=DEFAULT_REGISTRY_PORT,
+                )
             else:
+                if args.setup_registry and not registry_ready:
+                    print("  Registry unavailable, falling back to local Docker build")
                 install_iot_ingest_consumer(iot_result)
         except Exception as exc:
             import traceback
