@@ -933,7 +933,7 @@ class TestConsumerGracefulShutdown:
         nq.ensure_stream = AsyncMock()
         nq.close = AsyncMock()
 
-        # subscribe returns immediately (simulating shutdown signal received)
+        # subscribe returns immediately (simulating cancelled subscription)
         async def _fake_subscribe(subject, durable, callback):
             pass  # Return immediately — simulates cancelled subscription
 
@@ -949,15 +949,12 @@ class TestConsumerGracefulShutdown:
 
         with patch("lma_core.queue.NatsQueue", return_value=nq):
             with patch("lma_core.storage.DuckDbStore", return_value=store):
-
-                # Patch signal handlers and make shutdown_event fire immediately
+                # Inject a pre-set shutdown_event so main() doesn't block
+                # on shutdown_event.wait() forever.
+                shutdown_event = asyncio.Event()
+                shutdown_event.set()
                 with patch.object(asyncio.get_event_loop(), "add_signal_handler"):
-                    # We can't easily patch shutdown_event, but since
-                    # subscribe returns immediately, the main loop will
-                    # proceed to shutdown naturally.
-                    # Actually, let's just test that close is called by
-                    # invoking the shutdown path manually:
-                    await consumer.main()
+                    await consumer.main(shutdown_event=shutdown_event)
 
         nq.close.assert_called_once()
         store.close.assert_called_once()

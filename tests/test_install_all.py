@@ -123,6 +123,7 @@ class TestParseArgs:
         assert args.skip_cardputer is False
         assert args.skip_rnode is False
         assert args.client_root is None
+        assert args.skip_iot_ingest is False
 
     def test_cardputer_port_flag(self):
         """--cardputer-port should be captured."""
@@ -177,6 +178,19 @@ class TestParseArgs:
         """--skip-k8s sets the flag to True."""
         args = install_all._parse_args(["--include-services", "--skip-k8s"])
         assert args.skip_k8s is True
+
+    def test_skip_iot_ingest_flag(self):
+        """--skip-iot-ingest sets the flag to True."""
+        args = install_all._parse_args(["--include-services", "--skip-iot-ingest"])
+        assert args.skip_iot_ingest is True
+
+    def test_skip_iot_ingest_with_skip_k8s(self):
+        """--skip-iot-ingest can be combined with --skip-k8s."""
+        args = install_all._parse_args(
+            ["--include-services", "--skip-k8s", "--skip-iot-ingest"]
+        )
+        assert args.skip_k8s is True
+        assert args.skip_iot_ingest is True
 
     def test_skip_flags_noop_without_include_services(self):
         """--skip-server and --skip-k8s can be set without --include-services."""
@@ -726,9 +740,12 @@ class TestMainWithServicesSkipped:
     @pytest.fixture(autouse=True)
     def _setup_mocks(self):
         patches = _patch_imports()
-        # Also mock the service install functions
+        # Also mock the service install functions to prevent real Docker/kubectl calls
         patches["install_pi_server"] = patch.object(install_all, "install_pi_server")
         patches["install_k8s_services"] = patch.object(install_all, "install_k8s_services")
+        patches["install_iot_ingest_consumer"] = patch.object(
+            install_all, "install_iot_ingest_consumer"
+        )
         self.mocks, self._patches = _start_patches(patches)
         self.mocks["find_cardputer_port"].return_value = None
         self.mocks["find_rnode_port"].return_value = None
@@ -757,9 +774,12 @@ class TestMainWithServices:
     @pytest.fixture(autouse=True)
     def _setup_mocks(self):
         patches = _patch_imports()
-        # Mock the service install functions
+        # Mock the service install functions to prevent real Docker/kubectl calls
         patches["install_pi_server"] = patch.object(install_all, "install_pi_server")
         patches["install_k8s_services"] = patch.object(install_all, "install_k8s_services")
+        patches["install_iot_ingest_consumer"] = patch.object(
+            install_all, "install_iot_ingest_consumer"
+        )
         self.mocks, self._patches = _start_patches(patches)
         self.mocks["find_cardputer_port"].return_value = None
         self.mocks["find_rnode_port"].return_value = None
@@ -767,11 +787,12 @@ class TestMainWithServices:
         _stop_patches(self._patches)
 
     def test_include_services_calls_install_functions(self):
-        """--include-services should call both install functions."""
+        """--include-services should call all three install functions."""
         with pytest.raises(SystemExit):
             install_all.main(["--include-services"])
         self.mocks["install_pi_server"].assert_called_once()
         self.mocks["install_k8s_services"].assert_called_once()
+        self.mocks["install_iot_ingest_consumer"].assert_called_once()
 
     def test_only_pi_server_called_when_k8s_skipped(self):
         """--skip-k8s should prevent k8s install but allow Pi server."""
@@ -779,6 +800,8 @@ class TestMainWithServices:
             install_all.main(["--include-services", "--skip-k8s"])
         self.mocks["install_pi_server"].assert_called_once()
         self.mocks["install_k8s_services"].assert_not_called()
+        # --skip-k8s also skips iot-ingest (cascading skip)
+        self.mocks["install_iot_ingest_consumer"].assert_not_called()
 
     def test_only_k8s_called_when_server_skipped(self):
         """--skip-server should prevent Pi server install but allow K8s."""
@@ -786,16 +809,24 @@ class TestMainWithServices:
             install_all.main(["--include-services", "--skip-server"])
         self.mocks["install_pi_server"].assert_not_called()
         self.mocks["install_k8s_services"].assert_called_once()
+        self.mocks["install_iot_ingest_consumer"].assert_called_once()
+
+    def test_skip_iot_ingest_prevents_iot_call(self):
+        """--skip-iot-ingest should prevent iot-ingest install but allow others."""
+        with pytest.raises(SystemExit):
+            install_all.main(["--include-services", "--skip-iot-ingest"])
+        self.mocks["install_pi_server"].assert_called_once()
+        self.mocks["install_k8s_services"].assert_called_once()
+        self.mocks["install_iot_ingest_consumer"].assert_not_called()
 
     def test_service_results_in_summary(self, capsys):
-        """Pi Server and K8s Services should appear in summary."""
-        # The mocked install functions don't touch the DeviceResult, so
-        # they'll remain at default SKIP unless we simulate OK.
+        """Pi Server, K8s Services, and IoT Ingest Consumer should appear in summary."""
         with pytest.raises(SystemExit):
             install_all.main(["--include-services"])
         captured = capsys.readouterr().out
         assert "Pi Server" in captured
         assert "K8s Services" in captured
+        assert "IoT Ingest Consumer" in captured
 
 
 # ── Unit tests for install_services.py ─────────────────────────────
@@ -1095,3 +1126,181 @@ class TestInstallK8sServices:
             install_services.install_k8s_services(result, "/fake/repo")
             assert result.status == "FAIL"
             assert "kubectl error" in result.detail
+
+
+class TestInstallIotIngestConsumer:
+    """Unit tests for install_services.install_iot_ingest_consumer()."""
+
+    def _make_result(self):
+        return install_all.DeviceResult("IoT Ingest Consumer")
+
+    def test_skips_when_docker_not_found(self):
+        """Result should be SKIP when docker is not on PATH."""
+        with patch("shutil.which", return_value=None):
+            result = self._make_result()
+            install_services.install_iot_ingest_consumer(result, "/fake/repo")
+            assert result.status == "SKIP"
+            assert "docker" in result.detail.lower()
+
+    def test_skips_when_repo_root_none_and_not_found(self):
+        """Result should be FAIL when repo_root cannot be located."""
+        with patch.object(install_services, "_find_repo_root", return_value=None):
+            result = self._make_result()
+            install_services.install_iot_ingest_consumer(result, None)
+            assert result.status == "FAIL"
+            assert "repo root" in result.detail.lower()
+
+    def test_fails_when_dockerfile_not_found(self):
+        """Result should be FAIL when Dockerfile.iot-ingest does not exist."""
+        with (
+            patch("shutil.which", return_value="/usr/bin/docker"),
+            patch("os.path.isfile", return_value=False),
+        ):
+            result = self._make_result()
+            install_services.install_iot_ingest_consumer(result, "/fake/repo")
+            assert result.status == "FAIL"
+            assert "Dockerfile not found" in result.detail
+
+    def test_builds_and_applies_when_all_clis_found(self):
+        """Result should be OK when Docker build + kubectl apply both succeed."""
+        mock_proc = MagicMock()
+        mock_proc.returncode = 0
+        with (
+            patch("shutil.which", return_value="/usr/bin/docker"),
+            patch("os.path.isfile", return_value=True),
+            patch("subprocess.run", return_value=mock_proc),
+        ):
+            result = self._make_result()
+            install_services.install_iot_ingest_consumer(result, "/fake/repo")
+            assert result.status == "OK"
+            assert "deployed" in result.detail.lower()
+
+    def test_fails_when_docker_build_returns_nonzero(self):
+        """Result should be FAIL when docker build returns non-zero."""
+        mock_proc = MagicMock()
+        mock_proc.returncode = 1
+        mock_proc.stderr = "Error: manifest not found"
+        with (
+            patch("shutil.which", return_value="/usr/bin/docker"),
+            patch("os.path.isfile", return_value=True),
+            patch("subprocess.run", return_value=mock_proc),
+        ):
+            result = self._make_result()
+            install_services.install_iot_ingest_consumer(result, "/fake/repo")
+            assert result.status == "FAIL"
+            assert "Docker build failed" in result.detail
+
+    def test_fails_when_docker_build_raises_subprocess_error(self):
+        """Result should be FAIL when docker build raises SubprocessError."""
+        with (
+            patch("shutil.which", return_value="/usr/bin/docker"),
+            patch("os.path.isfile", return_value=True),
+            patch(
+                "subprocess.run",
+                side_effect=subprocess.SubprocessError("build failed"),
+            ),
+        ):
+            result = self._make_result()
+            install_services.install_iot_ingest_consumer(result, "/fake/repo")
+            assert result.status == "FAIL"
+            assert "Docker build error" in result.detail
+
+    def test_fails_when_kubectl_not_found_after_docker_build(self):
+        """When docker build succeeds but kubectl is missing, result should be SKIP.
+
+        Note: The function short-circuits at the Docker check when docker
+        is missing. To test the post-Docker kubectl check, docker must
+        succeed first.
+        """
+        mock_proc = MagicMock()
+        mock_proc.returncode = 0
+        # shutil.which returns docker but not kubectl
+        def _which_side_effect(cmd):
+            if cmd == "docker":
+                return "/usr/bin/docker"
+            return None
+
+        with (
+            patch("shutil.which", side_effect=_which_side_effect),
+            patch("os.path.isfile", return_value=True),
+            patch("subprocess.run", return_value=mock_proc),
+        ):
+            result = self._make_result()
+            install_services.install_iot_ingest_consumer(result, "/fake/repo")
+            assert result.status == "SKIP"
+            assert "kubectl" in result.detail.lower()
+
+    def test_fails_when_kubectl_apply_returns_nonzero(self):
+        """Result should be FAIL when kubectl apply returns non-zero."""
+        mock_proc = MagicMock()
+        mock_proc.returncode = 0  # Docker succeeds
+        mock_proc.stderr = ""
+
+        # Second call (kubectl) fails
+        mock_fail_proc = MagicMock()
+        mock_fail_proc.returncode = 1
+        mock_fail_proc.stderr = "connection refused"
+
+        with (
+            patch("shutil.which", return_value="/usr/bin/docker"),
+            patch("os.path.isfile", return_value=True),
+            patch(
+                "subprocess.run",
+                side_effect=[mock_proc, mock_fail_proc],
+            ),
+        ):
+            result = self._make_result()
+            install_services.install_iot_ingest_consumer(result, "/fake/repo")
+            assert result.status == "FAIL"
+            assert "kubectl apply" in result.detail.lower()
+
+    def test_fails_when_kubectl_apply_raises_subprocess_error(self):
+        """Result should be FAIL when kubectl apply raises SubprocessError."""
+        mock_proc = MagicMock()
+        mock_proc.returncode = 0
+        with (
+            patch("shutil.which", return_value="/usr/bin/docker"),
+            patch("os.path.isfile", return_value=True),
+            patch(
+                "subprocess.run",
+                side_effect=[mock_proc, subprocess.SubprocessError("kubectl error")],
+            ),
+        ):
+            result = self._make_result()
+            install_services.install_iot_ingest_consumer(result, "/fake/repo")
+            assert result.status == "FAIL"
+            assert "kubectl error" in result.detail
+
+    def test_fails_when_docker_build_raises_os_error(self):
+        """Result should be FAIL when docker build raises OSError (caught by
+        the generic ``except Exception`` handler)."""
+        with (
+            patch("shutil.which", return_value="/usr/bin/docker"),
+            patch("os.path.isfile", return_value=True),
+            patch(
+                "subprocess.run",
+                side_effect=OSError("no such file"),
+            ),
+        ):
+            result = self._make_result()
+            install_services.install_iot_ingest_consumer(result, "/fake/repo")
+            assert result.status == "FAIL"
+            assert "Unexpected error during Docker build" in result.detail
+
+    def test_fails_when_manifest_not_found_for_kubectl(self):
+        """Result should be FAIL when k8s/iot-ingest.yaml is missing."""
+        mock_proc = MagicMock()
+        mock_proc.returncode = 0
+        # os.path.isfile returns True for Dockerfile, False for manifest
+        def _isfile(path):
+            return "Dockerfile" in path
+
+        with (
+            patch("shutil.which", return_value="/usr/bin/docker"),
+            patch("os.path.isfile", side_effect=_isfile),
+            patch("subprocess.run", return_value=mock_proc),
+        ):
+            result = self._make_result()
+            install_services.install_iot_ingest_consumer(result, "/fake/repo")
+            assert result.status == "FAIL"
+            assert "iot-ingest.yaml" in result.detail.lower()

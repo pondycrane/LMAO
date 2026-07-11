@@ -238,6 +238,7 @@ bazel run //tools:install_all -- --client-root /path/to/cardputer_client
 bazel run //tools:install_all -- --include-services
 bazel run //tools:install_all -- --include-services --skip-server
 bazel run //tools:install_all -- --include-services --skip-k8s
+bazel run //tools:install_all -- --include-services --skip-iot-ingest
 ```
 
 Output shows a per-device summary table with OK/FAIL/SKIP status:
@@ -463,6 +464,44 @@ python k8s-app/iot_ingest.py --use-nats --subscribe --store --subscribe-timeout 
 python k8s-app/iot_ingest.py --query "SELECT node_id, count(*) FROM sensor_readings GROUP BY node_id"
 ```
 
+#### Persistent Consumer Deployment
+
+A long-lived Kubernetes Deployment (``k8s/iot-ingest.yaml``) runs a
+persistent NATS→DuckDB consumer that **replaces the CLI-based approach**
+for production use. The consumer auto-restarts on crash, persists DuckDB
+data to a PersistentVolumeClaim, and uses a durable consumer name for
+at-least-once delivery across restarts.
+
+```bash
+# Deploy the persistent consumer (requires NATS already deployed)
+kubectl apply -f k8s/iot-ingest.yaml
+
+# Or deploy via the unified installer
+bazel run //tools:install_all -- --include-services
+```
+
+**Environment variables** (configured via ``k8s/iot-ingest.yaml`` ConfigMap):
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| ``NATS_SERVER`` | ``nats://nats-server.default.svc.cluster.local:4222`` | NATS server URL |
+| ``DUCKDB_PATH`` | ``/data/sensors.db`` | Path to DuckDB database file (on PVC) |
+| ``CONSUMER_NAME`` | ``iot-ingest`` | Durable consumer name for JetStream |
+
+**Graceful shutdown**: The consumer handles SIGTERM/SIGINT, drains the
+subscription, and closes both NATS and DuckDB connections cleanly before
+exiting. Kubernetes waits for ``terminationGracePeriodSeconds`` (default 30s)
+before force-killing.
+
+**PVC persistence**: DuckDB data is stored on a 1 Gi ``PersistentVolumeClaim``
+(``iot-ingest-pvc``), surviving pod restarts and redeployments.
+
+> **Tip**: Use ``--skip-iot-ingest`` to exclude the persistent consumer from
+> the unified installer:
+> ```bash
+> bazel run //tools:install_all -- --include-services --skip-iot-ingest
+> ```
+
 #### Architecture notes
 
 - **No changes to gRPC**: The LMAO server and gRPC API are unchanged. NATS is
@@ -518,6 +557,7 @@ If an RNode is connected, LoRa messaging is available.
 ├── ARCHITECTURE.md                    # Full system architecture reference
 ├── AGENTS.md                          # Project rules (E2E flash verification)
 ├── Dockerfile                         # Container build for server deployment
+├── Dockerfile.iot-ingest              # Container build for IoT ingest consumer
 ├── .bazelversion                      # Bazel version pin (7.4.1)
 ├── MODULE.bazel                       # Bazel module definition
 │
@@ -554,10 +594,12 @@ If an RNode is connected, LoRa messaging is available.
 │
 ├── k8s/                               # Kubernetes manifests
 │   ├── lmao-service.yaml              # Headless Service + Endpoints for external RPi
-│   └── nats-server.yaml               # NATS Deployment + Service + ConfigMap (JetStream)
+│   ├── nats-server.yaml               # NATS Deployment + Service + ConfigMap (JetStream)
+│   └── iot-ingest.yaml                # Persistent IoT Ingest Consumer (NATS→DuckDB)
 │
 ├── k8s-app/                           # Example K8s pod application
-│   └── iot_ingest.py                  # gRPC + NATS client: Send + Subscribe + GetIdentity
+│   ├── iot_ingest.py                  # gRPC + NATS client: Send + Subscribe + GetIdentity
+│   └── iot_ingest_consumer.py         # Persistent consumer service (NATS JetStream → DuckDB)
 │
 ├── cardputer_client/                  # MicroPython — runs on M5Stack Cardputer
 │   ├── boot.py                        # MicroPython boot script (sets /lib in path)

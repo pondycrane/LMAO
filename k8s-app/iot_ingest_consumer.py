@@ -49,25 +49,29 @@ async def _store_and_ack(msg, store):
     await store.store_sensor_report(bytes(msg.data))
 
 
-async def main() -> None:
+async def main(shutdown_event: asyncio.Event | None = None) -> None:
     """Entry point for the persistent iot-ingest consumer.
 
     Reads configuration from environment variables, connects to NATS,
     initializes DuckDB, and runs the subscribe loop until cancelled.
     On shutdown, gracefully closes both NATS and DuckDB.
+
+    Args:
+        shutdown_event: Optional pre-constructed event for testing.
+            When provided, the function uses this event instead of
+            creating its own. Tests can inject a pre-set event so
+            ``main()`` exits immediately after subscribe returns.
     """
     nats_server = os.environ.get("NATS_SERVER", _DEFAULT_NATS_SERVER)
     duckdb_path = os.environ.get("DUCKDB_PATH", _DEFAULT_DUCKDB_PATH)
     consumer_name = os.environ.get("CONSUMER_NAME", _DEFAULT_CONSUMER_NAME)
 
-    from lma_core.queue import NatsQueue
-    from lma_core.storage import DuckDbStore
-
-    nq = NatsQueue(name=consumer_name)
-    store = DuckDbStore(name=consumer_name)
+    nq = None
+    store = None
 
     # Signal handlers
-    shutdown_event = asyncio.Event()
+    if shutdown_event is None:
+        shutdown_event = asyncio.Event()
 
     def _signal_handler() -> None:
         _logger.info("Received shutdown signal — draining...")
@@ -75,10 +79,23 @@ async def main() -> None:
 
     loop = asyncio.get_event_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
-        with contextlib.suppress(NotImplementedError):
+        try:
             loop.add_signal_handler(sig, _signal_handler)
+        except NotImplementedError:
+            _logger.warning(
+                "Signal handlers not supported on this platform — "
+                "consumer may not shut down gracefully on SIGTERM/SIGINT. "
+                "This is expected in test environments but should not "
+                "happen in production (Linux/K8s) containers."
+            )
 
     try:
+        from lma_core.queue import NatsQueue
+        from lma_core.storage import DuckDbStore
+
+        nq = NatsQueue(name=consumer_name)
+        store = DuckDbStore(name=consumer_name)
+
         _logger.info(
             "IoT Ingest Consumer starting: NATS=%s, DuckDB=%s, name=%s",
             nats_server,
@@ -118,8 +135,10 @@ async def main() -> None:
         _logger.critical("Fatal error in consumer", exc_info=True)
         sys.exit(1)
     finally:
-        await nq.close()
-        store.close()
+        if nq is not None:
+            await nq.close()
+        if store is not None:
+            store.close()
         _logger.info("IoT Ingest Consumer stopped.")
 
 
