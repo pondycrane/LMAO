@@ -168,15 +168,10 @@ def find_cardputer_port(preferred=None):
         return None
 
     for p in ports:
-        try:
-            if p.vid == 0x303A:  # Espressif
-                return p.device
-        except (TypeError, AttributeError):
-            pass  # port object may not have a vid
-        try:
-            desc = (p.description or "").lower()
-        except (TypeError, AttributeError):
-            desc = ""
+        vid = getattr(p, "vid", None)
+        if vid == 0x303A:  # Espressif
+            return p.device
+        desc = (getattr(p, "description", "") or "").lower()
         if any(kw in desc for kw in ("esp32", "cp210x", "ch340", "jtag", "usb serial")):
             return p.device
 

@@ -97,13 +97,9 @@ def _init_lxmf_router(identity, storage_path="/flash/lxmf_state", display_name="
 def _init_wifi(ssid, password, config, debug=0):
     """Connect to WiFi if the config requires it.
 
-    Returns ``True`` if WiFi was attempted, ``False`` otherwise.
     Failures are logged but do NOT halt the boot sequence.
     """
-    if not _needs_wifi(config):
-        return False
     _connect_wifi(ssid, password, debug)
-    return True
 
 
 def make_sensor_message(identity_hex, seq, battery=3.7, strict=False):
