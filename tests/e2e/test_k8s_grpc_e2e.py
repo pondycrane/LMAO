@@ -502,21 +502,20 @@ import duckdb as _duckdb
 con = _duckdb.connect(":memory:")
 con.execute("""
     CREATE TABLE sensor_readings (
-        id INTEGER PRIMARY KEY,
         node_id TEXT NOT NULL,
         seq INTEGER,
         battery REAL,
         sensor_id INTEGER,
         value REAL,
         unit TEXT,
-        timestamp_ms INTEGER
+        timestamp_ms BIGINT
     )
 """)
 
 # Store a simulated SensorReport (mirrors iot_ingest.build_sensor_envelope)
 con.execute(
     "INSERT INTO sensor_readings VALUES "
-    "(1, 'e2e-test-node', 1, 3.7, 1, 42.5, 'C', 0)"
+    "('e2e-test-node', 1, 3.7, 1, 42.5, 'C', 0)"
 )
 
 # Query it back to prove the storage path works end-to-end

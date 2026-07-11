@@ -17,7 +17,7 @@ import os
 import time
 
 # Local imports
-import config
+from lmao_server import config
 from google.protobuf.message import DecodeError
 
 from lma_core import LMAOEnvelope
