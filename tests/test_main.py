@@ -566,6 +566,198 @@ class TestSensorSendInMainLoop:
         mock_log.assert_any_call("Sensor: seq=1", None, None)
 
 
+# ── Humidity sensor tests ─────────────────────────────────────────
+
+
+class TestMakeSensorMessageWithHumidity:
+    """Tests for make_sensor_message() with external humidity sensor.
+
+    Uses MagicMock to simulate the sensor lib returning humidity values.
+    """
+
+    @staticmethod
+    def _call_with_humidity(
+        identity_hex="a1b2",
+        seq=0,
+        battery=3.7,
+        hum_temp=22.5,
+        humidity=65.0,
+        sensor_type="DHT20",
+    ):
+        """Call make_sensor_message with a mocked humidity sensor, return readings."""
+        mock_encode = MagicMock()
+        mock_humidity = MagicMock(return_value=(hum_temp, humidity))
+
+        with (
+            patch.object(lmao_client, "SENSOR_TYPE", sensor_type),
+            patch.object(lmao_client, "HAS_SENSOR_LIB", True),
+            patch.object(lmao_client, "read_humidity_temperature", mock_humidity),
+            patch.object(
+                lmao_client, "encode_sensor_envelope", mock_encode, create=True
+            ),
+        ):
+            lmao_client.make_sensor_message(identity_hex, seq, battery)
+
+        mock_encode.assert_called_once()
+        return mock_encode.call_args[0][3]  # readings list
+
+    @staticmethod
+    def _call_without_sensor(identity_hex="a1b2", seq=0, battery=3.7):
+        """Call make_sensor_message with SENSOR_TYPE=None, return readings."""
+        mock_encode = MagicMock()
+
+        with (
+            patch.object(lmao_client, "SENSOR_TYPE", None),
+            patch.object(lmao_client, "HAS_SENSOR_LIB", True),
+            patch.object(
+                lmao_client, "encode_sensor_envelope", mock_encode, create=True
+            ),
+        ):
+            lmao_client.make_sensor_message(identity_hex, seq, battery)
+
+        mock_encode.assert_called_once()
+        return mock_encode.call_args[0][3]
+
+    def test_two_readings_when_sensor_connected(self):
+        """When SENSOR_TYPE is set and sensor lib returns values, 2 readings."""
+        readings = self._call_with_humidity(sensor_type="DHT20")
+        assert len(readings) == 2, f"Expected 2 readings, got {len(readings)}"
+
+    def test_first_reading_is_temperature_with_sensor_id_1(self):
+        """Reading[0] has sensor_id=1 (temperature)."""
+        readings = self._call_with_humidity(sensor_type="DHT20")
+        assert readings[0]["sensor_id"] == 1
+        assert readings[0]["unit"] == "C"
+
+    def test_second_reading_is_humidity_with_sensor_id_2(self):
+        """Reading[1] has sensor_id=2 (humidity, unit='%')."""
+        readings = self._call_with_humidity(sensor_type="DHT20", humidity=68.0)
+        assert readings[1]["sensor_id"] == 2
+        assert readings[1]["unit"] == "%"
+        assert readings[1]["value"] == 68.0
+
+    def test_single_reading_when_sensor_type_is_none(self):
+        """When SENSOR_TYPE is None, only 1 reading (die temp)."""
+        readings = self._call_without_sensor()
+        assert len(readings) == 1
+        assert readings[0]["sensor_id"] == 1
+
+    def test_single_reading_when_sensor_lib_not_available(self):
+        """When HAS_SENSOR_LIB is False, falls back to single reading."""
+        mock_encode = MagicMock()
+
+        with (
+            patch.object(lmao_client, "SENSOR_TYPE", "DHT20"),
+            patch.object(lmao_client, "HAS_SENSOR_LIB", False),
+            patch.object(
+                lmao_client, "encode_sensor_envelope", mock_encode, create=True
+            ),
+        ):
+            lmao_client.make_sensor_message("a1b2", 0, 3.7)
+
+        mock_encode.assert_called_once()
+        readings = mock_encode.call_args[0][3]
+        assert len(readings) == 1
+
+    def test_single_reading_when_sensor_returns_none(self):
+        """When sensor lib returns (None, None), falls back to single reading."""
+        mock_encode = MagicMock()
+        mock_humidity = MagicMock(return_value=(None, None))
+
+        with (
+            patch.object(lmao_client, "SENSOR_TYPE", "DHT20"),
+            patch.object(lmao_client, "HAS_SENSOR_LIB", True),
+            patch.object(lmao_client, "read_humidity_temperature", mock_humidity),
+            patch.object(
+                lmao_client, "encode_sensor_envelope", mock_encode, create=True
+            ),
+        ):
+            lmao_client.make_sensor_message("a1b2", 0, 3.7)
+
+        mock_encode.assert_called_once()
+        readings = mock_encode.call_args[0][3]
+        assert len(readings) == 1
+
+    def test_single_reading_when_sensor_raises(self):
+        """When sensor lib raises, falls back to single reading (no crash)."""
+        mock_encode = MagicMock()
+        mock_humidity = MagicMock(side_effect=OSError("I2C bus error"))
+
+        with (
+            patch.object(lmao_client, "SENSOR_TYPE", "DHT20"),
+            patch.object(lmao_client, "HAS_SENSOR_LIB", True),
+            patch.object(lmao_client, "read_humidity_temperature", mock_humidity),
+            patch.object(
+                lmao_client, "encode_sensor_envelope", mock_encode, create=True
+            ),
+        ):
+            lmao_client.make_sensor_message("a1b2", 0, 3.7)
+
+        mock_encode.assert_called_once()
+        readings = mock_encode.call_args[0][3]
+        assert len(readings) == 1, (
+            f"Expected fallback to 1 reading on exception, got {len(readings)}"
+        )
+
+    def test_humidity_value_is_preserved(self):
+        """Humidity reading value matches what the sensor returned."""
+        readings = self._call_with_humidity(humidity=72.5)
+        assert readings[1]["value"] == 72.5
+
+    def test_temp_reading_still_die_temp_not_sensor_temp(self):
+        """Sensor_id=1 remains die temp (25.0 fallback), not external sensor temp."""
+        # Even if the external sensor also reports temperature, sensor_id=1 should
+        # remain the die temperature (25.0°C fallback on CPython).
+        readings = self._call_with_humidity(hum_temp=30.0, humidity=55.0)
+        # On CPython with fallback, die temp is 25.0
+        assert readings[0]["value"] == 25.0, (
+            f"sensor_id=1 should be die temp fallback (25.0), got {readings[0]['value']}"
+        )
+
+    def test_both_readings_share_same_timestamp(self):
+        """Temperature and humidity readings should share the same timestamp."""
+        readings = self._call_with_humidity(sensor_type="DHT20")
+        assert readings[0]["timestamp_ms"] == readings[1]["timestamp_ms"], (
+            f"Timestamps should match: {readings[0]['timestamp_ms']} "
+            f"vs {readings[1]['timestamp_ms']}"
+        )
+
+
+# ── Interval tests ─────────────────────────────────────────────────
+
+
+class TestIntervalSeconds:
+    """Tests for _min_interval() and INTERVAL_SECONDS default."""
+
+    def test_default_interval_is_60(self):
+        """Default INTERVAL_SECONDS should be 60."""
+        assert lmao_client.INTERVAL_SECONDS == 60
+
+    def test_min_interval_clamps_below_10(self):
+        """_min_interval(3) clamps to 10."""
+        assert lmao_client._min_interval(3) == 10
+
+    def test_min_interval_clamps_zero(self):
+        """_min_interval(0) clamps to 10."""
+        assert lmao_client._min_interval(0) == 10
+
+    def test_min_interval_clamps_negative(self):
+        """_min_interval(-5) clamps to 10."""
+        assert lmao_client._min_interval(-5) == 10
+
+    def test_min_interval_passes_through_large_values(self):
+        """_min_interval(120) passes through unchanged."""
+        assert lmao_client._min_interval(120) == 120
+
+    def test_min_interval_passes_through_exactly_10(self):
+        """_min_interval(10) passes through unchanged."""
+        assert lmao_client._min_interval(10) == 10
+
+    def test_min_interval_passes_through_3600(self):
+        """_min_interval(3600) — 1-hour interval passes through."""
+        assert lmao_client._min_interval(3600) == 3600
+
+
 # ── import guard ────────────────────────────────────────────────────
 
 

@@ -35,8 +35,10 @@ logger = logging.getLogger(__name__)
 try:
     import grpc
 except ImportError:
-    print("ERROR: grpcio is required. Install with: pip install grpcio grpcio-tools",
-          file=sys.stderr)
+    print(
+        "ERROR: grpcio is required. Install with: pip install grpcio grpcio-tools",
+        file=sys.stderr,
+    )
     sys.exit(1)
 
 # Use lma_core to import proto stubs (single import point)
@@ -61,8 +63,10 @@ except ImportError:
             LMAOServicer,  # noqa: F401
         )
     except ImportError:
-        print("ERROR: Cannot import gRPC stubs. Run from repo root or set PYTHONPATH.",
-              file=sys.stderr)
+        print(
+            "ERROR: Cannot import gRPC stubs. Run from repo root or set PYTHONPATH.",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
 
@@ -141,10 +145,14 @@ def subscribe_example(stub: LMAOStub, timeout: int = 5):
             logger.warning("gRPC subscribe failed (UNAVAILABLE): %s", e.details())
         elif e.code() == grpc.StatusCode.DEADLINE_EXCEEDED:
             print(f"  Subscribe timeout: {e.details()}")
-            logger.warning("gRPC subscribe timeout (DEADLINE_EXCEEDED): %s", e.details())
+            logger.warning(
+                "gRPC subscribe timeout (DEADLINE_EXCEEDED): %s", e.details()
+            )
         else:
             print(f"  Subscribe error: code={e.code()} details={e.details()}")
-            logger.warning("gRPC subscribe error: code=%s details=%s", e.code(), e.details())
+            logger.warning(
+                "gRPC subscribe error: code=%s details=%s", e.code(), e.details()
+            )
     print()
 
 
@@ -291,7 +299,10 @@ def main():
         try:
             store.initialize(args.db_path, read_only=True)
         except Exception as e:
-            print(f"ERROR: Could not open DuckDB database at {args.db_path}: {e}", file=sys.stderr)
+            print(
+                f"ERROR: Could not open DuckDB database at {args.db_path}: {e}",
+                file=sys.stderr,
+            )
             sys.exit(1)
 
         try:
@@ -301,9 +312,9 @@ def main():
                 try:
                     col_rows = asyncio.run(
                         store.query(
-                            f"SELECT column_name FROM information_schema.columns "
-                            f"WHERE table_name = 'sensor_readings' "
-                            f"ORDER BY ordinal_position"
+                            "SELECT column_name FROM information_schema.columns "
+                            "WHERE table_name = 'sensor_readings' "
+                            "ORDER BY ordinal_position"
                         )
                     )
                     cols = [r[0] for r in col_rows]

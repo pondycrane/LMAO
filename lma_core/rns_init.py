@@ -85,7 +85,9 @@ def init_rns_and_lxmf(
                 f"This is often caused by a missing or misconfigured RNode on {rnode_port}."
             )
             print("Check that:")
-            print(f"  1. The RNode is plugged in and on the correct port ({rnode_port})")
+            print(
+                f"  1. The RNode is plugged in and on the correct port ({rnode_port})"
+            )
             print("  2. You have permission: sudo usermod -a -G dialout $USER")
             print("  3. The RNode firmware is flashed correctly")
             print("  See rnode_firmware/README.md and README Troubleshooting.")

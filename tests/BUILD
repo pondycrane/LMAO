@@ -126,6 +126,15 @@ py_test(
 )
 
 py_test(
+    name = "test_sensors",
+    srcs = ["test_sensors.py"],
+    data = ["//cardputer_client:lib_files"],
+    deps = [
+        "@lmao_pip//pytest",
+    ],
+)
+
+py_test(
     name = "test_flash",
     srcs = ["test_flash.py"],
     deps = [
