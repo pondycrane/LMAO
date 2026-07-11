@@ -233,6 +233,11 @@ bazel run //tools:install_all -- --skip-rnode
 
 # Custom client root path
 bazel run //tools:install_all -- --client-root /path/to/cardputer_client
+
+# Also deploy Pi server and K8s services
+bazel run //tools:install_all -- --include-services
+bazel run //tools:install_all -- --include-services --skip-server
+bazel run //tools:install_all -- --include-services --skip-k8s
 ```
 
 Output shows a per-device summary table with OK/FAIL/SKIP status:
@@ -581,7 +586,8 @@ If an RNode is connected, LoRa messaging is available.
 │
 ├── tools/                             # Build/install tools
 │   ├── BUILD                          # Bazel: py_binary + py_library targets
-│   └── install_all.py                 # Unified hardware flash orchestrator
+│   ├── install_all.py                 # Unified hardware flash orchestrator
+│   └── install_services.py            # Pi server Docker build + K8s manifest apply
 │
 └── rnode_firmware/                    # Documentation only
     └── README.md                      # Step-by-step ESP32 RNode flashing guide
@@ -615,6 +621,11 @@ See [`proto/lma.proto`](proto/lma.proto) for the complete definitions.
 > **Note:** Audio, image, and call signal payloads typically exceed LoRa's ~200 B
 > per-packet limit and are better suited for WiFi or other high-bandwidth
 > interfaces. Text, sensor, and command messages fit comfortably in LoRa packets.
+
+> **Sensor Readings Convention:** Each `SensorReading` in a `SensorReport.readings[]`
+> uses `sensor_id` to identify the measurement type: `sensor_id=1` = temperature (°C),
+> `sensor_id=2` = humidity (%). New sensor types should use `sensor_id >= 3` and
+> be documented here.
 
 ---
 

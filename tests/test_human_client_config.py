@@ -135,7 +135,7 @@ class TestGetConfigDir:
         config_file = os.path.join(result, "config")
         with open(config_file) as f:
             content = f.read()
-        assert "[test]\nkey = value\n" == content
+        assert content == "[test]\nkey = value\n"
 
     def test_prefix_is_lmao_rns(self, config_module):
         """The temp directory uses the 'lmao_rns_' prefix."""
@@ -224,9 +224,7 @@ class TestResolveRNodePort:
 
     def test_env_var_overrides(self, config_module):
         """LMAO_RNODE_PORT env var takes priority."""
-        with patch.dict(
-            os.environ, {"LMAO_RNODE_PORT": "/dev/ttySpecial"}, clear=False
-        ):
+        with patch.dict(os.environ, {"LMAO_RNODE_PORT": "/dev/ttySpecial"}, clear=False):
             result = resolve_rnode_port()
         assert result == "/dev/ttySpecial"
 
@@ -284,7 +282,8 @@ class TestResolveRNodePort:
 
 
 if __name__ == "__main__":
-    import pytest as _pytest
     import sys as _sys
+
+    import pytest as _pytest
 
     _sys.exit(_pytest.main([__file__] + _sys.argv[1:]))

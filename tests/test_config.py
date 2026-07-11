@@ -16,12 +16,11 @@ import ast
 import os
 from unittest.mock import patch
 
-
 # Import the config module (available when running under Bazel via deps)
 try:
     from lmao_server import config
 except ImportError:
-    config = None
+    config = None  # type: ignore[assignment]
 
 # Import shared config utilities directly (replacing the old _-prefixed aliases)
 from lma_core.config_utils import dict_to_ini, resolve_rnode_port
@@ -130,7 +129,7 @@ class TestGetConfigDir:
         config_file = os.path.join(result, "config")
         with open(config_file) as f:
             content = f.read()
-        assert "[test]\nkey = value\n" == content
+        assert content == "[test]\nkey = value\n"
 
     def test_prefix_is_lmao_rns(self):
         """The temp directory uses the 'lmao_rns_' prefix."""
@@ -188,9 +187,7 @@ class TestResolveRNodePort:
 
     def test_env_var_overrides(self):
         """LMAO_RNODE_PORT env var takes priority."""
-        with patch.dict(
-            os.environ, {"LMAO_RNODE_PORT": "/dev/ttySpecial"}, clear=False
-        ):
+        with patch.dict(os.environ, {"LMAO_RNODE_PORT": "/dev/ttySpecial"}, clear=False):
             result = resolve_rnode_port()
         assert result == "/dev/ttySpecial"
 
@@ -256,9 +253,7 @@ class TestCardputerConfigStructure:
 
     def test_config_module_compile(self):
         """config.py must be syntactically valid and compilable."""
-        config_path = os.path.join(
-            os.path.dirname(__file__), "..", "cardputer_client", "config.py"
-        )
+        config_path = os.path.join(os.path.dirname(__file__), "..", "cardputer_client", "config.py")
         with open(config_path, encoding="utf-8") as f:
             code = f.read()
         # Must compile cleanly
@@ -266,9 +261,7 @@ class TestCardputerConfigStructure:
 
     def test_config_exports_dest_hash(self):
         """config.py must define DEST_HASH at module level."""
-        config_path = os.path.join(
-            os.path.dirname(__file__), "..", "cardputer_client", "config.py"
-        )
+        config_path = os.path.join(os.path.dirname(__file__), "..", "cardputer_client", "config.py")
         with open(config_path, encoding="utf-8") as f:
             code = f.read()
         tree = ast.parse(code)
@@ -278,19 +271,14 @@ class TestCardputerConfigStructure:
                 for target in node.targets:
                     if isinstance(target, ast.Name):
                         top_level_names.add(target.id)
-            elif isinstance(node, ast.ImportFrom):
-                for alias in node.names:
-                    top_level_names.add(alias.asname or alias.name)
-            elif isinstance(node, ast.Import):
+            elif isinstance(node, (ast.ImportFrom, ast.Import)):
                 for alias in node.names:
                     top_level_names.add(alias.asname or alias.name)
         assert "DEST_HASH" in top_level_names, "config.py does not define DEST_HASH"
 
     def test_config_exports_expected_keys(self):
         """config.py must define all expected module-level names."""
-        config_path = os.path.join(
-            os.path.dirname(__file__), "..", "cardputer_client", "config.py"
-        )
+        config_path = os.path.join(os.path.dirname(__file__), "..", "cardputer_client", "config.py")
         with open(config_path, encoding="utf-8") as f:
             code = f.read()
         tree = ast.parse(code)
@@ -300,10 +288,7 @@ class TestCardputerConfigStructure:
                 for target in node.targets:
                     if isinstance(target, ast.Name):
                         top_level_names.add(target.id)
-            elif isinstance(node, ast.ImportFrom):
-                for alias in node.names:
-                    top_level_names.add(alias.asname or alias.name)
-            elif isinstance(node, ast.Import):
+            elif isinstance(node, (ast.ImportFrom, ast.Import)):
                 for alias in node.names:
                     top_level_names.add(alias.asname or alias.name)
         expected = {
@@ -319,9 +304,7 @@ class TestCardputerConfigStructure:
 
     def test_dest_hash_default_is_none(self):
         """DEST_HASH must default to None (no server target until configured)."""
-        config_path = os.path.join(
-            os.path.dirname(__file__), "..", "cardputer_client", "config.py"
-        )
+        config_path = os.path.join(os.path.dirname(__file__), "..", "cardputer_client", "config.py")
         with open(config_path, encoding="utf-8") as f:
             code = f.read()
         tree = ast.parse(code)
@@ -333,8 +316,7 @@ class TestCardputerConfigStructure:
                         # ast.Constant depending on Python version)
                         if isinstance(node.value, ast.Constant):
                             assert node.value.value is None, (
-                                f"DEST_HASH should default to None, "
-                                f"got {node.value.value!r}"
+                                f"DEST_HASH should default to None, got {node.value.value!r}"
                             )
                         elif hasattr(ast, "NameConstant"):
                             assert isinstance(node.value, ast.NameConstant), (
@@ -346,7 +328,8 @@ class TestCardputerConfigStructure:
 
 
 if __name__ == "__main__":
-    import pytest as _pytest
     import sys as _sys
+
+    import pytest as _pytest
 
     _sys.exit(_pytest.main([__file__] + _sys.argv[1:]))

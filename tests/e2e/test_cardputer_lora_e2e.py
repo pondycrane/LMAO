@@ -15,15 +15,14 @@ Run with::
     bazel test //tests:test_cardputer_lora_e2e --test_output=all
 """
 
-from collections.abc import Callable
-from typing import Any
-
 import asyncio
 import logging
 import os
 import sys
-import time
 import threading
+import time
+from collections.abc import Callable
+from typing import Any
 
 import pytest
 
@@ -62,10 +61,12 @@ except ImportError:
 # Ensure e2e_helpers is importable when running the script directly
 # (Bazel already adds the e2e/ directory to sys.path).
 sys.path.insert(0, os.path.dirname(__file__))
+import contextlib
+
 from e2e_helpers import (  # noqa: E402
-    find_rnode_port,
     case_insensitive_contains,
     check_rnode_firmware,
+    find_rnode_port,
     flash_rnode_firmware,
 )
 
@@ -203,9 +204,7 @@ def _probe_hardware():
                     )
                     return
         except Exception as exc:
-            _HARDWARE_REASON = (
-                f"Cannot communicate with Cardputer at {_CARDCOMPUTER_PORT}: {exc}"
-            )
+            _HARDWARE_REASON = f"Cannot communicate with Cardputer at {_CARDCOMPUTER_PORT}: {exc}"
             return
 
         _HARDWARE_READY = True
@@ -227,9 +226,7 @@ class TestHardwareDetection:
 
     def test_pyserial_available(self):
         """pyserial must be importable in the Bazel test environment."""
-        assert HAS_PYSERIAL, (
-            "pyserial not available. Add '@lmao_pip//pyserial' to test deps."
-        )
+        assert HAS_PYSERIAL, "pyserial not available. Add '@lmao_pip//pyserial' to test deps."
 
     def test_flash_lib_available(self):
         """The flash_lib must be importable."""
@@ -262,7 +259,7 @@ class TestHardwareDetection:
 
     def test_probe_rnode_flash_succeeds(self):
         """_probe_hardware auto-flashes firmware when missing and proceeds."""
-        from unittest.mock import patch, MagicMock
+        from unittest.mock import MagicMock, patch
 
         mod = sys.modules[__name__]
 
@@ -349,9 +346,7 @@ class TestHardwareDetection:
 
             with (
                 patch.object(mod, "check_rnode_firmware", return_value=False),
-                patch.object(
-                    mod, "flash_rnode_firmware", return_value=(False, "esptool error")
-                ),
+                patch.object(mod, "flash_rnode_firmware", return_value=(False, "esptool error")),
             ):
                 _probe_hardware()
 
@@ -365,7 +360,7 @@ class TestHardwareDetection:
 
     def test_probe_rnode_firmware_present(self):
         """_probe_hardware skips flash when firmware is already present."""
-        from unittest.mock import patch, MagicMock
+        from unittest.mock import MagicMock, patch
 
         mod = sys.modules[__name__]
 
@@ -534,18 +529,14 @@ class TestCardputerLoRaE2E:
         #   freq_khz: 868000, bandwidth: "125", sf: 7, coding_rate: 5
         # Must match the server exactly for bidirectional LoRa communication.
         server_freq_mhz = server_lora["frequency"] / 1_000_000
-        assert server_freq_mhz == 868.0, (
-            f"Server freq {server_lora['frequency']} Hz != 868 MHz"
-        )
+        assert server_freq_mhz == 868.0, f"Server freq {server_lora['frequency']} Hz != 868 MHz"
         assert server_lora["bandwidth"] == 125000, (
             f"Server BW {server_lora['bandwidth']} Hz != 125 kHz"
         )
         assert server_lora["spreadingfactor"] == 7, (
             f"Server SF {server_lora['spreadingfactor']} != 7"
         )
-        assert server_lora["codingrate"] == 5, (
-            f"Server CR {server_lora['codingrate']} != 5"
-        )
+        assert server_lora["codingrate"] == 5, f"Server CR {server_lora['codingrate']} != 5"
 
     def test_lora_full_e2e(self):
         """Full LoRa E2E: flash Cardputer with server hash, start server,
@@ -562,10 +553,12 @@ class TestCardputerLoRaE2E:
         5. Verifies the message arrives over LoRa on the server side
         6. Optionally checks for ACK reply on Cardputer serial output
         """
-        import tempfile
         import shutil
-        import RNS
+        import tempfile
+
         import LXMF
+        import RNS
+
         from lma_core import LMAOEnvelope
         from lma_core.config_utils import dict_to_ini
         from lma_core.storage import DuckDbStore
@@ -615,9 +608,7 @@ class TestCardputerLoRaE2E:
             def capture_delivery(message):
                 """Record received messages for the test to inspect."""
                 source = message.get_source()
-                source_hash = (
-                    RNS.hexrep(source.hash, delimit=False) if source else "<unknown>"
-                )
+                source_hash = RNS.hexrep(source.hash, delimit=False) if source else "<unknown>"
                 content_bytes = message.content if hasattr(message, "content") else b""
                 try:
                     envelope = LMAOEnvelope()
@@ -663,9 +654,7 @@ class TestCardputerLoRaE2E:
                             )
                     else:
                         try:
-                            display_text = content_bytes.decode(
-                                "utf-8", errors="replace"
-                            )
+                            display_text = content_bytes.decode("utf-8", errors="replace")
                         except Exception:
                             display_text = "<undecodable>"
 
@@ -727,9 +716,7 @@ class TestCardputerLoRaE2E:
                     local_path = os.path.join(root, rel)
                     remote_path = rel
                     assert os.path.isfile(local_path), f"Missing source: {local_path}"
-                    uploaded = cardputer_flash.upload_file(
-                        cardputer_ser, local_path, remote_path
-                    )
+                    uploaded = cardputer_flash.upload_file(cardputer_ser, local_path, remote_path)
                     assert uploaded, f"Failed to upload {rel}"
 
                 # Upload all library files (auto-discovered, like the flash tool does).
@@ -740,9 +727,7 @@ class TestCardputerLoRaE2E:
                     if not os.path.isfile(local_path):
                         continue
                     remote_path = rel
-                    uploaded = cardputer_flash.upload_file(
-                        cardputer_ser, local_path, remote_path
-                    )
+                    uploaded = cardputer_flash.upload_file(cardputer_ser, local_path, remote_path)
                     assert uploaded, f"Failed to upload lib/{rel}"
 
                 # Overwrite /config.py on the device with the patched version
@@ -752,21 +737,15 @@ class TestCardputerLoRaE2E:
                 # namespace and is lost on soft reset).
                 import tempfile
 
-                with tempfile.NamedTemporaryFile(
-                    mode="w", suffix=".py", delete=False
-                ) as tmp:
+                with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as tmp:
                     tmp.write(patched_config)
                     tmp_path = tmp.name
                 try:
-                    uploaded = cardputer_flash.upload_file(
-                        cardputer_ser, tmp_path, "config.py"
-                    )
+                    uploaded = cardputer_flash.upload_file(cardputer_ser, tmp_path, "config.py")
                     assert uploaded, "Failed to upload patched config.py"
                 finally:
-                    try:
+                    with contextlib.suppress(OSError):
                         os.unlink(tmp_path)
-                    except OSError:
-                        pass
 
                 # Verify the hash is present in the config on the device
                 ok, out = cardputer_flash.exec_raw(
@@ -775,8 +754,7 @@ class TestCardputerLoRaE2E:
                 )
                 assert ok, f"exec_raw failed: {out[:200]}"
                 assert server_hash in out.decode("utf-8", errors="replace"), (
-                    f"Server hash {server_hash} not found in device config output: "
-                    f"{out[:200]}"
+                    f"Server hash {server_hash} not found in device config output: {out[:200]}"
                 )
 
                 # Soft-reset to boot the Cardputer with new code
@@ -853,8 +831,7 @@ class TestCardputerLoRaE2E:
                 # SensorReports are sent by default (SEND_SENSOR=True), validate ingestion
                 rows = asyncio.run(
                     store.query(
-                        "SELECT node_id, value, unit FROM sensor_readings "
-                        "ORDER BY id DESC LIMIT 5",
+                        "SELECT node_id, value, unit FROM sensor_readings ORDER BY id DESC LIMIT 5",
                     )
                 )
                 assert len(rows) > 0, (
@@ -885,36 +862,23 @@ class TestCardputerLoRaE2E:
                 # (humidity, unit="%").  When no sensor is connected, only
                 # sensor_id=1 readings are produced — this is the normal case.
                 # Use index-based access — DuckDB fetchall() returns tuples, not objects
-                humidity_rows = [
-                    r for r in rows if len(r) >= 3 and r[2] == "%"
-                ]
+                humidity_rows = [r for r in rows if len(r) >= 3 and r[2] == "%"]
                 if humidity_rows:
                     # External sensor IS connected — validate humidity data
-                    print(
-                        f"\n💧 Humidity sensor detected: {len(humidity_rows)} reading(s)"
-                    )
+                    print(f"\n💧 Humidity sensor detected: {len(humidity_rows)} reading(s)")
                     for row in humidity_rows:
                         hum = float(row[1])
-                        assert 0.0 <= hum <= 100.0, (
-                            f"Expected humidity in [0, 100]%, got {hum}%"
-                        )
+                        assert 0.0 <= hum <= 100.0, f"Expected humidity in [0, 100]%, got {hum}%"
                     # Verify at least one SensorReport had 2 readings
-                    multi_reading_msgs = [
-                        m for m in sensor_messages if "readings" in str(m)
-                    ]
-                    print(
-                        f"   SensorReports with multiple readings: {len(multi_reading_msgs)}"
-                    )
+                    multi_reading_msgs = [m for m in sensor_messages if "sensor_id" in str(m)]
+                    print(f"   SensorReports with multiple readings: {len(multi_reading_msgs)}")
                 else:
                     # No external sensor — this is the standard configuration
-                    print(
-                        "\nℹ️  No humidity sensor detected (SENSOR_TYPE=None or not connected)."
-                    )
+                    print("\nℹ️  No humidity sensor detected (SENSOR_TYPE=None or not connected).")
                     print("   Single-reading mode (die temp only) — normal operation.")
 
                 assert store_failures == 0, (
-                    f"DuckDB store failed {store_failures} time(s) — "
-                    f"partial data loss detected."
+                    f"DuckDB store failed {store_failures} time(s) — partial data loss detected."
                 )
                 print(f"\n✅ Sensor data ingested to DuckDB: {len(rows)} row(s)")
 
@@ -938,10 +902,8 @@ class TestCardputerLoRaE2E:
                     store.close()
                 except Exception:
                     _logger.warning("DuckDB store close failed", exc_info=True)
-                try:
+                with contextlib.suppress(OSError):
                     os.unlink(db_path)
-                except OSError:
-                    pass
 
         finally:
             shutil.rmtree(configdir, ignore_errors=True)

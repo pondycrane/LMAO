@@ -5,8 +5,8 @@ Run with::
     bazel test //tests:test_lma_core --test_output=all
 """
 
-import sys
 import logging
+import sys
 from unittest.mock import MagicMock
 
 import pytest
@@ -37,17 +37,11 @@ class TestLmaCoreImportError:
             import lma_core  # noqa: F401
 
         # The module logs a CRITICAL message with build instructions before raising
-        critical_messages = [
-            r.message for r in caplog.records if r.levelname == "CRITICAL"
-        ]
+        critical_messages = [r.message for r in caplog.records if r.levelname == "CRITICAL"]
         assert len(critical_messages) > 0, "Should log a CRITICAL message"
         combined = " ".join(critical_messages)
-        assert "Bazel" in combined, (
-            f"CRITICAL message should mention Bazel, got: {combined}"
-        )
-        assert "protoc" in combined, (
-            f"CRITICAL message should mention protoc, got: {combined}"
-        )
+        assert "Bazel" in combined, f"CRITICAL message should mention Bazel, got: {combined}"
+        assert "protoc" in combined, f"CRITICAL message should mention protoc, got: {combined}"
 
     def test_import_succeeds_when_proto_present(self):
         """When proto.lma_pb2 is available, lma_core imports without error."""

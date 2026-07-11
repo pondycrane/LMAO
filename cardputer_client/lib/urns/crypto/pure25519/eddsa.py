@@ -2,14 +2,20 @@
 # Adapted for µReticulum
 
 import os
+
 from ..hashes import sha512
-from .basic import (bytes_to_clamped_scalar,
-                    bytes_to_scalar, scalar_to_bytes,
-                    bytes_to_element_unchecked,
-                    scalarmult_base_comb)
+from .basic import (
+    bytes_to_clamped_scalar,
+    bytes_to_element_unchecked,
+    bytes_to_scalar,
+    scalar_to_bytes,
+    scalarmult_base_comb,
+)
+
 
 def H(m):
     return sha512(m)
+
 
 def publickey(seed):
     assert len(seed) == 32
@@ -17,14 +23,17 @@ def publickey(seed):
     A = scalarmult_base_comb(a)
     return A.to_bytes()
 
+
 def Hint(m):
     h = H(m)
     return int.from_bytes(h, "little")
+
 
 def signature(m, sk, pk):
     assert len(sk) == 32
     assert len(pk) == 32
     import gc
+
     gc.collect()
     h = H(sk[:32])
     a_bytes, inter = h[:32], h[32:]
@@ -36,6 +45,7 @@ def signature(m, sk, pk):
     S = r + Hint(R_bytes + pk + m) * a
     return R_bytes + scalar_to_bytes(S)
 
+
 def signature_cached(m, a, inter, pk):
     """Sign with pre-derived key material (avoids SHA-512 + scalarmult per call).
 
@@ -46,6 +56,7 @@ def signature_cached(m, a, inter, pk):
         pk: pre-computed public key bytes
     """
     import gc
+
     gc.collect()
     r = Hint(inter + m)
     R = scalarmult_base_comb(r)
@@ -54,12 +65,14 @@ def signature_cached(m, a, inter, pk):
     S = r + Hint(R_bytes + pk + m) * a
     return R_bytes + scalar_to_bytes(S)
 
+
 def checkvalid(s, m, pk):
     if len(s) != 64:
         raise Exception("signature length is wrong")
     if len(pk) != 32:
         raise Exception("public-key length is wrong")
     import gc
+
     gc.collect()
     R = bytes_to_element_unchecked(s[:32])
     A = bytes_to_element_unchecked(pk)
@@ -70,11 +83,14 @@ def checkvalid(s, m, pk):
     v2 = R.add(A.scalarmult(h))
     return v1 == v2
 
+
 def create_signing_key():
     return os.urandom(32)
 
+
 def create_verifying_key(signing_key):
     return publickey(signing_key)
+
 
 def sign(skbytes, msg):
     if len(skbytes) != 32:
@@ -82,6 +98,7 @@ def sign(skbytes, msg):
     vkbytes = create_verifying_key(skbytes)
     sig = signature(msg, skbytes, vkbytes)
     return sig
+
 
 def verify(vkbytes, sig, msg):
     if len(vkbytes) != 32:

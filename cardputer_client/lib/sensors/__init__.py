@@ -5,9 +5,7 @@ _SDA_PIN = 21
 _SCL_PIN = 22
 
 
-def read_humidity_temperature(
-    sensor_type, i2c_addr=0x38, sda_pin=_SDA_PIN, scl_pin=_SCL_PIN
-):
+def read_humidity_temperature(sensor_type, i2c_addr=0x38, sda_pin=_SDA_PIN, scl_pin=_SCL_PIN):
     """Read temperature (Celsius) and humidity (%) from the external Grove sensor.
 
     Args:
@@ -24,7 +22,7 @@ def read_humidity_temperature(
 
     # Lazy import — fails gracefully if I2C or driver not available
     try:
-        from machine import SoftI2C, Pin
+        from machine import Pin, SoftI2C
 
         i2c = SoftI2C(sda=Pin(sda_pin), scl=Pin(scl_pin))
 

@@ -28,7 +28,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Callable, List
+from collections.abc import Callable
+from typing import Any
 
 _logger = logging.getLogger(__name__)
 
@@ -120,7 +121,7 @@ class NatsQueue:
 
     async def connect(
         self,
-        servers: str | List[str] = "nats://localhost:4222",
+        servers: str | list[str] = "nats://localhost:4222",
         **kwargs: Any,
     ) -> None:
         """Connect to a NATS cluster and create a JetStream context.
@@ -151,9 +152,7 @@ class NatsQueue:
                 )
                 self._js = self._nc.jetstream()
             except Exception:
-                _logger.critical(
-                    "Failed to connect to NATS at %s", servers, exc_info=True
-                )
+                _logger.critical("Failed to connect to NATS at %s", servers, exc_info=True)
                 raise
             _logger.info("Connected to NATS (JetStream available)")
 
@@ -177,7 +176,7 @@ class NatsQueue:
     async def ensure_stream(
         self,
         name: str,
-        subjects: List[str],
+        subjects: list[str],
         **overrides: Any,
     ) -> None:
         """Idempotent stream creation / update.
@@ -215,9 +214,7 @@ class NatsQueue:
         try:
             # add_stream raises if JetStream is not available (no --js)
             await self._js.add_stream(**config)
-            _logger.info(
-                "JetStream stream '%s' created with subjects: %s", name, subjects
-            )
+            _logger.info("JetStream stream '%s' created with subjects: %s", name, subjects)
         except Exception as exc:
             err_msg = str(exc).lower()
             if "already exists" in err_msg or "stream name already in use" in err_msg:
@@ -270,6 +267,11 @@ class NatsQueue:
         self._check_connected()
 
         if len(payload) > self._max_payload:
+            _logger.warning(
+                "Payload size %d bytes exceeds max %d — rejecting",
+                len(payload),
+                self._max_payload,
+            )
             raise ValueError(
                 f"Payload size {len(payload)} bytes exceeds maximum "
                 f"{self._max_payload} bytes. Chunk large messages or "
@@ -277,9 +279,7 @@ class NatsQueue:
             )
 
         ack = await self._js.publish(subject, payload, **kwargs)
-        _logger.debug(
-            "Published %d bytes to '%s' (seq=%s)", len(payload), subject, ack.seq
-        )
+        _logger.debug("Published %d bytes to '%s' (seq=%s)", len(payload), subject, ack.seq)
         return ack
 
     # ------------------------------------------------------------------
@@ -398,7 +398,8 @@ class NatsQueue:
                                 nak_err,
                                 exc_info=True,
                             )
-                            raise  # Bubble up to outer retry/reconnect
+                            # Keep subscription alive; message will be redelivered
+                            continue
         except asyncio.CancelledError:
             _logger.info("Subscribe cancelled for '%s'", subject)
             raise
@@ -410,6 +411,4 @@ class NatsQueue:
     def _check_connected(self) -> None:
         """Raise if the NATS connection has not been established."""
         if self._nc is None or self._js is None:
-            raise RuntimeError(
-                "Not connected to NATS. Call `await nq.connect(...)` first."
-            )
+            raise RuntimeError("Not connected to NATS. Call `await nq.connect(...)` first.")

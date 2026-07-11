@@ -14,17 +14,17 @@ Usage:
     python3 human_client/client.py
 """
 
-import os
 import logging
+import os
 import time
-
-from lma_core.rns_di import RNS, LXMF
-from lma_core.rns_init import warn_if_rnode_missing, init_rns_and_lxmf
 
 # Local imports
 import config
+
 from lma_core import LMAOEnvelope
 from lma_core.message_utils import decode_lmao_message
+from lma_core.rns_di import LXMF, RNS
+from lma_core.rns_init import init_rns_and_lxmf, warn_if_rnode_missing
 
 logger = logging.getLogger(__name__)
 
@@ -56,14 +56,10 @@ class Client:
         try:
             source_identity = message.get_source()
             source_hash = (
-                RNS.hexrep(source_identity.hash, delimit=False)
-                if source_identity
-                else "<unknown>"
+                RNS.hexrep(source_identity.hash, delimit=False) if source_identity else "<unknown>"
             )
             content_bytes = message.content if hasattr(message, "content") else b""
-            title = (
-                message.title_as_string() if hasattr(message, "title_as_string") else ""
-            )
+            title = message.title_as_string() if hasattr(message, "title_as_string") else ""
 
             logger.info(
                 "Message received — From: %s  Title: %s  Content length: %d bytes",
@@ -79,15 +75,11 @@ class Client:
             print(f"\n>>> MSG from {source_hash}: {display_text}")
 
         except AttributeError as e:
-            logger.error(
-                "LXMF message missing expected attributes: %s", e, exc_info=True
-            )
+            logger.error("LXMF message missing expected attributes: %s", e, exc_info=True)
         except (RNS.RNSException, LXMF.LXMFException) as e:
             logger.error("RNS/LXMF error processing message: %s", e, exc_info=True)
         except Exception as e:
-            logger.error(
-                "Unexpected error in handle_lxmf_delivery: %s", e, exc_info=True
-            )
+            logger.error("Unexpected error in handle_lxmf_delivery: %s", e, exc_info=True)
 
     def _send_message(self, dest_identity, content):
         """Build and send a protobuf-encoded TextMessage to the given
@@ -163,6 +155,21 @@ class Client:
         return True, None
 
     @staticmethod
+    def _resolve_identity(hex_str):
+        """Try to recall a RNS.Identity from a hex hash string.
+
+        Returns the identity or None on failure (logs the error).
+        """
+        try:
+            identity = RNS.Identity.recall(bytes.fromhex(hex_str))
+        except (RNS.RNSException, OSError, ValueError) as e:
+            logger.error("Failed to recall identity for %s: %s", hex_str, e, exc_info=True)
+            return None
+        if identity is None:
+            logger.error("Identity recall returned None for %s", hex_str)
+        return identity
+
+    @staticmethod
     def _print_help():
         """Print available commands."""
         print("\nAvailable commands:")
@@ -208,21 +215,14 @@ class Client:
                 print(f"Invalid hash: {err}")
                 return True
             self._default_dest_hash = dest_str
-            # Convert hex to bytes for identity lookup
-            dest_bytes = bytes.fromhex(dest_str)
-            try:
-                self._default_dest_identity = RNS.Identity.recall(dest_bytes)
-            except (RNS.RNSException, OSError) as e:
-                logger.error(
-                    "Failed to recall identity for %s: %s", dest_str, e, exc_info=True
-                )
+            self._default_dest_identity = self._resolve_identity(dest_str)
+            if self._default_dest_identity is not None:
+                print(f"Default destination set to: {dest_str}")
+            else:
                 print(
                     f"Warning: Could not resolve destination identity for {dest_str}. "
                     f"Hash saved, but send may fail until the identity is discoverable."
                 )
-                self._default_dest_identity = None
-            if self._default_dest_identity is not None:
-                print(f"Default destination set to: {dest_str}")
             return True
 
         # /send <dest_hash> <message>
@@ -240,19 +240,8 @@ class Client:
             if not content:
                 print("Error: Message content cannot be empty.")
                 return True
-            dest_bytes = bytes.fromhex(dest_str)
-            try:
-                dest_identity = RNS.Identity.recall(dest_bytes)
-            except (RNS.RNSException, OSError, ValueError) as e:
-                logger.error(
-                    "Failed to recall identity for %s: %s", dest_str, e, exc_info=True
-                )
-                print(
-                    f"Error: Could not resolve destination {dest_str}. Have you heard from this node?"
-                )
-                return True
+            dest_identity = self._resolve_identity(dest_str)
             if dest_identity is None:
-                logger.error("Identity recall returned None for %s", dest_str)
                 print(
                     f"Error: Could not resolve destination {dest_str}. Have you heard from this node?"
                 )
@@ -263,27 +252,16 @@ class Client:
         # Plain text — send to default destination if set
         if self._default_dest_hash:
             if self._default_dest_identity is None:
-                dest_bytes = bytes.fromhex(self._default_dest_hash)
-                try:
-                    self._default_dest_identity = RNS.Identity.recall(dest_bytes)
-                except (RNS.RNSException, OSError) as e:
-                    logger.error(
-                        "Failed to recall default identity: %s", e, exc_info=True
-                    )
+                self._default_dest_identity = self._resolve_identity(self._default_dest_hash)
+                if self._default_dest_identity is None:
                     print(
-                        f"Error: Could not resolve default destination {self._default_dest_hash}."
+                        f"Error: Could not resolve default destination "
+                        f"{self._default_dest_hash}."
                     )
                     return True
-            if self._default_dest_identity is None:
-                print(
-                    f"Error: Could not resolve default destination {self._default_dest_hash}."
-                )
-                return True
             self._send_message(self._default_dest_identity, stripped)
         else:
-            print(
-                "No default destination set. Use /dest <hash> to set one, or /send <hash> <msg>."
-            )
+            print("No default destination set. Use /dest <hash> to set one, or /send <hash> <msg>.")
 
         return True
 
@@ -295,11 +273,7 @@ class Client:
             format="%(asctime)s [%(levelname)s] %(message)s",
         )
 
-        cfg_dict = (
-            self._config_dict
-            if self._config_dict is not None
-            else config.get_config_dict()
-        )
+        cfg_dict = self._config_dict if self._config_dict is not None else config.get_config_dict()
         rnode_port = cfg_dict["interfaces"]["RNode LoRa"]["port"]
 
         # Warn if RNode port is missing (but DO NOT exit)

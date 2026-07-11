@@ -6,6 +6,7 @@ use this function instead of duplicating the decode chain.
 """
 
 import logging
+
 from google.protobuf.message import DecodeError
 
 _logger = logging.getLogger(__name__)

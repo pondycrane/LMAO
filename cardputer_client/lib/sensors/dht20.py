@@ -26,9 +26,8 @@ class DHT20:
         buf = bytearray(3)
         self.i2c.readfrom_mem_into(self.addr, 0x71, buf)
         if not (buf[0] & 0x18):
-            self.i2c.writeto_mem(self.addr, 0x1B, b"\x00")
-            self.i2c.writeto_mem(self.addr, 0x1C, b"\x00")
-            self.i2c.writeto_mem(self.addr, 0x1E, b"\x00")
+            # Standard AHT20 calibration command per datasheet
+            self.i2c.writeto(self.addr, b"\xe1\x08\x00")
 
     def read(self):
         """Trigger a measurement and return (temperature_celsius, humidity_pct).

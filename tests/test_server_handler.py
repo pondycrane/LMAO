@@ -2,12 +2,12 @@
 
 import asyncio
 import logging
-from unittest.mock import MagicMock, patch
-import pytest
 import sys
-from google.protobuf.message import DecodeError
+from unittest.mock import MagicMock, patch
 
-from conftest import setup_common_mocks, cleanup_common_mocks
+import pytest
+from conftest import cleanup_common_mocks, setup_common_mocks
+from google.protobuf.message import DecodeError
 
 
 @pytest.fixture
@@ -181,9 +181,7 @@ class TestHandleLXMFDelivery:
         server.handle_lxmf_delivery(msg)
         server.router.handle_outbound.assert_called_once()
 
-    def test_protobuf_decode_uses_content_from_text_field(
-        self, server_with_mocks, caplog
-    ):
+    def test_protobuf_decode_uses_content_from_text_field(self, server_with_mocks, caplog):
         """When protobuf decode succeeds and HasField('text') is True,
         the content from text.content is used as display_text."""
         server = server_with_mocks
@@ -227,15 +225,11 @@ class TestHandleLXMFDelivery:
             server.handle_lxmf_delivery(msg)
 
         # Verify fallback warning was logged
-        warn_found = any(
-            "non-text payload" in record.message for record in caplog.records
-        )
+        warn_found = any("non-text payload" in record.message for record in caplog.records)
         assert warn_found, "Should log warning about non-text payload"
 
         # Verify raw text fallback was used
-        info_found = any(
-            "Content (raw text)" in record.message for record in caplog.records
-        )
+        info_found = any("Content (raw text)" in record.message for record in caplog.records)
         assert info_found, "Should log raw text fallback content"
 
     def test_protobuf_decode_binary_invalid_utf8(self, server_with_mocks):
@@ -311,12 +305,8 @@ class TestSubscriberManagement:
         with caplog.at_level(logging.WARNING):
             server._fanout_to_grpc_subscribers("test-message")
 
-        warning_messages = [
-            r.message for r in caplog.records if r.levelname == "WARNING"
-        ]
-        assert len(warning_messages) >= 1, (
-            "Should log at least one warning for bad subscriber"
-        )
+        warning_messages = [r.message for r in caplog.records if r.levelname == "WARNING"]
+        assert len(warning_messages) >= 1, "Should log at least one warning for bad subscriber"
         assert q_ok in server._grpc_subscribers, "Good subscriber should survive"
 
     def test_clear_grpc_subscribers(self, server_with_mocks):
@@ -351,7 +341,8 @@ class TestSubscriberManagement:
 
 
 if __name__ == "__main__":
-    import pytest
     import sys
+
+    import pytest
 
     sys.exit(pytest.main([__file__] + sys.argv[1:]))

@@ -20,13 +20,13 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
-from typing import Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from tools.install_all import DeviceResult
 
 
-def _find_repo_root() -> Optional[str]:
+def _find_repo_root() -> str | None:
     """Walk up from this module's directory looking for the repo root.
 
     Identifies the repo root by locating a ``Dockerfile`` or ``.git``
@@ -36,11 +36,15 @@ def _find_repo_root() -> Optional[str]:
         Absolute path to the repo root, or ``None`` if not found.
     """
     current = os.path.dirname(os.path.abspath(__file__))
+    print(f"  DEBUG: Searching for repo root, starting at {current}")
     for _ in range(10):
         if os.path.isfile(os.path.join(current, "Dockerfile")):
+            print(f"  DEBUG: Found repo root via Dockerfile at {current}")
             return current
         if os.path.isdir(os.path.join(current, ".git")):
+            print(f"  DEBUG: Found repo root via .git at {current}")
             return current
+        print(f"  DEBUG: Checked {current}, no Dockerfile/.git found")
         parent = os.path.dirname(current)
         if parent == current:
             break
@@ -48,7 +52,7 @@ def _find_repo_root() -> Optional[str]:
     return None
 
 
-def install_pi_server(result: DeviceResult, repo_root: Optional[str] = None) -> None:
+def install_pi_server(result: DeviceResult, repo_root: str | None = None) -> None:
     """Build the lmao-server Docker image via ``docker build``.
 
     Checks for the ``docker`` CLI on PATH; if not found, marks the
@@ -80,9 +84,7 @@ def install_pi_server(result: DeviceResult, repo_root: Optional[str] = None) -> 
         return
 
     if shutil.which("docker") is None:
-        result.skip(
-            "Docker not found on PATH — install with: apt-get install docker.io"
-        )
+        result.skip("Docker not found on PATH — install with: apt-get install docker.io")
         print("  SKIP: Docker not found on PATH")
         return
 
@@ -112,7 +114,7 @@ def install_pi_server(result: DeviceResult, repo_root: Optional[str] = None) -> 
         print(f"  FAIL: {exc}")
 
 
-def install_k8s_services(result: DeviceResult, repo_root: Optional[str] = None) -> None:
+def install_k8s_services(result: DeviceResult, repo_root: str | None = None) -> None:
     """Apply Kubernetes manifests via ``kubectl apply -f``.
 
     Applies ``k8s/lmao-service.yaml`` and ``k8s/nats-server.yaml``.
@@ -149,7 +151,7 @@ def install_k8s_services(result: DeviceResult, repo_root: Optional[str] = None) 
         os.path.join("k8s", "nats-server.yaml"),
     ]
 
-    applied = []
+    applied: list[str] = []
 
     for manifest in manifests:
         manifest_path = os.path.join(repo_root, manifest)
@@ -157,8 +159,7 @@ def install_k8s_services(result: DeviceResult, repo_root: Optional[str] = None) 
             if applied:
                 print(f"  WARNING: {', '.join(applied)} were already applied.")
                 print(
-                    "  Manual rollback: kubectl delete -f k8s/<manifest>"
-                    " for each applied manifest"
+                    "  Manual rollback: kubectl delete -f k8s/<manifest> for each applied manifest"
                 )
             result.fail(f"Manifest not found: {manifest}")
             print(f"  FAIL: Manifest not found: {manifest}")

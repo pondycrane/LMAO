@@ -8,17 +8,17 @@ Run with::
     bazel test //tests:test_install_all --test_output=all
 """
 
+import subprocess
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 # Import the install_all module (available under Bazel via deps).
 try:
-    from tools import install_all
-    from tools import install_services
+    from tools import install_all, install_services
 except ImportError:
-    install_all = None
-    install_services = None
+    install_all = None  # type: ignore[assignment]
+    install_services = None  # type: ignore[assignment]
 
 
 # ── helpers ─────────────────────────────────────────────────────────
@@ -33,15 +33,9 @@ def _patch_imports():
     patches = {
         "serial": patch("tools.install_all.serial", MagicMock()),
         "serial.tools": patch("tools.install_all.serial.tools", MagicMock()),
-        "serial.tools.list_ports": patch(
-            "tools.install_all.serial.tools.list_ports", MagicMock()
-        ),
-        "find_cardputer_port": patch.object(
-            install_all, "find_cardputer_port", return_value=None
-        ),
-        "find_rnode_port": patch.object(
-            install_all, "find_rnode_port", return_value=None
-        ),
+        "serial.tools.list_ports": patch("tools.install_all.serial.tools.list_ports", MagicMock()),
+        "find_cardputer_port": patch.object(install_all, "find_cardputer_port", return_value=None),
+        "find_rnode_port": patch.object(install_all, "find_rnode_port", return_value=None),
         "check_rnode_firmware": patch.object(
             install_all, "check_rnode_firmware", return_value=False
         ),
@@ -56,16 +50,16 @@ def _patch_imports():
 
 
 def _start_patches(patches_dict):
-    """Start all mocks in *patches_dict* and return the active mocks."""
+    """Start all patches in *patches_dict* and return (mocks, patches)."""
     mocks = {}
     for key, p in patches_dict.items():
         mocks[key] = p.start()
-    return mocks
+    return mocks, patches_dict
 
 
-def _stop_patches(mocks_dict):
-    """Stop all mocks in *mocks_dict*."""
-    for p in mocks_dict.values():
+def _stop_patches(patches_dict):
+    """Stop all patches in *patches_dict*."""
+    for p in patches_dict.values():
         p.stop()
 
 
@@ -154,9 +148,7 @@ class TestParseArgs:
 
     def test_combined_flags(self):
         """Multiple flags can be combined."""
-        args = install_all._parse_args(
-            ["--cardputer-port", "/dev/ttyACM0", "--skip-rnode"]
-        )
+        args = install_all._parse_args(["--cardputer-port", "/dev/ttyACM0", "--skip-rnode"])
         assert args.cardputer_port == "/dev/ttyACM0"
         assert args.skip_rnode is True
         assert args.skip_cardputer is False
@@ -291,16 +283,12 @@ class TestFlashCardputerClient:
 
         patches = {
             "time.sleep": patch("tools.install_all.time.sleep", return_value=None),
-            "enter_raw_repl": patch.object(
-                install_all, "enter_raw_repl", return_value=True
-            ),
+            "enter_raw_repl": patch.object(install_all, "enter_raw_repl", return_value=True),
             "verify_device": patch.object(
                 install_all, "verify_device", return_value=(True, "ESP32 detected")
             ),
             "upload_file": patch.object(install_all, "upload_file", return_value=True),
-            "exit_raw_repl": patch.object(
-                install_all, "exit_raw_repl", return_value=None
-            ),
+            "exit_raw_repl": patch.object(install_all, "exit_raw_repl", return_value=None),
             "verify_files_exist": patch.object(
                 install_all, "verify_files_exist", return_value=None
             ),
@@ -314,16 +302,13 @@ class TestFlashCardputerClient:
         for key, p in patches.items():
             self.mocks[key] = p.start()
         # serial.Serial needs special handling (returns self.mock_ser)
-        self._serial_patch = patch(
-            "tools.install_all.serial.Serial", self.mock_serial_class
-        )
+        self._serial_patch = patch("tools.install_all.serial.Serial", self.mock_serial_class)
         self._serial_patch.start()
         # FILES_TO_UPLOAD is a list, not compatible with patch.object dict stop
         self._saved_files = install_all.FILES_TO_UPLOAD
         install_all.FILES_TO_UPLOAD = ["main.py", "config.py"]
         yield
-        for p in self.mocks.values():
-            p.stop()
+        _stop_patches(self._all_patches)
         self._serial_patch.stop()
         install_all.FILES_TO_UPLOAD = self._saved_files
 
@@ -373,9 +358,7 @@ class TestFlashCardputerClient:
 
     def test_missing_source_file_sets_fail(self):
         """Missing source file should set FAIL and close port."""
-        self.mocks["verify_files_exist"].side_effect = FileNotFoundError(
-            "main.py not found"
-        )
+        self.mocks["verify_files_exist"].side_effect = FileNotFoundError("main.py not found")
         result = self._make_result()
         install_all._flash_cardputer_client("/dev/ttyACM0", "/fake/root", result)
         assert result.status == "FAIL"
@@ -400,9 +383,7 @@ class TestFlashCardputerClient:
         """Serial exception mid-operation should set FAIL and close port."""
         import serial as pyserial
 
-        self.mocks["enter_raw_repl"].side_effect = pyserial.SerialException(
-            "disconnected"
-        )
+        self.mocks["enter_raw_repl"].side_effect = pyserial.SerialException("disconnected")
         result = self._make_result()
         install_all._flash_cardputer_client("/dev/ttyACM0", "/fake/root", result)
         assert result.status == "FAIL"
@@ -451,9 +432,7 @@ class TestMainPipeline:
             "find_cardputer_port": patch.object(
                 install_all, "find_cardputer_port", return_value=None
             ),
-            "find_rnode_port": patch.object(
-                install_all, "find_rnode_port", return_value=None
-            ),
+            "find_rnode_port": patch.object(install_all, "find_rnode_port", return_value=None),
             "check_rnode_firmware": patch.object(
                 install_all, "check_rnode_firmware", return_value=False
             ),
@@ -463,16 +442,12 @@ class TestMainPipeline:
             "find_client_root": patch.object(
                 install_all, "find_client_root", return_value="/fake/client_root"
             ),
-            "enter_raw_repl": patch.object(
-                install_all, "enter_raw_repl", return_value=True
-            ),
+            "enter_raw_repl": patch.object(install_all, "enter_raw_repl", return_value=True),
             "verify_device": patch.object(
                 install_all, "verify_device", return_value=(True, "ESP32 detected")
             ),
             "upload_file": patch.object(install_all, "upload_file", return_value=True),
-            "exit_raw_repl": patch.object(
-                install_all, "exit_raw_repl", return_value=None
-            ),
+            "exit_raw_repl": patch.object(install_all, "exit_raw_repl", return_value=None),
             "verify_files_exist": patch.object(
                 install_all, "verify_files_exist", return_value=None
             ),
@@ -480,7 +455,7 @@ class TestMainPipeline:
                 install_all, "auto_discover_lib_files", return_value=[]
             ),
         }
-        self.mocks = _start_patches(patches)
+        self.mocks, self._patches = _start_patches(patches)
         # Patch FILES_TO_UPLOAD (a list, not compatible with patch.object dict)
         self._saved_files = install_all.FILES_TO_UPLOAD
         install_all.FILES_TO_UPLOAD = ["main.py", "config.py"]
@@ -490,7 +465,7 @@ class TestMainPipeline:
         self._serial_patch = patch("tools.install_all.serial.Serial", MagicMock())
         self._serial_patch.start()
         yield
-        _stop_patches(self.mocks)
+        _stop_patches(self._patches)
         install_all.FILES_TO_UPLOAD = self._saved_files
         self._getsizep.stop()
         self._serial_patch.stop()
@@ -550,9 +525,9 @@ class TestMainSkipFlags:
     def _setup_mocks(self):
         """Mock out all hardware-dependent functions."""
         patches = _patch_imports()
-        self.mocks = _start_patches(patches)
+        self.mocks, self._patches = _start_patches(patches)
         yield
-        _stop_patches(self.mocks)
+        _stop_patches(self._patches)
 
     def test_skip_both_devices_exits_0(self):
         """When both devices are skipped, should exit 0 with no work."""
@@ -591,12 +566,12 @@ class TestMainNoHardware:
     @pytest.fixture(autouse=True)
     def _setup_mocks(self):
         patches = _patch_imports()
-        self.mocks = _start_patches(patches)
+        self.mocks, self._patches = _start_patches(patches)
         # Both ports return None (no hardware detected)
         self.mocks["find_cardputer_port"].return_value = None
         self.mocks["find_rnode_port"].return_value = None
         yield
-        _stop_patches(self.mocks)
+        _stop_patches(self._patches)
 
     def test_no_hardware_exits_0(self):
         """When nothing is detected, main should exit 0 gracefully."""
@@ -619,12 +594,12 @@ class TestMainRNodeDetected:
     @pytest.fixture(autouse=True)
     def _setup_mocks(self):
         patches = _patch_imports()
-        self.mocks = _start_patches(patches)
+        self.mocks, self._patches = _start_patches(patches)
         self.mocks["find_cardputer_port"].return_value = None
         self.mocks["find_rnode_port"].return_value = "/dev/ttyUSB0"
         self.mocks["check_rnode_firmware"].return_value = True  # already RNode
         yield
-        _stop_patches(self.mocks)
+        _stop_patches(self._patches)
 
     def test_rnode_already_firmware_exits_0(self):
         """When RNode already has firmware, should exit 0 without flashing."""
@@ -650,13 +625,13 @@ class TestMainRNodeFlashFails:
     @pytest.fixture(autouse=True)
     def _setup_mocks(self):
         patches = _patch_imports()
-        self.mocks = _start_patches(patches)
+        self.mocks, self._patches = _start_patches(patches)
         self.mocks["find_cardputer_port"].return_value = None
         self.mocks["find_rnode_port"].return_value = "/dev/ttyUSB0"
         self.mocks["check_rnode_firmware"].return_value = False
         self.mocks["flash_rnode_firmware"].return_value = (False, "Flash error")
         yield
-        _stop_patches(self.mocks)
+        _stop_patches(self._patches)
 
     def test_flash_failure_exits_1(self):
         """When flashing fails, should exit 1."""
@@ -671,13 +646,13 @@ class TestMainClientRootNotFound:
     @pytest.fixture(autouse=True)
     def _setup_mocks(self):
         patches = _patch_imports()
-        self.mocks = _start_patches(patches)
+        self.mocks, self._patches = _start_patches(patches)
         self.mocks["find_cardputer_port"].return_value = "/dev/ttyACM0"
         self.mocks["find_rnode_port"].return_value = None
         # Make find_client_root return None (not found)
         self.mocks["find_client_root"].return_value = None
         yield
-        _stop_patches(self.mocks)
+        _stop_patches(self._patches)
 
     def test_missing_client_root_reports_fail(self):
         """When client_root is None, Cardputer should be marked FAIL."""
@@ -692,12 +667,12 @@ class TestMainRNodePortOverride:
     @pytest.fixture(autouse=True)
     def _setup_mocks(self):
         patches = _patch_imports()
-        self.mocks = _start_patches(patches)
+        self.mocks, self._patches = _start_patches(patches)
         self.mocks["find_cardputer_port"].return_value = None
         self.mocks["find_rnode_port"].return_value = None  # won't be called
         self.mocks["check_rnode_firmware"].return_value = True
         yield
-        _stop_patches(self.mocks)
+        _stop_patches(self._patches)
 
     def test_rnode_port_override_uses_specified_port(self):
         """When --rnode-port is given, it should be used directly."""
@@ -719,11 +694,11 @@ class TestMainWithoutServices:
     @pytest.fixture(autouse=True)
     def _setup_mocks(self):
         patches = _patch_imports()
-        self.mocks = _start_patches(patches)
+        self.mocks, self._patches = _start_patches(patches)
         self.mocks["find_cardputer_port"].return_value = None
         self.mocks["find_rnode_port"].return_value = None
         yield
-        _stop_patches(self.mocks)
+        _stop_patches(self._patches)
 
     def test_services_get_skip_when_flag_not_set(self, capsys):
         """Pi Server and K8s Services should show SKIP when --include-services not set."""
@@ -750,14 +725,12 @@ class TestMainWithServicesSkipped:
         patches = _patch_imports()
         # Also mock the service install functions
         patches["install_pi_server"] = patch.object(install_all, "install_pi_server")
-        patches["install_k8s_services"] = patch.object(
-            install_all, "install_k8s_services"
-        )
-        self.mocks = _start_patches(patches)
+        patches["install_k8s_services"] = patch.object(install_all, "install_k8s_services")
+        self.mocks, self._patches = _start_patches(patches)
         self.mocks["find_cardputer_port"].return_value = None
         self.mocks["find_rnode_port"].return_value = None
         yield
-        _stop_patches(self.mocks)
+        _stop_patches(self._patches)
 
     def test_skip_flags_prevent_service_calls(self):
         """--skip-server and --skip-k8s prevent service install calls."""
@@ -783,14 +756,12 @@ class TestMainWithServices:
         patches = _patch_imports()
         # Mock the service install functions
         patches["install_pi_server"] = patch.object(install_all, "install_pi_server")
-        patches["install_k8s_services"] = patch.object(
-            install_all, "install_k8s_services"
-        )
-        self.mocks = _start_patches(patches)
+        patches["install_k8s_services"] = patch.object(install_all, "install_k8s_services")
+        self.mocks, self._patches = _start_patches(patches)
         self.mocks["find_cardputer_port"].return_value = None
         self.mocks["find_rnode_port"].return_value = None
         yield
-        _stop_patches(self.mocks)
+        _stop_patches(self._patches)
 
     def test_include_services_calls_install_functions(self):
         """--include-services should call both install functions."""
@@ -822,6 +793,81 @@ class TestMainWithServices:
         captured = capsys.readouterr().out
         assert "Pi Server" in captured
         assert "K8s Services" in captured
+
+
+# ── Unit tests for install_services.py ─────────────────────────────
+
+
+class TestInstallRNodeFirmware:
+    """Direct unit tests for _install_rnode_firmware()."""
+
+    def _make_result(self):
+        return install_all.DeviceResult("RNode (Heltec)")
+
+    def test_already_rnode_returns_ok(self):
+        """check_rnode_firmware returns True → status OK, no flash called."""
+        result = self._make_result()
+        with (
+            patch.object(install_all, "check_rnode_firmware", return_value=True),
+            patch.object(install_all, "flash_rnode_firmware") as mock_flash,
+        ):
+            install_all._install_rnode_firmware("/dev/ttyUSB0", result)
+        assert result.status == "OK"
+        assert "already installed" in result.detail
+        mock_flash.assert_not_called()
+
+    def test_flash_success_sets_ok(self):
+        """check returns False, flash returns (True, "OK") → status OK."""
+        result = self._make_result()
+        with (
+            patch.object(install_all, "check_rnode_firmware", return_value=False),
+            patch.object(
+                install_all,
+                "flash_rnode_firmware",
+                return_value=(True, "Flashed successfully"),
+            ),
+        ):
+            install_all._install_rnode_firmware("/dev/ttyUSB0", result)
+        assert result.status == "OK"
+        assert "Flashed" in result.detail
+
+    def test_flash_failure_sets_fail(self):
+        """check returns False, flash returns (False, "error") → status FAIL."""
+        result = self._make_result()
+        with (
+            patch.object(install_all, "check_rnode_firmware", return_value=False),
+            patch.object(
+                install_all,
+                "flash_rnode_firmware",
+                return_value=(False, "Flash error: device not found"),
+            ),
+        ):
+            install_all._install_rnode_firmware("/dev/ttyUSB0", result)
+        assert result.status == "FAIL"
+        assert "Flash error" in result.detail
+
+    def test_exception_during_check_sets_fail(self):
+        """check_rnode_firmware raises → status FAIL, traceback printed."""
+        result = self._make_result()
+        with patch.object(install_all, "check_rnode_firmware", side_effect=OSError("serial error")):
+            install_all._install_rnode_firmware("/dev/ttyUSB0", result)
+        assert result.status == "FAIL"
+        assert "Unexpected error" in result.detail
+
+    def test_exception_during_flash_sets_fail(self):
+        """flash_rnode_firmware raises → status FAIL."""
+        result = self._make_result()
+        with (
+            patch.object(install_all, "check_rnode_firmware", return_value=False),
+            patch.object(
+                install_all,
+                "flash_rnode_firmware",
+                side_effect=RuntimeError("timeout"),
+            ),
+        ):
+            install_all._install_rnode_firmware("/dev/ttyUSB0", result)
+        assert result.status == "FAIL"
+        assert "Unexpected error" in result.detail
 
 
 # ── Unit tests for install_services.py ─────────────────────────────
@@ -933,7 +979,7 @@ class TestInstallPiServer:
             assert "Docker build failed" in result.detail
 
     def test_fails_when_subprocess_raises(self):
-        """Result should be FAIL when subprocess.run raises an error."""
+        """Result should be FAIL when subprocess.run raises an OSError."""
         with (
             patch("shutil.which", return_value="/usr/bin/docker"),
             patch("subprocess.run", side_effect=OSError("no such file")),
@@ -941,6 +987,20 @@ class TestInstallPiServer:
             result = self._make_result()
             install_services.install_pi_server(result, "/fake/repo")
             assert result.status == "FAIL"
+
+    def test_fails_when_subprocess_error_raised(self):
+        """Result should be FAIL when subprocess.run raises SubprocessError."""
+        with (
+            patch("shutil.which", return_value="/usr/bin/docker"),
+            patch(
+                "subprocess.run",
+                side_effect=subprocess.SubprocessError("command failed"),
+            ),
+        ):
+            result = self._make_result()
+            install_services.install_pi_server(result, "/fake/repo")
+            assert result.status == "FAIL"
+            assert "Docker build error" in result.detail
 
 
 class TestInstallK8sServices:
@@ -1008,7 +1068,7 @@ class TestInstallK8sServices:
             assert "kubectl apply" in result.detail.lower()
 
     def test_fails_when_subprocess_raises(self):
-        """Result should be FAIL when subprocess.run raises an error."""
+        """Result should be FAIL when subprocess.run raises an OSError."""
         with (
             patch("shutil.which", return_value="/usr/bin/kubectl"),
             patch("os.path.isfile", return_value=True),
@@ -1017,3 +1077,18 @@ class TestInstallK8sServices:
             result = self._make_result()
             install_services.install_k8s_services(result, "/fake/repo")
             assert result.status == "FAIL"
+
+    def test_fails_when_subprocess_error_raised(self):
+        """Result should be FAIL when subprocess.run raises SubprocessError."""
+        with (
+            patch("shutil.which", return_value="/usr/bin/kubectl"),
+            patch("os.path.isfile", return_value=True),
+            patch(
+                "subprocess.run",
+                side_effect=subprocess.SubprocessError("kubectl error"),
+            ),
+        ):
+            result = self._make_result()
+            install_services.install_k8s_services(result, "/fake/repo")
+            assert result.status == "FAIL"
+            assert "kubectl error" in result.detail

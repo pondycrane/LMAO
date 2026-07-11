@@ -2,6 +2,7 @@
 # Adapted for µReticulum: stripped base64 encoding, simplified
 
 import os
+
 from . import _ed25519
 
 BadSignatureError = _ed25519.BadSignatureError
@@ -29,6 +30,7 @@ class SigningKey:
         # P0a: Pre-derive key material to avoid SHA-512 + clamping per sign
         from ..hashes import sha512
         from .basic import bytes_to_clamped_scalar
+
         h = sha512(self.sk_s[:32])
         self._cached_a = bytes_to_clamped_scalar(h[:32])
         self._cached_inter = h[32:]
@@ -51,6 +53,7 @@ class SigningKey:
         assert isinstance(msg, (bytes, bytearray))
         # P0a: Use cached key derivation - avoids H(seed) + clamping per sign
         from . import eddsa
+
         sig = eddsa.signature_cached(msg, self._cached_a, self._cached_inter, self.vk_s)
         sig_R = sig[0:32]
         sig_S = sig[32:64]
