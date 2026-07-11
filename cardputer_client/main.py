@@ -7,20 +7,19 @@ Uses the urns µReticulum port for MicroPython.
 Sends periodic "Hello" messages and displays received replies.
 """
 
-import time
-import sys
-
 # µReticulum imports (urns MicroPython port)
 import gc
+import sys
+import time
 
 gc.collect()
 
 # Try to import the urns library from /lib (where the flash tool places it)
 try:
     sys.path.insert(0, "/lib")
-    from urns import Reticulum, Identity  # noqa: F401
-    from urns.lxmf import LXMRouter, LXMessage  # noqa: F401
-    from urns.log import LOG_NOTICE, LOG_INFO  # noqa: F401
+    from urns import Identity, Reticulum  # noqa: F401
+    from urns.log import LOG_INFO, LOG_NOTICE  # noqa: F401
+    from urns.lxmf import LXMessage, LXMRouter  # noqa: F401
 
     HAS_URNS = True
 except ImportError:
@@ -28,8 +27,8 @@ except ImportError:
 
 # Display support (if available)
 try:
-    from machine import Pin, SPI
     import st7789
+    from machine import SPI, Pin
 
     HAS_DISPLAY = True
 except ImportError:
@@ -37,7 +36,7 @@ except ImportError:
 
 # Proto encoder (optional — gracefully degrades if not on device)
 try:
-    from proto.lma_encoder import make_poc_message, encode_sensor_envelope
+    from proto.lma_encoder import encode_sensor_envelope, make_poc_message
 
     HAS_PROTO = True
 except ImportError:
@@ -49,9 +48,11 @@ SEND_SENSOR = True
 # Default interval and sensor settings; updated from config.py at boot time.
 # Module-level defaults allow make_sensor_message() to function even when
 # no config.py is present (e.g., in test environments).
-INTERVAL_SECONDS = 60
-SENSOR_TYPE = None
-SENSOR_I2C_ADDR = 0x38
+_CONFIG = {
+    "interval_seconds": 60,
+    "sensor_type": None,
+    "sensor_i2c_addr": 0x38,
+}
 
 # ---- Sensor library detection ----
 try:
@@ -96,25 +97,27 @@ def _init_lxmf_router(identity, storage_path="/flash/lxmf_state", display_name="
 def _init_wifi(ssid, password, config, debug=0):
     """Connect to WiFi if the config requires it.
 
-    Returns ``True`` if WiFi was attempted, ``False`` otherwise.
     Failures are logged but do NOT halt the boot sequence.
     """
-    if not _needs_wifi(config):
-        return False
     _connect_wifi(ssid, password, debug)
-    return True
 
 
 def make_sensor_message(identity_hex, seq, battery=3.7, strict=False):
-    """Build an LMAOEnvelope containing a SensorReport with real ESP32 die temperature.
+    """Build an LMAOEnvelope containing a SensorReport.
 
-    When *strict* is ``False`` (default): on CPython (no ``esp32`` module) falls back
-    to a constant 25.0°C for test environments.  On real hardware, sensor read
-    failures propagate as exceptions regardless of the flag.
+    Always includes an ESP32 internal die temperature reading (sensor_id=1).
+    When ``_CONFIG["sensor_type"]`` is set and the sensor library is available,
+    also appends an external humidity reading (sensor_id=2) from the Grove I2C
+    sensor.
 
-    When *strict* is ``True``: raises ``RuntimeError`` if the ESP32 die temperature
-    cannot be read, even on CPython.  Use this in E2E tests or production configs
-    that must never see synthetic data.
+    When *strict* is ``False`` (default): on CPython (no ``esp32`` module) falls
+    back to a constant 25.0°C for test environments.  On real hardware, sensor
+    read failures propagate as exceptions regardless of the flag.
+
+    When *strict* is ``True``: raises an exception if the ESP32 die temperature
+    cannot be read (``RuntimeError`` when the ``esp32`` module is absent; the
+    underlying exception propagates on real hardware).  Use this in E2E tests or
+    production configs that must never see synthetic data.
 
     Args:
         identity_hex: Hex identity string of the sending node.
@@ -123,7 +126,7 @@ def make_sensor_message(identity_hex, seq, battery=3.7, strict=False):
         strict: If ``True``, fail hard when temperature can't be read from hardware.
 
     Returns:
-        bytes: Serialized LMAOEnvelope protobuf.
+        bytes: Serialized LMAOEnvelope protobuf with one or two SensorReading entries.
     """
 
     try:
@@ -151,10 +154,10 @@ def make_sensor_message(identity_hex, seq, battery=3.7, strict=False):
     ]
 
     # ---- Humidity sensor (external Grove I2C) ----
-    if SENSOR_TYPE is not None and HAS_SENSOR_LIB:
+    if _CONFIG["sensor_type"] is not None and HAS_SENSOR_LIB:
         try:
             _, humidity = read_humidity_temperature(
-                SENSOR_TYPE, SENSOR_I2C_ADDR
+                _CONFIG["sensor_type"], _CONFIG["sensor_i2c_addr"]
             )
             if humidity is not None:
                 readings.append(
@@ -166,8 +169,9 @@ def make_sensor_message(identity_hex, seq, battery=3.7, strict=False):
                     }
                 )
         except (OSError, ValueError) as e:
-            if hasattr(sys, "print_exception"):
-                sys.print_exception(e)
+            import traceback
+
+            traceback.print_exc()
             print(f"Humidity sensor read failed: {e}")
 
     return encode_sensor_envelope(identity_hex, seq, battery, readings)
@@ -248,17 +252,21 @@ def handle_reply(message):
     """
     content = ""
     try:
+        source_info = (
+            message.source_hash.hex()[:8] if message.source_hash else "unknown"
+        )
         content = message.content_as_string() or ""
     except Exception as e:
-        print(f"handle_reply: content extraction failed: {e}")
+        print(f"handle_reply: content extraction failed from {source_info}: {e}")
         sys.print_exception(e)
+        return  # Don't add empty content to pending_replies
 
     if content:
-        print(f"\n>>> REPLY from server: {content}")
+        print(f"\n>>> REPLY from server ({source_info}): {content}")
         pending_replies.append(content)
 
 
-pending_replies = []
+pending_replies: list[str] = []
 
 
 # ---- Helpers ----
@@ -309,8 +317,8 @@ def _connect_wifi(ssid, password, debug=0, timeout=15):
         ntptime.settime()
         if debug >= 1:
             print("NTP synced")
-    except Exception:
-        print("NTP sync failed")
+    except Exception as e:
+        print(f"NTP sync failed: {e}")
 
     return ip
 
@@ -338,8 +346,7 @@ def _convert_dest_hash(hex_val):
         return hex_val
     if not isinstance(hex_val, str):
         raise ValueError(
-            f"DEST_HASH must be a hex string, bytes, or None, "
-            f"got {type(hex_val).__name__}"
+            f"DEST_HASH must be a hex string, bytes, or None, got {type(hex_val).__name__}"
         )
     try:
         import ubinascii
@@ -370,37 +377,47 @@ def main():
 
     # ---- Load config (must be on device as /config.py) ----
     try:
-        from config import WIFI_SSID, WIFI_PASS, NODE_NAME, DEBUG, CONFIG
+        from config import CONFIG, DEBUG, DEST_HASH, NODE_NAME, WIFI_PASS, WIFI_SSID
 
+        raw_dest = DEST_HASH  # captured for error messages
+        DEST_HASH = _convert_dest_hash(DEST_HASH)
+
+        # Optional new config constants — gracefully handle missing values
         try:
-            from config import DEST_HASH, INTERVAL_SECONDS, SENSOR_TYPE, SENSOR_I2C_ADDR
-
-            raw_dest = DEST_HASH  # captured for error messages
-            DEST_HASH = _convert_dest_hash(DEST_HASH)
+            from config import INTERVAL_SECONDS, SENSOR_I2C_ADDR, SENSOR_TYPE
         except ImportError:
-            DEST_HASH = None  # Legacy config without DEST_HASH
             INTERVAL_SECONDS = 60
             SENSOR_TYPE = None
             SENSOR_I2C_ADDR = 0x38
-        except ValueError:
-            log(
-                f"ERROR: DEST_HASH is not a valid hex string: {raw_dest!r}. "
-                "Expected 32 hex characters (e.g. 'a1b2c3d4e5f6...'). "
-                "Set DEST_HASH = None in config.py to disable sending.",
-                tft,
-                status_lines,
-            )
-            while True:
-                time.sleep(1)
 
         # ---- Apply config values ----
         # Clamp interval to minimum 10s to avoid LoRa congestion
         INTERVAL_SECONDS = _min_interval(INTERVAL_SECONDS)
 
-        # Sync sensor config to module-level globals (needed by make_sensor_message)
-        globals()["SENSOR_TYPE"] = SENSOR_TYPE
-        globals()["SENSOR_I2C_ADDR"] = SENSOR_I2C_ADDR
-        globals()["INTERVAL_SECONDS"] = INTERVAL_SECONDS
+        # Sync sensor config to _CONFIG dict (needed by make_sensor_message)
+        _CONFIG["sensor_type"] = SENSOR_TYPE
+        _CONFIG["sensor_i2c_addr"] = SENSOR_I2C_ADDR
+        _CONFIG["interval_seconds"] = INTERVAL_SECONDS
+
+    except ValueError:
+        log(
+            f"ERROR: DEST_HASH is not a valid hex string: {raw_dest!r}. "
+            "Expected 32 hex characters (e.g. 'a1b2c3d4e5f6...'). "
+            "Set DEST_HASH = None in config.py to disable sending.",
+            tft,
+            status_lines,
+        )
+        while True:
+            time.sleep(1)
+
+    except SyntaxError as e:
+        log(
+            f"ERROR: config.py has a syntax error on line {getattr(e, 'lineno', '?')}: {e}",
+            tft,
+            status_lines,
+        )
+        while True:
+            time.sleep(1)
 
     except ImportError:
         log("ERROR: Cannot import config — is config.py on device?", tft, status_lines)
@@ -506,7 +523,7 @@ def main():
                 tft = log(f"Reply: {reply}", tft, status_lines)
             pending_replies.clear()
 
-            time.sleep(INTERVAL_SECONDS)
+            time.sleep(_CONFIG["interval_seconds"])
 
         except KeyboardInterrupt:
             log("Shutting down...", tft, status_lines)

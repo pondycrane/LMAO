@@ -1,12 +1,12 @@
 """Tests for server gRPC service (with mocked RNS/LXMF)."""
 
 import asyncio
-from unittest.mock import MagicMock, AsyncMock
-import pytest
 import sys
-from google.protobuf.message import DecodeError
+from unittest.mock import AsyncMock, MagicMock
 
-from conftest import setup_common_mocks, cleanup_common_mocks
+import pytest
+from conftest import cleanup_common_mocks, setup_common_mocks
+from google.protobuf.message import DecodeError
 
 
 @pytest.fixture
@@ -244,7 +244,8 @@ class TestLMAOGrpcService:
 
 
 if __name__ == "__main__":
-    import pytest
     import sys
+
+    import pytest
 
     sys.exit(pytest.main([__file__] + sys.argv[1:]))

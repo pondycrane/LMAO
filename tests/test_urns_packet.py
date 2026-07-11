@@ -4,9 +4,9 @@ These tests mock MicroPython-specific imports so the urns library can be
 exercised on a host CPython environment without ESP32 hardware.
 """
 
-import sys
-import os
 import hashlib
+import os
+import sys
 from unittest.mock import MagicMock
 
 # Ensure the urns package is importable (parent of the urns/ directory)
@@ -30,7 +30,7 @@ class _MockMicroPython:
         return f
 
 
-sys.modules["micropython"] = _MockMicroPython()
+sys.modules["micropython"] = _MockMicroPython()  # type: ignore[assignment]
 
 # uhashlib — delegate to CPython hashlib
 _mp_uhashlib = MagicMock()
@@ -60,16 +60,15 @@ sys.modules["ucryptolib"] = _mp_ucryptolib
 
 # Now import the urns modules under test
 from urns.const import (  # noqa: E402
+    DEST_SINGLE,
     HEADER_MINSIZE,
-    PKT_DATA,
     PKT_ANNOUNCE,
+    PKT_DATA,
     PKT_LINKREQUEST,
     PKT_PROOF,
     TRUNCATED_HASHLENGTH,
-    DEST_SINGLE,
 )
 from urns.packet import Packet  # noqa: E402
-
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
 

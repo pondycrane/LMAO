@@ -1,7 +1,8 @@
 # µReticulum Interface Base Class
 
 import time
-from ..log import log, LOG_VERBOSE, LOG_DEBUG, LOG_ERROR
+
+from ..log import LOG_DEBUG, LOG_ERROR, LOG_VERBOSE, log
 
 
 class Interface:
@@ -49,15 +50,17 @@ class Interface:
     def setup_ifac(self, config):
         """Derive IFAC keys from network_name/passphrase in config."""
         from .. import const
+
         network_name = config.get("networkname")
         passphrase = config.get("passphrase")
         if network_name is None and passphrase is None:
             return
 
+        import gc
+
+        from ..crypto import Ed25519PrivateKey
         from ..crypto.hashes import sha256
         from ..crypto.hkdf import hkdf
-        from ..crypto import Ed25519PrivateKey
-        import gc
 
         ifac_origin = b""
         if network_name:
@@ -87,6 +90,7 @@ class Interface:
         self._last_activity = time.time()
 
         from ..transport import Transport
+
         Transport.inbound(data, self)
 
     def ifac_sign(self, data):
@@ -95,19 +99,19 @@ class Interface:
             return data
 
         import gc
+
         from ..crypto.hkdf import hkdf
 
-        ifac = self.ifac_signing_key.sign(data)[-self.ifac_size:]
+        ifac = self.ifac_signing_key.sign(data)[-self.ifac_size :]
         gc.collect()
 
-        mask = hkdf(length=len(data) + self.ifac_size,
-                     derive_from=ifac, salt=self.ifac_key)
+        mask = hkdf(length=len(data) + self.ifac_size, derive_from=ifac, salt=self.ifac_key)
 
         new_raw = bytearray(len(data) + self.ifac_size)
         new_raw[0] = data[0] | 0x80
         new_raw[1] = data[1]
-        new_raw[2:2 + self.ifac_size] = ifac
-        new_raw[2 + self.ifac_size:] = data[2:]
+        new_raw[2 : 2 + self.ifac_size] = ifac
+        new_raw[2 + self.ifac_size :] = data[2:]
 
         isz = self.ifac_size
         new_raw[0] = (new_raw[0] ^ mask[0]) | 0x80

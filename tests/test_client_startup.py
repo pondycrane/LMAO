@@ -1,11 +1,11 @@
 """Tests for human client startup and lifecycle (with mocked RNS/LXMF)."""
 
-from unittest.mock import MagicMock, patch, PropertyMock
 import builtins
-import pytest
 import sys
+from unittest.mock import MagicMock, PropertyMock, patch
 
-from conftest import setup_common_mocks, cleanup_common_mocks
+import pytest
+from conftest import cleanup_common_mocks, setup_common_mocks
 
 
 @pytest.fixture
@@ -68,21 +68,15 @@ class TestMain:
         """main() should exit(1) when RNS.Identity() fails with RNSException."""
         client = client_with_main_mocks
 
-        sys.modules["RNS"].Identity.side_effect = sys.modules["RNS"].RNSException(
-            "OOM in crypto"
-        )
+        sys.modules["RNS"].Identity.side_effect = sys.modules["RNS"].RNSException("OOM in crypto")
 
         with patch.object(client.os.path, "exists", return_value=True):
             with pytest.raises(SystemExit) as exc:
                 client.main()
 
-        assert exc.value.code == 1, (
-            "Should exit with code 1 on identity creation failure"
-        )
+        assert exc.value.code == 1, "Should exit with code 1 on identity creation failure"
         captured = capsys.readouterr()
-        assert "FATAL" in captured.out + captured.err, (
-            "Output should indicate FATAL error"
-        )
+        assert "FATAL" in captured.out + captured.err, "Output should indicate FATAL error"
 
     def test_router_creation_failure(self, client_with_main_mocks, capsys):
         """main() should exit(1) when LXMF.LXMRouter() fails with LXMFException."""
@@ -101,9 +95,7 @@ class TestMain:
 
         assert exc.value.code == 1, "Should exit with code 1 on router creation failure"
         captured = capsys.readouterr()
-        assert "FATAL" in captured.out + captured.err, (
-            "Output should indicate FATAL error"
-        )
+        assert "FATAL" in captured.out + captured.err, "Output should indicate FATAL error"
 
     @pytest.mark.parametrize(
         "rnode_exists,expected_substr",
@@ -180,9 +172,7 @@ class TestMain:
 class TestRNodeMissing:
     """Tests for graceful handling of missing RNode."""
 
-    def test_rnode_missing_starts_wifi_only(
-        self, client_with_main_mocks, capsys, caplog
-    ):
+    def test_rnode_missing_starts_wifi_only(self, client_with_main_mocks, capsys, caplog):
         """When RNode port does not exist, client should start in WiFi-only mode."""
         client = client_with_main_mocks
 
@@ -247,7 +237,8 @@ class TestReplInput:
 
 
 if __name__ == "__main__":
-    import pytest
     import sys
+
+    import pytest
 
     sys.exit(pytest.main([__file__] + sys.argv[1:]))

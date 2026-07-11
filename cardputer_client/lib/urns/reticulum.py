@@ -1,11 +1,13 @@
 # µReticulum Core Engine
 # Simplified for Pico W: JSON config, no RPC, async event loop
 
-import os
+import contextlib
 import gc
+import os
+
 from . import const
-from .log import log, set_loglevel, LOG_VERBOSE, LOG_DEBUG, LOG_ERROR, LOG_NOTICE, LOG_INFO
 from .identity import Identity
+from .log import LOG_DEBUG, LOG_ERROR, LOG_INFO, LOG_NOTICE, LOG_VERBOSE, log, set_loglevel
 from .transport import Transport
 
 
@@ -34,7 +36,7 @@ class Reticulum:
 
         # Derive storage directory from config path
         if "/" in config_path:
-            self.storagepath = config_path[:config_path.rfind("/")]
+            self.storagepath = config_path[: config_path.rfind("/")]
         else:
             self.storagepath = "."
 
@@ -75,8 +77,9 @@ class Reticulum:
     def _load_config(self, config_path):
         try:
             import json
+
             if self._file_exists(config_path):
-                with open(config_path, "r") as f:
+                with open(config_path) as f:
                     self.config = json.load(f)
                 log("Loaded configuration from " + config_path, LOG_VERBOSE)
             else:
@@ -114,18 +117,16 @@ class Reticulum:
 
     @staticmethod
     def _ensure_dir(path):
-        try:
+        with contextlib.suppress(OSError):
             os.mkdir(path)
-        except OSError:
-            pass
 
     # Map interface type names to their module files.
     # Add new interfaces here: "TypeName": "module_name"
     _INTERFACE_MAP = {
-        "UDPInterface":       "udp",
-        "SerialInterface":    "serial",
-        "E32Interface":       "e32",
-        "LoRaInterface":      "lora",
+        "UDPInterface": "udp",
+        "SerialInterface": "serial",
+        "E32Interface": "e32",
+        "LoRaInterface": "lora",
         "TCPClientInterface": "tcp",
     }
 
@@ -145,7 +146,7 @@ class Reticulum:
             return iface_config
         merged = {}
         merged.update(preset)
-        merged.update(iface_config)   # explicit interface keys win
+        merged.update(iface_config)  # explicit interface keys win
         return merged
 
     def setup_interfaces(self):
@@ -159,9 +160,7 @@ class Reticulum:
         # boot from a trusted peer's announce/message timestamp.
         ts_cfg = self.config.get("time_sync", {})
         Transport.time_sync_enabled = ts_cfg.get("enabled", False)
-        Transport.time_sync_trusted = set(
-            h.lower() for h in ts_cfg.get("trusted_nodes", [])
-        )
+        Transport.time_sync_trusted = set(h.lower() for h in ts_cfg.get("trusted_nodes", []))
         Transport.time_sync_min_sources = ts_cfg.get("min_sources", 2)
         Transport.time_sync_tolerance = ts_cfg.get("tolerance", 120)
         if Transport.time_sync_enabled:
@@ -211,16 +210,19 @@ class Reticulum:
         if not probe_cfg.get("enabled", False):
             return
         from .destination import Destination
+
         app_name = probe_cfg.get("app_name", "urns")
         aspect = probe_cfg.get("aspect", "probe")
         self.probe_destination = Destination(
-            self.identity, Destination.IN, Destination.SINGLE,
-            app_name, aspect,
+            self.identity,
+            Destination.IN,
+            Destination.SINGLE,
+            app_name,
+            aspect,
         )
         self.probe_destination.accepts_links(False)
         self.probe_destination.set_proof_strategy(Destination.PROVE_ALL)
-        print("Probe address:", self.probe_destination.hexhash,
-              "(" + app_name + "." + aspect + ")")
+        print("Probe address:", self.probe_destination.hexhash, "(" + app_name + "." + aspect + ")")
 
     async def run(self):
         """Main async event loop. Run with asyncio.run(reticulum.run())"""
@@ -232,7 +234,7 @@ class Reticulum:
 
         # Start interface poll loops
         for iface in self.interfaces:
-            if hasattr(iface, 'poll_loop'):
+            if hasattr(iface, "poll_loop"):
                 tasks.append(asyncio.create_task(iface.poll_loop()))
 
         if self.probe_destination is not None:
@@ -269,14 +271,12 @@ class Reticulum:
         """Clean shutdown - persist state and close interfaces"""
         log("Shutting down µReticulum", LOG_NOTICE)
         if Transport.persist_path is not None:
-            try:
+            with contextlib.suppress(Exception):
                 Transport.save_path_table(Transport.persist_path)
-            except Exception:
-                pass
         Transport.stop()
         Identity.persist_data()
         for iface in self.interfaces:
-            if hasattr(iface, 'close'):
+            if hasattr(iface, "close"):
                 try:
                     iface.close()
                 except Exception as e:

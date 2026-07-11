@@ -2,9 +2,10 @@
 # Slightly modified Fernet implementation (no VERSION/TIMESTAMP fields)
 
 import os
+
+from .aes import AES, AES_128_CBC, AES_256_CBC
 from .hmac import new as hmac_new
 from .pkcs7 import PKCS7
-from .aes import AES_128_CBC, AES_256_CBC, AES
 
 
 class Token:
@@ -44,18 +45,13 @@ class Token:
             raise ValueError("Cannot verify HMAC on token of only " + str(len(token)) + " bytes")
         received_hmac = token[-32:]
         expected_hmac = hmac_new(self._signing_key, token[:-32]).digest()
-        if received_hmac == expected_hmac:
-            return True
-        return False
+        return received_hmac == expected_hmac
 
     def encrypt(self, data=None):
         if not isinstance(data, bytes):
             raise TypeError("Token plaintext input must be bytes")
         iv = os.urandom(16)
-        ciphertext = self.mode.encrypt(
-            plaintext=PKCS7.pad(data),
-            key=self._encryption_key,
-            iv=iv)
+        ciphertext = self.mode.encrypt(plaintext=PKCS7.pad(data), key=self._encryption_key, iv=iv)
         signed_parts = iv + ciphertext
         return signed_parts + hmac_new(self._signing_key, signed_parts).digest()
 
@@ -70,9 +66,10 @@ class Token:
 
         try:
             return PKCS7.unpad(
-                self.mode.decrypt(
-                    ciphertext=ciphertext,
-                    key=self._encryption_key,
-                    iv=iv))
-        except Exception:
+                self.mode.decrypt(ciphertext=ciphertext, key=self._encryption_key, iv=iv)
+            )
+        except Exception as e:
+            from ..log import log, LOG_ERROR
+
+            log("Token decrypt failed: " + str(e), LOG_ERROR)
             raise ValueError("Could not decrypt token")

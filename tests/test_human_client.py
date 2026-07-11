@@ -1,11 +1,11 @@
 """Tests for human client message handler (with mocked RNS/LXMF)."""
 
-from unittest.mock import MagicMock, patch
-import pytest
 import sys
-from google.protobuf.message import DecodeError
+from unittest.mock import MagicMock, patch
 
-from conftest import setup_common_mocks, cleanup_common_mocks
+import pytest
+from conftest import cleanup_common_mocks, setup_common_mocks
+from google.protobuf.message import DecodeError
 
 
 @pytest.fixture
@@ -197,9 +197,7 @@ class TestHandleLXMFDelivery:
         assert "MSG from" in captured.out
         assert "non-text" in captured.out or "bytes" in captured.out
 
-    def test_protobuf_decode_uses_content_from_text_field(
-        self, client_with_mocks, capsys
-    ):
+    def test_protobuf_decode_uses_content_from_text_field(self, client_with_mocks, capsys):
         """When protobuf decode succeeds and HasField('text') is True,
         the content from text.content is displayed."""
         client = client_with_mocks
@@ -555,7 +553,8 @@ class TestSendMessage:
 
 
 if __name__ == "__main__":
-    import pytest
     import sys
+
+    import pytest
 
     sys.exit(pytest.main([__file__] + sys.argv[1:]))

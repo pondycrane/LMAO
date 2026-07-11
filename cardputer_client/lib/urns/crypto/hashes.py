@@ -3,6 +3,7 @@
 # SHA-512: uses pure-Python fallback (uhashlib has no sha512)
 
 from uhashlib import sha256 as _sha256_cls
+
 from .sha512 import sha512 as _sha512_cls
 
 

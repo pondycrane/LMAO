@@ -3,17 +3,25 @@
 
 __version__ = "0.1.0"
 
-from .log import log, LOG_NONE, LOG_CRITICAL, LOG_ERROR, LOG_WARNING
-from .log import LOG_NOTICE, LOG_INFO, LOG_VERBOSE, LOG_DEBUG, LOG_EXTREME
-from . import const
-from .identity import Identity
+from . import bz2dec, const, lxmf
 from .destination import Destination
-from .packet import Packet, PacketReceipt
-from .transport import Transport
+from .identity import Identity
 from .link import Link
-from . import lxmf
-from . import bz2dec
+from .log import (
+    LOG_CRITICAL,
+    LOG_DEBUG,
+    LOG_ERROR,
+    LOG_EXTREME,
+    LOG_INFO,
+    LOG_NONE,
+    LOG_NOTICE,
+    LOG_VERBOSE,
+    LOG_WARNING,
+    log,
+)
+from .packet import Packet, PacketReceipt
 from .reticulum import Reticulum
+from .transport import Transport
 
 
 def hexrep(data, delimit=True):
@@ -22,6 +30,4 @@ def hexrep(data, delimit=True):
     except TypeError:
         data = [data]
     d = ":" if delimit else ""
-    return d.join("{:02x}".format(c) for c in data)
-
-
+    return d.join(f"{c:02x}" for c in data)

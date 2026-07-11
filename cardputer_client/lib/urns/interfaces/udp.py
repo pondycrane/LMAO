@@ -6,12 +6,13 @@
 #   corrupts non-blocking state, causing recvfrom to block)
 # - RX watchdog: if TX works but RX is dead, recreate socket
 
+import contextlib
+import gc
 import socket
 import time
-from . import Interface
-from ..log import log, LOG_VERBOSE, LOG_DEBUG, LOG_WARNING, LOG_ERROR, LOG_NOTICE
 
-import gc
+from ..log import LOG_DEBUG, LOG_ERROR, LOG_NOTICE, LOG_VERBOSE, LOG_WARNING, log
+from . import Interface
 
 
 def _resolve_addr(host, port):
@@ -75,8 +76,19 @@ class UDPInterface(Interface):
             self._socket = _create_socket(self.listen_ip, self.listen_port)
 
             self.online = True
-            log("UDP " + self.name + " on " + self.listen_ip + ":" + str(self.listen_port), LOG_NOTICE)
-            log("UDP " + self.name + " broadcast to " + self.forward_ip + ":" + str(self.forward_port), LOG_VERBOSE)
+            log(
+                "UDP " + self.name + " on " + self.listen_ip + ":" + str(self.listen_port),
+                LOG_NOTICE,
+            )
+            log(
+                "UDP "
+                + self.name
+                + " broadcast to "
+                + self.forward_ip
+                + ":"
+                + str(self.forward_port),
+                LOG_VERBOSE,
+            )
 
         except Exception as e:
             log("Could not create UDP interface: " + str(e), LOG_ERROR)
@@ -87,6 +99,7 @@ class UDPInterface(Interface):
         """Auto-detect subnet broadcast address from network interface."""
         try:
             import network
+
             wlan = network.WLAN(network.STA_IF)
             if wlan.active() and wlan.isconnected():
                 ip, subnet, gateway, dns = wlan.ifconfig()
@@ -103,10 +116,8 @@ class UDPInterface(Interface):
         """Close and recreate the socket. Used by the watchdog when RX is stuck."""
         log("Recreating socket (watchdog)", LOG_WARNING)
         if self._socket:
-            try:
+            with contextlib.suppress(BaseException):
                 self._socket.close()
-            except:
-                pass
             self._socket = None
 
         gc.collect()
@@ -139,10 +150,8 @@ class UDPInterface(Interface):
             sent = True
         except Exception as e:
             log("UDP send error: " + str(e), LOG_ERROR)
-            try:
+            with contextlib.suppress(BaseException):
                 self._socket.settimeout(0)
-            except:
-                pass
 
         return sent
 
@@ -166,25 +175,44 @@ class UDPInterface(Interface):
                     _last_gc = now
 
                 if loop_count % 1000 == 0:
-                    log("UDP poll alive, loops=" + str(loop_count)
-                        + " rx=" + str(self.rx) + " rxb=" + str(self.rxb)
-                        + " tx=" + str(self.tx)
-                        + " sock=" + str(self._socket is not None), LOG_VERBOSE)
+                    log(
+                        "UDP poll alive, loops="
+                        + str(loop_count)
+                        + " rx="
+                        + str(self.rx)
+                        + " rxb="
+                        + str(self.rxb)
+                        + " tx="
+                        + str(self.tx)
+                        + " sock="
+                        + str(self._socket is not None),
+                        LOG_VERBOSE,
+                    )
 
                 # --- RX watchdog ---
                 # Trigger when TX has happened but no RX for too long.
                 # Uses _last_rx_time (not just rx==0) so it also catches
                 # the case where RX dies mid-session.
                 _rx_ref = self._last_rx_time if self._last_rx_time > 0 else self._first_tx_time
-                if (self._first_tx_time > 0
-                        and self._watchdog_retries < self.RX_WATCHDOG_MAX_RETRIES
-                        and (now - _rx_ref) > self.RX_WATCHDOG_TIMEOUT):
+                if (
+                    self._first_tx_time > 0
+                    and self._watchdog_retries < self.RX_WATCHDOG_MAX_RETRIES
+                    and (now - _rx_ref) > self.RX_WATCHDOG_TIMEOUT
+                ):
                     self._watchdog_retries += 1
-                    log("RX watchdog: tx=" + str(self.tx)
-                        + " rx=" + str(self.rx) + " silent "
-                        + str(int(now - _rx_ref)) + "s, retry "
-                        + str(self._watchdog_retries) + "/" + str(self.RX_WATCHDOG_MAX_RETRIES),
-                        LOG_WARNING)
+                    log(
+                        "RX watchdog: tx="
+                        + str(self.tx)
+                        + " rx="
+                        + str(self.rx)
+                        + " silent "
+                        + str(int(now - _rx_ref))
+                        + "s, retry "
+                        + str(self._watchdog_retries)
+                        + "/"
+                        + str(self.RX_WATCHDOG_MAX_RETRIES),
+                        LOG_WARNING,
+                    )
                     if self._recreate_socket():
                         if self._last_rx_time > 0:
                             self._last_rx_time = now
@@ -220,9 +248,7 @@ class UDPInterface(Interface):
     def close(self):
         super().close()
         if self._socket:
-            try:
+            with contextlib.suppress(BaseException):
                 self._socket.close()
-            except:
-                pass
         self._socket = None
         log("UDP " + self.name + " closed", LOG_VERBOSE)

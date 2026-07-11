@@ -8,7 +8,10 @@ import os
 try:
     from micropython import native
 except ImportError:
-    native = lambda f: f
+
+    def native(f):
+        return f
+
 
 P = 2**255 - 19
 _A = 486662
@@ -30,8 +33,8 @@ def _point_add(point_n, point_m, point_diff):
 
 def _point_double(point_n):
     (xn, zn) = point_n
-    xn2 = xn ** 2
-    zn2 = zn ** 2
+    xn2 = xn**2
+    zn2 = zn**2
     x = (xn2 - zn2) ** 2
     xzn = xn * zn
     z = 4 * xzn * (xn2 + _A * xzn + zn2)
@@ -41,7 +44,7 @@ def _point_double(point_n):
 def _const_time_swap(a, b, swap):
     index = int(swap) * 2
     temp = (a, b, b, a)
-    return temp[index:index + 2]
+    return temp[index : index + 2]
 
 
 @native
@@ -60,6 +63,7 @@ def _raw_curve25519(base, n):
     swap = 0
 
     import gc
+
     _gc = gc.collect
 
     for t in reversed(range(255)):
@@ -98,7 +102,7 @@ def _raw_curve25519(base, n):
 
 def _unpack_number(s):
     if len(s) != 32:
-        raise ValueError('Curve25519 values must be 32 bytes')
+        raise ValueError("Curve25519 values must be 32 bytes")
     return int.from_bytes(s, "little")
 
 
@@ -164,10 +168,8 @@ class X25519PrivateKey:
 
     def public_key(self):
         if _native:
-            return X25519PublicKey.from_public_bytes(
-                _native.x25519_publickey(self._raw))
-        return X25519PublicKey.from_public_bytes(
-            _pack_number(_raw_curve25519(9, self.a)))
+            return X25519PublicKey.from_public_bytes(_native.x25519_publickey(self._raw))
+        return X25519PublicKey.from_public_bytes(_pack_number(_raw_curve25519(9, self.a)))
 
     def exchange(self, peer_public_key):
         if isinstance(peer_public_key, bytes):

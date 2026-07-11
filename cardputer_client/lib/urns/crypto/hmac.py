@@ -17,14 +17,15 @@ class HMAC:
 
         if digestmod is None:
             from uhashlib import sha256
+
             digestmod = sha256
 
         self._digest_cons = digestmod
 
         inner = self._digest_cons()
-        self.digest_size = inner.digest_size if hasattr(inner, 'digest_size') else 32
+        self.digest_size = inner.digest_size if hasattr(inner, "digest_size") else 32
 
-        if hasattr(inner, 'block_size'):
+        if hasattr(inner, "block_size"):
             blocksize = inner.block_size
             if blocksize < 16:
                 blocksize = self.blocksize
@@ -36,7 +37,7 @@ class HMAC:
         if len(key) > blocksize:
             key = self._digest_cons(key).digest()
 
-        key = key + b'\x00' * (blocksize - len(key))
+        key = key + b"\x00" * (blocksize - len(key))
 
         # Store padded keys for reconstruction (avoids .copy() requirement)
         self._outer_key_pad = bytes(b ^ 0x5C for b in key)
@@ -60,7 +61,8 @@ class HMAC:
 
     def hexdigest(self):
         import binascii
-        return str(binascii.hexlify(self.digest()), 'ascii')
+
+        return str(binascii.hexlify(self.digest()), "ascii")
 
 
 def new(key, msg=None, digestmod=None):
@@ -70,17 +72,18 @@ def new(key, msg=None, digestmod=None):
 def digest(key, msg, digest_func):
     if digest_func is None:
         from uhashlib import sha256
+
         digest_func = sha256
 
     digest_cons = digest_func
 
     inner = digest_cons()
     outer = digest_cons()
-    blocksize = getattr(inner, 'block_size', 64)
+    blocksize = getattr(inner, "block_size", 64)
     if len(key) > blocksize:
         key = digest_cons(key).digest()
 
-    key = key + b'\x00' * (blocksize - len(key))
+    key = key + b"\x00" * (blocksize - len(key))
     inner.update(bytes(b ^ 0x36 for b in key))
     outer.update(bytes(b ^ 0x5C for b in key))
     inner.update(msg)

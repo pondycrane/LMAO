@@ -1,10 +1,10 @@
 """Tests for server startup and lifecycle (with mocked RNS/LXMF)."""
 
-from unittest.mock import MagicMock, AsyncMock, patch, PropertyMock
-import pytest
 import sys
+from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
-from conftest import setup_common_mocks, cleanup_common_mocks
+import pytest
+from conftest import cleanup_common_mocks, setup_common_mocks
 
 
 class TestAsyncMain:
@@ -31,9 +31,7 @@ class TestAsyncMain:
         sys.modules["RNS"].Identity.return_value = mock_identity
 
         # Make asyncio.sleep raise KeyboardInterrupt after one iteration
-        with patch.object(
-            server_mod.asyncio, "sleep", side_effect=[None, KeyboardInterrupt]
-        ):
+        with patch.object(server_mod.asyncio, "sleep", side_effect=[None, KeyboardInterrupt]):
             await server_mod.async_main()
 
         captured = capsys.readouterr()
@@ -122,9 +120,7 @@ class TestInitRnsAndLxmf:
 
     def test_init_custom_storage_path(self, server_mod):
         """_init_rns_and_lxmf should pass custom identity_storage_path."""
-        server_mod._init_rns_and_lxmf(
-            "/dev/ttyUSB0", identity_storage_path="/custom/path"
-        )
+        server_mod._init_rns_and_lxmf("/dev/ttyUSB0", identity_storage_path="/custom/path")
 
         _, kwargs = sys.modules["LXMF"].LXMRouter.call_args
         assert kwargs.get("storagepath") == "/custom/path"
@@ -197,9 +193,7 @@ class TestPrintStartupBanner:
     def test_banner_shows_identity_and_status(self, server_mod, capsys):
         """Banner should include identity hex and RNode status."""
         with patch.object(server_mod.os.path, "exists", return_value=True):
-            server_mod._print_startup_banner(
-                "testhash1234", "/dev/ttyUSB0", grpc_available=False
-            )
+            server_mod._print_startup_banner("testhash1234", "/dev/ttyUSB0", grpc_available=False)
 
         captured = capsys.readouterr()
         assert "testhash1234" in captured.out
@@ -209,9 +203,7 @@ class TestPrintStartupBanner:
     def test_banner_when_rnode_missing(self, server_mod, capsys):
         """Banner should show warning when RNode port does not exist."""
         with patch.object(server_mod.os.path, "exists", return_value=False):
-            server_mod._print_startup_banner(
-                "testhash", "/dev/ttyUSB0", grpc_available=False
-            )
+            server_mod._print_startup_banner("testhash", "/dev/ttyUSB0", grpc_available=False)
 
         captured = capsys.readouterr()
         assert "RNode not connected" in captured.out
@@ -219,9 +211,7 @@ class TestPrintStartupBanner:
     def test_banner_with_grpc(self, server_mod, capsys):
         """Banner should include gRPC info when gRPC is available."""
         with patch.object(server_mod.os.path, "exists", return_value=True):
-            server_mod._print_startup_banner(
-                "testhash", "/dev/ttyUSB0", grpc_available=True
-            )
+            server_mod._print_startup_banner("testhash", "/dev/ttyUSB0", grpc_available=True)
 
         captured = capsys.readouterr()
         assert "gRPC: 0.0.0.0:50051" in captured.out
@@ -229,9 +219,7 @@ class TestPrintStartupBanner:
     def test_banner_without_grpc(self, server_mod, capsys):
         """Banner should omit gRPC info when gRPC is not available."""
         with patch.object(server_mod.os.path, "exists", return_value=True):
-            server_mod._print_startup_banner(
-                "testhash", "/dev/ttyUSB0", grpc_available=False
-            )
+            server_mod._print_startup_banner("testhash", "/dev/ttyUSB0", grpc_available=False)
 
         captured = capsys.readouterr()
         assert "gRPC:" not in captured.out
@@ -239,9 +227,7 @@ class TestPrintStartupBanner:
     def test_banner_includes_standard_sections(self, server_mod, capsys):
         """Banner should always contain key informational sections."""
         with patch.object(server_mod.os.path, "exists", return_value=True):
-            server_mod._print_startup_banner(
-                "testhash", "/dev/ttyUSB0", grpc_available=False
-            )
+            server_mod._print_startup_banner("testhash", "/dev/ttyUSB0", grpc_available=False)
 
         captured = capsys.readouterr()
         assert "Listening for LXMF messages" in captured.out
@@ -250,7 +236,8 @@ class TestPrintStartupBanner:
 
 
 if __name__ == "__main__":
-    import pytest
     import sys
+
+    import pytest
 
     sys.exit(pytest.main([__file__] + sys.argv[1:]))

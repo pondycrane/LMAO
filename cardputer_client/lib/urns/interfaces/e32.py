@@ -3,9 +3,9 @@
 # and 6-byte hex register configuration
 
 import time
-from .serial import SerialInterface, hdlc_escape, FLAG
-from ..log import log, LOG_VERBOSE, LOG_DEBUG, LOG_ERROR, LOG_NOTICE
 
+from ..log import LOG_DEBUG, LOG_ERROR, LOG_NOTICE, LOG_VERBOSE, log
+from .serial import FLAG, SerialInterface, hdlc_escape
 
 # Air rate codes to bps mapping (E32 SPED register bits 2-0)
 _AIR_RATES = {
@@ -15,8 +15,8 @@ _AIR_RATES = {
     3: 4800,
     4: 9600,
     5: 19200,
-    6: 19200,   # same as 5
-    7: 19200,   # same as 5
+    6: 19200,  # same as 5
+    7: 19200,  # same as 5
 }
 
 # TX power codes (E32-900T20: 20/17/14/10 dBm)
@@ -27,12 +27,10 @@ _E32_BUF = 512
 _CHUNK_SZ = 200
 
 # UART baud rate codes for SPED register bits 5-3
-_BAUD_CODES = {1200: 0, 2400: 1, 4800: 2, 9600: 3, 19200: 4,
-               38400: 5, 57600: 6, 115200: 7}
+_BAUD_CODES = {1200: 0, 2400: 1, 4800: 2, 9600: 3, 19200: 4, 38400: 5, 57600: 6, 115200: 7}
 
 
 class E32Interface(SerialInterface):
-
     def __init__(self, config):
         # Extract E32-specific config before calling super
         self._m0_pin_num = config.get("m0_pin", None)
@@ -68,10 +66,16 @@ class E32Interface(SerialInterface):
         # Override bitrate with air rate (UART baud is irrelevant for throughput)
         self.bitrate = config["_e32_bitrate"]
 
-        log("E32 configured: ch=" + str(self._channel)
-            + " air=" + str(_AIR_RATES.get(self._air_rate, "?")) + "bps"
-            + " power=" + str(_TX_POWER.get(self._tx_power, "?"))
-            , LOG_NOTICE)
+        log(
+            "E32 configured: ch="
+            + str(self._channel)
+            + " air="
+            + str(_AIR_RATES.get(self._air_rate, "?"))
+            + "bps"
+            + " power="
+            + str(_TX_POWER.get(self._tx_power, "?")),
+            LOG_NOTICE,
+        )
 
     def _setup_pins(self):
         import machine
@@ -140,12 +144,12 @@ class E32Interface(SerialInterface):
         time.sleep_ms(100)
 
         # Read current config
-        cfg_uart.write(b'\xC1\xC1\xC1')
+        cfg_uart.write(b"\xc1\xc1\xc1")
         time.sleep_ms(100)
         self._wait_aux_ready(500)
         cur = cfg_uart.read()
         if cur and len(cur) >= 6:
-            log("E32 current config: " + " ".join("{:02X}".format(b) for b in cur[:6]), LOG_DEBUG)
+            log("E32 current config: " + " ".join(f"{b:02X}" for b in cur[:6]), LOG_DEBUG)
         else:
             log("E32 could not read current config", LOG_DEBUG)
 
@@ -161,16 +165,18 @@ class E32Interface(SerialInterface):
         # trans_mode=0 (transparent), io_drive=1 (push-pull), wake_time=0 (250ms), fec=1 (enabled)
         option = (0 << 7) | (1 << 6) | (0 << 3) | (1 << 2) | (self._tx_power & 0x03)
 
-        reg = bytes([
-            0xC0,                       # Save to flash
-            0xFF,                       # ADDH = 0xFF (broadcast)
-            0xFF,                       # ADDL = 0xFF (broadcast)
-            sped,                       # SPED
-            self._channel & 0xFF,       # Channel
-            option,                     # OPTION
-        ])
+        reg = bytes(
+            [
+                0xC0,  # Save to flash
+                0xFF,  # ADDH = 0xFF (broadcast)
+                0xFF,  # ADDL = 0xFF (broadcast)
+                sped,  # SPED
+                self._channel & 0xFF,  # Channel
+                option,  # OPTION
+            ]
+        )
 
-        log("E32 writing config: " + " ".join("{:02X}".format(b) for b in reg), LOG_DEBUG)
+        log("E32 writing config: " + " ".join(f"{b:02X}" for b in reg), LOG_DEBUG)
 
         cfg_uart.write(reg)
         time.sleep_ms(100)
@@ -179,7 +185,7 @@ class E32Interface(SerialInterface):
         # Read echo/response
         resp = cfg_uart.read()
         if resp:
-            log("E32 config response: " + " ".join("{:02X}".format(b) for b in resp), LOG_DEBUG)
+            log("E32 config response: " + " ".join(f"{b:02X}" for b in resp), LOG_DEBUG)
 
         cfg_uart.deinit()
         log("E32 auto-configuration complete", LOG_NOTICE)
@@ -198,7 +204,7 @@ class E32Interface(SerialInterface):
                 offset = 0
                 while offset < len(frame):
                     self._wait_aux_ready(2000)
-                    chunk = frame[offset:offset + _CHUNK_SZ]
+                    chunk = frame[offset : offset + _CHUNK_SZ]
                     self._uart.write(chunk)
                     offset += _CHUNK_SZ
             else:

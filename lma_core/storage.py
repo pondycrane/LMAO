@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, List, Optional
+from typing import Any
 
 _logger = logging.getLogger(__name__)
 
@@ -111,7 +111,7 @@ class DuckDbStore:
 
         self._name = name
         self._conn: Any = None  # duckdb.DuckDBPyConnection
-        self._db_path: Optional[str] = None
+        self._db_path: str | None = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -153,16 +153,12 @@ class DuckDbStore:
         if not _DUCKDB_AVAILABLE:
             raise ImportError(_DUCKDB_IMPORT_ERROR)
 
-        _logger.info(
-            "Opening DuckDB database at %s (read_only=%s) ...", db_path, read_only
-        )
+        _logger.info("Opening DuckDB database at %s (read_only=%s) ...", db_path, read_only)
         try:
             self._conn = duckdb.connect(db_path, read_only=read_only)
             self._db_path = db_path
         except Exception:
-            _logger.critical(
-                "Failed to open DuckDB database at %s", db_path, exc_info=True
-            )
+            _logger.critical("Failed to open DuckDB database at %s", db_path, exc_info=True)
             raise
 
         # Ensure schema exists
@@ -188,9 +184,7 @@ class DuckDbStore:
             try:
                 self._conn.close()
             except Exception:
-                _logger.warning(
-                    "Error closing DuckDB store '%s'", self._name, exc_info=True
-                )
+                _logger.warning("Error closing DuckDB store '%s'", self._name, exc_info=True)
             finally:
                 self._conn = None
                 self._db_path = None
@@ -236,7 +230,7 @@ class DuckDbStore:
             raise
 
         sensor = envelope.sensor
-        rows_to_insert: List[tuple] = []
+        rows_to_insert: list[tuple] = []
 
         for reading in sensor.readings:
             rows_to_insert.append(
@@ -282,7 +276,7 @@ class DuckDbStore:
     # Read
     # ------------------------------------------------------------------
 
-    async def query(self, sql: str, params: Optional[List[Any]] = None) -> List[Any]:
+    async def query(self, sql: str, params: list[Any] | None = None) -> list[Any]:
         """Execute a read-only SQL query and return all rows.
 
         Parameters
@@ -305,7 +299,7 @@ class DuckDbStore:
 
         loop = asyncio.get_event_loop()
 
-        def _query() -> List[Any]:
+        def _query() -> list[Any]:
             if params is not None:
                 return self._conn.execute(sql, params).fetchall()
             return self._conn.execute(sql).fetchall()

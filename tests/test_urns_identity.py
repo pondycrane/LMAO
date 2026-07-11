@@ -1,8 +1,8 @@
 """Smoke tests for urns Identity — key generation, encrypt/decrypt, sign/validate."""
 
-import sys
-import os
 import hashlib
+import os
+import sys
 from unittest.mock import MagicMock
 
 # Ensure the urns package is importable
@@ -23,7 +23,7 @@ class _MockMicroPython:
         return f
 
 
-sys.modules["micropython"] = _MockMicroPython()
+sys.modules["micropython"] = _MockMicroPython()  # type: ignore[assignment]
 
 _mp_uhashlib = MagicMock()
 _mp_uhashlib.sha256 = hashlib.sha256
@@ -55,9 +55,7 @@ class TestIdentityCreation:
     def test_creates_valid_keypair(self):
         identity = Identity()
         assert identity.hash is not None
-        assert (
-            len(identity.hash) == const.TRUNCATED_HASHLENGTH // 8
-        )  # 16 bytes (truncated)
+        assert len(identity.hash) == const.TRUNCATED_HASHLENGTH // 8  # 16 bytes (truncated)
         assert identity.pub is not None
         assert identity.prv is not None
 

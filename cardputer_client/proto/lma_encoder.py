@@ -170,9 +170,7 @@ def encode_sensor_reading(sensor_id, value, unit, timestamp_ms):
     result = bytearray()
     result.extend(encode_field(1, 0, encode_varint(sensor_id)))  # uint32
     result.extend(encode_field(2, 5, _encode_float(value)))  # float
-    result.extend(
-        encode_field(3, 2, encode_length_delimited(unit.encode("utf-8")))
-    )  # string
+    result.extend(encode_field(3, 2, encode_length_delimited(unit.encode("utf-8"))))  # string
     result.extend(encode_field(4, 0, encode_varint(timestamp_ms)))  # uint64
     return bytes(result)
 
@@ -183,23 +181,17 @@ def encode_sensor_report(node_id, seq, battery, readings):
     readings is a list of dicts: [{sensor_id, value, unit, timestamp_ms}, ...]
     """
     result = bytearray()
-    result.extend(
-        encode_field(1, 2, encode_length_delimited(node_id.encode("utf-8")))
-    )  # string
+    result.extend(encode_field(1, 2, encode_length_delimited(node_id.encode("utf-8"))))  # string
     result.extend(encode_field(2, 0, encode_varint(seq)))  # uint32
     result.extend(encode_field(3, 5, _encode_float(battery)))  # float
     for r in readings:
-        inner = encode_sensor_reading(
-            r["sensor_id"], r["value"], r["unit"], r["timestamp_ms"]
-        )
-        result.extend(
-            encode_field(4, 2, encode_length_delimited(inner))
-        )  # repeated SensorReading
+        inner = encode_sensor_reading(r["sensor_id"], r["value"], r["unit"], r["timestamp_ms"])
+        result.extend(encode_field(4, 2, encode_length_delimited(inner)))  # repeated SensorReading
     return bytes(result)
 
 
 def decode_sensor_reading(data):
-    """Decode a single SensorReading from bytes. Returns dict or None."""
+    """Decode a single SensorReading from bytes. Returns dict (never None)."""
     return _decode_proto_message(
         data,
         {
@@ -238,15 +230,9 @@ def encode_command_request(cmd_id, target, action, params, issued_ms, expires_ms
     params is a dict of string→string.
     """
     result = bytearray()
-    result.extend(
-        encode_field(1, 2, encode_length_delimited(cmd_id.encode("utf-8")))
-    )  # string
-    result.extend(
-        encode_field(2, 2, encode_length_delimited(target.encode("utf-8")))
-    )  # string
-    result.extend(
-        encode_field(3, 2, encode_length_delimited(action.encode("utf-8")))
-    )  # string
+    result.extend(encode_field(1, 2, encode_length_delimited(cmd_id.encode("utf-8"))))  # string
+    result.extend(encode_field(2, 2, encode_length_delimited(target.encode("utf-8"))))  # string
+    result.extend(encode_field(3, 2, encode_length_delimited(action.encode("utf-8"))))  # string
     # map<string, string> params = 4 — encoded as repeated length-delimited entries
     # each entry is a sub-message: key (field 1) + value (field 2)
     for k, v in params.items():
@@ -309,18 +295,10 @@ def decode_command_request(data):
 def encode_command_ack(cmd_id, node_id, success, message):
     """Encode a CommandAck protobuf message."""
     result = bytearray()
-    result.extend(
-        encode_field(1, 2, encode_length_delimited(cmd_id.encode("utf-8")))
-    )  # string
-    result.extend(
-        encode_field(2, 2, encode_length_delimited(node_id.encode("utf-8")))
-    )  # string
-    result.extend(
-        encode_field(3, 0, encode_varint(1 if success else 0))
-    )  # bool (varint)
-    result.extend(
-        encode_field(4, 2, encode_length_delimited(message.encode("utf-8")))
-    )  # string
+    result.extend(encode_field(1, 2, encode_length_delimited(cmd_id.encode("utf-8"))))  # string
+    result.extend(encode_field(2, 2, encode_length_delimited(node_id.encode("utf-8"))))  # string
+    result.extend(encode_field(3, 0, encode_varint(1 if success else 0)))  # bool (varint)
+    result.extend(encode_field(4, 2, encode_length_delimited(message.encode("utf-8"))))  # string
     return bytes(result)
 
 
@@ -390,13 +368,9 @@ def encode_audio_message(node_id, audio_data, codec, duration_ms, timestamp):
     audio_data is bytes (not str).
     """
     result = bytearray()
-    result.extend(
-        encode_field(1, 2, encode_length_delimited(node_id.encode("utf-8")))
-    )  # string
+    result.extend(encode_field(1, 2, encode_length_delimited(node_id.encode("utf-8"))))  # string
     result.extend(encode_field(2, 2, encode_length_delimited(audio_data)))  # bytes
-    result.extend(
-        encode_field(3, 2, encode_length_delimited(codec.encode("utf-8")))
-    )  # string
+    result.extend(encode_field(3, 2, encode_length_delimited(codec.encode("utf-8"))))  # string
     result.extend(encode_field(4, 0, encode_varint(duration_ms)))  # uint32
     result.extend(encode_field(5, 0, encode_varint(timestamp)))  # uint64
     return bytes(result)
@@ -430,13 +404,9 @@ def encode_image_message(node_id, image_data, fmt, width, height, timestamp):
     image_data is bytes.
     """
     result = bytearray()
-    result.extend(
-        encode_field(1, 2, encode_length_delimited(node_id.encode("utf-8")))
-    )  # string
+    result.extend(encode_field(1, 2, encode_length_delimited(node_id.encode("utf-8"))))  # string
     result.extend(encode_field(2, 2, encode_length_delimited(image_data)))  # bytes
-    result.extend(
-        encode_field(3, 2, encode_length_delimited(fmt.encode("utf-8")))
-    )  # string
+    result.extend(encode_field(3, 2, encode_length_delimited(fmt.encode("utf-8"))))  # string
     result.extend(encode_field(4, 0, encode_varint(width)))  # uint32
     result.extend(encode_field(5, 0, encode_varint(height)))  # uint32
     result.extend(encode_field(6, 0, encode_varint(timestamp)))  # uint64
@@ -480,12 +450,8 @@ def encode_call_signal(signal, sdp_or_ice, media_type):
     """
     result = bytearray()
     result.extend(encode_field(1, 0, encode_varint(signal)))  # enum (varint)
-    result.extend(
-        encode_field(2, 2, encode_length_delimited(sdp_or_ice.encode("utf-8")))
-    )  # string
-    result.extend(
-        encode_field(3, 2, encode_length_delimited(media_type.encode("utf-8")))
-    )  # string
+    result.extend(encode_field(2, 2, encode_length_delimited(sdp_or_ice.encode("utf-8"))))  # string
+    result.extend(encode_field(3, 2, encode_length_delimited(media_type.encode("utf-8"))))  # string
     return bytes(result)
 
 
@@ -602,12 +568,11 @@ def parse_poc_message(data):
         result = decode_envelope(data)
     except Exception:
         result = None
-    if result is not None:
-        return result.get("content") if isinstance(result, dict) else None
+    # Return content if protobuf produced a dict; fall through to raw-UTF-8 fallback
+    if isinstance(result, dict):
+        return result.get("content")
     # Fallback: treat raw content as plain text
-    print(
-        "WARNING: parse_poc_message — protobuf decode returned None, trying raw UTF-8 fallback"
-    )
+    print("WARNING: parse_poc_message — protobuf decode returned None, trying raw UTF-8 fallback")
     try:
         text = data.decode("utf-8")
         return text
