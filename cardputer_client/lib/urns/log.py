@@ -42,19 +42,19 @@ def log(msg, level=LOG_NOTICE):
         try:
             ln = _level_names.get(level, "????")
             line = "[%d][%s] %s" % (time.time(), ln, str(msg))
-        except:
+        except Exception:
             line = "[LOG FORMAT ERROR] " + repr(msg)
 
         # Console output — the critical path for diagnostics
         try:
             print(line)
-        except:
+        except Exception:
             # If even print fails, try a raw fallback so the user sees something
             try:
                 import sys as _sys
 
                 _sys.stdout.write("[LOG FAILURE] " + repr(line) + "\n")
-            except:
+            except Exception:
                 pass  # Nothing more we can do
 
         # Ring buffer is best-effort; never silence console for it
@@ -62,7 +62,7 @@ def log(msg, level=LOG_NOTICE):
             _LOG_RING.append(line)
             if len(_LOG_RING) > _LOG_RING_MAX:
                 _LOG_RING.pop(0)
-        except:
+        except Exception:
             pass
 
 

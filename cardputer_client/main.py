@@ -107,15 +107,21 @@ def _init_wifi(ssid, password, config, debug=0):
 
 
 def make_sensor_message(identity_hex, seq, battery=3.7, strict=False):
-    """Build an LMAOEnvelope containing a SensorReport with real ESP32 die temperature.
+    """Build an LMAOEnvelope containing a SensorReport.
 
-    When *strict* is ``False`` (default): on CPython (no ``esp32`` module) falls back
-    to a constant 25.0°C for test environments.  On real hardware, sensor read
-    failures propagate as exceptions regardless of the flag.
+    Always includes an ESP32 internal die temperature reading (sensor_id=1).
+    When ``_CONFIG["sensor_type"]`` is set and the sensor library is available,
+    also appends an external humidity reading (sensor_id=2) from the Grove I2C
+    sensor.
 
-    When *strict* is ``True``: raises ``RuntimeError`` if the ESP32 die temperature
-    cannot be read, even on CPython.  Use this in E2E tests or production configs
-    that must never see synthetic data.
+    When *strict* is ``False`` (default): on CPython (no ``esp32`` module) falls
+    back to a constant 25.0°C for test environments.  On real hardware, sensor
+    read failures propagate as exceptions regardless of the flag.
+
+    When *strict* is ``True``: raises an exception if the ESP32 die temperature
+    cannot be read (``RuntimeError`` when the ``esp32`` module is absent; the
+    underlying exception propagates on real hardware).  Use this in E2E tests or
+    production configs that must never see synthetic data.
 
     Args:
         identity_hex: Hex identity string of the sending node.
@@ -124,7 +130,7 @@ def make_sensor_message(identity_hex, seq, battery=3.7, strict=False):
         strict: If ``True``, fail hard when temperature can't be read from hardware.
 
     Returns:
-        bytes: Serialized LMAOEnvelope protobuf.
+        bytes: Serialized LMAOEnvelope protobuf with one or two SensorReading entries.
     """
 
     try:
@@ -167,8 +173,9 @@ def make_sensor_message(identity_hex, seq, battery=3.7, strict=False):
                     }
                 )
         except (OSError, ValueError) as e:
-            if hasattr(sys, "print_exception"):
-                sys.print_exception(e)
+            import traceback
+
+            traceback.print_exc()
             print(f"Humidity sensor read failed: {e}")
 
     return encode_sensor_envelope(identity_hex, seq, battery, readings)
@@ -249,13 +256,17 @@ def handle_reply(message):
     """
     content = ""
     try:
+        source_info = (
+            message.source_hash.hex()[:8] if message.source_hash else "unknown"
+        )
         content = message.content_as_string() or ""
     except Exception as e:
-        print(f"handle_reply: content extraction failed: {e}")
+        print(f"handle_reply: content extraction failed from {source_info}: {e}")
         sys.print_exception(e)
+        return  # Don't add empty content to pending_replies
 
     if content:
-        print(f"\n>>> REPLY from server: {content}")
+        print(f"\n>>> REPLY from server ({source_info}): {content}")
         pending_replies.append(content)
 
 
@@ -310,8 +321,8 @@ def _connect_wifi(ssid, password, debug=0, timeout=15):
         ntptime.settime()
         if debug >= 1:
             print("NTP synced")
-    except Exception:
-        print("NTP sync failed")
+    except Exception as e:
+        print(f"NTP sync failed: {e}")
 
     return ip
 
@@ -397,6 +408,15 @@ def main():
             f"ERROR: DEST_HASH is not a valid hex string: {raw_dest!r}. "
             "Expected 32 hex characters (e.g. 'a1b2c3d4e5f6...'). "
             "Set DEST_HASH = None in config.py to disable sending.",
+            tft,
+            status_lines,
+        )
+        while True:
+            time.sleep(1)
+
+    except SyntaxError as e:
+        log(
+            f"ERROR: config.py has a syntax error on line {getattr(e, 'lineno', '?')}: {e}",
             tft,
             status_lines,
         )

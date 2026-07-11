@@ -267,6 +267,11 @@ class NatsQueue:
         self._check_connected()
 
         if len(payload) > self._max_payload:
+            _logger.warning(
+                "Payload size %d bytes exceeds max %d — rejecting",
+                len(payload),
+                self._max_payload,
+            )
             raise ValueError(
                 f"Payload size {len(payload)} bytes exceeds maximum "
                 f"{self._max_payload} bytes. Chunk large messages or "
@@ -393,7 +398,8 @@ class NatsQueue:
                                 nak_err,
                                 exc_info=True,
                             )
-                            raise  # Bubble up to outer retry/reconnect
+                            # Keep subscription alive; message will be redelivered
+                            continue
         except asyncio.CancelledError:
             _logger.info("Subscribe cancelled for '%s'", subject)
             raise
