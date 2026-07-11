@@ -258,9 +258,8 @@ class LXMessage:
 
         unpacked_payload = umsgpack.unpackb(packed_payload)
 
-        # Extract stamp if present (5th element)
+        # Strip stamp field (5th element) if present — not used on this platform
         if len(unpacked_payload) > 4:
-            unpacked_payload[4]
             unpacked_payload = unpacked_payload[:4]
             packed_payload = umsgpack.packb(unpacked_payload)
 

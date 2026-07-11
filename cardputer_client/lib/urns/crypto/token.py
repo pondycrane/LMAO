@@ -68,5 +68,8 @@ class Token:
             return PKCS7.unpad(
                 self.mode.decrypt(ciphertext=ciphertext, key=self._encryption_key, iv=iv)
             )
-        except Exception:
+        except Exception as e:
+            from ..log import log, LOG_ERROR
+
+            log("Token decrypt failed: " + str(e), LOG_ERROR)
             raise ValueError("Could not decrypt token")

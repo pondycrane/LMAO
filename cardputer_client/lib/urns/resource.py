@@ -409,7 +409,6 @@ class Resource:
         t1 = time.time()
 
         # Strip random hash
-        plaintext[:RANDOM_HASH_SIZE]
         self.data = plaintext[RANDOM_HASH_SIZE:]
         del plaintext
         gc.collect()

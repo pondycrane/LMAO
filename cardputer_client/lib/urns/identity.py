@@ -118,7 +118,12 @@ class Identity:
             # Re-announces refresh the received time, like upstream.
             Identity.known_ratchets[destination_hash] = (ratchet, time.time())
         except Exception as e:
-            log("Could not remember ratchet: " + str(e), LOG_ERROR)
+            log(
+                "Could not remember ratchet for "
+                + destination_hash.hex()[:8]
+                + ": " + str(e),
+                LOG_ERROR,
+            )
 
     @staticmethod
     def get_ratchet(destination_hash):
@@ -225,7 +230,7 @@ class Identity:
 
                 gc.collect()
             except Exception as e:
-                log("Announce sig validation error: " + str(e), LOG_DEBUG)
+                log("gc.collect failed after announce sig verify: " + str(e), LOG_ERROR)
             log("Announce sig_valid=" + str(sig_valid), LOG_DEBUG)
 
             # Fallback: if verification failed, try opposite ratchet assumption.
@@ -259,7 +264,7 @@ class Identity:
 
                         gc.collect()
                     except Exception as e:
-                        log("Signature validation error: " + str(e), LOG_DEBUG)
+                        log("gc.collect failed after alt announce sig verify: " + str(e), LOG_ERROR)
                     if sig_valid:
                         log("Announce verified with alternate layout", LOG_DEBUG)
                 if not len(packet.data) > keysize + name_hash_len + 10 + sig_len:
@@ -460,7 +465,7 @@ class Identity:
 
                 gc.collect()
             except Exception as e:
-                log("Identity encrypt error: " + str(e), LOG_DEBUG)
+                log("gc.collect failed during encrypt keygen: " + str(e), LOG_ERROR)
 
             if ratchet is not None:
                 target_public_key = X25519PublicKey.from_public_bytes(ratchet)
@@ -473,7 +478,7 @@ class Identity:
 
                 gc.collect()
             except Exception as e:
-                log("Identity encrypt error: " + str(e), LOG_DEBUG)
+                log("gc.collect failed during encrypt ECDH: " + str(e), LOG_ERROR)
             derived_key = hkdf(
                 length=Identity.DERIVED_KEY_LENGTH,
                 derive_from=shared_key,
@@ -486,7 +491,7 @@ class Identity:
 
                 gc.collect()
             except Exception as e:
-                log("Identity encrypt error: " + str(e), LOG_DEBUG)
+                log("gc.collect failed during encrypt Token: " + str(e), LOG_ERROR)
             ciphertext = token.encrypt(plaintext)
             return ephemeral_pub_bytes + ciphertext
         else:

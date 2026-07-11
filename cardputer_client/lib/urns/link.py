@@ -46,9 +46,8 @@ class Link:
         if len(packet.data) < ECPUBSIZE:
             raise ValueError("Link request too short: " + str(len(packet.data)))
 
-        # Parse peer keys from link request payload
+        # Parse peer X25519 public key from link request payload
         peer_pub_bytes = packet.data[:32]
-        packet.data[32:64]
 
         # Parse signalling bytes if present (RNS 0.8+)
         has_signalling = len(packet.data) > ECPUBSIZE
