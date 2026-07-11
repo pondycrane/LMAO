@@ -2,7 +2,7 @@
 Install server-side services: Docker build on the Pi and Kubernetes
 manifest application to the cluster.
 
-Provides two public functions that are called by install_all.py's main()
+Provides three public functions that are called by install_all.py's main()
 pipeline when the --include-services flag is set.
 
 Usage (via Bazel):
@@ -32,9 +32,19 @@ def _find_repo_root() -> str | None:
     Identifies the repo root by locating a ``Dockerfile`` or ``.git``
     directory in an ancestor directory.
 
+    When run via ``bazel run``, Bazel sets ``BUILD_WORKSPACE_DIRECTORY``
+    to the actual workspace root — use that directly to avoid the Bazel
+    sandbox execroot (which has no .git or real Dockerfile).
+
     Returns:
         Absolute path to the repo root, or ``None`` if not found.
     """
+    # Bazel-run path: BUILD_WORKSPACE_DIRECTORY points to the real workspace root
+    bw = os.environ.get("BUILD_WORKSPACE_DIRECTORY")
+    if bw and os.path.isdir(bw):
+        print(f"  DEBUG: Found repo root via BUILD_WORKSPACE_DIRECTORY: {bw}")
+        return bw
+
     current = os.path.dirname(os.path.abspath(__file__))
     print(f"  DEBUG: Searching for repo root, starting at {current}")
     for _ in range(10):
@@ -319,3 +329,90 @@ def install_k8s_services(result: DeviceResult, repo_root: str | None = None) -> 
     manifests_str = ", ".join(applied)
     result.ok(f"Applied {manifests_str}")
     print(f"  OK: Applied {manifests_str}")
+
+
+def setup_registry(result: DeviceResult, repo_root: str | None = None) -> None:
+    """Start the local Docker registry and push all LMAO images.
+
+    Delegates to ``docker/registry/manage.sh`` which wraps docker-compose
+    and docker push under the hood.  Checks for the ``docker`` CLI and the
+    manage script before proceeding.
+
+    The caller must pass a ``DeviceResult`` instance (imported lazily
+    from ``install_all``) as *result*.  On success the result is set to
+    OK; on failure it is set to FAIL.  Missing ``docker`` CLI on PATH
+    results in SKIP; missing ``manage.sh`` or repo root results in FAIL.
+
+    Args:
+        result: A ``DeviceResult`` instance (from ``tools.install_all``).
+        repo_root: Path to the repository root containing ``docker/registry/``.
+            When ``None``, auto-detected via ``_find_repo_root()``.
+    """
+
+    print("\n--- Local Docker Registry: start + push ---")
+
+    if repo_root is None:
+        repo_root = _find_repo_root()
+
+    if not repo_root:
+        result.fail("Cannot locate repo root (no Dockerfile found)")
+        print("  FAIL: Cannot locate repo root (no Dockerfile found)")
+        return
+
+    manage_script = os.path.join(repo_root, "docker", "registry", "manage.sh")
+
+    if shutil.which("docker") is None:
+        result.skip("Docker not found on PATH")
+        print("  SKIP: Docker not found on PATH")
+        return
+
+    if not os.path.isfile(manage_script):
+        result.fail(f"Registry manage script not found: {manage_script}")
+        print(f"  FAIL: manage.sh not found at {manage_script}")
+        return
+
+    try:
+        # Step 1 -- start the registry container
+        print("  Starting registry container...")
+        proc = subprocess.run(
+            [manage_script, "start"],
+            capture_output=True,
+            text=True,
+        )
+        if proc.returncode != 0:
+            stderr_tail = proc.stderr.strip().split("\n")[-3:]
+            err_msg = "; ".join(stderr_tail) if stderr_tail else "unknown error"
+            result.fail(f"Registry start failed: {err_msg}")
+            print(f"  FAIL: Registry start failed -- {err_msg}")
+            return
+
+        print("  Registry container started.")
+
+        # Step 2 -- push all LMAO images
+        print("  Building and pushing LMAO images...")
+        env = os.environ.copy()
+        proc = subprocess.run(
+            [manage_script, "push"],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        if proc.returncode != 0:
+            stderr_tail = proc.stderr.strip().split("\n")[-3:]
+            err_msg = "; ".join(stderr_tail) if stderr_tail else "unknown error"
+            result.fail(f"Registry push failed: {err_msg}")
+            print(f"  FAIL: Registry push failed -- {err_msg}")
+            return
+
+        result.ok("Registry started and LMAO images pushed")
+        print("  OK: Registry running, images pushed")
+
+    except subprocess.SubprocessError as exc:
+        result.fail(f"Registry setup error: {exc}")
+        print(f"  FAIL: {exc}")
+    except Exception as exc:
+        import traceback
+
+        traceback.print_exc()
+        result.fail(f"Unexpected error during registry setup: {exc}")
+        print(f"  FAIL: {exc}")
