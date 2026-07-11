@@ -4,6 +4,7 @@ These helpers are imported by individual E2E test files to avoid code
 duplication.  They require pyserial and physical hardware to be connected.
 """
 
+import os
 import subprocess
 import sys
 import traceback
@@ -15,6 +16,45 @@ import serial.tools.list_ports
 # Consolidates VID checking into a single set to avoid verbose
 # try/except-per-VID anti-pattern.
 RNODE_VIDS = {0x303A, 0x10C4, 0x1A86}
+
+
+def _find_system_python() -> str:
+    """Return the path of a system Python that has ``rns`` installed.
+
+    Bazel's sandbox Python (``sys.executable`` inside a test) does *not*
+    have ``rns`` available, so we resolve a system Python via
+    ``shutil.which()`` with a preference for the user-local install.
+
+    Returns:
+        Absolute path to a Python interpreter that can import ``RNS``,
+        or ``sys.executable`` as a fallback (which will fail at runtime
+        but preserves the existing error path for non-Bazel invocations).
+    """
+    import shutil
+
+    # Preference order: user-local pip, then system python3, then python.
+    candidates = [
+        os.path.expanduser("~/.local/bin/python3"),
+        shutil.which("python3"),
+        shutil.which("python"),
+    ]
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        try:
+            result = subprocess.run(
+                [candidate, "-c", "import RNS; print(RNS.__version__)"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode == 0:
+                return candidate
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            continue
+
+    # Fallback — will likely produce the same ModuleNotFoundError as before.
+    return sys.executable
 
 
 def case_insensitive_contains(haystack: bytes, needle: str) -> bool:
@@ -80,10 +120,11 @@ def check_rnode_firmware(port: str, timeout: int = 15) -> bool:
         (including when ``rnodeconf`` is not importable or the subprocess
         times out).
     """
+    system_python = _find_system_python()
     try:
         result = subprocess.run(
             [
-                sys.executable,
+                system_python,
                 "-m",
                 "RNS.Utilities.rnodeconf",
                 "--port",
@@ -139,10 +180,11 @@ def flash_rnode_firmware(port: str, timeout: int = 120) -> tuple[bool, str]:
         error summary.
     """
     print(f"\nAuto-flashing RNode firmware on {port} ...", flush=True)
+    system_python = _find_system_python()
     try:
         result = subprocess.run(
             [
-                sys.executable,
+                system_python,
                 "-m",
                 "RNS.Utilities.rnodeconf",
                 "--port",
