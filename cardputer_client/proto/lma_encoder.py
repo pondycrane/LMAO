@@ -568,8 +568,9 @@ def parse_poc_message(data):
         result = decode_envelope(data)
     except Exception:
         result = None
-    if result is not None:
-        return result.get("content") if isinstance(result, dict) else None
+    # Return content if protobuf produced a dict; fall through to raw-UTF-8 fallback
+    if isinstance(result, dict):
+        return result.get("content")
     # Fallback: treat raw content as plain text
     print("WARNING: parse_poc_message — protobuf decode returned None, trying raw UTF-8 fallback")
     try:
