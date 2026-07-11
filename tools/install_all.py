@@ -8,12 +8,16 @@ then prints a summary table of per-device results.
 When --include-services is set, also builds the Pi server Docker image and
 applies Kubernetes manifests to the cluster.
 
+When --setup-registry is set, starts the local Docker registry and pushes
+all LMAO images to it.
+
 Usage (via Bazel):
     bazel run //tools:install_all
     bazel run //tools:install_all -- --cardputer-port /dev/ttyACM0
     bazel run //tools:install_all -- --rnode-port /dev/ttyUSB0
     bazel run //tools:install_all -- --skip-cardputer
     bazel run //tools:install_all -- --skip-rnode
+    bazel run //tools:install_all -- --setup-registry
     bazel run //tools:install_all -- --include-services
     bazel run //tools:install_all -- --include-services --skip-k8s
 
@@ -61,6 +65,7 @@ from tools.install_services import (
     install_iot_ingest_consumer,
     install_k8s_services,
     install_pi_server,
+    setup_registry,
 )
 
 # ---- Result tracking ----
@@ -290,6 +295,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Path to cardputer_client/ directory (auto-detected when omitted).",
     )
     parser.add_argument(
+        "--setup-registry",
+        action="store_true",
+        help="Start local Docker registry and push LMAO images.",
+    )
+    parser.add_argument(
         "--include-services",
         action="store_true",
         help="Also install Pi server (Docker) and apply K8s manifests.",
@@ -359,6 +369,20 @@ def main(argv: list[str] | None = None) -> None:
             print("RNode: SKIP — not detected on USB")
         else:
             _install_rnode_firmware(port, rn_result)
+
+    # ── Local Registry ──
+    registry_result = DeviceResult("Local Registry")
+    results.append(registry_result)
+
+    if args.setup_registry:
+        try:
+            setup_registry(registry_result)
+        except Exception as exc:
+            import traceback
+            traceback.print_exc()
+            registry_result.fail(f"Registry setup error: {exc}")
+    else:
+        registry_result.skip("--setup-registry not set")
 
     # ── Services (Pi server + K8s) ──
     pi_result = DeviceResult("Pi Server")
