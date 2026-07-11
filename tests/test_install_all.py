@@ -46,9 +46,7 @@ def _patch_imports():
         "find_client_root": patch.object(
             install_all, "find_client_root", return_value="/fake/client_root"
         ),
-        "enter_raw_repl": patch.object(
-            install_all, "enter_raw_repl", return_value=True
-        ),
+        "enter_raw_repl": patch.object(install_all, "enter_raw_repl", return_value=True),
     }
     return patches
 
@@ -187,9 +185,7 @@ class TestParseArgs:
 
     def test_skip_iot_ingest_with_skip_k8s(self):
         """--skip-iot-ingest can be combined with --skip-k8s."""
-        args = install_all._parse_args(
-            ["--include-services", "--skip-k8s", "--skip-iot-ingest"]
-        )
+        args = install_all._parse_args(["--include-services", "--skip-k8s", "--skip-iot-ingest"])
         assert args.skip_k8s is True
         assert args.skip_iot_ingest is True
 
@@ -1267,6 +1263,7 @@ class TestInstallIotIngestConsumer:
         """
         mock_proc = MagicMock()
         mock_proc.returncode = 0
+
         # shutil.which returns docker but not kubectl
         def _which_side_effect(cmd):
             if cmd == "docker":
@@ -1344,6 +1341,7 @@ class TestInstallIotIngestConsumer:
         """Result should be FAIL when k8s/iot-ingest.yaml is missing."""
         mock_proc = MagicMock()
         mock_proc.returncode = 0
+
         # os.path.isfile returns True for Dockerfile, False for manifest
         def _isfile(path):
             return "Dockerfile" in path
@@ -1357,6 +1355,244 @@ class TestInstallIotIngestConsumer:
             install_services.install_iot_ingest_consumer(result, "/fake/repo")
             assert result.status == "FAIL"
             assert "iot-ingest.yaml" in result.detail.lower()
+
+    # ── Registry path tests ──
+
+    def test_registry_path_skips_docker_build(self):
+        """When registry_host and registry_port are set, should skip docker build."""
+        result = self._make_result()
+        with (
+            patch("shutil.which", return_value="/usr/bin/kubectl"),
+            patch("os.path.isfile", return_value=True),
+            patch("subprocess.run") as mock_run,
+        ):
+            mock_proc = MagicMock()
+            mock_proc.returncode = 0
+            mock_run.return_value = mock_proc
+            install_services.install_iot_ingest_consumer(
+                result,
+                "/fake/repo",
+                registry_host="192.168.0.36",
+                registry_port=5000,
+            )
+            # Should be OK (registry deploy succeeded)
+            assert result.status == "OK"
+            assert "deployed from registry" in result.detail.lower()
+            # Should NOT have called docker build (only kubectl commands)
+            for call_args in mock_run.call_args_list:
+                args = call_args[0][0]
+                assert "docker" not in args
+
+    def test_registry_path_delegates_to_helper(self):
+        """When registry params are set, should delegate to _apply_iot_ingest_manifest."""
+        result = self._make_result()
+        with patch.object(
+            install_services,
+            "_apply_iot_ingest_manifest",
+        ) as mock_helper:
+            install_services.install_iot_ingest_consumer(
+                result,
+                "/fake/repo",
+                registry_host="192.168.0.36",
+                registry_port=5000,
+            )
+            mock_helper.assert_called_once_with(result, "/fake/repo", "192.168.0.36", 5000)
+
+    def test_registry_path_still_checks_repo_root(self):
+        """Registry path should still check repo_root before delegating."""
+        result = self._make_result()
+        with patch.object(install_services, "_find_repo_root", return_value=None):
+            install_services.install_iot_ingest_consumer(
+                result,
+                None,
+                registry_host="192.168.0.36",
+                registry_port=5000,
+            )
+            assert result.status == "FAIL"
+            assert "repo root" in result.detail.lower()
+
+    def test_no_registry_preserves_local_build(self):
+        """Without registry params, existing docker build + kubectl apply is preserved."""
+        mock_proc = MagicMock()
+        mock_proc.returncode = 0
+        result = self._make_result()
+        with (
+            patch("shutil.which", return_value="/usr/bin/docker"),
+            patch("os.path.isfile", return_value=True),
+            patch("subprocess.run", return_value=mock_proc) as mock_run,
+        ):
+            install_services.install_iot_ingest_consumer(result, "/fake/repo")
+            assert result.status == "OK"
+            # Should have called docker build
+            docker_calls = [c for c in mock_run.call_args_list if "docker" in c[0][0]]
+            assert len(docker_calls) > 0
+
+    def test_registry_host_only_does_not_activate(self):
+        """registry_host alone without registry_port should not activate registry path."""
+        mock_proc = MagicMock()
+        mock_proc.returncode = 0
+        result = self._make_result()
+        with (
+            patch("shutil.which", return_value="/usr/bin/docker"),
+            patch("os.path.isfile", return_value=True),
+            patch("subprocess.run", return_value=mock_proc) as mock_run,
+        ):
+            install_services.install_iot_ingest_consumer(
+                result,
+                "/fake/repo",
+                registry_host="192.168.0.36",
+            )
+            # Should have followed the normal docker build path
+            docker_calls = [c for c in mock_run.call_args_list if "docker" in c[0][0]]
+            assert len(docker_calls) > 0
+
+
+# ── Unit tests for _apply_iot_ingest_manifest() ──────────────────
+
+
+class TestApplyIotIngestManifest:
+    """Unit tests for install_services._apply_iot_ingest_manifest()."""
+
+    def _make_result(self):
+        return install_all.DeviceResult("IoT Ingest Consumer")
+
+    def test_skips_when_kubectl_not_found(self):
+        """Result should be SKIP when kubectl is not on PATH."""
+        with patch("shutil.which", return_value=None):
+            result = self._make_result()
+            install_services._apply_iot_ingest_manifest(result, "/fake/repo", "192.168.0.36", 5000)
+            assert result.status == "SKIP"
+            assert "kubectl" in result.detail.lower()
+
+    def test_fails_when_manifest_not_found(self):
+        """Result should be FAIL when k8s/iot-ingest.yaml does not exist."""
+        with (
+            patch("shutil.which", return_value="/usr/bin/kubectl"),
+            patch("os.path.isfile", return_value=False),
+        ):
+            result = self._make_result()
+            install_services._apply_iot_ingest_manifest(result, "/fake/repo", "192.168.0.36", 5000)
+            assert result.status == "FAIL"
+            assert "iot-ingest.yaml" in result.detail.lower()
+
+    def test_ok_when_all_steps_succeed(self):
+        """Result should be OK when apply + set image + patch all succeed."""
+        mock_proc = MagicMock()
+        mock_proc.returncode = 0
+        with (
+            patch("shutil.which", return_value="/usr/bin/kubectl"),
+            patch("os.path.isfile", return_value=True),
+            patch("subprocess.run", return_value=mock_proc),
+        ):
+            result = self._make_result()
+            install_services._apply_iot_ingest_manifest(result, "/fake/repo", "192.168.0.36", 5000)
+            assert result.status == "OK"
+            assert "192.168.0.36:5000/lmao-iot-ingest:latest" in result.detail
+
+    def test_sets_image_and_patch_pull_policy(self):
+        """Should call kubectl apply, set image, and patch pull policy."""
+        mock_proc = MagicMock()
+        mock_proc.returncode = 0
+        with (
+            patch("shutil.which", return_value="/usr/bin/kubectl"),
+            patch("os.path.isfile", return_value=True),
+            patch("subprocess.run", return_value=mock_proc) as mock_run,
+        ):
+            result = self._make_result()
+            install_services._apply_iot_ingest_manifest(result, "/fake/repo", "192.168.0.36", 5000)
+            assert result.status == "OK"
+            # Should have made 3 subprocess calls
+            assert mock_run.call_count == 3
+            # First call: kubectl apply
+            first_call_args = mock_run.call_args_list[0][0][0]
+            assert "apply" in first_call_args
+            # Second call: kubectl set image
+            second_call_args = mock_run.call_args_list[1][0][0]
+            assert "set" in second_call_args
+            assert "image" in second_call_args
+            assert "192.168.0.36:5000/lmao-iot-ingest:latest" in str(second_call_args)
+            # Third call: kubectl patch
+            third_call_args = mock_run.call_args_list[2][0][0]
+            assert "patch" in third_call_args
+            assert "Always" in str(third_call_args)
+
+    def test_fails_when_kubectl_apply_returns_nonzero(self):
+        """Result should be FAIL when kubectl apply fails."""
+        mock_fail = MagicMock()
+        mock_fail.returncode = 1
+        mock_fail.stderr = "connection refused"
+        with (
+            patch("shutil.which", return_value="/usr/bin/kubectl"),
+            patch("os.path.isfile", return_value=True),
+            patch("subprocess.run", return_value=mock_fail),
+        ):
+            result = self._make_result()
+            install_services._apply_iot_ingest_manifest(result, "/fake/repo", "192.168.0.36", 5000)
+            assert result.status == "FAIL"
+            assert "kubectl apply failed" in result.detail
+
+    def test_fails_when_set_image_fails(self):
+        """Result should be FAIL when kubectl set image fails."""
+        mock_ok = MagicMock()
+        mock_ok.returncode = 0
+        mock_fail = MagicMock()
+        mock_fail.returncode = 1
+        mock_fail.stderr = "deployment not found"
+        with (
+            patch("shutil.which", return_value="/usr/bin/kubectl"),
+            patch("os.path.isfile", return_value=True),
+            patch("subprocess.run", side_effect=[mock_ok, mock_fail]),
+        ):
+            result = self._make_result()
+            install_services._apply_iot_ingest_manifest(result, "/fake/repo", "192.168.0.36", 5000)
+            assert result.status == "FAIL"
+            assert "set image failed" in result.detail
+
+    def test_fails_when_patch_fails(self):
+        """Result should be FAIL when kubectl patch fails."""
+        mock_ok = MagicMock()
+        mock_ok.returncode = 0
+        mock_fail = MagicMock()
+        mock_fail.returncode = 1
+        mock_fail.stderr = "forbidden"
+        with (
+            patch("shutil.which", return_value="/usr/bin/kubectl"),
+            patch("os.path.isfile", return_value=True),
+            patch("subprocess.run", side_effect=[mock_ok, mock_ok, mock_fail]),
+        ):
+            result = self._make_result()
+            install_services._apply_iot_ingest_manifest(result, "/fake/repo", "192.168.0.36", 5000)
+            assert result.status == "FAIL"
+            assert "patch failed" in result.detail
+
+    def test_fails_when_subprocess_raises(self):
+        """Result should be FAIL when subprocess.run raises SubprocessError."""
+        with (
+            patch("shutil.which", return_value="/usr/bin/kubectl"),
+            patch("os.path.isfile", return_value=True),
+            patch(
+                "subprocess.run",
+                side_effect=subprocess.SubprocessError("command timeout"),
+            ),
+        ):
+            result = self._make_result()
+            install_services._apply_iot_ingest_manifest(result, "/fake/repo", "192.168.0.36", 5000)
+            assert result.status == "FAIL"
+
+    def test_fails_when_generic_exception_raised(self):
+        """Result should be FAIL when an unexpected exception occurs."""
+        with (
+            patch("shutil.which", return_value="/usr/bin/kubectl"),
+            patch("os.path.isfile", return_value=True),
+            patch(
+                "subprocess.run",
+                side_effect=OSError("disk full"),
+            ),
+        ):
+            result = self._make_result()
+            install_services._apply_iot_ingest_manifest(result, "/fake/repo", "192.168.0.36", 5000)
+            assert result.status == "FAIL"
+            assert "Unexpected error" in result.detail
 
 
 # ── Unit tests for setup_registry() ─────────────────────────────────
@@ -1513,3 +1749,80 @@ class TestMainWithRegistry:
         captured = capsys.readouterr().out
         assert "FAIL" in captured
         assert "Docker daemon not running" in captured
+
+
+# ── Main pipeline — registry + services integration ──────────────
+
+
+class TestMainWithRegistryAndServices:
+    """Test main() with --setup-registry and --include-services together."""
+
+    @pytest.fixture(autouse=True)
+    def _setup_mocks(self):
+        patches = _patch_imports()
+        patches["setup_registry"] = patch.object(install_all, "setup_registry")
+        patches["install_pi_server"] = patch.object(install_all, "install_pi_server")
+        patches["install_k8s_services"] = patch.object(install_all, "install_k8s_services")
+        patches["install_iot_ingest_consumer"] = patch.object(
+            install_all, "install_iot_ingest_consumer"
+        )
+        self.mocks, self._patches = _start_patches(patches)
+        self.mocks["find_cardputer_port"].return_value = None
+        self.mocks["find_rnode_port"].return_value = None
+        yield
+        _stop_patches(self._patches)
+
+    def test_registry_with_services_passes_registry_to_iot(self):
+        """When both --setup-registry and --include-services are set,
+        install_iot_ingest_consumer should receive registry_host and registry_port."""
+        # Simulate successful registry setup (sets result.status to "OK")
+        self.mocks["setup_registry"].side_effect = lambda result: setattr(
+            result, "status", "OK"
+        )
+        with pytest.raises(SystemExit):
+            install_all.main(["--setup-registry", "--include-services"])
+        self.mocks["install_iot_ingest_consumer"].assert_called_once()
+        call_kwargs = self.mocks["install_iot_ingest_consumer"].call_args.kwargs
+        assert call_kwargs.get("registry_host") == "192.168.0.36"
+        assert call_kwargs.get("registry_port") == 5000
+
+    def test_services_only_no_registry_passed_to_iot(self):
+        """When only --include-services (no --setup-registry) is set,
+        install_iot_ingest_consumer should NOT receive registry params."""
+        with pytest.raises(SystemExit):
+            install_all.main(["--include-services"])
+        self.mocks["install_iot_ingest_consumer"].assert_called_once()
+        call_kwargs = self.mocks["install_iot_ingest_consumer"].call_args.kwargs
+        assert "registry_host" not in call_kwargs
+        assert "registry_port" not in call_kwargs
+
+    def test_registry_only_does_not_call_iot(self):
+        """When only --setup-registry (no --include-services) is set,
+        install_iot_ingest_consumer should NOT be called."""
+        with pytest.raises(SystemExit):
+            install_all.main(["--setup-registry"])
+        self.mocks["install_iot_ingest_consumer"].assert_not_called()
+
+    def test_registry_with_services_and_skip_iot(self):
+        """--skip-iot-ingest should prevent iot install even with registry."""
+        self.mocks["setup_registry"].side_effect = lambda result: setattr(
+            result, "status", "OK"
+        )
+        with pytest.raises(SystemExit):
+            install_all.main(["--setup-registry", "--include-services", "--skip-iot-ingest"])
+        self.mocks["install_iot_ingest_consumer"].assert_not_called()
+
+    def test_registry_failure_falls_back_to_local_build(self):
+        """When registry setup fails, IoT deploy should fall back to local Docker build
+        without registry params."""
+        # Simulate registry failure (status stays SKIP or becomes FAIL)
+        self.mocks["setup_registry"].side_effect = lambda result: setattr(
+            result, "status", "FAIL"
+        )
+        with pytest.raises(SystemExit):
+            install_all.main(["--setup-registry", "--include-services"])
+        self.mocks["install_iot_ingest_consumer"].assert_called_once()
+        call_kwargs = self.mocks["install_iot_ingest_consumer"].call_args.kwargs
+        # Should NOT pass registry params on fallback
+        assert "registry_host" not in call_kwargs
+        assert "registry_port" not in call_kwargs
