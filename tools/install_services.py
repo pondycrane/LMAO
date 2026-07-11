@@ -25,6 +25,10 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from tools.install_all import DeviceResult
 
+# Default local Docker registry address (used when --setup-registry is set).
+_DEFAULT_REGISTRY_HOST = "192.168.0.36"
+_DEFAULT_REGISTRY_PORT = 5000
+
 
 def _find_repo_root() -> str | None:
     """Walk up from this module's directory looking for the repo root.
@@ -124,11 +128,152 @@ def install_pi_server(result: DeviceResult, repo_root: str | None = None) -> Non
         print(f"  FAIL: {exc}")
 
 
-def install_iot_ingest_consumer(result: DeviceResult, repo_root: str | None = None) -> None:
+def _apply_iot_ingest_manifest(
+    result: DeviceResult,
+    repo_root: str,
+    registry_host: str,
+    registry_port: int,
+) -> None:
+    """Apply the IoT ingest K8s manifest and configure the deployment
+    to pull from a local Docker registry.
+
+    Applies ``k8s/iot-ingest.yaml``, then sets the container image to
+    ``{registry_host}:{registry_port}/lmao-iot-ingest:latest`` and
+    patches ``imagePullPolicy`` to ``Always``.
+
+    Args:
+        result: A ``DeviceResult`` instance (from ``tools.install_all``).
+        repo_root: Path to the repository root containing ``k8s/``.
+        registry_host: Hostname or IP of the local Docker registry.
+        registry_port: Port of the local Docker registry.
+    """
+
+    print(
+        f"\n--- IoT Ingest Consumer: deploy from registry "
+        f"({registry_host}:{registry_port}/lmao-iot-ingest:latest) ---"
+    )
+
+    if shutil.which("kubectl") is None:
+        result.skip("kubectl not found on PATH — install with: apt-get install kubectl")
+        print("  SKIP: kubectl not found on PATH")
+        return
+
+    manifest_path = os.path.join(repo_root, "k8s", "iot-ingest.yaml")
+    if not os.path.isfile(manifest_path):
+        result.fail(f"Manifest not found: {manifest_path}")
+        print(f"  FAIL: Manifest not found: {manifest_path}")
+        return
+
+    # Step 1 — apply the base manifest (PVC, ConfigMap, Deployment)
+    try:
+        proc = subprocess.run(
+            ["kubectl", "apply", "-f", manifest_path],
+            capture_output=True,
+            text=True,
+        )
+        if proc.returncode != 0:
+            stderr_tail = proc.stderr.strip().split("\n")[-3:]
+            stderr_msg = "; ".join(stderr_tail) if stderr_tail else "unknown error"
+            result.fail(f"kubectl apply failed: {stderr_msg}")
+            print(f"  FAIL: kubectl apply failed — {stderr_msg}")
+            return
+    except subprocess.SubprocessError as exc:
+        result.fail(f"kubectl error: {exc}")
+        print(f"  FAIL: {exc}")
+        return
+    except Exception as exc:
+        import traceback
+
+        traceback.print_exc()
+        result.fail(f"Unexpected error during kubectl apply: {exc}")
+        print(f"  FAIL: {exc}")
+        return
+
+    # Step 2 — set container image to registry reference
+    registry_image = f"{registry_host}:{registry_port}/lmao-iot-ingest:latest"
+    try:
+        proc = subprocess.run(
+            [
+                "kubectl",
+                "set",
+                "image",
+                "deployment/iot-ingest-consumer",
+                f"consumer={registry_image}",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        if proc.returncode != 0:
+            stderr_tail = proc.stderr.strip().split("\n")[-3:]
+            stderr_msg = "; ".join(stderr_tail) if stderr_tail else "unknown error"
+            result.fail(f"kubectl set image failed: {stderr_msg}")
+            print(f"  FAIL: kubectl set image failed — {stderr_msg}")
+            return
+        print(f"  Image set to: {registry_image}")
+    except subprocess.SubprocessError as exc:
+        result.fail(f"kubectl error (set image): {exc}")
+        print(f"  FAIL: {exc}")
+        return
+    except Exception as exc:
+        import traceback
+
+        traceback.print_exc()
+        result.fail(f"Unexpected error during kubectl set image: {exc}")
+        print(f"  FAIL: {exc}")
+        return
+
+    # Step 3 — patch imagePullPolicy to Always
+    try:
+        proc = subprocess.run(
+            [
+                "kubectl",
+                "patch",
+                "deployment",
+                "iot-ingest-consumer",
+                "-p",
+                '{"spec":{"template":{"spec":{"containers":[{"name":"consumer","imagePullPolicy":"Always"}]}}}}',
+            ],
+            capture_output=True,
+            text=True,
+        )
+        if proc.returncode != 0:
+            stderr_tail = proc.stderr.strip().split("\n")[-3:]
+            stderr_msg = "; ".join(stderr_tail) if stderr_tail else "unknown error"
+            result.fail(f"kubectl patch failed: {stderr_msg}")
+            print(f"  FAIL: kubectl patch failed — {stderr_msg}")
+            return
+        print("  imagePullPolicy patched to Always")
+    except subprocess.SubprocessError as exc:
+        result.fail(f"kubectl error (patch): {exc}")
+        print(f"  FAIL: {exc}")
+        return
+    except Exception as exc:
+        import traceback
+
+        traceback.print_exc()
+        result.fail(f"Unexpected error during kubectl patch: {exc}")
+        print(f"  FAIL: {exc}")
+        return
+
+    result.ok(f"IoT Ingest Consumer deployed from registry ({registry_image})")
+    print(f"  OK: IoT Ingest Consumer deployed from registry ({registry_image})")
+
+
+def install_iot_ingest_consumer(
+    result: DeviceResult,
+    repo_root: str | None = None,
+    registry_host: str | None = None,
+    registry_port: int | None = None,
+) -> None:
     """Build the iot-ingest Docker image and apply its K8s manifest.
 
     Builds ``Dockerfile.iot-ingest`` via ``docker build``, then applies
     ``k8s/iot-ingest.yaml`` via ``kubectl apply -f``.
+
+    When *registry_host* and *registry_port* are both provided, the
+    Docker build step is skipped and the deployment is configured to
+    pull from the local registry at
+    ``{registry_host}:{registry_port}/lmao-iot-ingest:latest`` instead.
 
     The caller must pass a ``DeviceResult`` instance (imported lazily
     from ``install_all``) as *result*.  On success the result is set to
@@ -139,6 +284,10 @@ def install_iot_ingest_consumer(result: DeviceResult, repo_root: str | None = No
         result: A ``DeviceResult`` instance (from ``tools.install_all``).
         repo_root: Path to the repository root containing ``Dockerfile.iot-ingest``
             and ``k8s/``.  When ``None``, auto-detected via ``_find_repo_root()``.
+        registry_host: Hostname or IP of the local Docker registry.
+            When provided together with *registry_port*, the Docker build
+            step is skipped and the deployment pulls from the registry.
+        registry_port: Port of the local Docker registry.
     """
 
     print("\n--- IoT Ingest Consumer: Docker build + K8s apply ---")
@@ -149,6 +298,11 @@ def install_iot_ingest_consumer(result: DeviceResult, repo_root: str | None = No
     if not repo_root:
         result.fail("Cannot locate repo root (no Dockerfile found)")
         print("  FAIL: Cannot locate repo root (no Dockerfile found)")
+        return
+
+    # ── Registry path: skip docker build, use local registry ──
+    if registry_host is not None and registry_port is not None:
+        _apply_iot_ingest_manifest(result, repo_root, registry_host, registry_port)
         return
 
     # ── Docker build ───────────────────────────────────────────
