@@ -1,0 +1,47 @@
+# LMAO Local Docker Registry
+#
+# A self-hosted Docker registry running on the Pi server for local image
+# storage and distribution to the K3s cluster.
+#
+# Usage:
+#   # Start the registry
+#   docker compose -f docker/registry/docker-compose.yml up -d
+#
+#   # Stop the registry
+#   docker compose -f docker/registry/docker-compose.yml down
+#
+#   # Push the LMAO images
+#   docker tag lmao-server localhost:5000/lmao-server:latest
+#   docker push localhost:5000/lmao-server:latest
+#
+#   docker tag lmao-iot-ingest localhost:5000/lmao-iot-ingest:latest
+#   docker push localhost:5000/lmao-iot-ingest:latest
+#
+# The registry is served on port 5000 without TLS (plain HTTP). All K3s
+# cluster nodes need to be configured to trust it as an insecure registry
+# (see README § Local Docker Registry for details).
+
+services:
+  registry:
+    image: registry:2
+    container_name: lmao-registry
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:5000:5000"                    # localhost only (host-side)
+      - "192.168.0.36:5000:5000"                  # cluster-network access
+    environment:
+      REGISTRY_STORAGE_FILESYSTEM_ROOTDIRECTORY: /data
+      REGISTRY_HTTP_ADDR: 0.0.0.0:5000
+      REGISTRY_STORAGE_DELETE_ENABLED: "true"
+    volumes:
+      - registry-data:/data
+    networks:
+      - lmao-network
+
+volumes:
+  registry-data:
+    driver: local
+
+networks:
+  lmao-network:
+    driver: bridge

@@ -7,7 +7,13 @@
 #
 # Prerequisites:
 #   - NATS server running in the cluster (k8s/nats-server.yaml)
-#   - Docker image built: docker build -f Dockerfile.iot-ingest -t lmao-iot-ingest .
+#   - Docker image built and pushed to the local Docker registry:
+#       ./docker/registry/manage.sh push-ingest
+#     (see README §13 for local registry setup)
+#
+#   Alternatively, load the image directly into K3s containerd:
+#       docker build -f Dockerfile.iot-ingest -t lmao-iot-ingest .
+#       docker save lmao-iot-ingest:latest | k3s ctr image import -
 #
 # Usage:
 #   kubectl apply -f k8s/iot-ingest.yaml
@@ -78,8 +84,6 @@ spec:
             limits:
               cpu: 200m
               memory: 256Mi
-          # TODO: Replace with proper health-check endpoint when available.
-          # Currently verifies the process tree is alive by checking PID 1.
           livenessProbe:
             exec:
               command:
