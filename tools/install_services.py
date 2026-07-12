@@ -26,6 +26,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 from typing import TYPE_CHECKING
 
 # Default NATS server for the LMAO server container (overridable via env).
@@ -37,6 +38,222 @@ if TYPE_CHECKING:
 # Default local Docker registry address (used when --setup-registry is set).
 DEFAULT_REGISTRY_HOST = "192.168.0.36"
 DEFAULT_REGISTRY_PORT = 5000
+
+# ---------------------------------------------------------------------------
+# Serial port detection — distinguish RNode from Cardputer
+# ---------------------------------------------------------------------------
+
+
+def _find_system_python() -> str | None:
+    """Return a system Python that has ``rns`` installed, or None."""
+    import shutil as _shutil
+    for candidate in [
+        _shutil.which("python3"),
+        _shutil.which("python"),
+        "/usr/bin/python3",
+    ]:
+        if candidate is None:
+            continue
+        try:
+            result = subprocess.run(
+                [candidate, "-c", "import RNS; print('ok')"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode == 0 and result.stdout.strip() == "ok":
+                return candidate
+        except (subprocess.SubprocessError, OSError):
+            continue
+    return None
+
+
+def _probe_for_cardputer(port: str) -> bool:
+    """Try entering MicroPython raw REPL on *port* to detect a Cardputer.
+
+    Sends Ctrl+C (enter raw REPL), Ctrl+B (exit raw REPL). Returns True if
+    the MicroPython banner is detected.
+    """
+    try:
+        import serial as _serial
+        ser = _serial.Serial(port, 115200, timeout=2)
+        time.sleep(0.5)
+        # Drain any garbage
+        ser.reset_input_buffer()
+        # Send Ctrl+C to interrupt, then Ctrl+A to enter raw REPL
+        ser.write(b"\r\x03\x03")
+        time.sleep(0.3)
+        ser.reset_input_buffer()
+        ser.write(b"\r\x01")
+        time.sleep(0.3)
+        banner = ser.read(256)
+        ser.close()
+        # Raw REPL banner contains "raw REPL" or "MicroPython"
+        combined = banner.lower()
+        return b"raw repl" in combined or b"micropython" in combined or b">==" in combined
+    except Exception:
+        return False
+
+
+def _probe_for_rnode(port: str) -> bool:
+    """Check whether *port* is running RNode firmware.
+
+    Uses ``rnodeconf --info`` for definitive detection.  When ``rns``
+    is not available, falls back to VID/PID heuristics via the caller.
+
+    The ``rnodeconf --info`` command queries the RNode firmware version,
+    frequency, and other parameters.  Non-RNode devices (Cardputer,
+    plain serial adapters) will either time out or return non-zero.
+    """
+    system_python = _find_system_python()
+    if system_python is None:
+        return False
+
+    try:
+        # rnodeconf takes port as a positional argument, not --port
+        result = subprocess.run(
+            [system_python, "-m", "RNS.Utilities.rnodeconf",
+             port, "--info"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except subprocess.TimeoutExpired:
+        # rnodeconf hung — definitely not an RNode on this port
+        return False
+    except (subprocess.SubprocessError, OSError):
+        return False
+
+    if result.returncode != 0:
+        return False
+
+    combined = (result.stdout + result.stderr).lower()
+    return "rnode firmware" in combined or "lora:" in combined
+
+
+def detect_serial_devices() -> tuple[str | None, str | None]:
+    """Detect and classify connected USB serial devices.
+
+    Scans all serial ports, classifies each as RNode or Cardputer, and
+    returns ``(rnode_port, cardputer_port)``.
+
+    Detection strategy (in order of reliability):
+      1. ``rnodeconf --info`` — definitively identifies RNode firmware.
+         RNode firmware (even MicroPython-based) responds with parameters
+         including frequency, bandwidth, and firmware version.
+      2. VID/PID heuristics — when probing is unavailable or ambiguous:
+         - Espressif (0x303A)    → RNode (Heltec ESP32-LoRa)
+         - CP210x (0x10C4)       → Cardputer (M5Stack)
+         - CH340 (0x1A86)        → Cardputer (alternative USB-UART)
+      3. Path-based fallback — first existing port wins.
+
+    Note: We do NOT use MicroPython raw REPL probing to distinguish the two
+    because the RNode firmware itself is MicroPython-based and responds to
+    the same REPL protocol as the Cardputer.
+
+    Returns:
+        ``(rnode_port, cardputer_port)`` where each is a device path or
+        None if not found.
+    """
+    try:
+        import serial.tools.list_ports
+    except ImportError:
+        print("  WARNING: pyserial not available — falling back to path-based detection")
+        rn = _detect_rnode_port_fallback()
+        return rn, None
+
+    ports = list(serial.tools.list_ports.comports())
+    usb_ports = [
+        p for p in ports
+        if p.vid is not None and p.device.startswith("/dev/tty")
+        and "ttyAMA" not in p.device
+    ]
+
+    if not usb_ports:
+        print("  No USB serial devices found — falling back to path-based detection")
+        rn = _detect_rnode_port_fallback()
+        return rn, None
+
+    candidates: list[tuple[str, int | None, int | None]] = []
+    for p in usb_ports:
+        candidates.append((p.device, p.vid, p.pid))
+
+    print(f"  Found {len(candidates)} USB serial device(s)")
+    for dev, vid, pid in candidates:
+        vid_s = f"0x{vid:04X}" if vid else "???"
+        pid_s = f"0x{pid:04X}" if pid else "???"
+        print(f"    {dev}: {vid_s}:{pid_s}")
+
+    # ---- Phase 1: identify RNode via VID/PID and rnodeconf validation ----
+    rnode_port: str | None = None
+    cardputer_port: str | None = None
+    unclassified: list[str] = []
+
+    # VID/PID lookup table — maps (vid, pid) to device role
+    # Order matters: more specific matches first
+    VID_PID_MAP: list[tuple[int, int, str]] = [
+        # Espressif ESP32 native USB → Heltec RNode (or similar)
+        (0x303A, 0x4001, "rnode"),
+        # CP210x → M5Stack Cardputer (or generic USB-UART)
+        (0x10C4, 0xEA60, "cardputer"),
+        # CH340 → generic ESP32 (Cardputer or other)
+        (0x1A86, 0x7523, "cardputer"),
+    ]
+
+    for dev, vid, pid in candidates:
+        print(f"  Checking {dev}...", end="", flush=True)
+        classified = False
+
+        # Check VID/PID first
+        for map_vid, map_pid, role in VID_PID_MAP:
+            if vid == map_vid and pid == map_pid:
+                print(f" {role} (VID:PID=0x{vid:04X}:0x{pid:04X})")
+                if role == "rnode":
+                    rnode_port = dev
+                elif role == "cardputer":
+                    cardputer_port = dev
+                classified = True
+                break
+
+        if classified:
+            continue
+
+        # Unknown VID/PID — try rnodeconf probe as last resort
+        if _probe_for_rnode(dev):
+            print(" RNode (probe) ✓")
+            rnode_port = dev
+        else:
+            print(" unknown — no matching VID/PID")
+            unclassified.append(dev)
+
+    # ---- Phase 2: fallback for unclassified devices ----
+    if rnode_port is None and cardputer_port is None and unclassified:
+        rnode_port = unclassified[0]
+        if len(unclassified) > 1:
+            cardputer_port = unclassified[1]
+        print(f"  No VID/PID match — assigning fallback: RNode={rnode_port}"
+              f"{f', Cardputer={cardputer_port}' if cardputer_port else ''}")
+
+    if rnode_port:
+        print(f"  ✓ RNode port: {rnode_port}")
+    else:
+        print("  ✗ No RNode port detected")
+
+    if cardputer_port:
+        print(f"  ✓ Cardputer port: {cardputer_port}")
+    else:
+        print("  ✗ No Cardputer port detected")
+
+    return rnode_port, cardputer_port
+
+
+def _detect_rnode_port_fallback() -> str | None:
+    """Fallback: return the first common serial port that exists.
+
+    Used when pyserial is not available for VID/PID probing.
+    Also used when the main detection function falls through without
+    a classification.
+    """
+    for port in ["/dev/ttyACM0", "/dev/ttyUSB0", "/dev/ttyACM1", "/dev/ttyUSB1"]:
+        if os.path.exists(port):
+            return port
+    return None
 
 
 def _run_kubectl_step(
@@ -674,15 +891,28 @@ def _resolve_nats_address() -> str | None:
 def _detect_rnode_port() -> str:
     """Auto-detect the RNode serial port.
 
-    Priority: ``LMAO_RNODE_PORT`` env var, then common ports,
-    then fallback to ``/dev/ttyUSB0``.
+    Priority:
+    1. ``LMAO_RNODE_PORT`` environment variable (explicit override).
+    2. ``detect_serial_devices()`` — VID/PID + firmware probing.
+    3. Fallback: first existing common serial port.
     """
     env_port = os.environ.get("LMAO_RNODE_PORT")
     if env_port:
+        # Even with an explicit env override, warn if the device doesn't exist
+        if not os.path.exists(env_port):
+            print(f"  WARNING: LMAO_RNODE_PORT={env_port} set but device not found!")
         return env_port
-    for port in ["/dev/ttyUSB0", "/dev/ttyACM0", "/dev/ttyUSB1", "/dev/ttyACM1"]:
-        if os.path.exists(port):
-            return port
+
+    rnode, _ = detect_serial_devices()
+    if rnode:
+        return rnode
+
+    fallback = _detect_rnode_port_fallback()
+    if fallback:
+        print(f"  WARNING: No RNode identified by probing — using first available port {fallback}")
+        return fallback
+
+    print("  WARNING: No serial port found — defaulting to /dev/ttyUSB0")
     return "/dev/ttyUSB0"
 
 
