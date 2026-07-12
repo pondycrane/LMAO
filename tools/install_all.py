@@ -67,6 +67,7 @@ from tools.install_services import (
     install_iot_ingest_consumer,
     install_k8s_services,
     install_pi_server,
+    run_pi_server,
     setup_registry,
 )
 
@@ -404,6 +405,7 @@ def main(argv: list[str] | None = None) -> None:
                 pi_result.skip("--skip-server")
             else:
                 install_pi_server(pi_result)
+                run_pi_server(pi_result)
 
             if args.skip_k8s:
                 k8s_result.skip("--skip-k8s")

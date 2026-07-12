@@ -96,8 +96,10 @@ class NatsQueue:
     """
 
     # JetStream stream defaults
-    _MAX_AGE_NS = 7 * 24 * 60 * 60 * 1_000_000_000  # 7 days
-    _MAX_STREAM_BYTES = 1_073_741_824  # 1 GiB
+    # All durations are in seconds — nats-py's StreamConfig._to_nanoseconds()
+    # converts them.  Do NOT pass nanoseconds here.
+    _MAX_AGE = 7 * 24 * 60 * 60  # 7 days (in seconds)
+    _MAX_STREAM_BYTES = 500_000_000  # 500 MB (NATS server max_file_store is 1 GB)
     _MAX_MSG_SIZE = 1_048_576  # 1 MiB
     _REPLICAS = 1
 
@@ -203,7 +205,7 @@ class NatsQueue:
             "name": name,
             "subjects": subjects,
             "retention": "limits",
-            "max_age": self._MAX_AGE_NS,
+            "max_age": self._MAX_AGE,  # seconds (nats-py converts to nanoseconds)
             "max_bytes": self._MAX_STREAM_BYTES,
             "max_msg_size": self._max_payload,
             "storage": "file",
@@ -212,7 +214,9 @@ class NatsQueue:
         }
 
         try:
-            # add_stream raises if JetStream is not available (no --js)
+            # add_stream takes a config dict / StreamConfig as first positional
+            # and optional **params to evolve() the config.  We pass the config
+            # fields as **params so they're applied via evolve().
             await self._js.add_stream(**config)
             _logger.info("JetStream stream '%s' created with subjects: %s", name, subjects)
         except Exception as exc:

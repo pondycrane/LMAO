@@ -46,6 +46,23 @@ except ImportError:
     GRPC_AVAILABLE = False
     logger.info("gRPC not available — K8s integration features disabled.")
 
+# ──────────────────────────────────────────────────────────────
+# NATS imports (optional — gracefully degrade if unavailable)
+# ──────────────────────────────────────────────────────────────
+try:
+    from lma_core.queue import NatsQueue
+
+    NATS_AVAILABLE = True
+except ImportError:
+    NATS_AVAILABLE = False
+    logger.info("nats-py not available — NATS JetStream publishing disabled.")
+
+# Default NATS server address — overridable via environment variable.
+# When running inside Docker with --network host, "localhost" resolves
+# to the host, so the K8s NATS service must be reachable via NodePort
+# or the host's cluster network.
+_NATS_SERVER = os.environ.get("NATS_SERVER", "nats://localhost:4222")
+
 
 def _warn_if_rnode_missing(rnode_port):
     """Warn if the RNode port does not exist (delegates to shared helper)."""
@@ -61,12 +78,17 @@ def _init_rns_and_lxmf(rnode_port, identity_storage_path="/tmp/lmao_server_lxmf"
     )
 
 
-def _print_startup_banner(identity_hex, rnode_port, grpc_available):
+def _print_startup_banner(identity_hex, rnode_port, grpc_available, nats_connected=False):
     """Print the server startup banner with identity and status info."""
     rnode_status = (
         f"RNode on {rnode_port}"
         if os.path.exists(rnode_port)
         else "⚠️  RNode not connected — LoRa unavailable"
+    )
+    nats_status = (
+        f"NATS: {_NATS_SERVER}"
+        if nats_connected
+        else "NATS: disconnected"
     )
     print(f"\n{'=' * 50}")
     print("LMAO Server — Running (async mode)")
@@ -75,9 +97,13 @@ def _print_startup_banner(identity_hex, rnode_port, grpc_available):
     print(f"  LoRa: {rnode_status}")
     print("  WiFi: AutoInterface enabled")
     print("  Title discriminator: p:Envelope")
+    print(f"  {nats_status}")
     if grpc_available:
         print("  gRPC: 0.0.0.0:50051")
     print(f"{'=' * 50}\n")
+
+
+_NATS_SUBJECT = "lmao.messages.env"
 
 
 class Server:
@@ -89,6 +115,10 @@ class Server:
         self._config_dict = config_dict
         # gRPC subscriber queues (set by LMAOGrpcService if active)
         self._grpc_subscribers = []
+        # NATS JetStream publisher (injected by async_main)
+        self._nats_queue = None
+        self._nats_task = None
+        self._loop = None
 
     def register_grpc_subscriber(self, queue):
         """Register an asyncio.Queue for gRPC Subscribe streaming."""
@@ -172,6 +202,15 @@ class Server:
             else:
                 logger.warning("Could not send reply (no source identity or router).")
 
+            # Publish to NATS JetStream (fire-and-forget from sync context)
+            if self._nats_queue is not None and self._loop is not None:
+                asyncio.run_coroutine_threadsafe(
+                    self._publish_to_nats(source_hash, content_bytes),
+                    self._loop,
+                )
+            else:
+                logger.debug("NATS unavailable — skipping publish")
+
             # Fan out to gRPC subscribers (if any)
             self._fanout_to_grpc_subscribers(message)
 
@@ -181,6 +220,29 @@ class Server:
             logger.error("RNS/LXMF error processing message: %s", e, exc_info=True)
         except Exception as e:
             logger.error("Unexpected error in handle_lxmf_delivery: %s", e, exc_info=True)
+
+    async def _publish_to_nats(self, source_hash: str, content_bytes: bytes) -> None:
+        """Publish an incoming LXMF message payload to NATS JetStream.
+
+        Called fire-and-forget from the sync ``handle_lxmf_delivery``
+        callback via ``asyncio.run_coroutine_threadsafe``.
+
+        Args:
+            source_hash: Hex identity of the sending node.
+            content_bytes: Raw content bytes from the LXMF message.
+        """
+        if self._nats_queue is None:
+            return
+        try:
+            ack = await self._nats_queue.publish(_NATS_SUBJECT, content_bytes)
+            logger.debug(
+                "Published %d bytes from %s to NATS (seq=%s)",
+                len(content_bytes),
+                source_hash,
+                ack.seq,
+            )
+        except Exception:
+            logger.warning("NATS publish failed", exc_info=True)
 
 
 # ──────────────────────────────────────────────────────────────
@@ -321,11 +383,31 @@ async def async_main():
     # Register the delivery callback
     router.register_delivery_callback(lmao_server.handle_lxmf_delivery)
 
+    # ── NATS connect (optional) ─────────────────────────────────
+    nats_queue = None
+    if NATS_AVAILABLE:
+        try:
+            nats_queue = NatsQueue(name="lmao-server")
+            await nats_queue.connect(servers=_NATS_SERVER)
+            await nats_queue.ensure_stream("LMAO_MESSAGES", ["lmao.messages.>"])
+            logger.info("NATS JetStream connected: %s", _NATS_SERVER)
+
+            # Inject into the server instance for publishing from callbacks
+            lmao_server._nats_queue = nats_queue
+            lmao_server._loop = asyncio.get_event_loop()
+        except Exception as exc:
+            logger.warning(
+                "NATS connection failed (%s) — continuing without NATS publishing.",
+                exc,
+            )
+            nats_queue = None
+
     # Print banner
     _print_startup_banner(
         RNS.hexrep(server_identity.hash, delimit=False),
         rnode_port,
         GRPC_AVAILABLE,
+        nats_queue is not None,
     )
 
     # Start gRPC server if available
@@ -356,6 +438,9 @@ async def async_main():
             await grpc_server.stop(5)
         if lmao_server:
             lmao_server.clear_grpc_subscribers()
+        if nats_queue is not None:
+            await nats_queue.close()
+            logger.info("NATS connection closed.")
 
 
 if __name__ == "__main__":
