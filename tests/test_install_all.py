@@ -32,9 +32,7 @@ def _patch_imports():
     start/stop them independently.
     """
     patches = {
-        "serial": patch("tools.install_all.serial", MagicMock()),
-        "serial.tools": patch("tools.install_all.serial.tools", MagicMock()),
-        "serial.tools.list_ports": patch("tools.install_all.serial.tools.list_ports", MagicMock()),
+        "serial_serial": patch("tools.install_all.serial.Serial", MagicMock()),
         "find_cardputer_port": patch.object(install_all, "find_cardputer_port", return_value=None),
         "find_rnode_port": patch.object(install_all, "find_rnode_port", return_value=None),
         "check_rnode_firmware": patch.object(
@@ -47,6 +45,30 @@ def _patch_imports():
             install_all, "find_client_root", return_value="/fake/client_root"
         ),
         "enter_raw_repl": patch.object(install_all, "enter_raw_repl", return_value=True),
+        "verify_files_exist": patch.object(
+            install_all, "verify_files_exist", return_value=None
+        ),
+        "upload_file": patch.object(install_all, "upload_file", return_value=True),
+        "exit_raw_repl": patch.object(install_all, "exit_raw_repl", return_value=None),
+        "auto_discover_lib_files": patch.object(
+            install_all, "auto_discover_lib_files", return_value=[]
+        ),
+        "verify_device": patch.object(
+            install_all, "verify_device", return_value=(True, "ESP32 detected")
+        ),
+        "verify_files_exist": patch.object(
+            install_all, "verify_files_exist", return_value=None
+        ),
+        "upload_file": patch.object(install_all, "upload_file", return_value=True),
+        "exit_raw_repl": patch.object(install_all, "exit_raw_repl", return_value=None),
+        "auto_discover_lib_files": patch.object(
+            install_all, "auto_discover_lib_files", return_value=[]
+        ),
+        "os_path_getsize": patch("os.path.getsize", return_value=100),
+        "detect_serial_devices": patch.object(
+            install_all, "detect_serial_devices", return_value=(None, None)
+        ),
+        "comports": patch("serial.tools.list_ports.comports", return_value=[]),
     }
     return patches
 
@@ -455,6 +477,7 @@ class TestMainPipeline:
             "serial.tools.list_ports": patch(
                 "tools.install_all.serial.tools.list_ports", MagicMock()
             ),
+            "comports": patch("serial.tools.list_ports.comports", return_value=[]),
             "find_cardputer_port": patch.object(
                 install_all, "find_cardputer_port", return_value=None
             ),
@@ -479,6 +502,9 @@ class TestMainPipeline:
             ),
             "auto_discover_lib_files": patch.object(
                 install_all, "auto_discover_lib_files", return_value=[]
+            ),
+            "detect_serial_devices": patch.object(
+                install_all, "detect_serial_devices", return_value=(None, None)
             ),
         }
         self.mocks, self._patches = _start_patches(patches)
@@ -519,13 +545,13 @@ class TestMainPipeline:
     def test_both_devices_detected_both_processed(self):
         """Both Cardputer and RNode detected → both processed."""
         self.mocks["find_cardputer_port"].return_value = "/dev/ttyACM0"
-        self.mocks["find_rnode_port"].return_value = "/dev/ttyUSB0"
+        self.mocks["detect_serial_devices"].return_value = ("/dev/ttyUSB0", None)
         self.mocks["check_rnode_firmware"].return_value = True
         with pytest.raises(SystemExit) as exc_info:
             install_all.main([])
         assert exc_info.value.code == 0
         self.mocks["find_cardputer_port"].assert_called_once()
-        self.mocks["find_rnode_port"].assert_called_once()
+        self.mocks["detect_serial_devices"].assert_called_once()
 
     def test_cardputer_port_override_bypasses_auto_detection(self):
         """--cardputer-port override bypasses auto-detection."""
@@ -563,13 +589,14 @@ class TestMainSkipFlags:
 
     def test_skip_cardputer_only(self):
         """When Cardputer is skipped, RNode should still be processed."""
-        # Mock find_rnode_port to return a port
-        self.mocks["find_rnode_port"].return_value = "/dev/ttyUSB0"
+        # Mock detect_serial_devices to return a port
+        self.mocks["detect_serial_devices"].return_value = ("/dev/ttyUSB0", None)
+        self.mocks["check_rnode_firmware"].return_value = True
         with pytest.raises(SystemExit) as exc_info:
             install_all.main(["--skip-cardputer"])
         assert exc_info.value.code == 0
         # RNode detection should have been called
-        self.mocks["find_rnode_port"].assert_called_once()
+        self.mocks["detect_serial_devices"].assert_called_once()
         # Cardputer detection should NOT have been called
         self.mocks["find_cardputer_port"].assert_not_called()
 
@@ -623,6 +650,7 @@ class TestMainRNodeDetected:
         self.mocks, self._patches = _start_patches(patches)
         self.mocks["find_cardputer_port"].return_value = None
         self.mocks["find_rnode_port"].return_value = "/dev/ttyUSB0"
+        self.mocks["detect_serial_devices"].return_value = ("/dev/ttyUSB0", None)
         self.mocks["check_rnode_firmware"].return_value = True  # already RNode
         yield
         _stop_patches(self._patches)
@@ -654,6 +682,7 @@ class TestMainRNodeFlashFails:
         self.mocks, self._patches = _start_patches(patches)
         self.mocks["find_cardputer_port"].return_value = None
         self.mocks["find_rnode_port"].return_value = "/dev/ttyUSB0"
+        self.mocks["detect_serial_devices"].return_value = ("/dev/ttyUSB0", None)
         self.mocks["check_rnode_firmware"].return_value = False
         self.mocks["flash_rnode_firmware"].return_value = (False, "Flash error")
         yield
@@ -696,6 +725,7 @@ class TestMainRNodePortOverride:
         self.mocks, self._patches = _start_patches(patches)
         self.mocks["find_cardputer_port"].return_value = None
         self.mocks["find_rnode_port"].return_value = None  # won't be called
+        self.mocks["detect_serial_devices"].return_value = (None, None)
         self.mocks["check_rnode_firmware"].return_value = True
         yield
         _stop_patches(self._patches)
@@ -707,6 +737,8 @@ class TestMainRNodePortOverride:
         assert exc_info.value.code == 0
         # find_rnode_port should NOT be called (explicit port given)
         self.mocks["find_rnode_port"].assert_not_called()
+        # detect_serial_devices should NOT be called (explicit port given)
+        self.mocks["detect_serial_devices"].assert_not_called()
         # check_rnode_firmware should be called with the explicit port
         self.mocks["check_rnode_firmware"].assert_called_once_with("/dev/customUSB0")
 
@@ -1835,31 +1867,359 @@ class TestMainWithRegistryAndServices:
 
 
 class TestDetectRNodePort:
-    """Direct unit tests for install_services._detect_rnode_port()."""
+    """Direct unit tests for install_services._detect_rnode_port().
 
-    def test_env_var_overrides_auto_detect(self):
-        """LMAO_RNODE_PORT env var should be returned directly."""
-        with patch.dict(os.environ, {"LMAO_RNODE_PORT": "/dev/ttyS0"}, clear=True):
-            port = install_services._detect_rnode_port()
-            assert port == "/dev/ttyS0"
+    Tests the updated implementation that delegates to ``detect_serial_devices()``
+    then ``_detect_rnode_port_fallback()`` before returning ``None``.
+    """
 
-    def test_auto_detect_finds_existing_port(self):
-        """Should return the first existing port from the priority list."""
+    def test_env_var_overrides_everything(self):
+        """LMAO_RNODE_PORT env var should be returned directly without calling detect."""
         with (
-            patch.dict(os.environ, {}, clear=True),
-            patch("os.path.exists", side_effect=lambda p: p == "/dev/ttyACM0"),
+            patch.dict(os.environ, {"LMAO_RNODE_PORT": "/dev/ttyS0"}, clear=True),
+            patch.object(install_services, "detect_serial_devices") as mock_detect,
+            patch.object(install_services, "_detect_rnode_port_fallback") as mock_fallback,
         ):
             port = install_services._detect_rnode_port()
-            assert port == "/dev/ttyACM0"
+            assert port == "/dev/ttyS0"
+            mock_detect.assert_not_called()
+            mock_fallback.assert_not_called()
 
-    def test_fallback_when_no_port_found(self):
-        """Should return /dev/ttyUSB0 when no ports exist."""
+    def test_env_var_warns_if_device_missing(self, capsys):
+        """LMAO_RNODE_PORT set but device missing → warning printed, port still returned."""
         with (
-            patch.dict(os.environ, {}, clear=True),
+            patch.dict(os.environ, {"LMAO_RNODE_PORT": "/dev/ttyS0"}, clear=True),
             patch("os.path.exists", return_value=False),
         ):
             port = install_services._detect_rnode_port()
+            assert port == "/dev/ttyS0"
+            captured = capsys.readouterr().out
+            assert "WARNING" in captured
+            assert "device not found" in captured
+
+    def test_detect_serial_devices_used(self):
+        """detect_serial_devices called when no env var set."""
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(install_services, "detect_serial_devices", return_value=("/dev/ttyACM0", None)),
+            patch.object(install_services, "_detect_rnode_port_fallback") as mock_fallback,
+        ):
+            port = install_services._detect_rnode_port()
+            assert port == "/dev/ttyACM0"
+            mock_fallback.assert_not_called()
+
+    def test_fallback_used_when_detect_returns_none(self):
+        """_detect_rnode_port_fallback used when detect_serial_devices returns None."""
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(install_services, "detect_serial_devices", return_value=(None, None)),
+            patch.object(install_services, "_detect_rnode_port_fallback", return_value="/dev/ttyUSB0"),
+        ):
+            port = install_services._detect_rnode_port()
             assert port == "/dev/ttyUSB0"
+
+    def test_returns_none_when_everything_fails(self):
+        """Fallback returns None → returns None (no more hardcoded /dev/ttyUSB0)."""
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(install_services, "detect_serial_devices", return_value=(None, None)),
+            patch.object(install_services, "_detect_rnode_port_fallback", return_value=None),
+        ):
+            port = install_services._detect_rnode_port()
+            assert port is None
+
+
+# ── Unit tests for detect_serial_devices and probe functions ────────
+
+# Helper to create fake port objects for mocking serial.tools.list_ports.comports()
+def _make_port(device, vid, pid, description="USB device"):
+    from types import SimpleNamespace
+    return SimpleNamespace(device=device, vid=vid, pid=pid, description=description)
+
+
+class TestDetectSerialDevices:
+    """Tests for install_services.detect_serial_devices()."""
+
+    # ── VID/PID matching ──
+
+    def test_espressif_vid_detected_as_rnode(self):
+        """0x303A:0x4001 (Espressif ESP32-S3) → rnode detected, no cardputer."""
+        mock_ports = [
+            _make_port("/dev/ttyACM0", 0x303A, 0x4001, "ESP32-S3"),
+        ]
+        with (
+            patch("serial.tools.list_ports.comports", return_value=mock_ports),
+        ):
+            rnode, cardputer = install_services.detect_serial_devices()
+        assert rnode == "/dev/ttyACM0"
+        assert cardputer is None
+
+    def test_espressif_pid_1001_detected_as_rnode(self):
+        """0x303A:0x1001 (RNode firmware PID) → rnode detected."""
+        mock_ports = [
+            _make_port("/dev/ttyACM0", 0x303A, 0x1001, "ESP32-S3"),
+        ]
+        with (
+            patch("serial.tools.list_ports.comports", return_value=mock_ports),
+        ):
+            rnode, cardputer = install_services.detect_serial_devices()
+        assert rnode == "/dev/ttyACM0"
+        assert cardputer is None
+
+    def test_cp210x_vid_detected_as_cardputer(self):
+        """0x10C4:0xEA60 (CP210x) → cardputer detected, no rnode."""
+        mock_ports = [
+            _make_port("/dev/ttyUSB0", 0x10C4, 0xEA60, "CP2102 USB to UART Bridge"),
+        ]
+        with (
+            patch("serial.tools.list_ports.comports", return_value=mock_ports),
+        ):
+            rnode, cardputer = install_services.detect_serial_devices()
+        assert rnode is None
+        assert cardputer == "/dev/ttyUSB0"
+
+    def test_ch340_vid_detected_as_cardputer(self):
+        """0x1A86:0x7523 (CH340) → cardputer detected."""
+        mock_ports = [
+            _make_port("/dev/ttyUSB0", 0x1A86, 0x7523, "USB Serial CH340"),
+        ]
+        with (
+            patch("serial.tools.list_ports.comports", return_value=mock_ports),
+        ):
+            rnode, cardputer = install_services.detect_serial_devices()
+        assert rnode is None
+        assert cardputer == "/dev/ttyUSB0"
+
+    def test_both_devices_detected(self):
+        """Both RNode and Cardputer present → both identified."""
+        mock_ports = [
+            _make_port("/dev/ttyUSB0", 0x10C4, 0xEA60, "CP2102"),
+            _make_port("/dev/ttyACM0", 0x303A, 0x4001, "ESP32-S3"),
+        ]
+        with (
+            patch("serial.tools.list_ports.comports", return_value=mock_ports),
+        ):
+            rnode, cardputer = install_services.detect_serial_devices()
+        assert rnode == "/dev/ttyACM0"
+        assert cardputer == "/dev/ttyUSB0"
+
+    # ── Unknown VID/PID falls through to probe ──
+
+    def test_unknown_vid_probes_via_rnodeconf(self):
+        """Unknown VID/PID → falls through to _probe_for_rnode()."""
+        mock_ports = [
+            _make_port("/dev/ttyUSB0", 0x0403, 0x6001, "FTDI FT232"),
+        ]
+        with (
+            patch("serial.tools.list_ports.comports", return_value=mock_ports),
+            patch.object(install_services, "_probe_for_rnode", return_value=True),
+        ):
+            rnode, cardputer = install_services.detect_serial_devices()
+        assert rnode == "/dev/ttyUSB0"
+
+    def test_unknown_vid_probe_fails_adds_to_unclassified(self):
+        """Unknown VID/PID and probe fails → device added to unclassified list."""
+        mock_ports = [
+            _make_port("/dev/ttyUSB0", 0x0403, 0x6001, "FTDI FT232"),
+        ]
+        with (
+            patch("serial.tools.list_ports.comports", return_value=mock_ports),
+            patch.object(install_services, "_probe_for_rnode", return_value=False),
+        ):
+            rnode, cardputer = install_services.detect_serial_devices()
+        assert rnode is None
+        assert cardputer is None
+
+    # ── Fallback paths ──
+
+    def test_no_usb_ports_uses_fallback(self):
+        """No USB serial devices → falls back to _detect_rnode_port_fallback()."""
+        with (
+            patch("serial.tools.list_ports.comports", return_value=[]),
+            patch.object(install_services, "_detect_rnode_port_fallback", return_value="/dev/ttyUSB0"),
+        ):
+            rnode, cardputer = install_services.detect_serial_devices()
+        assert rnode == "/dev/ttyUSB0"
+        assert cardputer is None
+
+    def test_pyserial_unavailable_uses_fallback(self):
+        """ImportError on serial.tools.list_ports → falls back."""
+        with (
+            patch.object(install_services, "_detect_rnode_port_fallback", return_value="/dev/ttyACM0"),
+        ):
+            # Simulate ImportError by patching serial.tools.list_ports import
+            import builtins
+            real_import = builtins.__import__
+            def mock_import(name, *args, **kwargs):
+                if name == "serial.tools.list_ports":
+                    raise ImportError("no pyserial")
+                return real_import(name, *args, **kwargs)
+            with patch("builtins.__import__", side_effect=mock_import):
+                rnode, cardputer = install_services.detect_serial_devices()
+        assert rnode == "/dev/ttyACM0"
+        assert cardputer is None
+
+    def test_ttyama_ports_excluded(self):
+        """ttyAMA ports should be filtered out (not USB serial)."""
+        mock_ports = [
+            _make_port("/dev/ttyAMA0", 0x303A, 0x4001, "ESP32"),
+        ]
+        with (
+            patch("serial.tools.list_ports.comports", return_value=mock_ports),
+            patch.object(install_services, "_detect_rnode_port_fallback", return_value=None),
+        ):
+            rnode, cardputer = install_services.detect_serial_devices()
+        assert rnode is None  # filtered out
+        assert cardputer is None
+
+    def test_ports_without_vid_skipped(self):
+        """Ports with vid=None should be skipped."""
+        mock_ports = [
+            _make_port("/dev/ttyS0", None, None, "Unknown device"),
+        ]
+        with (
+            patch("serial.tools.list_ports.comports", return_value=mock_ports),
+            patch.object(install_services, "_detect_rnode_port_fallback", return_value=None),
+        ):
+            rnode, cardputer = install_services.detect_serial_devices()
+        assert rnode is None
+        assert cardputer is None
+
+    def test_cardputer_detection_requires_pyserial(self):
+        """Without pyserial, cardputer is always None."""
+        with (
+            patch.object(install_services, "_detect_rnode_port_fallback", return_value="/dev/ttyACM0"),
+        ):
+            import builtins
+            real_import = builtins.__import__
+            def mock_import(name, *args, **kwargs):
+                if name == "serial.tools.list_ports":
+                    raise ImportError("no pyserial")
+                return real_import(name, *args, **kwargs)
+            with patch("builtins.__import__", side_effect=mock_import):
+                rnode, cardputer = install_services.detect_serial_devices()
+        assert cardputer is None  # Cardputer detection requires pyserial
+
+
+class TestProbeForRNode:
+    """Tests for install_services._probe_for_rnode()."""
+
+    # ── Normal detection paths ──
+
+    def test_detects_rnode_from_stdout(self):
+        """'RNode Firmware' in stdout → True."""
+        with (
+            patch.object(install_services, "_find_system_python", return_value="/usr/bin/python3"),
+            patch("subprocess.run") as mock_run,
+        ):
+            mock_run.return_value = MagicMock(
+                returncode=0, stdout="RNode Firmware v1.73\nLoRa: ON\n", stderr=""
+            )
+            assert install_services._probe_for_rnode("/dev/ttyUSB0") is True
+
+    def test_detects_rnode_from_lora_keyword(self):
+        """'LoRa:' (without 'RNode Firmware') → True."""
+        with (
+            patch.object(install_services, "_find_system_python", return_value="/usr/bin/python3"),
+            patch("subprocess.run") as mock_run,
+        ):
+            mock_run.return_value = MagicMock(
+                returncode=0, stdout="Device info\nLoRa: SX1262\n", stderr=""
+            )
+            assert install_services._probe_for_rnode("/dev/ttyUSB0") is True
+
+    # ── Failure paths ──
+
+    def test_non_rnode_returns_false(self):
+        """Non-RNode output → False."""
+        with (
+            patch.object(install_services, "_find_system_python", return_value="/usr/bin/python3"),
+            patch("subprocess.run") as mock_run,
+        ):
+            mock_run.return_value = MagicMock(
+                returncode=0, stdout="USB Serial Device\n", stderr=""
+            )
+            assert install_services._probe_for_rnode("/dev/ttyUSB0") is False
+
+    def test_nonzero_exit_returns_false(self):
+        """rnodeconf non-zero exit → False."""
+        with (
+            patch.object(install_services, "_find_system_python", return_value="/usr/bin/python3"),
+            patch("subprocess.run") as mock_run,
+        ):
+            mock_run.return_value = MagicMock(
+                returncode=1, stdout="", stderr="could not open port"
+            )
+            assert install_services._probe_for_rnode("/dev/ttyUSB0") is False
+
+    def test_timeout_returns_false(self):
+        """subprocess timeout → False (no crash)."""
+        with (
+            patch.object(install_services, "_find_system_python", return_value="/usr/bin/python3"),
+            patch("subprocess.run", side_effect=subprocess.TimeoutExpired("cmd", 10)),
+        ):
+            assert install_services._probe_for_rnode("/dev/ttyUSB0") is False
+
+    def test_subprocess_error_returns_false(self):
+        """SubprocessError → False."""
+        with (
+            patch.object(install_services, "_find_system_python", return_value="/usr/bin/python3"),
+            patch("subprocess.run", side_effect=OSError("no such file")),
+        ):
+            assert install_services._probe_for_rnode("/dev/ttyUSB0") is False
+
+    def test_no_system_python_returns_false(self):
+        """_find_system_python returns None → False."""
+        with (
+            patch.object(install_services, "_find_system_python", return_value=None),
+        ):
+            assert install_services._probe_for_rnode("/dev/ttyUSB0") is False
+
+
+class TestDetectRNodePortFallback:
+    """Tests for install_services._detect_rnode_port_fallback()."""
+
+    def test_returns_first_existing_port(self):
+        """Returns the first port from the list that exists."""
+        with patch("os.path.exists", side_effect=lambda p: p == "/dev/ttyACM0"):
+            port = install_services._detect_rnode_port_fallback()
+            assert port == "/dev/ttyACM0"
+
+    def test_returns_none_when_no_ports_exist(self):
+        """No existing ports → returns None."""
+        with patch("os.path.exists", return_value=False):
+            port = install_services._detect_rnode_port_fallback()
+            assert port is None
+
+
+class TestMainDetectSerialDevices:
+    """Test main() with the new detect_serial_devices path."""
+
+    @pytest.fixture(autouse=True)
+    def _setup_mocks(self):
+        patches = _patch_imports()
+        self.mocks, self._patches = _start_patches(patches)
+        # detect_serial_devices is already patched by _patch_imports at install_all level
+        self.mocks["detect_serial_devices"].return_value = ("/dev/ttyACM0", None)
+        yield
+        _stop_patches(self._patches)
+
+    def test_rnode_detected_via_detect_serial_devices(self):
+        """RNode detected by detect_serial_devices → processed."""
+        self.mocks["check_rnode_firmware"].return_value = True
+        with pytest.raises(SystemExit) as exc_info:
+            install_all.main([])
+        assert exc_info.value.code == 0
+
+    def test_no_rnode_detected_skips(self, capsys):
+        """No RNode detected → skip with message."""
+        self.mocks["detect_serial_devices"].return_value = (None, None)
+        with pytest.raises(SystemExit) as exc_info:
+            install_all.main([])
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr().out
+        assert "SKIP" in captured
+        assert "not detected" in captured.lower()
 
 
 class TestDockerPsql:

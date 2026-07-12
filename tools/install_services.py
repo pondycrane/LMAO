@@ -26,7 +26,6 @@ import os
 import shutil
 import subprocess
 import tempfile
-import time
 from typing import TYPE_CHECKING
 
 # Default NATS server for the LMAO server container (overridable via env).
@@ -105,6 +104,7 @@ def _probe_for_rnode(port: str) -> bool:
     """
     system_python = _find_system_python()
     if system_python is None:
+        print(f"  Probe[{port}]: no system Python with 'rns' found")
         return False
 
     try:
@@ -115,16 +115,23 @@ def _probe_for_rnode(port: str) -> bool:
             capture_output=True, text=True, timeout=10,
         )
     except subprocess.TimeoutExpired:
-        # rnodeconf hung — definitely not an RNode on this port
+        print(f"  Probe[{port}]: rnodeconf --info timed out after 10s")
         return False
-    except (subprocess.SubprocessError, OSError):
+    except (subprocess.SubprocessError, OSError) as exc:
+        print(f"  Probe[{port}]: rnodeconf failed: {exc}")
         return False
 
     if result.returncode != 0:
+        stderr_tail = result.stderr.strip().split("\n")[-3:]
+        stderr_msg = "; ".join(stderr_tail) if stderr_tail else "unknown error"
+        print(f"  Probe[{port}]: rnodeconf exited {result.returncode}: {stderr_msg}")
         return False
 
     combined = (result.stdout + result.stderr).lower()
-    return "rnode firmware" in combined or "lora:" in combined
+    is_rnode = "rnode firmware" in combined or "lora:" in combined
+    if not is_rnode:
+        print(f"  Probe[{port}]: rnodeconf output did not contain RNode signatures")
+    return is_rnode
 
 
 def detect_serial_devices() -> tuple[str | None, str | None]:
@@ -133,14 +140,13 @@ def detect_serial_devices() -> tuple[str | None, str | None]:
     Scans all serial ports, classifies each as RNode or Cardputer, and
     returns ``(rnode_port, cardputer_port)``.
 
-    Detection strategy (in order of reliability):
-      1. ``rnodeconf --info`` — definitively identifies RNode firmware.
-         RNode firmware (even MicroPython-based) responds with parameters
-         including frequency, bandwidth, and firmware version.
-      2. VID/PID heuristics — when probing is unavailable or ambiguous:
+    Detection strategy (in order of application):
+      1. VID/PID lookup — classifies known USB serial adapters:
          - Espressif (0x303A)    → RNode (Heltec ESP32-LoRa)
          - CP210x (0x10C4)       → Cardputer (M5Stack)
          - CH340 (0x1A86)        → Cardputer (alternative USB-UART)
+      2. ``rnodeconf --info`` probe — definitive check for unknown VID/PID.
+         RNode firmware responds with frequency, bandwidth, and version.
       3. Path-based fallback — first existing port wins.
 
     Note: We do NOT use MicroPython raw REPL probing to distinguish the two
@@ -224,13 +230,12 @@ def detect_serial_devices() -> tuple[str | None, str | None]:
             print(" unknown — no matching VID/PID")
             unclassified.append(dev)
 
-    # ---- Phase 2: fallback for unclassified devices ----
+    # ---- Phase 2: report unclassified devices (do NOT blindly assign) ----
     if rnode_port is None and cardputer_port is None and unclassified:
-        rnode_port = unclassified[0]
-        if len(unclassified) > 1:
-            cardputer_port = unclassified[1]
-        print(f"  No VID/PID match — assigning fallback: RNode={rnode_port}"
-              f"{f', Cardputer={cardputer_port}' if cardputer_port else ''}")
+        print(f"  WARNING: {len(unclassified)} unclassified device(s) found —"
+              f" skipping automatic role assignment.")
+        for dev in unclassified:
+            print(f"    {dev} — no matching VID/PID and RNode probe failed/not available")
 
     if rnode_port:
         print(f"  ✓ RNode port: {rnode_port}")
@@ -890,13 +895,17 @@ def _resolve_nats_address() -> str | None:
     return None
 
 
-def _detect_rnode_port() -> str:
+def _detect_rnode_port() -> str | None:
     """Auto-detect the RNode serial port.
 
     Priority:
     1. ``LMAO_RNODE_PORT`` environment variable (explicit override).
     2. ``detect_serial_devices()`` — VID/PID + firmware probing.
     3. Fallback: first existing common serial port.
+    4. Hardcoded default: ``/dev/ttyUSB0`` when all else fails.
+
+    Returns:
+        Device path (e.g. ``/dev/ttyUSB0``) or ``None`` if no port found.
     """
     env_port = os.environ.get("LMAO_RNODE_PORT")
     if env_port:
@@ -914,8 +923,8 @@ def _detect_rnode_port() -> str:
         print(f"  WARNING: No RNode identified by probing — using first available port {fallback}")
         return fallback
 
-    print("  WARNING: No serial port found — defaulting to /dev/ttyUSB0")
-    return "/dev/ttyUSB0"
+    print("  WARNING: No serial port found — container will start without LoRa device")
+    return None
 
 
 def _docker_psql(filter_expr: str) -> str | None:
@@ -988,11 +997,13 @@ def run_pi_server(result: DeviceResult, repo_root: str | None = None) -> None:
 
     # ── Detect RNode port ──
     rnode_port = _detect_rnode_port()
-    rdevice_exists = os.path.exists(rnode_port)
+    rdevice_exists = rnode_port is not None and os.path.exists(rnode_port)
     if rdevice_exists:
         print(f"  RNode detected at: {rnode_port}")
-    else:
+    elif rnode_port:
         print("  RNode port {} not found \u2014 container will start without LoRa.".format(rnode_port))
+    else:
+        print("  No RNode port detected \u2014 container will start without LoRa.")
 
     # ── Resolve NATS_SERVER ──
     nats_server = os.environ.get("NATS_SERVER")
