@@ -587,6 +587,71 @@ def setup_registry(result: DeviceResult, repo_root: str | None = None) -> None:
         print(f"  FAIL: {exc}")
 
 
+
+def _resolve_nats_address() -> str | None:
+    """Resolve a reachable NATS server address from the K8s cluster.
+
+    Tries, in order:
+    1. If the NATS service is ``NodePort``, returns the first node's
+       IP with the assigned NodePort (reachable from outside the
+       cluster network).
+    2. If the service is ``ClusterIP``, returns the ClusterIP:4222
+       (reachable only from within the cluster).
+
+    Returns ``None`` if kubectl is unavailable or the service doesn't exist.
+    """
+    if shutil.which("kubectl") is None:
+        return None
+    try:
+        # Step 1: get service type and ClusterIP
+        svc_proc = subprocess.run(
+            [
+                "kubectl", "get", "svc", "nats-server", "-n", "default",
+                "-o", "jsonpath={.spec.type}|{.spec.clusterIP}",
+            ],
+            capture_output=True, text=True, timeout=10,
+        )
+        if svc_proc.returncode != 0:
+            return None
+        parts = svc_proc.stdout.strip().split("|")
+        svc_type = parts[0] if len(parts) > 0 else ""
+        cluster_ip = parts[1] if len(parts) > 1 else ""
+
+        # Step 2: NodePort path — find a node IP + NodePort
+        if svc_type == "NodePort":
+            # Get NodePort
+            port_proc = subprocess.run(
+                [
+                    "kubectl", "get", "svc", "nats-server", "-n", "default",
+                    "-o", "jsonpath={.spec.ports[0].nodePort}",
+                ],
+                capture_output=True, text=True, timeout=10,
+            )
+            if port_proc.returncode == 0:
+                node_port = port_proc.stdout.strip()
+                if node_port:
+                    # Get first ready node's InternalIP
+                    node_proc = subprocess.run(
+                        [
+                            "kubectl", "get", "nodes",
+                            "-o", "jsonpath={.items[0].status.addresses[?(@.type=='InternalIP')].address}",
+                        ],
+                        capture_output=True, text=True, timeout=10,
+                    )
+                    if node_proc.returncode == 0:
+                        node_ip = node_proc.stdout.strip().split()[0] if node_proc.stdout.strip() else ""
+                        if node_ip:
+                            return "nats://{}:{}".format(node_ip, node_port)
+
+        # Step 3: ClusterIP path
+        if svc_type == "ClusterIP" and cluster_ip and cluster_ip != "None":
+            return "nats://{}:4222".format(cluster_ip)
+
+    except (subprocess.SubprocessError, OSError):
+        pass
+    return None
+
+
 def _detect_rnode_port() -> str:
     """Auto-detect the RNode serial port.
 
@@ -622,8 +687,11 @@ def run_pi_server(result: DeviceResult, repo_root: str | None = None) -> None:
     creates a systemd unit at ``/etc/systemd/system/lmao-server.service``
     so the container starts on boot.
 
-    The ``NATS_SERVER`` environment variable (default: ``nats://localhost:4222``)
-    is passed through so the server can publish to the in-cluster NATS JetStream.
+    The ``NATS_SERVER`` environment variable is passed through so the
+    server can publish to the in-cluster NATS JetStream.  If unset, the
+    script auto-discovers the NATS ClusterIP by querying ``kubectl``,
+    falling back to ``nats://localhost:4222``.
+
     The RNode device path follows the same detection as the server config
     (``LMAO_RNODE_PORT`` env var, then auto-detect).
 
@@ -647,102 +715,61 @@ def run_pi_server(result: DeviceResult, repo_root: str | None = None) -> None:
         print("  SKIP: Docker not found on PATH")
         return
 
-    # ── Detect RNode port ────────────────────────────────────────────
+    # ── Detect RNode port ──
     rnode_port = _detect_rnode_port()
     rdevice_exists = os.path.exists(rnode_port)
     if rdevice_exists:
         print(f"  RNode detected at: {rnode_port}")
     else:
-        print(f"  RNode port {rnode_port} not found — container will start without LoRa.")
+        print("  RNode port {} not found \u2014 container will start without LoRa.".format(rnode_port))
 
-    # ── Stop any existing lmao-server container ─────────────────────
+    # ── Resolve NATS_SERVER ──
+    nats_server = os.environ.get("NATS_SERVER")
+    if nats_server is None:
+        resolved = _resolve_nats_address()
+        if resolved:
+            nats_server = resolved
+            print("  Resolved in-cluster NATS at {}".format(nats_server))
+        else:
+            nats_server = _DEFAULT_NATS_SERVER
+            print("  No in-cluster NATS found, using default {}".format(nats_server))
+
+    # ── Stop any existing lmao-server container ──
     print("  Stopping existing lmao-server container (if any)...")
     try:
         existing = _docker_psql("name=lmao-server")
     except subprocess.SubprocessError as exc:
-        result.fail(f"Failed to query Docker containers: {exc}")
-        print(f"  FAIL: docker ps failed — {exc}")
-        return
+        print("  WARNING: docker ps failed \u2014 {}".format(exc))
+        existing = None
     if existing:
         try:
             subprocess.run(
                 ["docker", "stop", "lmao-server"],
-                capture_output=True,
-                text=True,
-                timeout=30,
+                capture_output=True, text=True, timeout=30,
             )
             subprocess.run(
                 ["docker", "rm", "lmao-server"],
-                capture_output=True,
-                text=True,
-                timeout=15,
+                capture_output=True, text=True, timeout=15,
             )
             print("  Stopped and removed existing container.")
         except subprocess.SubprocessError as exc:
-            result.fail(f"Failed to stop existing container: {exc}")
-            print(f"  FAIL: {exc}")
-            return
+            print("  WARNING: could not stop existing container \u2014 {}".format(exc))
 
-    # ── Build docker run command ────────────────────────────────────
-    nats_server = os.environ.get("NATS_SERVER", _DEFAULT_NATS_SERVER)
-
-    docker_args = [
-        "docker", "run", "-d",
-        "--name", "lmao-server",
-        "--restart", "unless-stopped",
-        "--network", "host",
-        "-e", f"NATS_SERVER={nats_server}",
-    ]
-
-    # Pass through LMAO_RNODE_PORT so the container can detect the port
-    docker_args.extend(["-e", f"LMAO_RNODE_PORT={rnode_port}"])
-
-    # Pass through RNode USB serial device to the container
-    if rdevice_exists:
-        docker_args.extend(["--device", f"{rnode_port}:{rnode_port}"])
-
-    docker_args.append("lmao-server:latest")
-
-    print(f"  Starting container: {' '.join(docker_args)}")
-
-    try:
-        proc = subprocess.run(
-            docker_args,
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
-        if proc.returncode != 0:
-            stderr_tail = proc.stderr.strip().split("\n")[-3:]
-            err_msg = "; ".join(stderr_tail) if stderr_tail else "unknown error"
-            result.fail(f"docker run failed: {err_msg}")
-            print(f"  FAIL: docker run failed — {err_msg}")
-            return
-
-        container_id = proc.stdout.strip()[:12]
-        print(f"  Container started: {container_id}")
-    except subprocess.SubprocessError as exc:
-        result.fail(f"docker run error: {exc}")
-        print(f"  FAIL: {exc}")
-        return
-
-    # ── Install systemd service for auto-start on boot ──────────────
-    print("  Creating systemd service...")
-
-    # Build the ExecStart line — same as above but without -d
+    # ── Build ExecStart args (shared by docker run and systemd) ──
     exec_args = [
         "docker", "run", "--rm",
         "--name", "lmao-server",
         "--network", "host",
-        "-e", f"NATS_SERVER={nats_server}",
-        "-e", f"LMAO_RNODE_PORT={rnode_port}",
+        "-e", "NATS_SERVER={}".format(nats_server),
+        "-e", "LMAO_RNODE_PORT={}".format(rnode_port),
     ]
     if rdevice_exists:
-        exec_args.extend(["--device", f"{rnode_port}:{rnode_port}"])
+        exec_args.extend(["--device", "{}:{}".format(rnode_port, rnode_port)])
     exec_args.append("lmao-server:latest")
 
-    service_unit = f"""[Unit]
-Description=LMAO Server — Reticulum/LXMF LoRa mesh gateway
+    # ── Install systemd service FIRST (always \u2014 persistence mechanism) ──
+    service_unit = """[Unit]
+Description=LMAO Server \u2014 Reticulum/LXMF LoRa mesh gateway
 After=docker.service network-online.target
 Requires=docker.service
 Wants=network-online.target
@@ -751,7 +778,7 @@ Wants=network-online.target
 Type=simple
 ExecStartPre=-/usr/bin/docker stop lmao-server
 ExecStartPre=-/usr/bin/docker rm lmao-server
-ExecStart={' '.join(exec_args)}
+ExecStart={}
 ExecStop=/usr/bin/docker stop lmao-server
 Restart=always
 RestartSec=10
@@ -760,39 +787,28 @@ StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
-"""
+""".format(' '.join(exec_args))
 
+    systemd_ok = False
     try:
-        # Write the unit file via a temp file and sudo mv
+        import tempfile
         fd, tmp_path = tempfile.mkstemp(prefix="lmao-server-", suffix=".service")
         try:
             with os.fdopen(fd, "w") as f:
                 f.write(service_unit)
-
-            # Copy to systemd directory with sudo
             subprocess.run(
                 ["sudo", "mv", tmp_path, "/etc/systemd/system/lmao-server.service"],
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=15,
+                check=True, capture_output=True, text=True, timeout=15,
             )
             subprocess.run(
                 ["sudo", "systemctl", "daemon-reload"],
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=15,
+                check=True, capture_output=True, text=True, timeout=15,
             )
             subprocess.run(
                 ["sudo", "systemctl", "enable", "lmao-server"],
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=15,
+                check=True, capture_output=True, text=True, timeout=15,
             )
         except (subprocess.SubprocessError, OSError):
-            # Clean up temp file if sudo mv didn't run
             if os.path.exists(tmp_path):
                 os.unlink(tmp_path)
             raise
@@ -805,7 +821,7 @@ WantedBy=multi-user.target
         print("    sudo systemctl stop lmao-server     # Stop")
         print("    sudo systemctl status lmao-server   # Check status")
         print("    sudo journalctl -u lmao-server -f   # Tail logs")
-
+        systemd_ok = True
     except subprocess.SubprocessError as exc:
         stderr_hint = ""
         if isinstance(exc, subprocess.CalledProcessError) and exc.stderr:
@@ -813,41 +829,72 @@ WantedBy=multi-user.target
             stderr_hint = ": " + "; ".join(stderr_tail)
         elif isinstance(exc, subprocess.TimeoutExpired) and exc.stderr:
             stderr_hint = ": " + exc.stderr.strip()
-        result.fail(f"systemd install failed{stderr_hint}")
-        print(f"  FAIL: systemd install{stderr_hint}")
-        return
+        print("  WARNING: systemd install failed{}".format(stderr_hint))
+        print("  (Server will run now but won't auto-start on boot \u2014 fix sudo access)")
     except PermissionError:
-        result.fail("systemd install requires sudo — run with sudo or install manually")
-        print("  FAIL: Permission denied — re-run with sudo")
-        return
+        print("  WARNING: systemd install requires sudo \u2014 skipping")
+        print("  (Server will run now but won't auto-start on boot)")
     except Exception as exc:
         import traceback
-
         traceback.print_exc()
-        # Clean up temp file if sudo mv didn't run
-        if 'tmp_path' in dir() and os.path.exists(tmp_path):
-            os.unlink(tmp_path)
-        result.fail(f"Unexpected error during systemd setup: {exc}")
-        print(f"  FAIL: {exc}")
-        return
+        print("  WARNING: systemd install error: {}".format(exc))
 
-    # ── Verify container is running ─────────────────────────────────
-    print("  Verifying container...")
+    # ── Start container (now, so it runs immediately) ──
+    run_args = list(exec_args)
+    # Change --rm to -d --restart unless-stopped for immediate run
+    rm_idx = run_args.index("--rm")
+    run_args[rm_idx] = "-d"
+    restart_idx = run_args.index("--name")
+    run_args.insert(restart_idx, "unless-stopped")
+    run_args.insert(restart_idx, "--restart")
+
+    print("  Starting container: {}".format(' '.join(run_args)))
+
+    container_id = None
     try:
-        proc = subprocess.run(
-            ["docker", "ps", "--filter", "name=lmao-server", "--format", "{{.Status}}"],
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
-        status = proc.stdout.strip()
-        if status:
-            print(f"  Container status: {status}")
-            result.ok(f"Container running: {container_id}")
-            print(f"  OK: lmao-server running ({container_id})")
+        proc = subprocess.run(run_args, capture_output=True, text=True, timeout=60)
+        if proc.returncode == 0:
+            container_id = proc.stdout.strip()[:12]
+            print("  Container started: {}".format(container_id))
         else:
-            result.fail("Container exited after start")
-            print("  FAIL: Container exited — check `docker logs lmao-server`")
-    except subprocess.SubprocessError:
-        result.ok(f"Container started: {container_id} (status check skipped)")
-        print(f"  OK: Container started: {container_id}")
+            stderr_tail = proc.stderr.strip().split("\n")[-3:]
+            err_msg = "; ".join(stderr_tail) if stderr_tail else "unknown error"
+            print("  WARNING: docker run failed \u2014 {}".format(err_msg))
+            print("  Systemd service is installed. Fix the issue then:")
+            print("    sudo systemctl start lmao-server")
+    except subprocess.SubprocessError as exc:
+        print("  WARNING: docker run error \u2014 {}".format(exc))
+        print("  Systemd service is installed. Fix the issue then:")
+        print("    sudo systemctl start lmao-server")
+
+    # ── Verify container is running ──
+    if container_id:
+        print("  Verifying container...")
+        try:
+            proc = subprocess.run(
+                ["docker", "ps", "--filter", "name=lmao-server", "--format", "{{.Status}}"],
+                capture_output=True, text=True, timeout=15,
+            )
+            status = proc.stdout.strip()
+            if status:
+                print("  Container status: {}".format(status))
+                if systemd_ok:
+                    result.ok("Container running + systemd: {}".format(container_id))
+                    print("  OK: lmao-server running ({})".format(container_id))
+                else:
+                    result.ok("Container running: {}".format(container_id))
+                    print("  OK: lmao-server running ({})".format(container_id))
+            else:
+                result.fail("Container exited after start")
+                print("  FAIL: Container exited \u2014 check `docker logs lmao-server`")
+        except subprocess.SubprocessError:
+            if systemd_ok:
+                result.ok("Container started: {} (systemd enabled)".format(container_id))
+            else:
+                result.ok("Container started: {}".format(container_id))
+            print("  OK: Container started: {}".format(container_id))
+    else:
+        if systemd_ok:
+            result.ok("Systemd service installed (container will start on boot or via systemctl)")
+        else:
+            result.fail("Container did not start and systemd was not installed")
