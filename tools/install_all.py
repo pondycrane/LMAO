@@ -64,6 +64,7 @@ from tests.e2e.e2e_helpers import (
 from tools.install_services import (
     DEFAULT_REGISTRY_HOST,
     DEFAULT_REGISTRY_PORT,
+    detect_serial_devices,
     install_iot_ingest_consumer,
     install_k8s_services,
     install_pi_server,
@@ -366,7 +367,15 @@ def main(argv: list[str] | None = None) -> None:
         rn_result.skip("--skip-rnode")
         print("RNode: SKIP (--skip-rnode)")
     else:
-        port = args.rnode_port or find_rnode_port()
+        port = None
+        if args.rnode_port:
+            port = args.rnode_port
+        else:
+            # Use VID/PID-based detection instead of find_rnode_port()
+            # which has a too-broad VID set that can match the Cardputer
+            rnode_auto, _ = detect_serial_devices()
+            port = rnode_auto
+
         if not port:
             rn_result.skip("No RNode/Heltec detected on USB")
             print("RNode: SKIP — not detected on USB")
