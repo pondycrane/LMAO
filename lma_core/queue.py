@@ -96,8 +96,10 @@ class NatsQueue:
     """
 
     # JetStream stream defaults
-    _MAX_AGE_NS = 7 * 24 * 60 * 60 * 1_000_000_000  # 7 days
-    _MAX_STREAM_BYTES = 1_073_741_824  # 1 GiB
+    # All durations are in seconds — nats-py's StreamConfig._to_nanoseconds()
+    # converts them.  Do NOT pass nanoseconds here.
+    _MAX_AGE = 7 * 24 * 60 * 60  # 7 days (in seconds)
+    _MAX_STREAM_BYTES = 500_000_000  # 500 MB (NATS server max_file_store is 1 GB)
     _MAX_MSG_SIZE = 1_048_576  # 1 MiB
     _REPLICAS = 1
 
@@ -203,7 +205,7 @@ class NatsQueue:
             "name": name,
             "subjects": subjects,
             "retention": "limits",
-            "max_age": self._MAX_AGE_NS,
+            "max_age": self._MAX_AGE,  # seconds (nats-py converts to nanoseconds)
             "max_bytes": self._MAX_STREAM_BYTES,
             "max_msg_size": self._max_payload,
             "storage": "file",
@@ -211,27 +213,20 @@ class NatsQueue:
             **overrides,
         }
 
+        # Idempotent: try add_stream first; if it fails, fall back to
+        # update_stream.  update_stream can create non-existent streams
+        # on NATS >= 2.9.0, but add_stream is preferred for first creation.
+        _logger.info("Ensuring JetStream stream '%s' (subjects: %s) ...", name, subjects)
         try:
-            # add_stream raises if JetStream is not available (no --js)
             await self._js.add_stream(**config)
             _logger.info("JetStream stream '%s' created with subjects: %s", name, subjects)
-        except Exception as exc:
-            err_msg = str(exc).lower()
-            if "already exists" in err_msg or "stream name already in use" in err_msg:
-                # Stream already exists — update it
-                _logger.info("Stream '%s' already exists — updating config", name)
-                try:
-                    await self._js.update_stream(**config)
-                    _logger.info("JetStream stream '%s' updated", name)
-                except Exception:
-                    _logger.error("Failed to update stream '%s'", name, exc_info=True)
-                    raise
-            else:
-                _logger.error(
-                    "Failed to create stream '%s' — unexpected error",
-                    name,
-                    exc_info=True,
-                )
+        except Exception:
+            _logger.info("Stream '%s' already exists — updating config", name)
+            try:
+                await self._js.update_stream(**config)
+                _logger.info("JetStream stream '%s' updated", name)
+            except Exception:
+                _logger.error("Failed to ensure stream '%s'", name, exc_info=True)
                 raise
 
     # ------------------------------------------------------------------
@@ -299,7 +294,7 @@ class NatsQueue:
         the callback returns; unhandled exceptions trigger a negative
         acknowledgment (NAK) so the message is redelivered.
 
-        This method blocks until the task is cancelled or the
+        This method runs indefinitely until the task is cancelled or the
         connection is closed.  Run it as a background task for
         long-lived subscriptions::
 
