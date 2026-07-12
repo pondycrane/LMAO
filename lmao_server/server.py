@@ -1,14 +1,20 @@
 """
-LMAO Server — Reticulum + LXMF message handler with optional gRPC API.
+LMAO Server — Reticulum + LXMF message handler with optional gRPC API
+and NATS JetStream publishing.
 
 Runs on Raspberry Pi with an ESP32 RNode acting as a LoRa bridge.
-Listens for LXMF messages from Cardputer clients and sends acknowledgements.
+Listens for LXMF messages from Cardputer clients, sends acknowledgements,
+and publishes incoming message payloads to NATS JetStream (subject
+"lmao.messages.env") for downstream consumption by K8s pods.
 
 When gRPC is enabled (default), also serves the LMAO gRPC API on port 50051
 for K8s pod integration. The gRPC service provides:
   - Send:     Inject LMAOEnvelope into the LXMF mesh
   - Subscribe: Stream incoming LXMF messages to gRPC clients
   - GetIdentity: Return the server's Reticulum identity hex
+
+All optional dependencies (gRPC, NATS) use lazy imports with graceful
+degradation — the server starts and operates without them.
 """
 
 import asyncio
@@ -50,9 +56,9 @@ except ImportError:
 # NATS imports (optional — gracefully degrade if unavailable)
 # ──────────────────────────────────────────────────────────────
 try:
-    from lma_core.queue import NatsQueue
+    from lma_core.queue import NatsQueue, _NATS_AVAILABLE as _NATS_PY_AVAILABLE
 
-    NATS_AVAILABLE = True
+    NATS_AVAILABLE = _NATS_PY_AVAILABLE
 except ImportError:
     NATS_AVAILABLE = False
     logger.info("nats-py not available — NATS JetStream publishing disabled.")
@@ -117,7 +123,6 @@ class Server:
         self._grpc_subscribers = []
         # NATS JetStream publisher (injected by async_main)
         self._nats_queue = None
-        self._nats_task = None
         self._loop = None
 
     def register_grpc_subscriber(self, queue):
@@ -157,7 +162,9 @@ class Server:
         compatibility with non-protobuf senders. Sends a protobuf-encoded
         TextMessage ACK as a reply.
 
-        Also fans out to gRPC subscribers so streaming clients receive the message.
+        Also publishes the incoming message payload to NATS JetStream
+        (fire-and-forget via asyncio.run_coroutine_threadsafe) and fans out
+        to gRPC subscribers so streaming clients receive the message.
         """
         try:
             source_identity = message.get_source()
@@ -204,9 +211,13 @@ class Server:
 
             # Publish to NATS JetStream (fire-and-forget from sync context)
             if self._nats_queue is not None and self._loop is not None:
-                asyncio.run_coroutine_threadsafe(
+                fut = asyncio.run_coroutine_threadsafe(
                     self._publish_to_nats(source_hash, content_bytes),
                     self._loop,
+                )
+                fut.add_done_callback(
+                    lambda f: logger.error("NATS publish task failed: %s", f.exception())
+                    if f.exception() else None
                 )
             else:
                 logger.debug("NATS unavailable — skipping publish")
@@ -241,6 +252,9 @@ class Server:
                 source_hash,
                 ack.seq,
             )
+        except asyncio.CancelledError:
+            logger.debug("NATS publish cancelled during shutdown — skipping")
+            raise
         except Exception:
             logger.warning("NATS publish failed", exc_info=True)
 
@@ -399,6 +413,7 @@ async def async_main():
             logger.warning(
                 "NATS connection failed (%s) — continuing without NATS publishing.",
                 exc,
+                exc_info=True,
             )
             nats_queue = None
 
@@ -438,6 +453,7 @@ async def async_main():
             await grpc_server.stop(5)
         if lmao_server:
             lmao_server.clear_grpc_subscribers()
+            lmao_server._nats_queue = None  # Prevent new NATS publish attempts during shutdown
         if nats_queue is not None:
             await nats_queue.close()
             logger.info("NATS connection closed.")

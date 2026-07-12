@@ -98,7 +98,7 @@ spec:
               command:
                 - python3
                 - -c
-                - "import sys; sys.exit(0)"
+                - "import lma_core.queue, lma_core.storage; print('ready')"
             initialDelaySeconds: 5
             periodSeconds: 10
             timeoutSeconds: 2

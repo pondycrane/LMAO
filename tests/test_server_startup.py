@@ -234,6 +234,24 @@ class TestPrintStartupBanner:
         assert "WiFi: AutoInterface enabled" in captured.out
         assert "Title discriminator: p:Envelope" in captured.out
 
+    def test_banner_shows_nats_connected(self, server_mod, capsys):
+        """Banner should show NATS server URL when connected."""
+        with patch.object(server_mod.os.path, "exists", return_value=True):
+            server_mod._print_startup_banner(
+                "testhash", "/dev/ttyUSB0", grpc_available=False, nats_connected=True
+            )
+        captured = capsys.readouterr()
+        assert "NATS: nats://localhost:4222" in captured.out
+
+    def test_banner_shows_nats_disconnected(self, server_mod, capsys):
+        """Banner should show 'NATS: disconnected' when not connected."""
+        with patch.object(server_mod.os.path, "exists", return_value=True):
+            server_mod._print_startup_banner(
+                "testhash", "/dev/ttyUSB0", grpc_available=False, nats_connected=False
+            )
+        captured = capsys.readouterr()
+        assert "NATS: disconnected" in captured.out
+
 
 if __name__ == "__main__":
     import sys
