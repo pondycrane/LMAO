@@ -309,15 +309,16 @@ class TestNatsQueueStream:
 
     @pytest.mark.asyncio
     async def test_ensure_stream_raises_on_non_exists_error(self, connected_queue):
-        """If add_stream fails with a non-'already exists' error, re-raise it."""
+        """If add_stream fails and update_stream also fails, re-raise the update error."""
         nq = await connected_queue()
         nq._js.add_stream.side_effect = OSError("connection refused")
+        nq._js.update_stream.side_effect = OSError("connection refused")
 
         with pytest.raises(OSError, match="connection refused"):
             await nq.ensure_stream("BROKEN", ["b.>"])
 
         nq._js.add_stream.assert_called_once()
-        nq._js.update_stream.assert_not_called()
+        nq._js.update_stream.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_ensure_stream_raises_on_both_failures(self, connected_queue):
@@ -607,3 +608,22 @@ class TestNatsQueueSubscribe:
 # Test methods inside classes use local imports (after fixtures are active).
 # ---------------------------------------------------------------------------
 from lma_core.queue import NatsQueue  # noqa: E402
+
+
+class TestNatsQueueConstants:
+    """Regression tests for NatsQueue constant values."""
+
+    def test_constants_are_in_seconds(self):
+        """_MAX_AGE should be 7 days expressed in seconds (not nanoseconds)."""
+        assert NatsQueue._MAX_AGE == 7 * 24 * 60 * 60
+        # nats-py will convert to nanoseconds internally
+        expected_ns = 7 * 24 * 60 * 60 * 1_000_000_000
+        assert NatsQueue._MAX_AGE * 1_000_000_000 == expected_ns
+
+    def test_max_stream_bytes_set(self):
+        """_MAX_STREAM_BYTES should be 500 MB."""
+        assert NatsQueue._MAX_STREAM_BYTES == 500_000_000
+
+    def test_max_msg_size_set(self):
+        """_MAX_MSG_SIZE should be 1 MiB."""
+        assert NatsQueue._MAX_MSG_SIZE == 1_048_576

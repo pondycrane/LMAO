@@ -213,29 +213,20 @@ class NatsQueue:
             **overrides,
         }
 
+        # Idempotent: try add_stream first; if it fails, fall back to
+        # update_stream.  update_stream can create non-existent streams
+        # on NATS >= 2.9.0, but add_stream is preferred for first creation.
+        _logger.info("Ensuring JetStream stream '%s' (subjects: %s) ...", name, subjects)
         try:
-            # add_stream takes a config dict / StreamConfig as first positional
-            # and optional **params to evolve() the config.  We pass the config
-            # fields as **params so they're applied via evolve().
             await self._js.add_stream(**config)
             _logger.info("JetStream stream '%s' created with subjects: %s", name, subjects)
-        except Exception as exc:
-            err_msg = str(exc).lower()
-            if "already exists" in err_msg or "stream name already in use" in err_msg:
-                # Stream already exists — update it
-                _logger.info("Stream '%s' already exists — updating config", name)
-                try:
-                    await self._js.update_stream(**config)
-                    _logger.info("JetStream stream '%s' updated", name)
-                except Exception:
-                    _logger.error("Failed to update stream '%s'", name, exc_info=True)
-                    raise
-            else:
-                _logger.error(
-                    "Failed to create stream '%s' — unexpected error",
-                    name,
-                    exc_info=True,
-                )
+        except Exception:
+            _logger.info("Stream '%s' already exists — updating config", name)
+            try:
+                await self._js.update_stream(**config)
+                _logger.info("JetStream stream '%s' updated", name)
+            except Exception:
+                _logger.error("Failed to ensure stream '%s'", name, exc_info=True)
                 raise
 
     # ------------------------------------------------------------------
@@ -303,7 +294,7 @@ class NatsQueue:
         the callback returns; unhandled exceptions trigger a negative
         acknowledgment (NAK) so the message is redelivered.
 
-        This method blocks until the task is cancelled or the
+        This method runs indefinitely until the task is cancelled or the
         connection is closed.  Run it as a background task for
         long-lived subscriptions::
 

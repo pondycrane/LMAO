@@ -759,6 +759,7 @@ class TestMainWithServicesSkipped:
         patches["install_iot_ingest_consumer"] = patch.object(
             install_all, "install_iot_ingest_consumer"
         )
+        patches["run_pi_server"] = patch.object(install_all, "run_pi_server")
         self.mocks, self._patches = _start_patches(patches)
         self.mocks["find_cardputer_port"].return_value = None
         self.mocks["find_rnode_port"].return_value = None
@@ -793,6 +794,7 @@ class TestMainWithServices:
         patches["install_iot_ingest_consumer"] = patch.object(
             install_all, "install_iot_ingest_consumer"
         )
+        patches["run_pi_server"] = patch.object(install_all, "run_pi_server")
         self.mocks, self._patches = _start_patches(patches)
         self.mocks["find_cardputer_port"].return_value = None
         self.mocks["find_rnode_port"].return_value = None
@@ -1766,6 +1768,7 @@ class TestMainWithRegistryAndServices:
         patches["install_iot_ingest_consumer"] = patch.object(
             install_all, "install_iot_ingest_consumer"
         )
+        patches["run_pi_server"] = patch.object(install_all, "run_pi_server")
         self.mocks, self._patches = _start_patches(patches)
         self.mocks["find_cardputer_port"].return_value = None
         self.mocks["find_rnode_port"].return_value = None
@@ -1826,3 +1829,151 @@ class TestMainWithRegistryAndServices:
         # Should NOT pass registry params on fallback
         assert "registry_host" not in call_kwargs
         assert "registry_port" not in call_kwargs
+
+
+# ── Unit tests for new helpers in install_services.py ──────────────
+
+
+class TestDetectRNodePort:
+    """Direct unit tests for install_services._detect_rnode_port()."""
+
+    def test_env_var_overrides_auto_detect(self):
+        """LMAO_RNODE_PORT env var should be returned directly."""
+        with patch.dict(os.environ, {"LMAO_RNODE_PORT": "/dev/ttyS0"}, clear=True):
+            port = install_services._detect_rnode_port()
+            assert port == "/dev/ttyS0"
+
+    def test_auto_detect_finds_existing_port(self):
+        """Should return the first existing port from the priority list."""
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("os.path.exists", side_effect=lambda p: p == "/dev/ttyACM0"),
+        ):
+            port = install_services._detect_rnode_port()
+            assert port == "/dev/ttyACM0"
+
+    def test_fallback_when_no_port_found(self):
+        """Should return /dev/ttyUSB0 when no ports exist."""
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("os.path.exists", return_value=False),
+        ):
+            port = install_services._detect_rnode_port()
+            assert port == "/dev/ttyUSB0"
+
+
+class TestDockerPsql:
+    """Direct unit tests for install_services._docker_psql()."""
+
+    def _make_result(self):
+        return install_all.DeviceResult("Pi Server")
+
+    def test_returns_container_id_when_running(self):
+        """Should return the container ID when docker ps matches."""
+        mock_proc = MagicMock()
+        mock_proc.stdout = "abc123\n"
+        mock_proc.returncode = 0
+        with patch("subprocess.run", return_value=mock_proc):
+            cid = install_services._docker_psql("name=lmao-server")
+            assert cid == "abc123"
+
+    def test_returns_none_when_no_container(self):
+        """Should return None when no container matches."""
+        mock_proc = MagicMock()
+        mock_proc.stdout = ""
+        mock_proc.returncode = 0
+        with patch("subprocess.run", return_value=mock_proc):
+            cid = install_services._docker_psql("name=lmao-server")
+            assert cid is None
+
+
+class TestRunPiServer:
+    """Unit tests for install_services.run_pi_server()."""
+
+    def _make_result(self):
+        return install_all.DeviceResult("Pi Server")
+
+    def test_skips_when_docker_not_found(self):
+        """Result should be SKIP when docker is not on PATH."""
+        with patch("shutil.which", return_value=None):
+            result = self._make_result()
+            install_services.run_pi_server(result)
+            assert result.status == "SKIP"
+            assert "Docker" in result.detail
+
+    def test_stops_existing_container_and_starts_new(self):
+        """Should stop existing container, run new one, and install systemd."""
+        mock_docker_stop = MagicMock()
+        mock_docker_stop.returncode = 0
+        mock_docker_rm = MagicMock()
+        mock_docker_rm.returncode = 0
+        mock_docker_run = MagicMock()
+        mock_docker_run.returncode = 0
+        mock_docker_run.stdout = "new-container-id\n"
+        mock_docker_ps = MagicMock()
+        mock_docker_ps.stdout = "old-container\n"
+        mock_docker_verify = MagicMock()
+        mock_docker_verify.stdout = "Up 10 seconds\n"
+        mock_sudo_mv = MagicMock()
+        mock_sudo_mv.returncode = 0
+        mock_sudo_reload = MagicMock()
+        mock_sudo_reload.returncode = 0
+        mock_sudo_enable = MagicMock()
+        mock_sudo_enable.returncode = 0
+
+        with (
+            patch("shutil.which", return_value="/usr/bin/docker"),
+            patch.object(install_services, "_docker_psql", return_value="old-container"),
+            patch("os.path.exists", return_value=True),
+            patch("subprocess.run") as mock_run,
+            patch("tempfile.mkstemp", return_value=(3, "/tmp/lmao-server-xxx.service")),
+            patch("os.fdopen"),
+            patch("os.unlink"),
+        ):
+            # docker stop, docker rm, docker run, docker ps (verify),
+            # sudo mv, sudo systemctl daemon-reload, sudo systemctl enable
+            mock_run.side_effect = [
+                mock_docker_stop,    # docker stop
+                mock_docker_rm,      # docker rm
+                mock_docker_run,     # docker run
+                mock_docker_verify,  # docker ps --filter --format
+                mock_sudo_mv,        # sudo mv
+                mock_sudo_reload,    # sudo systemctl daemon-reload
+                mock_sudo_enable,    # sudo systemctl enable
+            ]
+            result = self._make_result()
+            install_services.run_pi_server(result)
+            assert result.status == "OK"
+            assert "running" in result.detail.lower()
+
+    def test_fails_when_docker_run_fails(self):
+        """Result should be FAIL when docker run returns non-zero."""
+        mock_docker_run = MagicMock()
+        mock_docker_run.returncode = 1
+        mock_docker_run.stderr = "Error: port in use\n"
+
+        with (
+            patch("shutil.which", return_value="/usr/bin/docker"),
+            patch.object(install_services, "_docker_psql", return_value=None),
+            patch("os.path.exists", return_value=True),
+            patch("subprocess.run", return_value=mock_docker_run),
+        ):
+            result = self._make_result()
+            install_services.run_pi_server(result)
+            assert result.status == "FAIL"
+            assert "docker run failed" in result.detail.lower()
+
+    def test_fails_when_docker_psql_raises(self):
+        """Result should be FAIL when _docker_psql raises TimeoutExpired."""
+        with (
+            patch("shutil.which", return_value="/usr/bin/docker"),
+            patch.object(
+                install_services,
+                "_docker_psql",
+                side_effect=subprocess.TimeoutExpired(["docker", "ps", "-q"], 15),
+            ),
+        ):
+            result = self._make_result()
+            install_services.run_pi_server(result)
+            assert result.status == "FAIL"
+            assert "Failed to query Docker containers" in result.detail

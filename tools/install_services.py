@@ -657,7 +657,12 @@ def run_pi_server(result: DeviceResult, repo_root: str | None = None) -> None:
 
     # ── Stop any existing lmao-server container ─────────────────────
     print("  Stopping existing lmao-server container (if any)...")
-    existing = _docker_psql("name=lmao-server")
+    try:
+        existing = _docker_psql("name=lmao-server")
+    except subprocess.SubprocessError as exc:
+        result.fail(f"Failed to query Docker containers: {exc}")
+        print(f"  FAIL: docker ps failed — {exc}")
+        return
     if existing:
         try:
             subprocess.run(
@@ -692,7 +697,7 @@ def run_pi_server(result: DeviceResult, repo_root: str | None = None) -> None:
     # Pass through LMAO_RNODE_PORT so the container can detect the port
     docker_args.extend(["-e", f"LMAO_RNODE_PORT={rnode_port}"])
 
-    # Pass through RNODE_PATH for backward compatibility
+    # Pass through RNode USB serial device to the container
     if rdevice_exists:
         docker_args.extend(["--device", f"{rnode_port}:{rnode_port}"])
 
@@ -764,31 +769,29 @@ WantedBy=multi-user.target
             with os.fdopen(fd, "w") as f:
                 f.write(service_unit)
 
-            import subprocess as _sp
-
             # Copy to systemd directory with sudo
-            _sp.run(
+            subprocess.run(
                 ["sudo", "mv", tmp_path, "/etc/systemd/system/lmao-server.service"],
                 check=True,
                 capture_output=True,
                 text=True,
                 timeout=15,
             )
-            _sp.run(
+            subprocess.run(
                 ["sudo", "systemctl", "daemon-reload"],
                 check=True,
                 capture_output=True,
                 text=True,
                 timeout=15,
             )
-            _sp.run(
+            subprocess.run(
                 ["sudo", "systemctl", "enable", "lmao-server"],
                 check=True,
                 capture_output=True,
                 text=True,
                 timeout=15,
             )
-        except Exception:
+        except (subprocess.SubprocessError, OSError):
             # Clean up temp file if sudo mv didn't run
             if os.path.exists(tmp_path):
                 os.unlink(tmp_path)
@@ -804,8 +807,14 @@ WantedBy=multi-user.target
         print("    sudo journalctl -u lmao-server -f   # Tail logs")
 
     except subprocess.SubprocessError as exc:
-        result.fail(f"systemd install failed: {exc}")
-        print(f"  FAIL: systemd install — {exc}")
+        stderr_hint = ""
+        if isinstance(exc, subprocess.CalledProcessError) and exc.stderr:
+            stderr_tail = exc.stderr.strip().split("\n")[-3:]
+            stderr_hint = ": " + "; ".join(stderr_tail)
+        elif isinstance(exc, subprocess.TimeoutExpired) and exc.stderr:
+            stderr_hint = ": " + exc.stderr.strip()
+        result.fail(f"systemd install failed{stderr_hint}")
+        print(f"  FAIL: systemd install{stderr_hint}")
         return
     except PermissionError:
         result.fail("systemd install requires sudo — run with sudo or install manually")
@@ -815,6 +824,9 @@ WantedBy=multi-user.target
         import traceback
 
         traceback.print_exc()
+        # Clean up temp file if sudo mv didn't run
+        if 'tmp_path' in dir() and os.path.exists(tmp_path):
+            os.unlink(tmp_path)
         result.fail(f"Unexpected error during systemd setup: {exc}")
         print(f"  FAIL: {exc}")
         return
