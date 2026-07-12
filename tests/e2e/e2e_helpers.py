@@ -108,8 +108,9 @@ def find_rnode_port():
 def check_rnode_firmware(port: str, timeout: int = 15) -> bool:
     """Check whether a Heltec on *port* is running RNode firmware.
 
-    Calls ``python -m RNS.Utilities.rnodeconf --port PORT --info`` and
-    inspects the output for tell-tale signs of RNode firmware.
+    Calls ``python -m RNS.Utilities.rnodeconf PORT --info`` (port is a
+    positional argument) and inspects the output for tell-tale signs of
+    RNode firmware.
 
     Args:
         port: Device path (e.g. ``/dev/ttyUSB0``).
