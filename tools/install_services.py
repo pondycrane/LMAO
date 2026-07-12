@@ -188,8 +188,10 @@ def detect_serial_devices() -> tuple[str | None, str | None]:
     # VID/PID lookup table — maps (vid, pid) to device role
     # Order matters: more specific matches first
     VID_PID_MAP: list[tuple[int, int, str]] = [
-        # Espressif ESP32 native USB → Heltec RNode (or similar)
+        # Espressif ESP32 native USB → Heltec RNode
         (0x303A, 0x4001, "rnode"),
+        # RNode firmware changes PID to 0x1001
+        (0x303A, 0x1001, "rnode"),
         # CP210x → M5Stack Cardputer (or generic USB-UART)
         (0x10C4, 0xEA60, "cardputer"),
         # CH340 → generic ESP32 (Cardputer or other)
