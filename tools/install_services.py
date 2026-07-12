@@ -15,6 +15,11 @@ Prerequisites:
     - k8s/lmao-service.yaml and k8s/nats-server.yaml at repo root
 """
 
+# Error handling convention:
+#   - Functions that operate on Kubernetes resources fail fast (result.fail + return).
+#   - `run_pi_server()` uses graceful degradation (WARNING + continue) so the
+#     server container starts even if systemd install or container cleanup fails.
+
 from __future__ import annotations
 
 import os
@@ -597,12 +602,21 @@ def _resolve_nats_address() -> str | None:
        cluster network).
     2. If the service is ``ClusterIP``, returns the ClusterIP:4222
        (reachable only from within the cluster).
-
-    Returns ``None`` if kubectl is unavailable or the service doesn't exist.
+    3. Falls back to ``None`` if no reachable address could be
+       determined (kubectl unavailable, service not found, unsupported
+       service type, or resolution failure).
     """
     if shutil.which("kubectl") is None:
         return None
     try:
+        # Print current kubectl context for diagnostics
+        ctx_proc = subprocess.run(
+            ["kubectl", "config", "current-context"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if ctx_proc.returncode == 0 and ctx_proc.stdout.strip():
+            print("  Using kubectl context: {}".format(ctx_proc.stdout.strip()))
+
         # Step 1: get service type and ClusterIP
         svc_proc = subprocess.run(
             [
@@ -619,7 +633,6 @@ def _resolve_nats_address() -> str | None:
 
         # Step 2: NodePort path — find a node IP + NodePort
         if svc_type == "NodePort":
-            # Get NodePort
             port_proc = subprocess.run(
                 [
                     "kubectl", "get", "svc", "nats-server", "-n", "default",
@@ -645,10 +658,16 @@ def _resolve_nats_address() -> str | None:
 
         # Step 3: ClusterIP path
         if svc_type == "ClusterIP" and cluster_ip and cluster_ip != "None":
+            print(
+                "  WARNING: NATS ClusterIP resolved \u2014 this address is only reachable\n"
+                "           from inside the K8s cluster. If the container fails to\n"
+                "           connect, set NATS_SERVER=nats://<external-addr>:4222"
+            )
             return "nats://{}:4222".format(cluster_ip)
 
-    except (subprocess.SubprocessError, OSError):
-        pass
+    except (subprocess.SubprocessError, OSError) as exc:
+        print("  WARNING: NATS address resolution failed \u2014 {}".format(exc))
+        return None
     return None
 
 
@@ -689,17 +708,37 @@ def run_pi_server(result: DeviceResult, repo_root: str | None = None) -> None:
 
     The ``NATS_SERVER`` environment variable is passed through so the
     server can publish to the in-cluster NATS JetStream.  If unset, the
-    script auto-discovers the NATS ClusterIP by querying ``kubectl``,
-    falling back to ``nats://localhost:4222``.
+    script auto-discovers a reachable NATS address by querying
+    ``kubectl``:
+
+    1. If the service type is ``NodePort``, resolves the first node's
+       IP with the assigned NodePort.
+    2. If the service type is ``ClusterIP``, resolves the ClusterIP on
+       port 4222.
+    3. Otherwise, falls back to ``nats://localhost:4222``.
 
     The RNode device path follows the same detection as the server config
     (``LMAO_RNODE_PORT`` env var, then auto-detect).
 
     Requires root privileges (via ``sudo``) for systemd setup.
 
-    The caller must pass a ``DeviceResult`` instance as *result*.  On success
-    the result is set to OK; on failure it is set to FAIL.  Missing Docker CLI
-    on PATH results in SKIP.
+    The caller must pass a ``DeviceResult`` instance as *result*.  On full
+    success the result is set to OK; on complete failure (e.g. missing
+    Docker CLI, container exited after start) it is set to FAIL or SKIP.
+
+    Note on persistence:
+        The systemd unit is installed *before* starting the container so
+        that the service survives reboot even if the immediate ``docker
+        run`` fails.  If systemd installation fails (e.g., missing sudo
+        access), the container is still started directly; only auto-start
+        on boot is lost.
+
+    Note:
+        Errors in intermediate steps (stopping an existing container,
+        installing the systemd unit) are treated as non-fatal warnings.
+        The function continues to start the container even when those
+        steps fail, so callers should check ``result`` for the final
+        verdict rather than assuming a single error aborts the function.
 
     Args:
         result: A ``DeviceResult`` instance (from ``tools.install_all``).
@@ -754,6 +793,15 @@ def run_pi_server(result: DeviceResult, repo_root: str | None = None) -> None:
             print("  Stopped and removed existing container.")
         except subprocess.SubprocessError as exc:
             print("  WARNING: could not stop existing container \u2014 {}".format(exc))
+            print("  Attempting force-remove fallback...")
+            try:
+                subprocess.run(
+                    ["docker", "rm", "-f", "lmao-server"],
+                    capture_output=True, text=True, timeout=15,
+                )
+                print("  Force-removed existing container.")
+            except subprocess.SubprocessError:
+                print("  WARNING: force-remove also failed; container name may conflict")
 
     # ── Build ExecStart args (shared by docker run and systemd) ──
     exec_args = [
@@ -882,17 +930,16 @@ WantedBy=multi-user.target
                     result.ok("Container running + systemd: {}".format(container_id))
                     print("  OK: lmao-server running ({})".format(container_id))
                 else:
-                    result.ok("Container running: {}".format(container_id))
+                    result.ok("Container running: {} (systemd not installed \u2014 "
+                              "will not survive reboot)".format(container_id))
                     print("  OK: lmao-server running ({})".format(container_id))
+                    print("  NOTE: systemd was not installed; container will not auto-start on boot.")
             else:
                 result.fail("Container exited after start")
                 print("  FAIL: Container exited \u2014 check `docker logs lmao-server`")
         except subprocess.SubprocessError:
-            if systemd_ok:
-                result.ok("Container started: {} (systemd enabled)".format(container_id))
-            else:
-                result.ok("Container started: {}".format(container_id))
-            print("  OK: Container started: {}".format(container_id))
+            result.fail("Container status check failed \u2014 verify manually: docker ps")
+            print("  FAIL: Could not verify container status \u2014 docker ps failed")
     else:
         if systemd_ok:
             result.ok("Systemd service installed (container will start on boot or via systemctl)")
