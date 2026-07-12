@@ -1887,6 +1887,149 @@ class TestDockerPsql:
             assert cid is None
 
 
+class TestResolveNatsAddress:
+    """Unit tests for install_services._resolve_nats_address()."""
+
+    def test_returns_none_when_kubectl_not_found(self):
+        """No kubectl on PATH should return None."""
+        with patch("shutil.which", return_value=None):
+            assert install_services._resolve_nats_address() is None
+
+    def test_returns_none_when_get_svc_fails(self):
+        """kubectl get svc returns non-zero should return None."""
+        mock_fail = MagicMock()
+        mock_fail.returncode = 1
+        with (
+            patch("shutil.which", return_value="/usr/bin/kubectl"),
+            patch("subprocess.run", return_value=mock_fail),
+        ):
+            assert install_services._resolve_nats_address() is None
+
+    def test_returns_nats_nodeport_for_nodeport_svc(self):
+        """NodePort service should return nats://<node_ip>:<node_port>."""
+        mock_ctx = MagicMock()
+        mock_ctx.returncode = 0
+        mock_ctx.stdout = "minikube\n"
+        mock_svc = MagicMock()
+        mock_svc.returncode = 0
+        mock_svc.stdout = "NodePort|10.43.0.1\n"
+        mock_port = MagicMock()
+        mock_port.returncode = 0
+        mock_port.stdout = "30146\n"
+        mock_node = MagicMock()
+        mock_node.returncode = 0
+        mock_node.stdout = "192.168.0.43\n"
+
+        with (
+            patch("shutil.which", return_value="/usr/bin/kubectl"),
+            patch("subprocess.run", side_effect=[mock_ctx, mock_svc, mock_port, mock_node]),
+        ):
+            result = install_services._resolve_nats_address()
+            assert result == "nats://192.168.0.43:30146"
+
+    def test_returns_nats_clusterip_for_clusterip_svc(self):
+        """ClusterIP service should return nats://<cluster_ip>:4222."""
+        mock_svc = MagicMock()
+        mock_svc.returncode = 0
+        mock_svc.stdout = "ClusterIP|10.43.0.1\n"
+
+        with (
+            patch("shutil.which", return_value="/usr/bin/kubectl"),
+            patch("subprocess.run", return_value=mock_svc),
+        ):
+            result = install_services._resolve_nats_address()
+            assert result == "nats://10.43.0.1:4222"
+
+    def test_returns_none_when_clusterip_is_none(self):
+        """ClusterIP service with IP 'None' should return None."""
+        mock_svc = MagicMock()
+        mock_svc.returncode = 0
+        mock_svc.stdout = "ClusterIP|None\n"
+
+        with (
+            patch("shutil.which", return_value="/usr/bin/kubectl"),
+            patch("subprocess.run", return_value=mock_svc),
+        ):
+            assert install_services._resolve_nats_address() is None
+
+    def test_returns_none_when_nodeport_has_no_port(self):
+        """NodePort service with empty port should return None."""
+        mock_ctx = MagicMock()
+        mock_ctx.returncode = 0
+        mock_ctx.stdout = "minikube\n"
+        mock_svc = MagicMock()
+        mock_svc.returncode = 0
+        mock_svc.stdout = "NodePort|10.43.0.1\n"
+        mock_port = MagicMock()
+        mock_port.returncode = 0
+        mock_port.stdout = ""
+
+        with (
+            patch("shutil.which", return_value="/usr/bin/kubectl"),
+            patch("subprocess.run", side_effect=[mock_ctx, mock_svc, mock_port]),
+        ):
+            assert install_services._resolve_nats_address() is None
+
+    def test_returns_none_when_nodeport_has_no_node_ip(self):
+        """NodePort service with empty node IP should return None."""
+        mock_ctx = MagicMock()
+        mock_ctx.returncode = 0
+        mock_ctx.stdout = "minikube\n"
+        mock_svc = MagicMock()
+        mock_svc.returncode = 0
+        mock_svc.stdout = "NodePort|10.43.0.1\n"
+        mock_port = MagicMock()
+        mock_port.returncode = 0
+        mock_port.stdout = "30146\n"
+        mock_node = MagicMock()
+        mock_node.returncode = 0
+        mock_node.stdout = ""
+
+        with (
+            patch("shutil.which", return_value="/usr/bin/kubectl"),
+            patch("subprocess.run", side_effect=[mock_ctx, mock_svc, mock_port, mock_node]),
+        ):
+            assert install_services._resolve_nats_address() is None
+
+    def test_returns_none_on_subprocess_error(self):
+        """SubprocessError during kubectl call should return None."""
+        with (
+            patch("shutil.which", return_value="/usr/bin/kubectl"),
+            patch("subprocess.run", side_effect=subprocess.TimeoutExpired(["kubectl"], 10)),
+        ):
+            assert install_services._resolve_nats_address() is None
+
+    def test_returns_none_when_svc_type_unexpected(self):
+        """Unknown service type (e.g., LoadBalancer) should return None."""
+        mock_svc = MagicMock()
+        mock_svc.returncode = 0
+        mock_svc.stdout = "LoadBalancer|10.43.0.1\n"
+
+        with (
+            patch("shutil.which", return_value="/usr/bin/kubectl"),
+            patch("subprocess.run", return_value=mock_svc),
+        ):
+            assert install_services._resolve_nats_address() is None
+
+    def test_handles_malformed_jsonpath_output(self):
+        """JSONPath output with missing '|' delimiter and no NodePort should return None."""
+        mock_ctx = MagicMock()
+        mock_ctx.returncode = 0
+        mock_ctx.stdout = "minikube\n"
+        mock_svc = MagicMock()
+        mock_svc.returncode = 0
+        mock_svc.stdout = "NodePort|\n"
+        mock_empty = MagicMock()
+        mock_empty.returncode = 0
+        mock_empty.stdout = ""
+
+        with (
+            patch("shutil.which", return_value="/usr/bin/kubectl"),
+            patch("subprocess.run", side_effect=[mock_ctx, mock_svc, mock_empty, mock_empty]),
+        ):
+            assert install_services._resolve_nats_address() is None
+
+
 class TestRunPiServer:
     """Unit tests for install_services.run_pi_server()."""
 
@@ -1910,8 +2053,6 @@ class TestRunPiServer:
         mock_docker_run = MagicMock()
         mock_docker_run.returncode = 0
         mock_docker_run.stdout = "new-container-id\n"
-        mock_docker_ps = MagicMock()
-        mock_docker_ps.stdout = "old-container\n"
         mock_docker_verify = MagicMock()
         mock_docker_verify.stdout = "Up 10 seconds\n"
         mock_sudo_mv = MagicMock()
@@ -1923,6 +2064,7 @@ class TestRunPiServer:
 
         with (
             patch("shutil.which", return_value="/usr/bin/docker"),
+            patch.object(install_services, "_resolve_nats_address", return_value=None),
             patch.object(install_services, "_docker_psql", return_value="old-container"),
             patch("os.path.exists", return_value=True),
             patch("subprocess.run") as mock_run,
@@ -1930,50 +2072,96 @@ class TestRunPiServer:
             patch("os.fdopen"),
             patch("os.unlink"),
         ):
-            # docker stop, docker rm, docker run, docker ps (verify),
-            # sudo mv, sudo systemctl daemon-reload, sudo systemctl enable
+            # New code flow: systemd FIRST (stop, rm, mv, reload, enable), then docker run, verify
             mock_run.side_effect = [
                 mock_docker_stop,    # docker stop
                 mock_docker_rm,      # docker rm
-                mock_docker_run,     # docker run
-                mock_docker_verify,  # docker ps --filter --format
                 mock_sudo_mv,        # sudo mv
                 mock_sudo_reload,    # sudo systemctl daemon-reload
                 mock_sudo_enable,    # sudo systemctl enable
+                mock_docker_run,     # docker run
+                mock_docker_verify,  # docker ps --filter --format
             ]
             result = self._make_result()
             install_services.run_pi_server(result)
             assert result.status == "OK"
             assert "running" in result.detail.lower()
 
-    def test_fails_when_docker_run_fails(self):
-        """Result should be FAIL when docker run returns non-zero."""
+    def test_graceful_degradation_when_docker_run_fails(self):
+        """Result should not be FAIL when docker run fails; systemd is already installed."""
         mock_docker_run = MagicMock()
         mock_docker_run.returncode = 1
         mock_docker_run.stderr = "Error: port in use\n"
+        # Make sudo commands succeed (return mock with returncode=0)
+        mock_sudo = MagicMock()
+        mock_sudo.returncode = 0
 
         with (
             patch("shutil.which", return_value="/usr/bin/docker"),
+            patch.object(install_services, "_resolve_nats_address", return_value=None),
             patch.object(install_services, "_docker_psql", return_value=None),
             patch("os.path.exists", return_value=True),
-            patch("subprocess.run", return_value=mock_docker_run),
+            patch("subprocess.run") as mock_run,
+            patch("tempfile.mkstemp", return_value=(3, "/tmp/lmao-server-xxx.service")),
+            patch("os.fdopen"),
+            patch("os.unlink"),
         ):
+            # sudo mv, sudo reload, sudo enable all succeed; docker run fails
+            mock_run.side_effect = [
+                mock_sudo,          # sudo mv
+                mock_sudo,          # sudo daemon-reload
+                mock_sudo,          # sudo enable
+                mock_docker_run,    # docker run (fails)
+            ]
             result = self._make_result()
             install_services.run_pi_server(result)
-            assert result.status == "FAIL"
-            assert "docker run failed" in result.detail.lower()
+            # Container didn't start but systemd is installed
+            assert result.status == "OK"
+            assert "Systemd service installed" in result.detail
 
-    def test_fails_when_docker_psql_raises(self):
-        """Result should be FAIL when _docker_psql raises TimeoutExpired."""
+    def test_graceful_degradation_when_docker_psql_raises(self):
+        """Result should not be FAIL when _docker_psql raises; graceful degradation."""
+        mock_sudo = MagicMock()
+        mock_sudo.returncode = 0
+
         with (
             patch("shutil.which", return_value="/usr/bin/docker"),
+            patch.object(install_services, "_resolve_nats_address", return_value=None),
             patch.object(
                 install_services,
                 "_docker_psql",
                 side_effect=subprocess.TimeoutExpired(["docker", "ps", "-q"], 15),
             ),
+            patch("os.path.exists", return_value=True),
+            patch("subprocess.run", return_value=mock_sudo),
+            patch("tempfile.mkstemp", return_value=(3, "/tmp/lmao-server-xxx.service")),
+            patch("os.fdopen"),
+            patch("os.unlink"),
         ):
             result = self._make_result()
             install_services.run_pi_server(result)
-            assert result.status == "FAIL"
-            assert "Failed to query Docker containers" in result.detail
+            # Graceful degradation: warning printed, container still starts
+            # Since docker run also uses mock_sudo (success), container starts
+            assert result.status == "OK"
+
+    def test_uses_nats_server_env_var_when_set(self):
+        """NATS_SERVER env var should be used directly, skipping auto-discovery."""
+        mock_sudo = MagicMock()
+        mock_sudo.returncode = 0
+
+        with (
+            patch.dict(os.environ, {"NATS_SERVER": "nats://custom:4222"}, clear=True),
+            patch("shutil.which", return_value="/usr/bin/docker"),
+            patch.object(install_services, "_resolve_nats_address") as mock_resolve,
+            patch.object(install_services, "_docker_psql", return_value=None),
+            patch("os.path.exists", return_value=True),
+            patch("subprocess.run", return_value=mock_sudo),
+            patch("tempfile.mkstemp", return_value=(3, "/tmp/lmao-server-xxx.service")),
+            patch("os.fdopen"),
+            patch("os.unlink"),
+        ):
+            result = self._make_result()
+            install_services.run_pi_server(result)
+            # _resolve_nats_address should NOT be called when env var is set
+            mock_resolve.assert_not_called()
+            assert result.status == "OK"

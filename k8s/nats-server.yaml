@@ -118,7 +118,7 @@ metadata:
   labels:
     app: nats-server
 spec:
-  type: ClusterIP
+  type: NodePort
   ports:
     - port: 4222
       targetPort: 4222
