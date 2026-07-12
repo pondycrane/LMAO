@@ -3,7 +3,7 @@
 import asyncio
 import logging
 import sys
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from conftest import cleanup_common_mocks, setup_common_mocks
@@ -338,6 +338,85 @@ class TestSubscriberManagement:
         ) as spy:
             server.handle_lxmf_delivery(msg)
             spy.assert_called_once_with(msg)
+
+    # ── NATS publish path tests (new code in PR #42) ────────────────
+
+    @pytest.mark.asyncio
+    async def test_publish_to_nats_sends_to_queue(self, server_with_mocks):
+        """_publish_to_nats should call _nats_queue.publish with correct args."""
+        server = server_with_mocks
+        mock_queue = AsyncMock()
+        mock_ack = MagicMock()
+        mock_ack.seq = 42
+        mock_queue.publish = AsyncMock(return_value=mock_ack)
+        server._nats_queue = mock_queue
+        server._loop = asyncio.get_event_loop()
+
+        await server._publish_to_nats("aabbccdd", b"test data")
+
+        mock_queue.publish.assert_called_once_with(
+            "lmao.messages.env", b"test data"
+        )
+
+    @pytest.mark.asyncio
+    async def test_publish_to_nats_handles_failure(self, server_with_mocks, caplog):
+        """_publish_to_nats should log warning when publish fails."""
+        server = server_with_mocks
+        mock_queue = AsyncMock()
+        mock_queue.publish = AsyncMock(side_effect=OSError("NATS disconnected"))
+        server._nats_queue = mock_queue
+        server._loop = asyncio.get_event_loop()
+
+        with caplog.at_level(logging.WARNING):
+            await server._publish_to_nats("aabbccdd", b"test data")
+
+        assert "NATS publish failed" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_publish_to_nats_noop_when_queue_none(self, server_with_mocks):
+        """_publish_to_nats should return immediately when _nats_queue is None."""
+        server = server_with_mocks
+        server._nats_queue = None
+
+        result = await server._publish_to_nats("aabbccdd", b"test data")
+        assert result is None
+
+    def test_nats_publish_called_when_configured(self, server_with_mocks):
+        """handle_lxmf_delivery should call _publish_to_nats when NATS is configured."""
+        server = server_with_mocks
+        server._nats_queue = AsyncMock()
+        loop = asyncio.new_event_loop()
+        server._loop = loop
+
+        msg = MagicMock()
+        msg.get_source.return_value = MagicMock()
+        msg.get_source.return_value.hash = b"\x0b" * 16
+        msg.content = b"nats test"
+        msg.title_as_string.return_value = "p:Envelope"
+
+        with patch.object(server, "_publish_to_nats") as mock_publish:
+            server.handle_lxmf_delivery(msg)
+            mock_publish.assert_called_once()
+        loop.close()
+
+    def test_nats_publish_skipped_when_no_queue(self, server_with_mocks, caplog):
+        """handle_lxmf_delivery should skip NATS publish when _nats_queue is None."""
+        server = server_with_mocks
+        server._nats_queue = None
+        loop = asyncio.new_event_loop()
+        server._loop = loop
+
+        msg = MagicMock()
+        msg.get_source.return_value = MagicMock()
+        msg.get_source.return_value.hash = b"\x0c" * 16
+        msg.content = b"no nats"
+        msg.title_as_string.return_value = "p:Envelope"
+
+        with caplog.at_level(logging.DEBUG):
+            server.handle_lxmf_delivery(msg)
+
+        assert "NATS unavailable" in caplog.text
+        loop.close()
 
 
 if __name__ == "__main__":

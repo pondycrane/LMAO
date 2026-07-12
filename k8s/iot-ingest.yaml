@@ -67,6 +67,7 @@ spec:
       labels:
         app: iot-ingest-consumer
     spec:
+      revisionHistoryLimit: 2
       containers:
         - name: consumer
           image: lmao-iot-ingest:latest
@@ -98,8 +99,9 @@ spec:
                 - python3
                 - -c
                 - "import lma_core.queue, lma_core.storage; print('ready')"
-            initialDelaySeconds: 10
-            periodSeconds: 15
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 2
       volumes:
         - name: duckdb-data
           persistentVolumeClaim:

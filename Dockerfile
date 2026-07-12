@@ -1,15 +1,22 @@
-# LMAO Server — Docker image with gRPC API
+# LMAO Server — Docker image with gRPC API + NATS JetStream publishing
 #
 # Build:
 #   docker build -t lmao-server .
 #
-# Run:
-#   docker run --rm -it --network host lmao-server
+# Run (production, daemonised):
+#   docker run -d --name lmao-server --restart unless-stopped \
+#     --network host \
+#     -e NATS_SERVER=nats://localhost:4222 \
+#     -e LMAO_RNODE_PORT=/dev/ttyACM0 \
+#     --device /dev/ttyACM0:/dev/ttyACM0 \
+#     lmao-server
+#
+# Or use: bazel run //tools:install_all -- --include-services
 #
 # The container uses --network host so that Reticulum can discover
 # RNS interfaces (AutoInterface, RNode) and expose gRPC on port 50051.
-#
-# Note: RNode USB passthrough requires --device /dev/ttyACM0 or similar.
+# RNode USB passthrough requires --device for the serial port.
+# NATS_SERVER must point to a reachable NATS server (default: localhost:4222).
 
 FROM python:3.12-slim
 
@@ -27,6 +34,7 @@ COPY . .
 RUN pip install --no-cache-dir \
     grpcio \
     grpcio-tools \
+    nats-py \
     protobuf \
     rns \
     lxmf

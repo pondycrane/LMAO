@@ -340,12 +340,67 @@ docker run --network host --device /dev/ttyUSB0:/dev/ttyUSB0 lmao-server
 - `--network host` is **required** — Reticulum uses UDP multicast for
   AutoInterface discovery and must run on the host network stack.
 - Pass your RNode device with `--device` (adjust path as needed).
-- Set `LMAO_RNODE_PORT` to override the auto-detected port:
+- Set `NATS_SERVER` to enable JetStream publishing:
   ```bash
   docker run --network host --device /dev/ttyACM0:/dev/ttyACM0 \
+    -e NATS_SERVER=nats://my-nats-server:4222 \
     -e LMAO_RNODE_PORT=/dev/ttyACM0 lmao-server
   ```
 - The gRPC API on port 50051 is accessible on the host.
+
+#### 8.1 Systemd Auto-Start (Production)
+
+For production deployments, install the container as a systemd service
+so it starts automatically on boot and restarts on failure:
+
+```bash
+# Run the full server install (Docker build + systemd service)
+bazel run //tools:install_all -- --include-services
+```
+
+Or install the systemd service manually:
+
+```bash
+sudo tee /etc/systemd/system/lmao-server.service << 'EOF'
+[Unit]
+Description=LMAO Server — Reticulum/LXMF LoRa mesh gateway
+After=docker.service network-online.target
+Requires=docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStartPre=-/usr/bin/docker stop lmao-server
+ExecStartPre=-/usr/bin/docker rm lmao-server
+ExecStart=/usr/bin/docker run --rm --name lmao-server --network host \
+  -e NATS_SERVER=nats://localhost:4222 \
+  -e LMAO_RNODE_PORT=/dev/ttyUSB0 \
+  --device /dev/ttyUSB0:/dev/ttyUSB0 \
+  lmao-server:latest
+ExecStop=/usr/bin/docker stop lmao-server
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable lmao-server
+sudo systemctl start lmao-server
+```
+
+**Manage the service:**
+
+```bash
+sudo systemctl start lmao-server      # Start the container
+sudo systemctl stop lmao-server       # Stop the container
+sudo systemctl status lmao-server     # Check status
+sudo journalctl -u lmao-server -f     # Tail logs
+sudo systemctl disable lmao-server    # Disable auto-start on boot
+```
 
 ### 9. Kubernetes Deployment
 
@@ -372,6 +427,19 @@ python k8s-app/iot_ingest.py --send --get-identity
 
 > For in-cluster durable message queuing, see [Section 10](#10-nats-queue-k8s-persistent-pubsub)
 > for NATS JetStream deployment and usage.
+
+#### Environment Variables
+
+The server respects the following environment variables (also configurable
+when running in Docker or systemd):
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `NATS_SERVER` | `nats://localhost:4222` | NATS server URL for JetStream publishing |
+| `LMAO_RNODE_PORT` | auto-detect | Serial port for RNode LoRa interface |
+| `LMAO_MQTT_HOST` | `localhost` | MQTT broker hostname (IoT ingest) |
+| `LMAO_MQTT_PORT` | `1883` | MQTT broker port |
+| `LMAO_INGEST_DUCKDB_PATH` | `/data/sensors.db` | DuckDB file path (IoT ingest) |
 
 ### 10. NATS Queue (K8s Persistent PubSub)
 
