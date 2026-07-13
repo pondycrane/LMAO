@@ -31,7 +31,59 @@ For this POC:
 
 ---
 
-## Step 1: Install `rnodeconf`
+## Automated Flashing (Recommended)
+
+The LMAO project provides a built-in flashing pipeline in `lma_core.rnode_flasher`
+that replaces `rnodeconf --autoinstall` with direct esptool firmware writing plus
+KISS-protocol EEPROM provisioning.
+
+### Prerequisites
+
+```bash
+pip install esptool pyserial
+```
+
+### Quick flash
+
+```bash
+# From Python
+from lma_core.rnode_flasher import flash_rnode
+ok, msg = flash_rnode("/dev/ttyUSB0", firmware_path="./rnode_firmware.bin")
+
+# Or via the unified install tool
+bazel run //tools:install_all -- --rnode-port /dev/ttyUSB0
+```
+
+The `flash_rnode()` function performs:
+1. Erase flash via `esptool.py erase_flash`
+2. Write firmware via `esptool.py --baud 921600 write_flash 0x0 <firmware>.bin`
+3. Open KISS serial connection to the freshly-flashed device
+4. Provision EEPROM (unlock → write product/model/serial/checksum → blank signature → lock)
+5. Set firmware hash (clears "Firmware Corrupt" error)
+6. Verify via KISS `CMD_DETECT`
+
+### Verify
+
+```python
+from lma_core.rnode_flasher import check_rnode_firmware
+if check_rnode_firmware("/dev/ttyUSB0"):
+    print("RNode firmware detected")
+```
+
+Or with `rnodeconf` (legacy):
+```bash
+rnodeconf --port /dev/ttyUSB0 --info
+```
+
+---
+
+## Legacy Flashing (rnodeconf)
+
+The sections below describe the older `rnodeconf`-based approach.
+This method is retained for reference but the recommended approach above
+should be preferred for new workflows.
+
+### Legacy: Install `rnodeconf`
 
 On your Raspberry Pi or development machine:
 
@@ -53,7 +105,7 @@ rnodeconf --version
 
 ---
 
-## Step 2: Connect the ESP32
+### Legacy: Step 2 Connect the ESP32
 
 1. Connect the ESP32 to your machine via USB
 2. Identify the serial port:
@@ -70,9 +122,9 @@ ls /dev/cu.usbserial*
 
 ---
 
-## Step 3: Flash RNode Firmware
+### Legacy: Step 3 Flash RNode Firmware
 
-### Option A: Auto-install (recommended)
+### Option A: Auto-install (legacy)
 
 `rnodeconf` can automatically detect and flash compatible boards:
 
@@ -112,7 +164,7 @@ esptool.py --port /dev/ttyUSB0 --baud 921600 write_flash 0x0 rnode_firmware.bin
 
 ---
 
-## Step 4: Verify the RNode
+### Legacy: Step 4 Verify the RNode
 
 After flashing, the ESP32 should appear as a serial device:
 
@@ -136,7 +188,7 @@ Status: Ready
 
 ---
 
-## Step 5: Test with Reticulum
+### Legacy: Step 5 Test with Reticulum
 
 Create a minimal Reticulum config (`~/.reticulum/config`) or use the
 `lmao_server/config.py` from this repository:
@@ -159,7 +211,7 @@ If successful, you'll see log output showing the RNode interface coming online.
 
 ---
 
-## Step 6: Verify E2E Test Readiness
+### Legacy: Step 6 Verify E2E Test Readiness
 
 Before running the full E2E LoRa test, confirm the Heltec RNode is
 properly detected and configured:
