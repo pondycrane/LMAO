@@ -24,16 +24,17 @@ common failure mode (freshly erased or mis-flashed Heltec).
 **What happens**:
 1. The test detects the Heltec by USB VID (Espressif / CP210x / CH340).
 2. If firmware is already present → proceeds immediately.
-3. If firmware is missing → `rnodeconf --autoinstall` is called automatically
-   (output is printed to the test log so you can monitor progress).
+3. If firmware is missing → `flash_rnode_firmware()` from
+   `lma_core.rnode_flasher` is called automatically.  This erases the
+   ESP32 via `esptool.py`, writes firmware at 921600 baud, then provisions
+   EEPROM via the KISS serial protocol (product info, checksum, signature).
 4. After flashing, the device port is re-discovered (it may re-enumerate to
    a different path) and the firmware is verified.
 5. If auto-flash fails, the test skips with a diagnostic message.
 
 **Prerequisites**:
-- The `rns` package must be installed (already declared in
+- The `esptool` and `pyserial` packages must be installed (declared in
   `lmao_server/requirements_lock.txt` and available via Bazel).
-  `rnodeconf` is bundled inside `rns` at `RNS.Utilities.rnodeconf`.
 - The Heltec must be connected via USB.
 - Only **one** E2E test should run at a time — flashing is not safe for
   concurrent access to the same USB device.

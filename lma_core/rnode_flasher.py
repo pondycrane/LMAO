@@ -30,8 +30,10 @@ from collections.abc import Callable
 
 try:
     import serial
+    _SerialException = serial.SerialException
 except ImportError:
     serial = None  # type: ignore[assignment]
+    _SerialException = type("_SerialException", (Exception,), {})
 
 # ---------------------------------------------------------------------------
 # KISS Protocol Constants
@@ -73,6 +75,8 @@ CMD_UNLOCK_ROM = 0x59
 ROM_UNLOCK_BYTE = 0xF8
 CMD_HASHES = 0x60
 CMD_FW_UPD = 0x61
+# NOTE: 0x46 is shared with DETECT_RESP above — this is an upstream collision
+# in the RNode protocol.  The context (command vs. response) disambiguates.
 CMD_BT_CTRL = 0x46
 
 CMD_ERROR = 0x90
@@ -327,7 +331,7 @@ class RNodeKiss:
         self._ser.write(data)
 
     def _read_byte(self) -> int | None:
-        """Read a single byte from the serial port (non-blocking peek)."""
+        """Read a single byte from the serial port (blocking read with timeout)."""
         if self._ser is None:
             return None
         b = self._ser.read(1)
@@ -363,6 +367,12 @@ class RNodeKiss:
                             cb(payload)
                         if cmd == command:
                             return payload
+                    elif decoded is None:
+                        print(
+                            f"WARNING: Invalid KISS frame discarded "
+                            f"({len(self._frame_buf)} bytes)",
+                            file=sys.stderr,
+                        )
                 self._in_frame = not self._in_frame
             elif self._in_frame:
                 self._frame_buf.append(byte)
@@ -426,7 +436,9 @@ class RNodeKiss:
             if response is None:
                 return False
             return len(response) > 0 and response[0] == DETECT_RESP
-        except Exception:
+        except Exception as exc:
+            print(f"WARNING: RNodeKiss.detect() failed: {exc}", file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)
             return False
 
     def get_firmware_version(self) -> str | None:
@@ -526,8 +538,9 @@ def _find_esptool() -> str | None:
             )
             if result.returncode == 0:
                 return python  # caller must use `python -m esptool`
-        except Exception:
-            pass
+        except Exception as exc:
+            import sys as _sys
+            print(f"DEBUG: esptool fallback detection failed: {exc}", file=_sys.stderr)
     return None
 
 
@@ -624,6 +637,10 @@ def flash_rnode_firmware(
         )
     except subprocess.TimeoutExpired as exc:
         msg = f"esptool write_flash timed out after {timeout}s: {exc}"
+        print(f"WARNING: {msg}", file=sys.stderr)
+        return (False, msg)
+    except FileNotFoundError:
+        msg = f"esptool not found: {esptool}"
         print(f"WARNING: {msg}", file=sys.stderr)
         return (False, msg)
     except Exception as exc:
@@ -725,10 +742,10 @@ def provision_rnode_eeprom(
                 return (False, "EEPROM info lock byte not set after provisioning")
 
     except ImportError as exc:
-        msg = f"Cannot open serial port: {exc}"
+        msg = f"pyserial is required for serial communication. Install with: pip install pyserial ({exc})"
         print(f"WARNING: {msg}", file=sys.stderr)
         return (False, msg)
-    except serial.SerialException as exc:
+    except _SerialException as exc:
         msg = f"Serial error during EEPROM provisioning on {port}: {exc}"
         print(f"WARNING: {msg}", file=sys.stderr)
         traceback.print_exc(file=sys.stderr)
@@ -776,10 +793,10 @@ def set_rnode_firmware_hash(
             print(f"  Writing firmware hash ({len(hash_bytes)} bytes) ...", flush=True)
             rnode.set_firmware_hash(hash_bytes)
     except ImportError as exc:
-        msg = f"Cannot open serial port: {exc}"
+        msg = f"pyserial is required for serial communication. Install with: pip install pyserial ({exc})"
         print(f"WARNING: {msg}", file=sys.stderr)
         return (False, msg)
-    except serial.SerialException as exc:
+    except _SerialException as exc:
         msg = f"Serial error setting firmware hash on {port}: {exc}"
         print(f"WARNING: {msg}", file=sys.stderr)
         traceback.print_exc(file=sys.stderr)
@@ -819,9 +836,11 @@ def check_rnode_firmware(port: str, timeout: float = 15.0) -> bool:
                 print(f"  OK: RNode firmware v{version} detected", flush=True)
                 return True
     except ImportError as exc:
-        print(f"WARNING: Cannot open serial port — {exc}", file=sys.stderr)
+        msg = f"pyserial is required for serial communication. Install with: pip install pyserial ({exc})"
+        print(f"WARNING: {msg}", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
         return False
-    except serial.SerialException as exc:
+    except _SerialException as exc:
         print(f"WARNING: Serial error on {port}: {exc}", file=sys.stderr)
         return False
     except Exception as exc:

@@ -1172,7 +1172,7 @@ WantedBy=multi-user.target
             stderr_tail = exc.stderr.strip().split("\n")[-3:]
             stderr_hint = ": " + "; ".join(stderr_tail)
         elif isinstance(exc, subprocess.TimeoutExpired) and exc.stderr:
-            stderr_hint = ": " + exc.stderr.decode().strip()
+            stderr_hint = ": " + exc.stderr.strip()
         print(f"  WARNING: systemd install failed{stderr_hint}")
         print("  (Server will run now but won't auto-start on boot \u2014 fix sudo access)")
     except PermissionError:

@@ -39,6 +39,7 @@ from lma_core.rnode_flasher import (
     RNodeKiss,
     decode_kiss_frame,
     encode_kiss_frame,
+    flash_rnode,
     provision_rnode_eeprom,
     set_rnode_firmware_hash,
 )
@@ -766,6 +767,85 @@ class TestSetFirmwareHash:
         with patch("serial.Serial", side_effect=Exception("Access denied")):
             ok, msg = set_rnode_firmware_hash("/dev/ttyUSB0", timeout=1.0)
         assert ok is False
+
+
+class TestFlashRNode:
+    """Tests for flash_rnode() orchestrator — mocked sub-functions."""
+
+    def test_full_success(self):
+        """Returns (True, ...) when all steps succeed."""
+        with (
+            patch("lma_core.rnode_flasher.flash_rnode_firmware", return_value=(True, "Flash OK")),
+            patch("lma_core.rnode_flasher.provision_rnode_eeprom", return_value=(True, "Provision OK")),
+            patch("lma_core.rnode_flasher.set_rnode_firmware_hash", return_value=(True, "Hash OK")),
+            patch("lma_core.rnode_flasher.check_rnode_firmware", return_value=True),
+            patch("time.sleep", return_value=None),
+        ):
+            ok, msg = flash_rnode("/dev/ttyUSB0")
+        assert ok is True
+        assert "successfully" in msg
+
+    def test_flash_failure_returns_early(self):
+        """Returns (False, ...) when flash step fails."""
+        with (
+            patch("lma_core.rnode_flasher.flash_rnode_firmware", return_value=(False, "Flash error")),
+            patch("time.sleep", return_value=None),
+        ):
+            ok, msg = flash_rnode("/dev/ttyUSB0")
+        assert ok is False
+        assert "Flash failed" in msg
+
+    def test_provision_failure_returns_early(self):
+        """Returns (False, ...) when EEPROM provision fails."""
+        with (
+            patch("lma_core.rnode_flasher.flash_rnode_firmware", return_value=(True, "Flash OK")),
+            patch("lma_core.rnode_flasher.provision_rnode_eeprom", return_value=(False, "Provision error")),
+            patch("time.sleep", return_value=None),
+        ):
+            ok, msg = flash_rnode("/dev/ttyUSB0")
+        assert ok is False
+        assert "provisioning failed" in msg
+
+    def test_hash_set_failure_returns_early(self):
+        """Returns (False, ...) when firmware hash set fails."""
+        with (
+            patch("lma_core.rnode_flasher.flash_rnode_firmware", return_value=(True, "Flash OK")),
+            patch("lma_core.rnode_flasher.provision_rnode_eeprom", return_value=(True, "Provision OK")),
+            patch("lma_core.rnode_flasher.set_rnode_firmware_hash", return_value=(False, "Hash error")),
+            patch("time.sleep", return_value=None),
+        ):
+            ok, msg = flash_rnode("/dev/ttyUSB0")
+        assert ok is False
+        assert "hash" in msg.lower()
+
+    def test_verification_failure(self):
+        """Returns (False, ...) when post-flash verify fails."""
+        with (
+            patch("lma_core.rnode_flasher.flash_rnode_firmware", return_value=(True, "Flash OK")),
+            patch("lma_core.rnode_flasher.provision_rnode_eeprom", return_value=(True, "Provision OK")),
+            patch("lma_core.rnode_flasher.set_rnode_firmware_hash", return_value=(True, "Hash OK")),
+            patch("lma_core.rnode_flasher.check_rnode_firmware", return_value=False),
+            patch("time.sleep", return_value=None),
+        ):
+            ok, msg = flash_rnode("/dev/ttyUSB0")
+        assert ok is False
+        assert "verification failed" in msg
+
+    def test_provision_skipped(self):
+        """When provision=False, skips EEPROM/hash/verify steps."""
+        with (
+            patch("lma_core.rnode_flasher.flash_rnode_firmware", return_value=(True, "Flash OK")),
+            patch("lma_core.rnode_flasher.provision_rnode_eeprom") as mock_provision,
+            patch("lma_core.rnode_flasher.set_rnode_firmware_hash") as mock_hash,
+            patch("lma_core.rnode_flasher.check_rnode_firmware") as mock_verify,
+            patch("time.sleep", return_value=None),
+        ):
+            ok, msg = flash_rnode("/dev/ttyUSB0", provision=False)
+        assert ok is True
+        assert "skipped" in msg
+        mock_provision.assert_not_called()
+        mock_hash.assert_not_called()
+        mock_verify.assert_not_called()
 
 
 if __name__ == "__main__":

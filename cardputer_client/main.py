@@ -262,6 +262,7 @@ def handle_reply(message):
     add blocking calls or locking here.
     """
     content = ""
+    source_info = "unknown"
     try:
         source_info = (
             message.source_hash.hex()[:8] if message.source_hash else "unknown"
