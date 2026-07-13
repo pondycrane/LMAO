@@ -15,6 +15,7 @@ py_library(
         ":install_services_lib",
         "//cardputer_client:flash_lib",
         "//tests:e2e_helpers_lib",
+        "//lma_core:rnode_flasher_lib",
         "@lmao_pip//pyserial",
     ],
 )

@@ -768,7 +768,7 @@ async def main():
     payload = env.SerializeToString()
 
     ack = await js.publish(SUBJECT, payload)
-    print(f"Published {{len(payload)}} bytes to '{SUBJECT}' (seq={{ack.seq}})")
+    print(f"Published {{len(payload)}} bytes to '{{SUBJECT}}' (seq={{ack.seq}})")
 
     # ── Subscribe and verify ─────────────────────────
     psub = await js.pull_subscribe(SUBJECT, durable="e2e-test-consumer")

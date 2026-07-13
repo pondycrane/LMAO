@@ -24,7 +24,8 @@ Usage (via Bazel):
 Prerequisites:
     - Cardputer with MicroPython installed, connected via USB
     - Heltec ESP32 connected via USB (for RNode firmware)
-    - ``rns`` Python package installed (provides ``rnodeconf``)
+    - ``esptool`` Python package installed (for ESP32 flashing)
+    - ``pyserial`` Python package installed
     - User has permissions on serial ports (dialout group)
 """
 
@@ -56,7 +57,6 @@ from cardputer_client.flash import (
 # RNode firmware helpers (from tests/e2e/e2e_helpers.py via e2e_helpers_lib).
 from tests.e2e.e2e_helpers import (
     check_rnode_firmware,
-    find_rnode_port,
     flash_rnode_firmware,
 )
 
