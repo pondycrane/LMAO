@@ -34,7 +34,6 @@ def _patch_imports():
     patches = {
         "serial_serial": patch("tools.install_all.serial.Serial", MagicMock()),
         "find_cardputer_port": patch.object(install_all, "find_cardputer_port", return_value=None),
-        "find_rnode_port": patch.object(install_all, "find_rnode_port", return_value=None),
         "check_rnode_firmware": patch.object(
             install_all, "check_rnode_firmware", return_value=False
         ),
@@ -45,9 +44,7 @@ def _patch_imports():
             install_all, "find_client_root", return_value="/fake/client_root"
         ),
         "enter_raw_repl": patch.object(install_all, "enter_raw_repl", return_value=True),
-        "verify_files_exist": patch.object(
-            install_all, "verify_files_exist", return_value=None
-        ),
+        "verify_files_exist": patch.object(install_all, "verify_files_exist", return_value=None),
         "upload_file": patch.object(install_all, "upload_file", return_value=True),
         "exit_raw_repl": patch.object(install_all, "exit_raw_repl", return_value=None),
         "auto_discover_lib_files": patch.object(
@@ -55,14 +52,6 @@ def _patch_imports():
         ),
         "verify_device": patch.object(
             install_all, "verify_device", return_value=(True, "ESP32 detected")
-        ),
-        "verify_files_exist": patch.object(
-            install_all, "verify_files_exist", return_value=None
-        ),
-        "upload_file": patch.object(install_all, "upload_file", return_value=True),
-        "exit_raw_repl": patch.object(install_all, "exit_raw_repl", return_value=None),
-        "auto_discover_lib_files": patch.object(
-            install_all, "auto_discover_lib_files", return_value=[]
         ),
         "os_path_getsize": patch("os.path.getsize", return_value=100),
         "detect_serial_devices": patch.object(
@@ -481,7 +470,6 @@ class TestMainPipeline:
             "find_cardputer_port": patch.object(
                 install_all, "find_cardputer_port", return_value=None
             ),
-            "find_rnode_port": patch.object(install_all, "find_rnode_port", return_value=None),
             "check_rnode_firmware": patch.object(
                 install_all, "check_rnode_firmware", return_value=False
             ),
@@ -609,8 +597,6 @@ class TestMainSkipFlags:
         assert exc_info.value.code == 0
         # Cardputer detection should have been called
         self.mocks["find_cardputer_port"].assert_called_once()
-        # RNode detection should NOT have been called
-        self.mocks["find_rnode_port"].assert_not_called()
 
 
 class TestMainNoHardware:
@@ -622,7 +608,6 @@ class TestMainNoHardware:
         self.mocks, self._patches = _start_patches(patches)
         # Both ports return None (no hardware detected)
         self.mocks["find_cardputer_port"].return_value = None
-        self.mocks["find_rnode_port"].return_value = None
         yield
         _stop_patches(self._patches)
 
@@ -649,7 +634,6 @@ class TestMainRNodeDetected:
         patches = _patch_imports()
         self.mocks, self._patches = _start_patches(patches)
         self.mocks["find_cardputer_port"].return_value = None
-        self.mocks["find_rnode_port"].return_value = "/dev/ttyUSB0"
         self.mocks["detect_serial_devices"].return_value = ("/dev/ttyUSB0", None)
         self.mocks["check_rnode_firmware"].return_value = True  # already RNode
         yield
@@ -681,7 +665,6 @@ class TestMainRNodeFlashFails:
         patches = _patch_imports()
         self.mocks, self._patches = _start_patches(patches)
         self.mocks["find_cardputer_port"].return_value = None
-        self.mocks["find_rnode_port"].return_value = "/dev/ttyUSB0"
         self.mocks["detect_serial_devices"].return_value = ("/dev/ttyUSB0", None)
         self.mocks["check_rnode_firmware"].return_value = False
         self.mocks["flash_rnode_firmware"].return_value = (False, "Flash error")
@@ -703,7 +686,6 @@ class TestMainClientRootNotFound:
         patches = _patch_imports()
         self.mocks, self._patches = _start_patches(patches)
         self.mocks["find_cardputer_port"].return_value = "/dev/ttyACM0"
-        self.mocks["find_rnode_port"].return_value = None
         # Make find_client_root return None (not found)
         self.mocks["find_client_root"].return_value = None
         yield
@@ -724,7 +706,6 @@ class TestMainRNodePortOverride:
         patches = _patch_imports()
         self.mocks, self._patches = _start_patches(patches)
         self.mocks["find_cardputer_port"].return_value = None
-        self.mocks["find_rnode_port"].return_value = None  # won't be called
         self.mocks["detect_serial_devices"].return_value = (None, None)
         self.mocks["check_rnode_firmware"].return_value = True
         yield
@@ -735,8 +716,6 @@ class TestMainRNodePortOverride:
         with pytest.raises(SystemExit) as exc_info:
             install_all.main(["--rnode-port", "/dev/customUSB0"])
         assert exc_info.value.code == 0
-        # find_rnode_port should NOT be called (explicit port given)
-        self.mocks["find_rnode_port"].assert_not_called()
         # detect_serial_devices should NOT be called (explicit port given)
         self.mocks["detect_serial_devices"].assert_not_called()
         # check_rnode_firmware should be called with the explicit port
@@ -754,7 +733,6 @@ class TestMainWithoutServices:
         patches = _patch_imports()
         self.mocks, self._patches = _start_patches(patches)
         self.mocks["find_cardputer_port"].return_value = None
-        self.mocks["find_rnode_port"].return_value = None
         yield
         _stop_patches(self._patches)
 
@@ -794,7 +772,6 @@ class TestMainWithServicesSkipped:
         patches["run_pi_server"] = patch.object(install_all, "run_pi_server")
         self.mocks, self._patches = _start_patches(patches)
         self.mocks["find_cardputer_port"].return_value = None
-        self.mocks["find_rnode_port"].return_value = None
         yield
         _stop_patches(self._patches)
 
@@ -829,7 +806,6 @@ class TestMainWithServices:
         patches["run_pi_server"] = patch.object(install_all, "run_pi_server")
         self.mocks, self._patches = _start_patches(patches)
         self.mocks["find_cardputer_port"].return_value = None
-        self.mocks["find_rnode_port"].return_value = None
         yield
         _stop_patches(self._patches)
 
@@ -1748,7 +1724,6 @@ class TestMainWithRegistry:
         patches["setup_registry"] = patch.object(install_all, "setup_registry")
         self.mocks, self._patches = _start_patches(patches)
         self.mocks["find_cardputer_port"].return_value = None
-        self.mocks["find_rnode_port"].return_value = None
         yield
         _stop_patches(self._patches)
 
@@ -1803,7 +1778,6 @@ class TestMainWithRegistryAndServices:
         patches["run_pi_server"] = patch.object(install_all, "run_pi_server")
         self.mocks, self._patches = _start_patches(patches)
         self.mocks["find_cardputer_port"].return_value = None
-        self.mocks["find_rnode_port"].return_value = None
         yield
         _stop_patches(self._patches)
 
@@ -1811,9 +1785,7 @@ class TestMainWithRegistryAndServices:
         """When both --setup-registry and --include-services are set,
         install_iot_ingest_consumer should receive registry_host and registry_port."""
         # Simulate successful registry setup (sets result.status to "OK")
-        self.mocks["setup_registry"].side_effect = lambda result: setattr(
-            result, "status", "OK"
-        )
+        self.mocks["setup_registry"].side_effect = lambda result: setattr(result, "status", "OK")
         with pytest.raises(SystemExit):
             install_all.main(["--setup-registry", "--include-services"])
         self.mocks["install_iot_ingest_consumer"].assert_called_once()
@@ -1840,9 +1812,7 @@ class TestMainWithRegistryAndServices:
 
     def test_registry_with_services_and_skip_iot(self):
         """--skip-iot-ingest should prevent iot install even with registry."""
-        self.mocks["setup_registry"].side_effect = lambda result: setattr(
-            result, "status", "OK"
-        )
+        self.mocks["setup_registry"].side_effect = lambda result: setattr(result, "status", "OK")
         with pytest.raises(SystemExit):
             install_all.main(["--setup-registry", "--include-services", "--skip-iot-ingest"])
         self.mocks["install_iot_ingest_consumer"].assert_not_called()
@@ -1851,9 +1821,7 @@ class TestMainWithRegistryAndServices:
         """When registry setup fails, IoT deploy should fall back to local Docker build
         without registry params."""
         # Simulate registry failure (status stays SKIP or becomes FAIL)
-        self.mocks["setup_registry"].side_effect = lambda result: setattr(
-            result, "status", "FAIL"
-        )
+        self.mocks["setup_registry"].side_effect = lambda result: setattr(result, "status", "FAIL")
         with pytest.raises(SystemExit):
             install_all.main(["--setup-registry", "--include-services"])
         self.mocks["install_iot_ingest_consumer"].assert_called_once()
@@ -1901,7 +1869,9 @@ class TestDetectRNodePort:
         """detect_serial_devices called when no env var set."""
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch.object(install_services, "detect_serial_devices", return_value=("/dev/ttyACM0", None)),
+            patch.object(
+                install_services, "detect_serial_devices", return_value=("/dev/ttyACM0", None)
+            ),
             patch.object(install_services, "_detect_rnode_port_fallback") as mock_fallback,
         ):
             port = install_services._detect_rnode_port()
@@ -1913,7 +1883,9 @@ class TestDetectRNodePort:
         with (
             patch.dict(os.environ, {}, clear=True),
             patch.object(install_services, "detect_serial_devices", return_value=(None, None)),
-            patch.object(install_services, "_detect_rnode_port_fallback", return_value="/dev/ttyUSB0"),
+            patch.object(
+                install_services, "_detect_rnode_port_fallback", return_value="/dev/ttyUSB0"
+            ),
         ):
             port = install_services._detect_rnode_port()
             assert port == "/dev/ttyUSB0"
@@ -1931,9 +1903,11 @@ class TestDetectRNodePort:
 
 # ── Unit tests for detect_serial_devices and probe functions ────────
 
+
 # Helper to create fake port objects for mocking serial.tools.list_ports.comports()
 def _make_port(device, vid, pid, description="USB device"):
     from types import SimpleNamespace
+
     return SimpleNamespace(device=device, vid=vid, pid=pid, description=description)
 
 
@@ -2036,7 +2010,9 @@ class TestDetectSerialDevices:
         """No USB serial devices → falls back to _detect_rnode_port_fallback()."""
         with (
             patch("serial.tools.list_ports.comports", return_value=[]),
-            patch.object(install_services, "_detect_rnode_port_fallback", return_value="/dev/ttyUSB0"),
+            patch.object(
+                install_services, "_detect_rnode_port_fallback", return_value="/dev/ttyUSB0"
+            ),
         ):
             rnode, cardputer = install_services.detect_serial_devices()
         assert rnode == "/dev/ttyUSB0"
@@ -2045,15 +2021,20 @@ class TestDetectSerialDevices:
     def test_pyserial_unavailable_uses_fallback(self):
         """ImportError on serial.tools.list_ports → falls back."""
         with (
-            patch.object(install_services, "_detect_rnode_port_fallback", return_value="/dev/ttyACM0"),
+            patch.object(
+                install_services, "_detect_rnode_port_fallback", return_value="/dev/ttyACM0"
+            ),
         ):
             # Simulate ImportError by patching serial.tools.list_ports import
             import builtins
+
             real_import = builtins.__import__
+
             def mock_import(name, *args, **kwargs):
                 if name == "serial.tools.list_ports":
                     raise ImportError("no pyserial")
                 return real_import(name, *args, **kwargs)
+
             with patch("builtins.__import__", side_effect=mock_import):
                 rnode, cardputer = install_services.detect_serial_devices()
         assert rnode == "/dev/ttyACM0"
@@ -2088,14 +2069,19 @@ class TestDetectSerialDevices:
     def test_cardputer_detection_requires_pyserial(self):
         """Without pyserial, cardputer is always None."""
         with (
-            patch.object(install_services, "_detect_rnode_port_fallback", return_value="/dev/ttyACM0"),
+            patch.object(
+                install_services, "_detect_rnode_port_fallback", return_value="/dev/ttyACM0"
+            ),
         ):
             import builtins
+
             real_import = builtins.__import__
+
             def mock_import(name, *args, **kwargs):
                 if name == "serial.tools.list_ports":
                     raise ImportError("no pyserial")
                 return real_import(name, *args, **kwargs)
+
             with patch("builtins.__import__", side_effect=mock_import):
                 rnode, cardputer = install_services.detect_serial_devices()
         assert cardputer is None  # Cardputer detection requires pyserial
@@ -2136,9 +2122,7 @@ class TestProbeForRNode:
             patch.object(install_services, "_find_system_python", return_value="/usr/bin/python3"),
             patch("subprocess.run") as mock_run,
         ):
-            mock_run.return_value = MagicMock(
-                returncode=0, stdout="USB Serial Device\n", stderr=""
-            )
+            mock_run.return_value = MagicMock(returncode=0, stdout="USB Serial Device\n", stderr="")
             assert install_services._probe_for_rnode("/dev/ttyUSB0") is False
 
     def test_nonzero_exit_returns_false(self):
@@ -2147,9 +2131,7 @@ class TestProbeForRNode:
             patch.object(install_services, "_find_system_python", return_value="/usr/bin/python3"),
             patch("subprocess.run") as mock_run,
         ):
-            mock_run.return_value = MagicMock(
-                returncode=1, stdout="", stderr="could not open port"
-            )
+            mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="could not open port")
             assert install_services._probe_for_rnode("/dev/ttyUSB0") is False
 
     def test_timeout_returns_false(self):
@@ -2434,12 +2416,12 @@ class TestRunPiServer:
         ):
             # New code flow: systemd FIRST (stop, rm, mv, reload, enable), then docker run, verify
             mock_run.side_effect = [
-                mock_docker_stop,    # docker stop
-                mock_docker_rm,      # docker rm
-                mock_sudo_mv,        # sudo mv
-                mock_sudo_reload,    # sudo systemctl daemon-reload
-                mock_sudo_enable,    # sudo systemctl enable
-                mock_docker_run,     # docker run
+                mock_docker_stop,  # docker stop
+                mock_docker_rm,  # docker rm
+                mock_sudo_mv,  # sudo mv
+                mock_sudo_reload,  # sudo systemctl daemon-reload
+                mock_sudo_enable,  # sudo systemctl enable
+                mock_docker_run,  # docker run
                 mock_docker_verify,  # docker ps --filter --format
             ]
             result = self._make_result()
@@ -2468,10 +2450,10 @@ class TestRunPiServer:
         ):
             # sudo mv, sudo reload, sudo enable all succeed; docker run fails
             mock_run.side_effect = [
-                mock_sudo,          # sudo mv
-                mock_sudo,          # sudo daemon-reload
-                mock_sudo,          # sudo enable
-                mock_docker_run,    # docker run (fails)
+                mock_sudo,  # sudo mv
+                mock_sudo,  # sudo daemon-reload
+                mock_sudo,  # sudo enable
+                mock_docker_run,  # docker run (fails)
             ]
             result = self._make_result()
             install_services.run_pi_server(result)

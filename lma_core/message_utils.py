@@ -37,6 +37,7 @@ def decode_lmao_message(content_bytes: bytes) -> str:
     if not content_bytes:
         return ""
 
+    assert LMAOEnvelope is not None  # import re-raises on failure
     envelope = LMAOEnvelope()
     try:
         envelope.ParseFromString(content_bytes)

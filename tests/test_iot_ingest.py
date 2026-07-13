@@ -848,7 +848,6 @@ class TestConsumerConnect:
         with patch.dict("os.environ", {"NATS_SERVER": "nats://test:4222"}):
             with patch("lma_core.queue.NatsQueue", return_value=nq):
                 with patch("lma_core.storage.DuckDbStore", return_value=store):
-
                     # Run the main function briefly — it'll block on subscribe
                     # so we schedule a task and cancel after connect/ensure_stream
                     stream_ensured = False
