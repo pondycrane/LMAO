@@ -22,8 +22,6 @@ import logging
 import os
 import time
 
-# Local imports
-from lmao_server import config
 from google.protobuf.message import DecodeError
 
 from lma_core import LMAOEnvelope
@@ -31,6 +29,9 @@ from lma_core.message_utils import decode_lmao_message
 from lma_core.rns_di import LXMF, RNS
 from lma_core.rns_init import init_rns_and_lxmf as _shared_init
 from lma_core.rns_init import warn_if_rnode_missing
+
+# Local imports
+from lmao_server import config
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +46,7 @@ try:
         LMAOServicer,
         SendResponse,
         SubscribeResponse,
-        add_LMAOServicer_to_server,
+        add_LMAOServicer_to_server,  # noqa: F401 — accessed by tests via module attribute
     )
 
     GRPC_AVAILABLE = True
@@ -57,7 +58,8 @@ except ImportError:
 # NATS imports (optional — gracefully degrade if unavailable)
 # ──────────────────────────────────────────────────────────────
 try:
-    from lma_core.queue import NatsQueue, _NATS_AVAILABLE as _NATS_PY_AVAILABLE
+    from lma_core.queue import _NATS_AVAILABLE as _NATS_PY_AVAILABLE
+    from lma_core.queue import NatsQueue
 
     NATS_AVAILABLE = _NATS_PY_AVAILABLE
 except ImportError:
@@ -92,11 +94,7 @@ def _print_startup_banner(identity_hex, rnode_port, grpc_available, nats_connect
         if os.path.exists(rnode_port)
         else "⚠️  RNode not connected — LoRa unavailable"
     )
-    nats_status = (
-        f"NATS: {_NATS_SERVER}"
-        if nats_connected
-        else "NATS: disconnected"
-    )
+    nats_status = f"NATS: {_NATS_SERVER}" if nats_connected else "NATS: disconnected"
     print(f"\n{'=' * 50}")
     print("LMAO Server — Running (async mode)")
     print(f"Node identity: {identity_hex}")
@@ -217,8 +215,11 @@ class Server:
                     self._loop,
                 )
                 fut.add_done_callback(
-                    lambda f: logger.error("NATS publish task failed: %s", f.exception())
-                    if f.exception() else None
+                    lambda f: (
+                        logger.error("NATS publish task failed: %s", f.exception())
+                        if f.exception()
+                        else None
+                    )
                 )
             else:
                 logger.debug("NATS unavailable — skipping publish")

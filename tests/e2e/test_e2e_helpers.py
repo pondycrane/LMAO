@@ -776,7 +776,9 @@ class TestFlashRNode:
         """Returns (True, ...) when all steps succeed."""
         with (
             patch("lma_core.rnode_flasher.flash_rnode_firmware", return_value=(True, "Flash OK")),
-            patch("lma_core.rnode_flasher.provision_rnode_eeprom", return_value=(True, "Provision OK")),
+            patch(
+                "lma_core.rnode_flasher.provision_rnode_eeprom", return_value=(True, "Provision OK")
+            ),
             patch("lma_core.rnode_flasher.set_rnode_firmware_hash", return_value=(True, "Hash OK")),
             patch("lma_core.rnode_flasher.check_rnode_firmware", return_value=True),
             patch("time.sleep", return_value=None),
@@ -788,7 +790,9 @@ class TestFlashRNode:
     def test_flash_failure_returns_early(self):
         """Returns (False, ...) when flash step fails."""
         with (
-            patch("lma_core.rnode_flasher.flash_rnode_firmware", return_value=(False, "Flash error")),
+            patch(
+                "lma_core.rnode_flasher.flash_rnode_firmware", return_value=(False, "Flash error")
+            ),
             patch("time.sleep", return_value=None),
         ):
             ok, msg = flash_rnode("/dev/ttyUSB0")
@@ -799,7 +803,10 @@ class TestFlashRNode:
         """Returns (False, ...) when EEPROM provision fails."""
         with (
             patch("lma_core.rnode_flasher.flash_rnode_firmware", return_value=(True, "Flash OK")),
-            patch("lma_core.rnode_flasher.provision_rnode_eeprom", return_value=(False, "Provision error")),
+            patch(
+                "lma_core.rnode_flasher.provision_rnode_eeprom",
+                return_value=(False, "Provision error"),
+            ),
             patch("time.sleep", return_value=None),
         ):
             ok, msg = flash_rnode("/dev/ttyUSB0")
@@ -810,8 +817,12 @@ class TestFlashRNode:
         """Returns (False, ...) when firmware hash set fails."""
         with (
             patch("lma_core.rnode_flasher.flash_rnode_firmware", return_value=(True, "Flash OK")),
-            patch("lma_core.rnode_flasher.provision_rnode_eeprom", return_value=(True, "Provision OK")),
-            patch("lma_core.rnode_flasher.set_rnode_firmware_hash", return_value=(False, "Hash error")),
+            patch(
+                "lma_core.rnode_flasher.provision_rnode_eeprom", return_value=(True, "Provision OK")
+            ),
+            patch(
+                "lma_core.rnode_flasher.set_rnode_firmware_hash", return_value=(False, "Hash error")
+            ),
             patch("time.sleep", return_value=None),
         ):
             ok, msg = flash_rnode("/dev/ttyUSB0")
@@ -822,7 +833,9 @@ class TestFlashRNode:
         """Returns (False, ...) when post-flash verify fails."""
         with (
             patch("lma_core.rnode_flasher.flash_rnode_firmware", return_value=(True, "Flash OK")),
-            patch("lma_core.rnode_flasher.provision_rnode_eeprom", return_value=(True, "Provision OK")),
+            patch(
+                "lma_core.rnode_flasher.provision_rnode_eeprom", return_value=(True, "Provision OK")
+            ),
             patch("lma_core.rnode_flasher.set_rnode_firmware_hash", return_value=(True, "Hash OK")),
             patch("lma_core.rnode_flasher.check_rnode_firmware", return_value=False),
             patch("time.sleep", return_value=None),

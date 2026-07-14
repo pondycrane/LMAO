@@ -255,8 +255,7 @@ class Client:
                 self._default_dest_identity = self._resolve_identity(self._default_dest_hash)
                 if self._default_dest_identity is None:
                     print(
-                        f"Error: Could not resolve default destination "
-                        f"{self._default_dest_hash}."
+                        f"Error: Could not resolve default destination {self._default_dest_hash}."
                     )
                     return True
             self._send_message(self._default_dest_identity, stripped)

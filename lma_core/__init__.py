@@ -21,17 +21,19 @@ import logging
 
 _logger = logging.getLogger(__name__)
 
-_PROTO_NAMES = frozenset({
-    "LMAOEnvelope",
-    "TextMessage",
-    "SensorReport",
-    "SensorReading",
-    "CommandRequest",
-    "CommandAck",
-    "AudioMessage",
-    "ImageMessage",
-    "CallSignal",
-})
+_PROTO_NAMES = frozenset(
+    {
+        "LMAOEnvelope",
+        "TextMessage",
+        "SensorReport",
+        "SensorReading",
+        "CommandRequest",
+        "CommandAck",
+        "AudioMessage",
+        "ImageMessage",
+        "CallSignal",
+    }
+)
 
 __all__ = sorted(_PROTO_NAMES)
 
