@@ -16,11 +16,4 @@ py_library(
     deps = ["//proto:lma_messages_py_proto"],
 )
 
-py_library(
-    name = "rnode_flasher_lib",
-    srcs = ["rnode_flasher.py"],
-    visibility = ["//visibility:public"],
-    deps = [
-        "@lmao_pip//pyserial",
-    ],
-)
+

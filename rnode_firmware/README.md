@@ -31,48 +31,29 @@ For this POC:
 
 ---
 
-## Automated Flashing (Recommended)
+## Flashing
 
-The LMAO project provides a built-in flashing pipeline in `lma_core.rnode_flasher`
-that replaces `rnodeconf --autoinstall` with direct esptool firmware writing plus
-KISS-protocol EEPROM provisioning.
+> **⚠️ Important:** The programmatic auto-flash pipeline (`rnode_flasher`) has been
+> removed because it could brick the device. **Always flash manually** using the
+> [RNode Firmware Web Flasher](https://flasher.rnode.network/) or the
+> [RNode Firmware GitHub releases](https://github.com/markqvist/RNode_Firmware/releases).
 
-### Prerequisites
+### Quick flash (web flasher — recommended)
 
-```bash
-pip install esptool pyserial
-```
-
-### Quick flash
-
-```bash
-# From Python
-from lma_core.rnode_flasher import flash_rnode
-ok, msg = flash_rnode("/dev/ttyUSB0", firmware_path="./rnode_firmware.bin")
-
-# Or via the unified install tool
-bazel run //tools:install_all -- --rnode-port /dev/ttyUSB0
-```
-
-The `flash_rnode()` function performs:
-1. Erase flash via `esptool.py erase_flash`
-2. Write firmware via `esptool.py --baud 921600 write_flash 0x0 <firmware>.bin`
-3. Open KISS serial connection to the freshly-flashed device
-4. Provision EEPROM (unlock → write product/model/serial/checksum → blank signature → lock)
-5. Set firmware hash (clears "Firmware Corrupt" error)
-6. Verify via KISS `CMD_DETECT`
+1. Connect the ESP32 to your computer via USB
+2. Open https://flasher.rnode.network/ in Chrome/Edge
+3. Select your board (e.g. Heltec LoRa 32 V3)
+4. Click "Install" and follow the prompts
 
 ### Verify
 
-```python
-from lma_core.rnode_flasher import check_rnode_firmware
-if check_rnode_firmware("/dev/ttyUSB0"):
-    print("RNode firmware detected")
-```
-
-Or with `rnodeconf` (legacy):
 ```bash
 rnodeconf --port /dev/ttyUSB0 --info
+```
+
+Or with `rnodeconf`:
+```bash
+rnodeconf --port /dev/ttyUSB0 --autoinstall
 ```
 
 ---
