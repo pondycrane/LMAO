@@ -2,14 +2,6 @@
 
 These helpers are imported by individual E2E test files to avoid code
 duplication.  They require pyserial and physical hardware to be connected.
-
-.. note::
-
-    ``check_rnode_firmware``, ``flash_rnode_firmware``, ``flash_rnode``,
-    ``provision_rnode_eeprom``, and ``set_rnode_firmware_hash`` are
-    re-exported from ``lma_core.rnode_flasher`` as of the esptool+KISS
-    migration.  The original implementations that shelled out to
-    ``rnodeconf`` have been removed.
 """
 
 import sys
@@ -17,15 +9,6 @@ import traceback
 
 import serial
 import serial.tools.list_ports
-
-# RNode flash/provision functions — re-exported from the new esptool+KISS module.
-from lma_core.rnode_flasher import (  # noqa: F401
-    check_rnode_firmware,
-    flash_rnode,
-    flash_rnode_firmware,
-    provision_rnode_eeprom,
-    set_rnode_firmware_hash,
-)
 
 # Known USB VID values for RNode-compatible devices.
 # Consolidates VID checking into a single set to avoid verbose
