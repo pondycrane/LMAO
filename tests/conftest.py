@@ -30,27 +30,21 @@ def setup_common_mocks(with_grpc=True):
     sys.modules["RNS"] = MagicMock()
     sys.modules["LXMF"] = MagicMock()
 
-    # Mock proto.lma_pb2 so the real lma_core package can be imported
-    _proto_pb2 = MagicMock()
-    _proto_pb2.LMAOEnvelope = MagicMock()
-    _proto_pb2.TextMessage = MagicMock()
-    _proto_pb2.SensorReport = MagicMock()
-    _proto_pb2.SensorReading = MagicMock()
-    _proto_pb2.CommandRequest = MagicMock()
-    _proto_pb2.CommandAck = MagicMock()
-    _proto_pb2.AudioMessage = MagicMock()
-    _proto_pb2.ImageMessage = MagicMock()
-    _proto_pb2.CallSignal = MagicMock()
-    _proto_pb2.SendRequest = MagicMock()
-    _proto_pb2.SendResponse = MagicMock()
-    _proto_pb2.SubscribeRequest = MagicMock()
-    _proto_pb2.SubscribeResponse = MagicMock()
-    _proto_pb2.GetIdentityRequest = MagicMock()
-    _proto_pb2.GetIdentityResponse = MagicMock()
+    # Mock proto.lma_messages_pb2 so the real lma_core package can be imported
+    _proto_messages_pb2 = MagicMock()
+    _proto_messages_pb2.LMAOEnvelope = MagicMock()
+    _proto_messages_pb2.TextMessage = MagicMock()
+    _proto_messages_pb2.SensorReport = MagicMock()
+    _proto_messages_pb2.SensorReading = MagicMock()
+    _proto_messages_pb2.CommandRequest = MagicMock()
+    _proto_messages_pb2.CommandAck = MagicMock()
+    _proto_messages_pb2.AudioMessage = MagicMock()
+    _proto_messages_pb2.ImageMessage = MagicMock()
+    _proto_messages_pb2.CallSignal = MagicMock()
     sys.modules["proto"] = MagicMock()
-    sys.modules["proto.lma_pb2"] = _proto_pb2
+    sys.modules["proto.lma_messages_pb2"] = _proto_messages_pb2
 
-    # Import the real lma_core package (needs proto.lma_pb2 mocked first)
+    # Import the real lma_core package (needs proto.lma_messages_pb2 mocked first)
     import lma_core as _real_lma_core
 
     # Re-bind proto types on lma_core so they reference the fresh mocks
@@ -65,7 +59,7 @@ def setup_common_mocks(with_grpc=True):
         "ImageMessage",
         "CallSignal",
     ):
-        setattr(_real_lma_core, _attr, getattr(_proto_pb2, _attr))
+        setattr(_real_lma_core, _attr, getattr(_proto_messages_pb2, _attr))
 
     sys.modules["lma_core"] = _real_lma_core
 
@@ -118,9 +112,18 @@ def setup_common_mocks(with_grpc=True):
         grpc_mock.StatusCode.UNIMPLEMENTED = MagicMock()
         sys.modules["grpc"] = grpc_mock
 
-        # Mock proto.lma_pb2_grpc
+        # Mock proto.lma_grpc_pb2 and proto.lma_grpc_pb2_grpc
+        _proto_grpc_pb2 = MagicMock()
+        _proto_grpc_pb2.SendRequest = MagicMock()
+        _proto_grpc_pb2.SendResponse = MagicMock()
+        _proto_grpc_pb2.SubscribeRequest = MagicMock()
+        _proto_grpc_pb2.SubscribeResponse = MagicMock()
+        _proto_grpc_pb2.GetIdentityRequest = MagicMock()
+        _proto_grpc_pb2.GetIdentityResponse = MagicMock()
+        sys.modules["proto.lma_grpc_pb2"] = _proto_grpc_pb2
+
         proto_grpc_mock = MagicMock()
-        sys.modules["proto.lma_pb2_grpc"] = proto_grpc_mock
+        sys.modules["proto.lma_grpc_pb2_grpc"] = proto_grpc_mock
 
         # Create mock lma_core.grpc_types module
         _grpc_types = types.ModuleType("lma_core.grpc_types")
@@ -159,8 +162,9 @@ def cleanup_common_mocks():
         "LXMF",
         "config",
         "proto",
-        "proto.lma_pb2",
-        "proto.lma_pb2_grpc",
+        "proto.lma_messages_pb2",
+        "proto.lma_grpc_pb2",
+        "proto.lma_grpc_pb2_grpc",
         "grpc",
         "lma_core.rns_di",
         "lma_core.rns_init",

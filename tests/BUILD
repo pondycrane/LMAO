@@ -73,7 +73,8 @@ py_test(
     ],
     deps = [
         "//lma_core",
-        "//proto:lma_py_proto",
+        "//proto:lma_grpc_py_proto",
+        "//proto:lma_messages_py_proto",
         "@lmao_pip//pytest",
     ],
 )
