@@ -617,20 +617,66 @@ def flash_rnode_firmware(
 
     print("Erase complete.", flush=True)
 
-    # Step 2: Write firmware
+    # Step 2: Write firmware (and companion bootloader/partitions if present)
+    #
+    # ESP32-S3 (Heltec V3) requires separate bootloader at 0x0, partitions
+    # at 0x8000, boot_app0 at 0xe000, and app firmware at 0x10000.
+    # Writing app firmware at 0x0 would clobber the bootloader.
+    #
+    # We look for companion files next to the firmware .bin:
+    #   {firmware_stem}.bootloader  →  0x0
+    #   {firmware_stem}.partitions  →  0x8000
+    #   {firmware_stem}.boot_app0   →  0xe000
+    #   {firmware_stem}.bin         →  0x10000  (app firmware)
+    #
+    # If companion files are missing, fall back to writing the single
+    # firmware at 0x0 (legacy / non-S3 behaviour).
+
+    fw_dir = os.path.dirname(firmware_path)
+    fw_stem = os.path.splitext(os.path.basename(firmware_path))[0]
+
+    bootloader_path = os.path.join(fw_dir, fw_stem + ".bootloader")
+    partitions_path = os.path.join(fw_dir, fw_stem + ".partitions")
+    boot_app0_path = os.path.join(fw_dir, fw_stem + ".boot_app0")
+
+    has_companion = (
+        os.path.isfile(bootloader_path)
+        and os.path.isfile(partitions_path)
+        and os.path.isfile(boot_app0_path)
+    )
+
+    if has_companion:
+        print(
+            f"Detected companion bootloader/partitions for {fw_stem}, "
+            "using multi-partition flash layout",
+            flush=True,
+        )
+        write_args = [
+            "--port", port,
+            "--baud", "921600",
+            "write_flash",
+            "0x0", bootloader_path,
+            "0x8000", partitions_path,
+            "0xe000", boot_app0_path,
+            "0x10000", firmware_path,
+        ]
+    else:
+        print(
+            "No companion bootloader/partitions found, "
+            "writing firmware at 0x0 (legacy layout)",
+            flush=True,
+        )
+        write_args = [
+            "--port", port,
+            "--baud", "921600",
+            "write_flash",
+            "0x0", firmware_path,
+        ]
+
     print(f"Writing firmware to {port} ...", flush=True)
     try:
         result = subprocess.run(
-            base_cmd
-            + [
-                "--port",
-                port,
-                "--baud",
-                "921600",
-                "write_flash",
-                "0x0",
-                firmware_path,
-            ],
+            base_cmd + write_args,
             capture_output=True,
             text=True,
             timeout=timeout,
