@@ -30,11 +30,11 @@ def _load_iot_ingest():
         _grpc_mock.StatusCode.UNAVAILABLE = "UNAVAILABLE"
         sys.modules["grpc"] = _grpc_mock
 
-    # proto.lma_pb2_grpc is a checked-in generated file not covered by
+    # proto.lma_grpc_pb2_grpc is a checked-in generated file not covered by
     # Bazel's py_proto_library rule. Mock it so that lma_core imports
     # LMAOStub/LMAOServicer successfully.
-    if "proto.lma_pb2_grpc" not in sys.modules:
-        sys.modules["proto.lma_pb2_grpc"] = MagicMock()
+    if "proto.lma_grpc_pb2_grpc" not in sys.modules:
+        sys.modules["proto.lma_grpc_pb2_grpc"] = MagicMock()
 
     spec = importlib.util.spec_from_file_location("iot_ingest", "k8s-app/iot_ingest.py")
     module = importlib.util.module_from_spec(spec)
@@ -64,9 +64,9 @@ class TestBuildSensorEnvelope:
         payload = iot_ingest.build_sensor_envelope(node_id, temp, humidity)
 
         # Parse back
-        from proto import lma_pb2
+        from proto import lma_messages_pb2
 
-        envelope = lma_pb2.LMAOEnvelope()
+        envelope = lma_messages_pb2.LMAOEnvelope()
         envelope.ParseFromString(payload)
 
         assert envelope.sensor.node_id == node_id
@@ -77,9 +77,9 @@ class TestBuildSensorEnvelope:
         """Verify sensor readings have correct fields and types."""
         payload = iot_ingest.build_sensor_envelope("struct-node", 30.0, 80.0)
 
-        from proto import lma_pb2
+        from proto import lma_messages_pb2
 
-        envelope = lma_pb2.LMAOEnvelope()
+        envelope = lma_messages_pb2.LMAOEnvelope()
         envelope.ParseFromString(payload)
 
         readings = envelope.sensor.readings
@@ -101,9 +101,9 @@ class TestBuildSensorEnvelope:
         """Battery should default to 3.7V."""
         payload = iot_ingest.build_sensor_envelope("batt-test", 20.0, 50.0)
 
-        from proto import lma_pb2
+        from proto import lma_messages_pb2
 
-        envelope = lma_pb2.LMAOEnvelope()
+        envelope = lma_messages_pb2.LMAOEnvelope()
         envelope.ParseFromString(payload)
 
         assert envelope.sensor.battery == pytest.approx(3.7)
@@ -112,9 +112,9 @@ class TestBuildSensorEnvelope:
         """Should handle sub-zero temperatures."""
         payload = iot_ingest.build_sensor_envelope("freezer", -15.0, 40.0)
 
-        from proto import lma_pb2
+        from proto import lma_messages_pb2
 
-        envelope = lma_pb2.LMAOEnvelope()
+        envelope = lma_messages_pb2.LMAOEnvelope()
         envelope.ParseFromString(payload)
 
         assert envelope.sensor.readings[0].value == pytest.approx(-15.0)
@@ -123,9 +123,9 @@ class TestBuildSensorEnvelope:
         """Should handle zero humidity."""
         payload = iot_ingest.build_sensor_envelope("dry", 30.0, 0.0)
 
-        from proto import lma_pb2
+        from proto import lma_messages_pb2
 
-        envelope = lma_pb2.LMAOEnvelope()
+        envelope = lma_messages_pb2.LMAOEnvelope()
         envelope.ParseFromString(payload)
 
         assert envelope.sensor.readings[1].value == pytest.approx(0.0)
@@ -848,7 +848,6 @@ class TestConsumerConnect:
         with patch.dict("os.environ", {"NATS_SERVER": "nats://test:4222"}):
             with patch("lma_core.queue.NatsQueue", return_value=nq):
                 with patch("lma_core.storage.DuckDbStore", return_value=store):
-
                     # Run the main function briefly — it'll block on subscribe
                     # so we schedule a task and cancel after connect/ensure_stream
                     stream_ensured = False

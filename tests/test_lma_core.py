@@ -13,28 +13,50 @@ import pytest
 
 
 class TestLmaCoreImportError:
-    """Tests that lma_core raises helpful ImportError when protobuf stubs missing."""
+    """Tests that lma_core raises helpful errors when protobuf stubs missing."""
 
-    def test_import_error_when_proto_missing(self, caplog, monkeypatch):
-        """Importing lma_core should raise ImportError when proto.lma_pb2 is missing."""
+    def test_import_succeeds_even_when_proto_missing(self):
+        """import lma_core should succeed even when proto.lma_messages_pb2 is missing.
+
+        Proto stubs are lazy-loaded only on first attribute access, so
+        importing the package itself must not fail.
+        """
         # Skip if proto stubs are available (generated via protoc)
         try:
-            import proto.lma_pb2  # noqa: F401
+            import proto.lma_messages_pb2  # noqa: F401
 
-            pytest.skip("proto.lma_pb2 is available — cannot test import error path")
+            pytest.skip("proto.lma_messages_pb2 is available — cannot test missing-proto path")
         except ImportError:
             pass
 
-        # Remove proto.lma_pb2 from sys.modules if present
-        if "proto.lma_pb2" in sys.modules:
-            monkeypatch.delitem(sys.modules, "proto.lma_pb2", raising=False)
-        if "lma_core" in sys.modules:
-            monkeypatch.delitem(sys.modules, "lma_core", raising=False)
-        if "proto" in sys.modules:
-            monkeypatch.delitem(sys.modules, "proto", raising=False)
+        # Remove proto.lma_messages_pb2 from sys.modules if present
+        for mod in list(sys.modules.keys()):
+            if mod.startswith("lma_core") or mod.startswith("proto"):
+                del sys.modules[mod]
 
+        # This should NOT raise — proto is lazy
+        import lma_core  # noqa: F401
+
+    def test_proto_access_raises_when_missing(self, caplog):
+        """Accessing a proto type from lma_core should raise ImportError when stubs missing."""
+        # Skip if proto stubs are available
+        try:
+            import proto.lma_messages_pb2  # noqa: F401
+
+            pytest.skip("proto.lma_messages_pb2 is available — cannot test missing-proto path")
+        except ImportError:
+            pass
+
+        # Remove proto.lma_messages_pb2 from sys.modules if present
+        for mod in list(sys.modules.keys()):
+            if mod.startswith("lma_core") or mod.startswith("proto"):
+                del sys.modules[mod]
+
+        import lma_core  # noqa: F401
+
+        # Accessing a proto name should raise ImportError
         with pytest.raises(ImportError):
-            import lma_core  # noqa: F401
+            lma_core.LMAOEnvelope  # noqa: B018
 
         # The module logs a CRITICAL message with build instructions before raising
         critical_messages = [r.message for r in caplog.records if r.levelname == "CRITICAL"]
@@ -44,7 +66,7 @@ class TestLmaCoreImportError:
         assert "protoc" in combined, f"CRITICAL message should mention protoc, got: {combined}"
 
     def test_import_succeeds_when_proto_present(self):
-        """When proto.lma_pb2 is available, lma_core imports without error."""
+        """When proto.lma_messages_pb2 is available, lma_core imports without error."""
         # Clear any cached/mocked version of lma_core before importing
         for mod in list(sys.modules.keys()):
             if mod.startswith("lma_core") or mod.startswith("proto"):
@@ -58,7 +80,7 @@ class TestLmaCoreImportError:
         assert hasattr(lma_core, "__all__"), "lma_core should define __all__"
 
     def test_all_exports_are_importable(self):
-        """All names in __all__ are present on the module when importable."""
+        """All names in __all__ are present on the module when proto stubs available."""
         # Clear any cached/mocked version of lma_core before importing
         for mod in list(sys.modules.keys()):
             if mod.startswith("lma_core") or mod.startswith("proto"):
@@ -68,27 +90,28 @@ class TestLmaCoreImportError:
         except ImportError:
             pytest.skip("lma_core not importable — proto stubs may be missing")
 
-        for name in lma_core.__all__:
-            assert hasattr(lma_core, name), (
-                f"__all__ lists '{name}' but it is not available on the module"
-            )
+        # hasattr triggers __getattr__ which loads proto stubs lazily.
+        # If stubs are available, all names should resolve.
+        missing = [name for name in lma_core.__all__ if not hasattr(lma_core, name)]
+        assert not missing, (
+            f"__all__ lists names that are not available on the module: {missing}"
+        )
 
     def test_grpc_request_types_optional_fallback(self):
-        """Missing gRPC request types in proto.lma_pb2 should warn, not crash."""
+        """Missing gRPC request types should warn via grpc_types, not crash lma_core."""
         # Clear cached modules to force fresh import
         for mod in list(sys.modules.keys()):
             if mod.startswith("lma_core") or mod.startswith("proto"):
                 del sys.modules[mod]
 
         # Save original module state for restoration
-        _original_pb2 = sys.modules.get("proto.lma_pb2", None)
+        _original_messages_pb2 = sys.modules.get("proto.lma_messages_pb2", None)
 
         try:
-            # Create mock proto.lma_pb2 with ONLY core message types — gRPC types
-            # are intentionally absent so from proto.lma_pb2 import SendRequest, ...
-            # raises ImportError (MagicMock auto-creates on access, so we use
-            # a custom class that only provides the specified names).
-            class _MockPb2:
+            # Create mock proto.lma_messages_pb2 with ONLY core message types.
+            # proto.lma_grpc_pb2 and proto.lma_grpc_pb2_grpc are left absent so
+            # from proto.lma_grpc_pb2 import SendRequest, ... raises ImportError.
+            class _MockMessagesPb2:
                 LMAOEnvelope = MagicMock()
                 TextMessage = MagicMock()
                 SensorReport = MagicMock()
@@ -99,12 +122,18 @@ class TestLmaCoreImportError:
                 ImageMessage = MagicMock()
                 CallSignal = MagicMock()
 
-            mock_pb2 = _MockPb2()
-            sys.modules["proto.lma_pb2"] = mock_pb2
+            mock_msgs_pb2 = _MockMessagesPb2()
+            sys.modules["proto.lma_messages_pb2"] = mock_msgs_pb2
 
-            # proto.lma_pb2_grpc is already not in sys.modules (we cleared it)
+            # proto.lma_grpc_pb2 and proto.lma_grpc_pb2_grpc are not in
+            # sys.modules (we cleared them) — grpc_types.py should warn.
 
-            # Capture log output via a StringIO handler on the root logger
+            # First, import lma_core — should succeed without warnings
+            # (gRPC types are no longer loaded from __init__.py)
+            import lma_core as lma_core_mod
+
+            # Now import lma_core.grpc_types — this should trigger the warning
+            # about missing gRPC stubs.
             import io
 
             log_capture = io.StringIO()
@@ -114,13 +143,13 @@ class TestLmaCoreImportError:
             logging.getLogger().addHandler(handler)
 
             try:
+                # Use importlib to force a fresh import of grpc_types.py
                 import importlib
 
-                # Re-import lma_core — the gRPC try/except should fire warnings
-                import lma_core as lma_core_mod
-
-                # Since lma_core is cached, reload it to trigger the import path
-                importlib.reload(lma_core_mod)
+                importlib.import_module("lma_core.grpc_types")
+            except Exception:
+                # The module may raise or log; we just need the log output
+                pass
             finally:
                 logging.getLogger().removeHandler(handler)
 
@@ -133,10 +162,10 @@ class TestLmaCoreImportError:
             )
         finally:
             # Restore original module state to prevent test pollution
-            if _original_pb2 is not None:
-                sys.modules["proto.lma_pb2"] = _original_pb2
+            if _original_messages_pb2 is not None:
+                sys.modules["proto.lma_messages_pb2"] = _original_messages_pb2
             else:
-                sys.modules.pop("proto.lma_pb2", None)
+                sys.modules.pop("proto.lma_messages_pb2", None)
 
     def test_all_contains_expected_types(self):
         """__all__ should contain the core message types."""

@@ -354,9 +354,7 @@ class TestSubscriberManagement:
 
         await server._publish_to_nats("aabbccdd", b"test data")
 
-        mock_queue.publish.assert_called_once_with(
-            "lmao.messages.env", b"test data"
-        )
+        mock_queue.publish.assert_called_once_with("lmao.messages.env", b"test data")
 
     @pytest.mark.asyncio
     async def test_publish_to_nats_handles_failure(self, server_with_mocks, caplog):
