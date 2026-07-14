@@ -1,5 +1,12 @@
 # LMAO project rules
 
+## First: read the README
+
+Always start by reading `README.md` in full before doing anything else.
+The README is the single source of truth for project architecture, setup,
+usage, testing, and conventions. It covers everything from protocol design
+to hardware setup to deployment. Do not proceed without reading it first.
+
 ## E2E flash verification
 
 Run the following as final verification before marking any feature complete or submitting a PR:
