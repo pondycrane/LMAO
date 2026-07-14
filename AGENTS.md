@@ -62,3 +62,17 @@ E2E_SENSOR_TYPE=DHT20 bazel test //tests:test_cardputer_lora_e2e --test_output=a
 
 When `E2E_SENSOR_TYPE` is not set (default), the test runs in single-reading
 mode (die temperature only), which is the normal configuration.
+
+## Archon GitHub Webhook Relay
+
+A local polling relay lets Archon respond to `@archon` mentions on GitHub
+issues and PRs without exposing a public webhook endpoint.
+
+See `docs/archon-webhook-relay.md` for full documentation.
+
+**Quick reference**:
+- Comment `@archon ...` on any issue/PR in `pondycrane/LMAO`
+- Relay polls every 15s, delivers to Archon at `localhost:3090`
+- Runs as `systemctl --user` service: `archon-webhook-relay`
+- Script: `tools/archon_webhook_relay.py`
+- State: `~/.archon/relay-state.json`
