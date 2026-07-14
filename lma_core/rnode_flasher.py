@@ -359,6 +359,7 @@ class RNodeKiss:
             if byte == KISS_FEND:
                 if self._in_frame:
                     decoded = decode_kiss_frame(self._frame_buf)
+                    frame_len = len(self._frame_buf)
                     self._frame_buf = []
                     if decoded and len(decoded) > 0:
                         cmd = decoded[0]
@@ -370,7 +371,7 @@ class RNodeKiss:
                             return payload
                     elif decoded is None:
                         print(
-                            f"WARNING: Invalid KISS frame discarded ({len(self._frame_buf)} bytes)",
+                            f"WARNING: Invalid KISS frame discarded ({frame_len} bytes)",
                             file=sys.stderr,
                         )
                 self._in_frame = not self._in_frame
