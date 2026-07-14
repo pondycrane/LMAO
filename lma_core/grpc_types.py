@@ -16,13 +16,6 @@ _logger = logging.getLogger(__name__)
 if TYPE_CHECKING:
     # These types are only generated when gRPC stubs are compiled.
     # At runtime, they're imported via the try/except below.
-    from proto.lma_grpc_pb2_grpc import (  # type: ignore[attr-defined]
-        LMAO,
-        LMAOServicer,
-        LMAOStub,
-        add_LMAOServicer_to_server,
-    )
-
     from proto.lma_grpc_pb2 import (  # type: ignore[attr-defined]
         GetIdentityRequest,
         GetIdentityResponse,
@@ -30,6 +23,12 @@ if TYPE_CHECKING:
         SendResponse,
         SubscribeRequest,
         SubscribeResponse,
+    )
+    from proto.lma_grpc_pb2_grpc import (  # type: ignore[attr-defined]
+        LMAO,
+        LMAOServicer,
+        LMAOStub,
+        add_LMAOServicer_to_server,
     )
 else:
     # Runtime imports - gracefully handle missing protobuf stubs.
