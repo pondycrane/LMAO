@@ -1,4 +1,5 @@
 """Debug script to check PYTHONPATH and imports in Bazel sandbox."""
+
 import os
 import sys
 
@@ -23,5 +24,6 @@ print(f"  Exists: {os.path.exists(candidate)}")
 
 # Try relative
 import importlib.util
+
 spec = importlib.util.find_spec("proto.lma_messages_pb2")
 print(f"\n  Find spec: {spec}")

@@ -1,5 +1,6 @@
 import os
 import sys
+
 print("CWD:", os.getcwd())
 print("PYTHONPATH env:", os.environ.get("PYTHONPATH", "NOT SET"))
 print("Sys.path:")

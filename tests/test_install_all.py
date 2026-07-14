@@ -37,8 +37,8 @@ def _patch_imports():
         "check_rnode_firmware": patch.object(
             install_all, "check_rnode_firmware", return_value=False
         ),
-        "flash_rnode_firmware": patch.object(
-            install_all, "flash_rnode_firmware", return_value=(True, "OK")
+        "flash_rnode": patch.object(
+            install_all, "flash_rnode", return_value=(True, "OK")
         ),
         "find_client_root": patch.object(
             install_all, "find_client_root", return_value="/fake/client_root"
@@ -473,8 +473,8 @@ class TestMainPipeline:
             "check_rnode_firmware": patch.object(
                 install_all, "check_rnode_firmware", return_value=False
             ),
-            "flash_rnode_firmware": patch.object(
-                install_all, "flash_rnode_firmware", return_value=(True, "OK")
+            "flash_rnode": patch.object(
+                install_all, "flash_rnode", return_value=(True, "OK")
             ),
             "find_client_root": patch.object(
                 install_all, "find_client_root", return_value="/fake/client_root"
@@ -646,7 +646,7 @@ class TestMainRNodeDetected:
         assert exc_info.value.code == 0
         # Should check firmware but NOT flash
         self.mocks["check_rnode_firmware"].assert_called_once_with("/dev/ttyUSB0")
-        self.mocks["flash_rnode_firmware"].assert_not_called()
+        self.mocks["flash_rnode"].assert_not_called()
 
     def test_rnode_needs_flashing(self):
         """When RNode lacks firmware, it should be flashed."""
@@ -654,7 +654,7 @@ class TestMainRNodeDetected:
         with pytest.raises(SystemExit) as exc_info:
             install_all.main([])
         assert exc_info.value.code == 0
-        self.mocks["flash_rnode_firmware"].assert_called_once()
+        self.mocks["flash_rnode"].assert_called_once()
 
 
 class TestMainRNodeFlashFails:
@@ -667,7 +667,7 @@ class TestMainRNodeFlashFails:
         self.mocks["find_cardputer_port"].return_value = None
         self.mocks["detect_serial_devices"].return_value = ("/dev/ttyUSB0", None)
         self.mocks["check_rnode_firmware"].return_value = False
-        self.mocks["flash_rnode_firmware"].return_value = (False, "Flash error")
+        self.mocks["flash_rnode"].return_value = (False, "Flash error")
         yield
         _stop_patches(self._patches)
 
@@ -866,7 +866,7 @@ class TestInstallRNodeFirmware:
         result = self._make_result()
         with (
             patch.object(install_all, "check_rnode_firmware", return_value=True),
-            patch.object(install_all, "flash_rnode_firmware") as mock_flash,
+            patch.object(install_all, "flash_rnode") as mock_flash,
         ):
             install_all._install_rnode_firmware("/dev/ttyUSB0", result)
         assert result.status == "OK"
@@ -880,7 +880,7 @@ class TestInstallRNodeFirmware:
             patch.object(install_all, "check_rnode_firmware", return_value=False),
             patch.object(
                 install_all,
-                "flash_rnode_firmware",
+                "flash_rnode",
                 return_value=(True, "Flashed successfully"),
             ),
         ):
@@ -895,7 +895,7 @@ class TestInstallRNodeFirmware:
             patch.object(install_all, "check_rnode_firmware", return_value=False),
             patch.object(
                 install_all,
-                "flash_rnode_firmware",
+                "flash_rnode",
                 return_value=(False, "Flash error: device not found"),
             ),
         ):
@@ -918,7 +918,7 @@ class TestInstallRNodeFirmware:
             patch.object(install_all, "check_rnode_firmware", return_value=False),
             patch.object(
                 install_all,
-                "flash_rnode_firmware",
+                "flash_rnode",
                 side_effect=RuntimeError("timeout"),
             ),
         ):
@@ -2507,3 +2507,31 @@ class TestRunPiServer:
             # _resolve_nats_address should NOT be called when env var is set
             mock_resolve.assert_not_called()
             assert result.status == "OK"
+
+    def test_handles_bytes_stderr(self):
+        """str/bytes decode guard: CalledProcessError with bytes stderr should not crash."""
+        bytes_error = subprocess.CalledProcessError(
+            returncode=1,
+            cmd=["sudo", "mv", "..."],
+            output=b"",
+            stderr=b"Error: port in use\n",
+        )
+        with (
+            patch("shutil.which", return_value="/usr/bin/docker"),
+            patch.object(install_services, "_resolve_nats_address", return_value=None),
+            patch.object(install_services, "_docker_psql", return_value=None),
+            patch("os.path.exists", return_value=True),
+            patch("subprocess.run", side_effect=bytes_error),
+            patch("tempfile.mkstemp", return_value=(3, "/tmp/lmao-server-xxx.service")),
+            patch("os.fdopen"),
+            patch("os.unlink"),
+        ):
+            result = self._make_result()
+            # Should not crash — the .decode() guard handles bytes stderr
+            try:
+                install_services.run_pi_server(result)
+            except Exception:
+                pytest.fail("run_pi_server raised unexpectedly with bytes stderr")
+            # Both systemd and docker run fail, so result is FAIL — but the
+            # key assertion is that no AttributeError was raised by .decode()
+            assert result.status in ("OK", "FAIL")
