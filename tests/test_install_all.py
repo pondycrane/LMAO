@@ -2507,3 +2507,31 @@ class TestRunPiServer:
             # _resolve_nats_address should NOT be called when env var is set
             mock_resolve.assert_not_called()
             assert result.status == "OK"
+
+    def test_handles_bytes_stderr(self):
+        """str/bytes decode guard: CalledProcessError with bytes stderr should not crash."""
+        bytes_error = subprocess.CalledProcessError(
+            returncode=1,
+            cmd=["sudo", "mv", "..."],
+            output=b"",
+            stderr=b"Error: port in use\n",
+        )
+        with (
+            patch("shutil.which", return_value="/usr/bin/docker"),
+            patch.object(install_services, "_resolve_nats_address", return_value=None),
+            patch.object(install_services, "_docker_psql", return_value=None),
+            patch("os.path.exists", return_value=True),
+            patch("subprocess.run", side_effect=bytes_error),
+            patch("tempfile.mkstemp", return_value=(3, "/tmp/lmao-server-xxx.service")),
+            patch("os.fdopen"),
+            patch("os.unlink"),
+        ):
+            result = self._make_result()
+            # Should not crash — the .decode() guard handles bytes stderr
+            try:
+                install_services.run_pi_server(result)
+            except Exception:
+                pytest.fail("run_pi_server raised unexpectedly with bytes stderr")
+            # Both systemd and docker run fail, so result is FAIL — but the
+            # key assertion is that no AttributeError was raised by .decode()
+            assert result.status in ("OK", "FAIL")

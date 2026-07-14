@@ -216,7 +216,7 @@ class Server:
                 )
                 fut.add_done_callback(
                     lambda f: (
-                        logger.error("NATS publish task failed: %s", f.exception())
+                        logger.error("NATS publish task failed: %s", f.exception(), exc_info=f.exception())
                         if f.exception()
                         else None
                     )

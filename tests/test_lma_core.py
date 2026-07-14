@@ -128,6 +128,9 @@ class TestLmaCoreImportError:
             # Python's import machinery from re-importing the real stubs from
             # disk (which exist in this environment) and forces the ImportError
             # fallback path in grpc_types.py.
+            # NOTE: These sentinel keys must match the import paths used in
+            # lma_core/grpc_types.py.  If those imports change, the keys
+            # here must be updated too.
             _sentinel = type(sys)("proto.lma_grpc_pb2")
             sys.modules["proto.lma_grpc_pb2"] = _sentinel
             _sentinel_grpc = type(sys)("proto.lma_grpc_pb2_grpc")
