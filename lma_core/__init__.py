@@ -6,7 +6,7 @@ re-exported here — consumers that need gRPC must import from
 ``lma_core.grpc_types`` directly.
 
 Proto stubs are loaded **lazily** on first access so that importing
-``lma_core`` submodules (e.g. ``lma_core.rnode_flasher``) does not
+``lma_core`` submodules (e.g. ``lma_core.queue``) does not
 force a proto dependency.  Only ``from lma_core import LMAOEnvelope``
 or similar attribute access triggers the proto import.
 
@@ -39,7 +39,7 @@ __all__ = sorted(_PROTO_NAMES)
 def __getattr__(name):
     """Lazy-load protobuf stubs on first attribute access.
 
-    This allows ``import lma_core`` (or ``import lma_core.rnode_flasher``)
+    This allows ``import lma_core`` (or ``import lma_core.queue``)
     without triggering proto imports.  Proto stubs are only loaded when
     someone accesses a specific type, e.g. ``from lma_core import LMAOEnvelope``.
     """
