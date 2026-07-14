@@ -13,7 +13,7 @@ py_library(
         "storage.py",
     ],
     visibility = ["//visibility:public"],
-    deps = ["//proto:lma_py_proto"],
+    deps = ["//proto:lma_messages_py_proto"],
 )
 
 py_library(
