@@ -8,6 +8,6 @@ py_library(
     visibility = ["//visibility:public"],
     deps = [
         "//lma_core",
-        "//proto:lma_py_proto",
+        "//proto:lma_grpc_py_proto",
     ],
 )

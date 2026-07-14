@@ -13,5 +13,14 @@ py_library(
         "storage.py",
     ],
     visibility = ["//visibility:public"],
-    deps = ["//proto:lma_py_proto"],
+    deps = ["//proto:lma_messages_py_proto"],
+)
+
+py_library(
+    name = "rnode_flasher_lib",
+    srcs = ["rnode_flasher.py"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@lmao_pip//pyserial",
+    ],
 )

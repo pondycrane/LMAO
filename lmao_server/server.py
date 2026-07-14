@@ -45,6 +45,7 @@ try:
         LMAOServicer,
         SendResponse,
         SubscribeResponse,
+        add_LMAOServicer_to_server,
     )
 
     GRPC_AVAILABLE = True

@@ -217,6 +217,7 @@ class DuckDbStore:
         from lma_core import LMAOEnvelope  # noqa: E402
 
         # ── Parse the envelope ──────────────────────────────────
+        assert LMAOEnvelope is not None  # import re-raises on failure
         envelope = LMAOEnvelope()
         try:
             envelope.ParseFromString(envelope_bytes)
