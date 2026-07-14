@@ -5,10 +5,10 @@ py_library(
     srcs = ["e2e/e2e_helpers.py"],
     visibility = ["//visibility:public"],
     deps = [
-        "//lma_core:rnode_flasher_lib",
         "@lmao_pip//pyserial",
     ],
 )
+
 
 py_test(
     name = "test_install_all",
@@ -58,7 +58,6 @@ py_test(
     ],
     main = "e2e/test_e2e_helpers.py",
     deps = [
-        "//lma_core:rnode_flasher_lib",
         "@lmao_pip//pyserial",
         "@lmao_pip//pytest",
     ],
@@ -321,7 +320,6 @@ py_test(
     deps = [
         "//cardputer_client:flash_lib",
         "//lma_core",
-        "//lma_core:rnode_flasher_lib",
         "//lmao_server:server_lib",
         "@lmao_pip//duckdb",
         "@lmao_pip//lxmf",
