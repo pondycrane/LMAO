@@ -308,6 +308,7 @@ py_test(
         "e2e/e2e_helpers.py",
     ],
     main = "e2e/test_cardputer_lora_e2e.py",
+
     data = [
         "//cardputer_client:boot.py",
         "//cardputer_client:config.py",
