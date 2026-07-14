@@ -37,8 +37,8 @@ def _patch_imports():
         "check_rnode_firmware": patch.object(
             install_all, "check_rnode_firmware", return_value=False
         ),
-        "flash_rnode_firmware": patch.object(
-            install_all, "flash_rnode_firmware", return_value=(True, "OK")
+        "flash_rnode": patch.object(
+            install_all, "flash_rnode", return_value=(True, "OK")
         ),
         "find_client_root": patch.object(
             install_all, "find_client_root", return_value="/fake/client_root"
@@ -473,8 +473,8 @@ class TestMainPipeline:
             "check_rnode_firmware": patch.object(
                 install_all, "check_rnode_firmware", return_value=False
             ),
-            "flash_rnode_firmware": patch.object(
-                install_all, "flash_rnode_firmware", return_value=(True, "OK")
+            "flash_rnode": patch.object(
+                install_all, "flash_rnode", return_value=(True, "OK")
             ),
             "find_client_root": patch.object(
                 install_all, "find_client_root", return_value="/fake/client_root"
@@ -646,7 +646,7 @@ class TestMainRNodeDetected:
         assert exc_info.value.code == 0
         # Should check firmware but NOT flash
         self.mocks["check_rnode_firmware"].assert_called_once_with("/dev/ttyUSB0")
-        self.mocks["flash_rnode_firmware"].assert_not_called()
+        self.mocks["flash_rnode"].assert_not_called()
 
     def test_rnode_needs_flashing(self):
         """When RNode lacks firmware, it should be flashed."""
@@ -654,7 +654,7 @@ class TestMainRNodeDetected:
         with pytest.raises(SystemExit) as exc_info:
             install_all.main([])
         assert exc_info.value.code == 0
-        self.mocks["flash_rnode_firmware"].assert_called_once()
+        self.mocks["flash_rnode"].assert_called_once()
 
 
 class TestMainRNodeFlashFails:
@@ -667,7 +667,7 @@ class TestMainRNodeFlashFails:
         self.mocks["find_cardputer_port"].return_value = None
         self.mocks["detect_serial_devices"].return_value = ("/dev/ttyUSB0", None)
         self.mocks["check_rnode_firmware"].return_value = False
-        self.mocks["flash_rnode_firmware"].return_value = (False, "Flash error")
+        self.mocks["flash_rnode"].return_value = (False, "Flash error")
         yield
         _stop_patches(self._patches)
 
@@ -866,7 +866,7 @@ class TestInstallRNodeFirmware:
         result = self._make_result()
         with (
             patch.object(install_all, "check_rnode_firmware", return_value=True),
-            patch.object(install_all, "flash_rnode_firmware") as mock_flash,
+            patch.object(install_all, "flash_rnode") as mock_flash,
         ):
             install_all._install_rnode_firmware("/dev/ttyUSB0", result)
         assert result.status == "OK"
@@ -880,7 +880,7 @@ class TestInstallRNodeFirmware:
             patch.object(install_all, "check_rnode_firmware", return_value=False),
             patch.object(
                 install_all,
-                "flash_rnode_firmware",
+                "flash_rnode",
                 return_value=(True, "Flashed successfully"),
             ),
         ):
@@ -895,7 +895,7 @@ class TestInstallRNodeFirmware:
             patch.object(install_all, "check_rnode_firmware", return_value=False),
             patch.object(
                 install_all,
-                "flash_rnode_firmware",
+                "flash_rnode",
                 return_value=(False, "Flash error: device not found"),
             ),
         ):
@@ -918,7 +918,7 @@ class TestInstallRNodeFirmware:
             patch.object(install_all, "check_rnode_firmware", return_value=False),
             patch.object(
                 install_all,
-                "flash_rnode_firmware",
+                "flash_rnode",
                 side_effect=RuntimeError("timeout"),
             ),
         ):

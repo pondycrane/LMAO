@@ -93,9 +93,7 @@ class TestLmaCoreImportError:
         # hasattr triggers __getattr__ which loads proto stubs lazily.
         # If stubs are available, all names should resolve.
         missing = [name for name in lma_core.__all__ if not hasattr(lma_core, name)]
-        assert not missing, (
-            f"__all__ lists names that are not available on the module: {missing}"
-        )
+        assert not missing, f"__all__ lists names that are not available on the module: {missing}"
 
     def test_grpc_request_types_optional_fallback(self):
         """Missing gRPC request types should warn via grpc_types, not crash lma_core."""
@@ -106,11 +104,11 @@ class TestLmaCoreImportError:
 
         # Save original module state for restoration
         _original_messages_pb2 = sys.modules.get("proto.lma_messages_pb2", None)
+        _original_grpc_pb2 = sys.modules.get("proto.lma_grpc_pb2", None)
+        _original_grpc_pb2_grpc = sys.modules.get("proto.lma_grpc_pb2_grpc", None)
 
         try:
             # Create mock proto.lma_messages_pb2 with ONLY core message types.
-            # proto.lma_grpc_pb2 and proto.lma_grpc_pb2_grpc are left absent so
-            # from proto.lma_grpc_pb2 import SendRequest, ... raises ImportError.
             class _MockMessagesPb2:
                 LMAOEnvelope = MagicMock()
                 TextMessage = MagicMock()
@@ -125,14 +123,17 @@ class TestLmaCoreImportError:
             mock_msgs_pb2 = _MockMessagesPb2()
             sys.modules["proto.lma_messages_pb2"] = mock_msgs_pb2
 
-            # proto.lma_grpc_pb2 and proto.lma_grpc_pb2_grpc are not in
-            # sys.modules (we cleared them) — grpc_types.py should warn.
+            # Insert sentinel modules for proto.lma_grpc_pb2 and
+            # proto.lma_grpc_pb2_grpc that have no attributes.  This prevents
+            # Python's import machinery from re-importing the real stubs from
+            # disk (which exist in this environment) and forces the ImportError
+            # fallback path in grpc_types.py.
+            _sentinel = type(sys)("proto.lma_grpc_pb2")
+            sys.modules["proto.lma_grpc_pb2"] = _sentinel
+            _sentinel_grpc = type(sys)("proto.lma_grpc_pb2_grpc")
+            sys.modules["proto.lma_grpc_pb2_grpc"] = _sentinel_grpc
 
-            # First, import lma_core — should succeed without warnings
-            # (gRPC types are no longer loaded from __init__.py)
-            import lma_core as lma_core_mod
-
-            # Now import lma_core.grpc_types — this should trigger the warning
+            # Now import lma_core.grpc_types — should log warning
             # about missing gRPC stubs.
             import io
 
@@ -143,12 +144,10 @@ class TestLmaCoreImportError:
             logging.getLogger().addHandler(handler)
 
             try:
-                # Use importlib to force a fresh import of grpc_types.py
                 import importlib
 
                 importlib.import_module("lma_core.grpc_types")
             except Exception:
-                # The module may raise or log; we just need the log output
                 pass
             finally:
                 logging.getLogger().removeHandler(handler)
@@ -162,10 +161,15 @@ class TestLmaCoreImportError:
             )
         finally:
             # Restore original module state to prevent test pollution
-            if _original_messages_pb2 is not None:
-                sys.modules["proto.lma_messages_pb2"] = _original_messages_pb2
-            else:
-                sys.modules.pop("proto.lma_messages_pb2", None)
+            for key, orig in [
+                ("proto.lma_messages_pb2", _original_messages_pb2),
+                ("proto.lma_grpc_pb2", _original_grpc_pb2),
+                ("proto.lma_grpc_pb2_grpc", _original_grpc_pb2_grpc),
+            ]:
+                if orig is not None:
+                    sys.modules[key] = orig
+                else:
+                    sys.modules.pop(key, None)
 
     def test_all_contains_expected_types(self):
         """__all__ should contain the core message types."""

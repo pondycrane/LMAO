@@ -30,6 +30,7 @@ from collections.abc import Callable
 
 try:
     import serial
+
     _SerialException = serial.SerialException
 except ImportError:
     serial = None  # type: ignore[assignment]
@@ -369,8 +370,7 @@ class RNodeKiss:
                             return payload
                     elif decoded is None:
                         print(
-                            f"WARNING: Invalid KISS frame discarded "
-                            f"({len(self._frame_buf)} bytes)",
+                            f"WARNING: Invalid KISS frame discarded ({len(self._frame_buf)} bytes)",
                             file=sys.stderr,
                         )
                 self._in_frame = not self._in_frame
@@ -540,6 +540,7 @@ def _find_esptool() -> str | None:
                 return python  # caller must use `python -m esptool`
         except Exception as exc:
             import sys as _sys
+
             print(f"DEBUG: esptool fallback detection failed: {exc}", file=_sys.stderr)
     return None
 
@@ -652,25 +653,33 @@ def flash_rnode_firmware(
             flush=True,
         )
         write_args = [
-            "--port", port,
-            "--baud", "921600",
+            "--port",
+            port,
+            "--baud",
+            "921600",
             "write_flash",
-            "0x0", bootloader_path,
-            "0x8000", partitions_path,
-            "0xe000", boot_app0_path,
-            "0x10000", firmware_path,
+            "0x0",
+            bootloader_path,
+            "0x8000",
+            partitions_path,
+            "0xe000",
+            boot_app0_path,
+            "0x10000",
+            firmware_path,
         ]
     else:
         print(
-            "No companion bootloader/partitions found, "
-            "writing firmware at 0x0 (legacy layout)",
+            "No companion bootloader/partitions found, writing firmware at 0x0 (legacy layout)",
             flush=True,
         )
         write_args = [
-            "--port", port,
-            "--baud", "921600",
+            "--port",
+            port,
+            "--baud",
+            "921600",
             "write_flash",
-            "0x0", firmware_path,
+            "0x0",
+            firmware_path,
         ]
 
     print(f"Writing firmware to {port} ...", flush=True)
@@ -787,8 +796,8 @@ def provision_rnode_eeprom(
             if rom_data[ROM.ADDR_INFO_LOCK] != ROM.INFO_LOCK_BYTE:
                 return (False, "EEPROM info lock byte not set after provisioning")
 
-    except ImportError as exc:
-        msg = f"pyserial is required for serial communication. Install with: pip install pyserial ({exc})"
+    except ImportError:
+        msg = "pyserial is required for serial communication. Install with: pip install pyserial"
         print(f"WARNING: {msg}", file=sys.stderr)
         return (False, msg)
     except _SerialException as exc:
@@ -838,8 +847,8 @@ def set_rnode_firmware_hash(
 
             print(f"  Writing firmware hash ({len(hash_bytes)} bytes) ...", flush=True)
             rnode.set_firmware_hash(hash_bytes)
-    except ImportError as exc:
-        msg = f"pyserial is required for serial communication. Install with: pip install pyserial ({exc})"
+    except ImportError:
+        msg = "pyserial is required for serial communication. Install with: pip install pyserial"
         print(f"WARNING: {msg}", file=sys.stderr)
         return (False, msg)
     except _SerialException as exc:
@@ -881,8 +890,8 @@ def check_rnode_firmware(port: str, timeout: float = 15.0) -> bool:
             if version is not None:
                 print(f"  OK: RNode firmware v{version} detected", flush=True)
                 return True
-    except ImportError as exc:
-        msg = f"pyserial is required for serial communication. Install with: pip install pyserial ({exc})"
+    except ImportError:
+        msg = "pyserial is required for serial communication. Install with: pip install pyserial"
         print(f"WARNING: {msg}", file=sys.stderr)
         traceback.print_exc(file=sys.stderr)
         return False
