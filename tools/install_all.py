@@ -44,6 +44,7 @@ except ImportError:
 # Cardputer flashing helpers (from cardputer_client/flash.py via flash_lib).
 from cardputer_client.flash import (
     FILES_TO_UPLOAD,
+    _mip_install,
     auto_discover_lib_files,
     enter_raw_repl,
     exit_raw_repl,
@@ -54,11 +55,9 @@ from cardputer_client.flash import (
     verify_files_exist,
 )
 
-# RNode firmware helpers (from tests/e2e/e2e_helpers.py via e2e_helpers_lib).
-from tests.e2e.e2e_helpers import (
-    check_rnode_firmware,
-    flash_rnode,
-)
+# RNode firmware helpers (manual flash only — see rnode_firmware/README.md).
+# The Heltec RNode must be flashed manually via the web tool.
+# (No import needed — probe is done via the RNode serial protocol directly.)
 
 # Server-service install helpers (from tools/install_services.py).
 from tools.install_services import (
@@ -164,13 +163,19 @@ def _flash_cardputer_client(port: str, client_root: str, result: DeviceResult) -
             print(f"  FAIL: {failed}/{total} files failed")
             return
 
+        # Install MicroPython dependencies (lora driver, contextlib).
+        print("  Installing MicroPython dependencies ...")
+        _mip_install(ser, "lora-sx126x")
+        _mip_install(ser, "lora-sync")
+        _mip_install(ser, "contextlib")
+
         # Soft reset.
         print("  Soft-resetting Cardputer ...")
         exit_raw_repl(ser)
         ser.write(b"\x04")  # Ctrl+D = soft reset
 
-        result.ok(f"Flashed {total} file(s) to Cardputer")
-        print(f"  OK: {total} file(s) uploaded")
+        result.ok(f"Flashed {total} file(s) + dependencies to Cardputer")
+        print(f"  OK: {total} file(s) uploaded, dependencies installed")
 
     except KeyboardInterrupt:
         result.fail("Aborted by user")
@@ -193,32 +198,38 @@ def _flash_cardputer_client(port: str, client_root: str, result: DeviceResult) -
 
 
 def _install_rnode_firmware(port: str, result: DeviceResult) -> None:
-    """Check and (if needed) flash RNode firmware onto a Heltec at *port*.
+    """Check if a Heltec at *port* is running RNode firmware.
 
-    Delegates to ``e2e_helpers.check_rnode_firmware`` and
-    ``e2e_helpers.flash_rnode_firmware`` which wrap ``rnodeconf``.
+    Uses the RNode hardware probe (0x00 byte request). Does NOT flash
+    programmatically — RNode firmware must be installed via the web
+    flasher tool (see rnode_firmware/README.md).
     """
     print(f"\n--- RNode: checking firmware on {port} ---")
 
     try:
-        # Step 1 — check if RNode firmware is already present.
-        is_rnode = check_rnode_firmware(port)
-        if is_rnode:
-            result.ok(f"RNode firmware already installed on {port}")
-            print("  OK: RNode firmware already detected")
-            return
+        import serial as _serial
 
-        # Step 2 — not an RNode; trigger autoinstall.
-        # Uses flash_rnode() which handles the full pipeline:
-        # esptool flash → EEPROM provisioning → firmware hash → verify.
-        print("  RNode firmware not detected. Starting autoinstall ...")
-        success, message = flash_rnode(port)
-        if success:
-            result.ok(f"RNode firmware flashed: {message}")
-            print(f"  OK: {message}")
+        # Probe the device with the RNode detection handshake.
+        ser = _serial.Serial(port, 115200, timeout=2)
+        time.sleep(0.3)
+        ser.write(b"\x00")
+        time.sleep(0.5)
+        data = ser.read(200)
+        ser.close()
+
+        if len(data) > 0 and data[0:1] == b"\xc0":
+            result.ok(f"RNode firmware detected on {port}")
+            print(f"  OK: RNode firmware detected ({len(data)} bytes response)")
         else:
-            result.fail(message)
-            print(f"  FAIL: {message}")
+            result.fail(
+                f"Device on {port} is not responding as RNode. "
+                f"Use the web flasher tool: https://flasher.rnode.ams1.meshkube.com/"
+                f"\n    See rnode_firmware/README.md for instructions."
+            )
+            print(f"  FAIL: Not an RNode — manual flash required")
+    except Exception as exc:
+        result.fail(f"RNode probe failed: {exc}")
+        print(f"  FAIL: {exc}")
     except Exception as exc:
         import traceback
 
