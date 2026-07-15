@@ -76,7 +76,7 @@ class Client:
 
         except AttributeError as e:
             logger.error("LXMF message missing expected attributes: %s", e, exc_info=True)
-        except (RNS.RNSException, LXMF.LXMFException) as e:
+        except (OSError, ValueError, KeyError) as e:
             logger.error("RNS/LXMF error processing message: %s", e, exc_info=True)
         except Exception as e:
             logger.error("Unexpected error in handle_lxmf_delivery: %s", e, exc_info=True)
@@ -125,7 +125,7 @@ class Client:
             print(f"Sent to {dest_hash}: {content}")
             return True
 
-        except (RNS.RNSException, LXMF.LXMFException) as e:
+        except (OSError, ValueError, KeyError) as e:
             logger.error("Failed to send message: %s", e, exc_info=True)
             print(f"Error sending message: {e}")
             return False
@@ -162,7 +162,7 @@ class Client:
         """
         try:
             identity = RNS.Identity.recall(bytes.fromhex(hex_str))
-        except (RNS.RNSException, OSError, ValueError) as e:
+        except (OSError, ValueError, KeyError) as e:
             logger.error("Failed to recall identity for %s: %s", hex_str, e, exc_info=True)
             return None
         if identity is None:
@@ -294,7 +294,7 @@ class Client:
         try:
             self.router.announce()
             logger.info("Announcement sent.")
-        except (RNS.RNSException, LXMF.LXMFException) as e:
+        except (OSError, ValueError, KeyError) as e:
             logger.warning("Failed to announce presence: %s", e, exc_info=True)
 
         # Print startup banner
