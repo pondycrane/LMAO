@@ -36,11 +36,10 @@ except ImportError:
 # Library files (urns/ and native .mpy modules) are uploaded to /lib/.
 FILES_TO_UPLOAD = [
     "boot.py",
-    "boot.mpy",
     "config.py",
-    "main.mpy",
-    "lora_boards.mpy",
-    "proto/lma_encoder.mpy",
+    "lora_boards.py",
+    "main.py",
+    "proto/lma_encoder.py",
 ]
 
 
@@ -406,6 +405,34 @@ def upload_file(ser, local_path, remote_path, chunk_size=1024):
     return False
 
 
+def _mip_install(ser, package):
+    """Install a MicroPython package via mip on the connected device.
+
+    Runs ``import mip; mip.install()`` in raw REPL and waits for completion.
+    Skips silently if already installed or WiFi is unavailable (non-fatal).
+    """
+    try:
+        script = (
+            b"import mip\n"
+            b"try:\n"
+            b"  mip.install('" + package.encode("utf-8") + b"')\n"
+            b"  print('MIP_OK')\n"
+            b"except Exception as e:\n"
+            b"  print('MIP_FAIL:', e)\n"
+        )
+        ok, out = exec_raw(ser, script, timeout=30)
+        if ok and "MIP_OK" in out:
+            print(f"  mip: {package} OK")
+            return True
+        if "already installed" in out.lower() or "exists" in out.lower():
+            print(f"  mip: {package} already installed")
+            return True
+        print(f"  mip: {package} skipped (no network? {out[:100]})")
+    except Exception as e:
+        print(f"  mip: {package} skipped ({e})")
+    return False
+
+
 # ---- Main (entry-point for ``bazel run``) ----
 
 
@@ -500,6 +527,12 @@ def main():
         print(f"Uploading {total_files} file(s) …")
         _upload_files(ser, client_root, FILES_TO_UPLOAD)
         _upload_files(ser, client_root, lib_files)
+
+        # — Install dependencies via mip —
+        print("\nInstalling MicroPython dependencies …")
+        _mip_install(ser, "lora-sx126x")
+        _mip_install(ser, "lora-sync")
+        _mip_install(ser, "contextlib")
 
         # — Soft reset —
         print("\nFlash complete. Soft-resetting Cardputer …")

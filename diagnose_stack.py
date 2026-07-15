@@ -455,6 +455,45 @@ except Exception as e:
     traceback.print_exc()
 
 
+# ── Layer 4: End-to-End LoRa connectivity check ─────────────────────
+
+print("\n" + "=" * 60)
+print("LAYER 4: End-to-End LoRa Connectivity")
+print("=" * 60)
+
+cardputer_port = None
+for port in ["/dev/ttyACM0", "/dev/ttyACM1"]:
+    if os.path.exists(port):
+        cardputer_port = port
+        break
+rnode_port = None
+for port in ["/dev/ttyUSB0", "/dev/ttyUSB1"]:
+    if os.path.exists(port):
+        rnode_port = port
+        break
+
+if cardputer_port:
+    print(f"  Cardputer: {cardputer_port} — connected")
+else:
+    print(f"  Cardputer: not found")
+
+if rnode_port:
+    print(f"  RNode:     {rnode_port} — connected")
+else:
+    print(f"  RNode:     not found")
+
+if cardputer_port and rnode_port:
+    print(f"\n  ✅ Both devices detected — ready for LoRa communication")
+    print(f"\n  To run the full E2E test:")
+    print(f"    bazel test //tests:test_cardputer_lora_e2e --test_output=all")
+elif cardputer_port:
+    print(f"\n  ⚠️  RNode not detected — Cardputer can run in WiFi-only mode")
+elif rnode_port:
+    print(f"\n  ⚠️  Cardputer not detected — verify USB connection")
+else:
+    print(f"\n  ❌ Neither device detected")
+
+
 # ── Cleanup ──────────────────────────────────────────────────────────
 
 _cleanup()
