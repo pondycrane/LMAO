@@ -32,3 +32,4 @@ MODULE.bazel.lock
 
 # Temp files
 /tmp/
+*.mpy

@@ -291,10 +291,16 @@ try:
         if cardputer_path in sys.path:
             sys.path.remove(cardputer_path)
         sys.path.insert(0, cardputer_path)
-        from proto.lma_encoder import encode_sensor_report, decode_envelope
+        from proto.lma_encoder import (
+            decode_envelope,
+            encode_sensor_envelope,
+            encode_sensor_report,
+            make_poc_message,
+            parse_poc_message,
+        )
 
         # Encode with the MicroPython encoder
-        mp_encoded = encode_sensor_report(
+        mp_encoded = encode_sensor_envelope(
             node_id="cafebabe",
             seq=42,
             battery=3.7,
@@ -310,22 +316,136 @@ try:
         mp_decoded = decode_envelope(encoded2)
         print(f"  ✅ Cardputer decoder parsed protobuf envelope: {mp_decoded}")
 
-        # Compare: both should produce valid protobuf
+        # Bidirectional decode check: both produce semantically identical protobuf
         env_a = LMAOEnvelope()
-        env_a.ParseFromString(encoded2)
+        env_a.ParseFromString(encoded2)  # protobuf library → protobuf library
         env_b = LMAOEnvelope()
-        env_b.ParseFromString(mp_encoded)
-        match = (
+        env_b.ParseFromString(mp_encoded)  # Cardputer encoder → protobuf library
+        cardputer_can_read_host = decode_envelope(encoded2) is not None
+        semantic_match = (
             env_a.sensor.node_id == env_b.sensor.node_id
             and env_a.sensor.seq == env_b.sensor.seq
             and abs(env_a.sensor.readings[0].value - env_b.sensor.readings[0].value) < 0.01
         )
-        print(f"  {'✅' if match else '❌'} Encoder cross-validation: {'MATCH' if match else 'MISMATCH'}")
+        if semantic_match:
+            print(f"  ✅ Encoder cross-validation: semantic MATCH")
+            if len(encoded2) != len(mp_encoded):
+                print(f"     (wire sizes differ: host={len(encoded2)}B vs cardputer={len(mp_encoded)}B —")
+                print(f"      protobuf library omits default values; Cardputer encoder includes them)")
+        else:
+            print(f"  ❌ Encoder cross-validation: semantic MISMATCH")
+            print(f"     Host: node_id={env_a.sensor.node_id} seq={env_a.sensor.seq} temp={env_a.sensor.readings[0].value}")
+            print(f"     Cardputer: node_id={env_b.sensor.node_id} seq={env_b.sensor.seq} temp={env_b.sensor.readings[0].value}")
 
     except ImportError as e:
         print(f"  ⚠️  Cardputer encoder test skipped: {e}")
     except Exception as e:
         print(f"  ⚠️  Cardputer encoder error: {e}")
+
+    # ── Test 6: Full Loop — Cardputer → Server → Cardputer ────────────────
+    print(f"\n  {'─' * 50}")
+    print(f"  → Full Loop: Cardputer → Server → Cardputer...")
+    try:
+        # Re-import Cardputer encoder (already loaded above; re-path if needed)
+        for _mod in list(sys.modules):
+            if _mod == "proto" or _mod.startswith("proto."):
+                del sys.modules[_mod]
+        if cardputer_path not in sys.path:
+            sys.path.insert(0, cardputer_path)
+        from proto.lma_encoder import (
+            decode_envelope,
+            encode_sensor_envelope,
+            make_poc_message,
+            parse_poc_message,
+        )
+
+        # Step 1: Cardputer sends a SensorReport (IoT message)
+        cardputer_node_id = "cafebabe"
+        cardputer_sensor_bytes = encode_sensor_envelope(
+            node_id=cardputer_node_id,
+            seq=42,
+            battery=3.7,
+            readings=[
+                {"sensor_id": 1, "value": 23.5, "unit": "C", "timestamp_ms": 0},
+                {"sensor_id": 2, "value": 55.0, "unit": "%", "timestamp_ms": 0},
+            ],
+        )
+        print(f"  \n  Step 1 — Cardputer encodes SensorReport:")
+        print(f"     ✅ {len(cardputer_sensor_bytes)} bytes (ready for LXMF Content)")
+
+        # Step 2: Server receives and decodes the SensorReport
+        server_envelope = LMAOEnvelope()
+        server_envelope.ParseFromString(cardputer_sensor_bytes)
+        sensor_fields = [
+            f"sensor_id={r.sensor_id}, value={r.value}{r.unit}"
+            for r in server_envelope.sensor.readings
+        ]
+        print(f"  Step 2 — Server decodes SensorReport:")
+        print(f"     ✅ node_id={server_envelope.sensor.node_id}")
+        print(f"        seq={server_envelope.sensor.seq}")
+        print(f"        battery={server_envelope.sensor.battery}V")
+        print(f"        readings: {', '.join(sensor_fields)}")
+
+        # Step 3: Server builds and sends a protobuf ACK TextMessage reply
+        ack_text = f"ACK from LMAO Server — received SensorReport ({len(cardputer_sensor_bytes)} bytes)"
+        reply_envelope = LMAOEnvelope()
+        reply_envelope.text.node_id = "lmao-server"
+        reply_envelope.text.content = ack_text
+        reply_envelope.text.timestamp = int(time.time() * 1000)
+        server_ack_bytes = reply_envelope.SerializeToString()
+        print(f"  Step 3 — Server builds ACK TextMessage:")
+        print(f"     ✅ ACK: {ack_text!r}")
+        print(f"     ✅ {len(server_ack_bytes)} bytes protobuf-encoded")
+
+        # Step 4: Cardputer receives and decodes the ACK
+        cardputer_decoded = parse_poc_message(server_ack_bytes)
+        print(f"  Step 4 — Cardputer decodes ACK:")
+        if cardputer_decoded:
+            print(f"     ✅ Decoded: {cardputer_decoded!r}")
+            if cardputer_decoded == ack_text:
+                print(f"     ✅ Round-trip MATCH — text intact through encode→send→decode")
+            else:
+                print(f"     ❌ Round-trip MISMATCH — expected: {ack_text!r}")
+        else:
+            print(f"     ❌ parse_poc_message returned None — ACK not decodable")
+
+        # Step 5: Cardputer also sends TextMessage (POC hello), verify server decodes it
+        # First, restore host proto path (remove Cardputer path, re-import host proto)
+        if cardputer_path in sys.path:
+            sys.path.remove(cardputer_path)
+        for _mod in list(sys.modules):
+            if _mod == "proto" or _mod.startswith("proto."):
+                del sys.modules[_mod]
+        # Force re-import of host proto via lma_core
+        from lma_core import LMAOEnvelope  # noqa: F811, F401
+
+        hello_text = "Hello from Cardputer — seq 1"
+        cardputer_hello_bytes = make_poc_message(cardputer_node_id, hello_text)
+        server_hello = decode_lmao_message(cardputer_hello_bytes)
+        print(f"  \n  Step 5 — Cardputer TextMessage loop:")
+        print(f"     Sent: {hello_text!r}")
+        print(f"     Server decoded: {server_hello!r}")
+        if server_hello == hello_text:
+            print(f"     ✅ TextMessage round-trip MATCH")
+        else:
+            print(f"     ❌ TextMessage round-trip MISMATCH")
+
+        print(f"  \n  {'✅' if cardputer_decoded == ack_text and server_hello == hello_text else '❌'} Full loop: COMPLETE")
+
+    except ImportError as e:
+        print(f"  ⚠️  Full loop test skipped: {e}")
+    except Exception as e:
+        print(f"  ⚠️  Full loop test error: {e}")
+        import traceback
+        traceback.print_exc()
+
+    # Re-import proto module for the host (cleared for Cardputer above)
+    for _mod in list(sys.modules):
+        if _mod == "proto" or _mod.startswith("proto."):
+            del sys.modules[_mod]
+    from lma_core import LMAOEnvelope, SensorReport, SensorReading, TextMessage
+
+    print()  # spacing before summary
 
 except ImportError as e:
     print(f"  ❌ Protobuf import error: {e}")
