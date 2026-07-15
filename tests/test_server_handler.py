@@ -60,7 +60,15 @@ class TestHandleLXMFDelivery:
         # Check that LXMessage was constructed with expected args
         call_kwargs = sys.modules["LXMF"].LXMessage.call_args.kwargs
         assert call_kwargs["title"] == "p:Envelope"
-        assert call_kwargs["destination"] == msg.get_source.return_value
+        # Verify the identity was wrapped in a RNS.Destination
+        sys.modules["RNS"].Destination.assert_any_call(
+            msg.get_source.return_value,
+            sys.modules["RNS"].Destination.OUT,
+            sys.modules["RNS"].Destination.SINGLE,
+            "lxmf",
+            "delivery",
+        )
+        assert call_kwargs["destination"] == sys.modules["RNS"].Destination.return_value
         # Verify reply content is a non-empty protobuf envelope
         reply_content = call_kwargs.get("content")
         assert reply_content is not None, "Reply must have content"
