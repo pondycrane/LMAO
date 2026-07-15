@@ -260,6 +260,59 @@ Output shows a per-device summary table with OK/FAIL/SKIP status:
 The tool auto-detects connected hardware via USB and exits with code 1
 if any device fails.
 
+### 5a. Cardputer ADV Hardware Reference
+
+The target device is **M5Stack Cardputer ADV** (Stamp-S3A, ESP32-S3FN8) with
+a **Cap LoRa-1262** module (SX1262) connected via the rear EXT 2.54-14P header.
+
+**EXT 14-pin header pinout** (verified from Cardputer ADV schematic v1.0):
+
+| Pin | Function | GPIO | Notes |
+|-----|----------|------|-------|
+| 1   | RESET    | 3    | SX1262 reset |
+| 2   | INT      | 4    | SX1262 DIO1 (IRQ) |
+| 3   | BUSY     | 6    | SX1262 busy |
+| 4   | SCK      | 40   | SPI clock (MTDO — JTAG pin, reclaimed at boot) |
+| 5   | MOSI     | 14   | SPI data |
+| 6   | MISO     | 39   | SPI data (MTCK — JTAG pin, reclaimed at boot) |
+| 7   | CS       | 5    | SPI chip select |
+| 8   | TX       | 15   | UART (GPS) |
+| 9   | RX       | 13   | UART (GPS) |
+| 10  | SCL      | 8    | I2C clock |
+| 11  | SDA      | 9    | I2C data |
+| 12  | 5VOUT    | —    | 5V output |
+| 13  | GND      | —    | Ground |
+| 14  | 5VIN     | —    | 5V input |
+
+**Key ESP32-S3 considerations:**
+
+- **GPIO39 (MTCK) and GPIO40 (MTDO)** are JTAG pins on the ESP32-S3. The
+  internal USB JTAG controller claims them by default for debugging. The
+  LoRa interface driver creates `Pin()` objects for these pins **before**
+  SPI init to reclaim them for GPIO/SPI use. This is handled automatically
+  in `lib/urns/interfaces/lora.py`.
+- **SPI bus 2 (HSPI / SPI3_HOST)** is used for the LoRa radio, separate from
+  SPI bus 1 (FSPI / SPI2_HOST) used by the ST7789 display.
+- **TCXO startup**: The Cap LoRa-1262 module needs 5000us for the TCXO to
+  stabilize (configured via `dio3_tcxo_start_time_us` in `lora_boards.py`).
+- The module connects via BOTH the HY2.0-4P Grove port (power) and the
+  EXT 14-pin header (SPI data signals). Both must be firmly seated.
+
+**Radio parameters** (must match server RNode config):
+
+| Parameter | Value |
+|-----------|-------|
+| Frequency | 868 MHz (EU) / 915 MHz (US) |
+| Spreading Factor | 7 |
+| Bandwidth | 125 kHz |
+| Coding Rate | 4:5 |
+| TX Power | 14 dBm |
+| Preamble | 8 symbols |
+| Syncword | 0x1424 (Reticulum default) |
+
+See `cardputer_client/lora_boards.py` for the `cardputer_adv` board preset
+and `cardputer_client/config.py` for the LoRa interface configuration.
+
 ### 6. Test Communication
 
 An automated E2E test can verify the full LoRa communication path with
