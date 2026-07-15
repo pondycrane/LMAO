@@ -468,8 +468,16 @@ class TestSendMessage:
         sys.modules["LXMF"].LXMessage.assert_called_once()
         call_kwargs = sys.modules["LXMF"].LXMessage.call_args.kwargs
         assert call_kwargs["title"] == "p:Envelope"
-        assert call_kwargs["destination"] == dest_identity
-        assert call_kwargs["source"] == client.client_identity
+        # Verify the identity was wrapped in a RNS.Destination
+        sys.modules["RNS"].Destination.assert_any_call(
+            dest_identity,
+            sys.modules["RNS"].Destination.OUT,
+            sys.modules["RNS"].Destination.SINGLE,
+            "lxmf",
+            "delivery",
+        )
+        assert call_kwargs["destination"] == sys.modules["RNS"].Destination.return_value
+        assert call_kwargs["source"] == sys.modules["RNS"].Destination.return_value
         assert call_kwargs["desired_method"] == 1  # OPPORTUNISTIC
 
         # Verify content is a serialized protobuf envelope
