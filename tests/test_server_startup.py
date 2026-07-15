@@ -117,6 +117,10 @@ class TestInitRnsAndLxmf:
         sys.modules["LXMF"].LXMRouter.assert_called_once_with(
             identity=identity, storagepath="/tmp/lmao_server_lxmf"
         )
+        # Verify delivery identity is registered (required for receiving messages)
+        router.register_delivery_identity.assert_called_once_with(
+            identity, display_name="lmao-server"
+        )
 
     def test_init_custom_storage_path(self, server_mod):
         """_init_rns_and_lxmf should pass custom identity_storage_path."""
