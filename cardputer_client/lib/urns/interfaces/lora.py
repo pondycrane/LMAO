@@ -65,6 +65,7 @@ class LoRaInterface(Interface):
         # DIO2/DIO3 options
         self._dio2_rf_sw = config.get("dio2_rf_sw", True)
         self._dio3_tcxo_mv = config.get("dio3_tcxo_millivolts", 1800)
+        self._dio3_tcxo_start_time_us = config.get("dio3_tcxo_start_time_us", None)
         self._use_dcdc = config.get("use_dcdc", False)
 
         # Radio parameters
@@ -110,6 +111,17 @@ class LoRaInterface(Interface):
         from lora import SX1262
         from machine import SPI, Pin
 
+        # ESP32-S3 JTAG workaround: GPIO39 (MTCK) and GPIO40 (MTDO) are used
+        # by the internal USB JTAG controller by default. Creating Pin objects
+        # for them early reclaims them for GPIO/SPI use. This must happen
+        # BEFORE creating the SPI bus.
+        _jtag_reclaim_pins = [self._miso_pin, self._sck_pin]
+        for _p in _jtag_reclaim_pins:
+            try:
+                Pin(_p, Pin.IN)
+            except Exception:
+                pass  # not a JTAG pin, ignore
+
         if self._external_spi:
             spi = self._external_spi
         else:
@@ -142,7 +154,29 @@ class LoRaInterface(Interface):
         if self._dio3_tcxo_mv is not None:
             kwargs["dio3_tcxo_millivolts"] = self._dio3_tcxo_mv
 
-        self._modem = SX1262(**kwargs)
+        # TCXO start time: some modules (e.g. Cap LoRa-1262 on Cardputer ADV)
+        # need more time for the TCXO to stabilize. The driver default is 1000us.
+        # Allow override via the board config.
+        _tcxo_start_us = getattr(self, "_dio3_tcxo_start_time_us", None)
+        if _tcxo_start_us is not None:
+            kwargs["dio3_tcxo_start_time_us"] = _tcxo_start_us
+
+        # Try TCXO-enabled init first, fall back to no TCXO if it fails.
+        # Some modules report a TCXO voltage but don't actually need it
+        # configured (TCXO_OPTIONAL).
+        try:
+            self._modem = SX1262(**kwargs)
+        except Exception as e:
+            if self._dio3_tcxo_mv is not None:
+                log(
+                    "LoRa TCXO init failed: " + str(e) + " — retrying without TCXO",
+                    LOG_DEBUG,
+                )
+                kwargs.pop("dio3_tcxo_millivolts", None)
+                kwargs.pop("dio3_tcxo_start_time_us", None)
+                self._modem = SX1262(**kwargs)
+            else:
+                raise
 
         # Set DC-DC regulator mode (opcode 0x96, value 0x01).
         # The lora-sx126x driver defaults to LDO which is insufficient
