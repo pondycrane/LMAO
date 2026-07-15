@@ -229,7 +229,7 @@ class Server:
 
         except AttributeError as e:
             logger.error("LXMF message missing expected attributes: %s", e, exc_info=True)
-        except (RNS.RNSException, LXMF.LXMFException) as e:
+        except (OSError, ValueError, KeyError) as e:
             logger.error("RNS/LXMF error processing message: %s", e, exc_info=True)
         except Exception as e:
             logger.error("Unexpected error in handle_lxmf_delivery: %s", e, exc_info=True)
@@ -286,7 +286,7 @@ if GRPC_AVAILABLE:
             dest_hash = request.destination_hash
             try:
                 dest = RNS.Identity.from_hex(dest_hash) if dest_hash else None
-            except (ValueError, RNS.RNSException, TypeError):
+            except (ValueError, TypeError, KeyError):
                 dest = None
             if not dest:
                 return SendResponse(
@@ -308,7 +308,7 @@ if GRPC_AVAILABLE:
                     destination_hash=dest_hash,
                     status="queued",
                 )
-            except (RNS.RNSException, LXMF.LXMFException, OSError) as e:
+            except (OSError, ValueError, KeyError) as e:
                 logger.error("Send RPC failed: %s", e, exc_info=True)
                 await context.abort(grpc.StatusCode.INTERNAL, f"Send failed: {e}")
 
@@ -343,7 +343,7 @@ if GRPC_AVAILABLE:
                             source_hash=source_hash,
                         )
                         yield resp
-                    except (AttributeError, RNS.RNSException, LXMF.LXMFException) as e:
+                    except (AttributeError, OSError, ValueError, KeyError) as e:
                         logger.warning("Subscribe: skipping malformed message: %s", e)
                         continue
             except asyncio.CancelledError:
