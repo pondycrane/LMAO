@@ -36,10 +36,11 @@ except ImportError:
 # Library files (urns/ and native .mpy modules) are uploaded to /lib/.
 FILES_TO_UPLOAD = [
     "boot.py",
+    "boot.mpy",
     "config.py",
-    "main.py",
-    "lora_boards.py",
-    "proto/lma_encoder.py",
+    "main.mpy",
+    "lora_boards.mpy",
+    "proto/lma_encoder.mpy",
 ]
 
 
