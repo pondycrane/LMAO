@@ -29,6 +29,23 @@ from lma_core.rns_init import init_rns_and_lxmf, warn_if_rnode_missing
 logger = logging.getLogger(__name__)
 
 
+def _identity_to_destination(identity):
+    """Wrap an RNS.Identity in an RNS.Destination for LXMF.
+
+    LXMF requires ``RNS.Destination`` objects for both ``destination`` and
+    ``source`` parameters of ``LXMessage.__init__()``. The destination hash
+    is deterministic from the identity hash, app name, and aspect, so the
+    resulting address is stable and matchable.
+    """
+    return RNS.Destination(
+        identity,
+        RNS.Destination.OUT,
+        RNS.Destination.SINGLE,
+        "lxmf",
+        "delivery",
+    )
+
+
 class Client:
     """Encapsulates human client lifecycle: Reticulum init, LXMF router,
     message handling (receive and send), and interactive REPL loop."""
@@ -86,7 +103,8 @@ class Client:
         destination identity via LXMF opportunistic delivery.
 
         Args:
-            dest_identity: RNS.Identity of the destination node.
+            dest_identity: RNS.Identity of the destination node (wrapped into
+                a ``RNS.Destination`` internally for ``LXMessage``).
             content: Text string to send.
 
         Returns:
@@ -112,8 +130,8 @@ class Client:
             envelope.text.timestamp = int(time.time() * 1000)
 
             outbound_msg = LXMF.LXMessage(
-                destination=dest_identity,
-                source=self.client_identity,
+                destination=_identity_to_destination(dest_identity),
+                source=_identity_to_destination(self.client_identity),
                 content=envelope.SerializeToString(),
                 title="p:Envelope",
                 desired_method=LXMF.LXMessage.OPPORTUNISTIC,

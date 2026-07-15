@@ -111,6 +111,23 @@ def _print_startup_banner(identity_hex, rnode_port, grpc_available, nats_connect
 _NATS_SUBJECT = "lmao.messages.env"
 
 
+def _identity_to_destination(identity):
+    """Wrap an RNS.Identity in an RNS.Destination for LXMF.
+
+    LXMF requires ``RNS.Destination`` objects for both ``destination`` and
+    ``source`` parameters of ``LXMessage.__init__()``. The destination hash
+    is deterministic from the identity hash, app name, and aspect, so the
+    resulting address is stable and matchable.
+    """
+    return RNS.Destination(
+        identity,
+        RNS.Destination.OUT,
+        RNS.Destination.SINGLE,
+        "lxmf",
+        "delivery",
+    )
+
+
 class Server:
     """Encapsulates LMAO server lifecycle: Reticulum init, LXMF router, and message handling."""
 
@@ -197,8 +214,8 @@ class Server:
                 reply_envelope.text.timestamp = int(time.time() * 1000)
 
                 reply_msg = LXMF.LXMessage(
-                    destination=source_identity,
-                    source=self.server_identity,
+                    destination=_identity_to_destination(source_identity),
+                    source=_identity_to_destination(self.server_identity),
                     content=reply_envelope.SerializeToString(),
                     title="p:Envelope",
                     desired_method=LXMF.LXMessage.OPPORTUNISTIC,
@@ -297,8 +314,8 @@ if GRPC_AVAILABLE:
             # Build an LXMF message and dispatch via the router
             try:
                 lxmf_msg = LXMF.LXMessage(
-                    destination=dest,
-                    source=self._server.server_identity,
+                    destination=_identity_to_destination(dest),
+                    source=_identity_to_destination(self._server.server_identity),
                     content=envelope.SerializeToString(),
                     title="p:Envelope",
                     desired_method=LXMF.LXMessage.OPPORTUNISTIC,
