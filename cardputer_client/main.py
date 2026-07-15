@@ -36,11 +36,16 @@ except ImportError:
 
 # Proto encoder (optional — gracefully degrades if not on device)
 try:
-    from proto.lma_encoder import encode_sensor_envelope, make_poc_message
+    from proto.lma_encoder import (
+        encode_sensor_envelope,
+        make_poc_message,
+        parse_poc_message,
+    )
 
     HAS_PROTO = True
 except ImportError:
     HAS_PROTO = False
+    parse_poc_message = None  # type: ignore[assignment]
 
 # Feature flag to disable SensorReport sending; defaults True for backward compatibility
 SEND_SENSOR = True
@@ -267,7 +272,13 @@ def handle_reply(message):
         source_info = (
             message.source_hash.hex()[:8] if message.source_hash else "unknown"
         )
-        content = message.content_as_string() or ""
+        # Decode protobuf LMAOEnvelope content first, fall back to raw UTF-8
+        raw = message.content if hasattr(message, "content") else b""
+        if HAS_PROTO and parse_poc_message is not None:
+            decoded = parse_poc_message(raw)
+            content = decoded if decoded else ""
+        else:
+            content = message.content_as_string() or ""
     except Exception as e:
         print(f"handle_reply: content extraction failed from {source_info}: {e}")
         sys.print_exception(e)

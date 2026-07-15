@@ -17,14 +17,14 @@ LORA_BOARDS = {
     #   BUSY: GPIO 15  (DIO3 / busy pin for SX1262)
     #   DIO1: GPIO 14  (IRQ)
     "cardputer_adv": {
-        "spi_bus": 1,
-        "sck_pin": 36,
-        "mosi_pin": 35,
-        "miso_pin": 37,
-        "cs_pin": 12,
-        "busy_pin": 15,
-        "dio1_pin": 14,
-        "reset_pin": 13,
+        "spi_bus": 2,  # HSPI (display uses SPI2_HOST too, LoRa separate device)
+        "sck_pin": 40,
+        "mosi_pin": 14,
+        "miso_pin": 39,
+        "cs_pin": 5,
+        "busy_pin": 6,
+        "dio1_pin": 4,
+        "reset_pin": 3,
         "dio2_rf_sw": True,
         "dio3_tcxo_millivolts": 1800,
         # No battery block — the Cardputer ADV doesn't have a battery ADC.

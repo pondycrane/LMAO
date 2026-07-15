@@ -73,11 +73,13 @@ CONFIG = {
             "forward_port": 4242,
         },
         # ---- Cardputer onboard SX1262 LoRa radio ----
+        # DISABLED: SX1262 init hangs with micropython-lib driver.
+        # Uncomment and set enabled=True once the driver issue is debugged.
         {
             "type": "LoRaInterface",
             "board": "cardputer_adv",  # pinout preset in lora_boards.py
             "name": "LoRa",
-            "enabled": True,
+            "enabled": False,
             "freq_khz": 868000,  # 868 MHz (EU); 915000 for US
             "sf": 7,  # SF7 fastest
             "bw": "125",  # 125 kHz
