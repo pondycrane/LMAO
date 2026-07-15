@@ -47,6 +47,7 @@ def init_rns_and_lxmf(
     rnode_port,
     configdir_factory,
     identity_storage_path,
+    display_name=None,
     atexit_register=None,
     register_delivery_callback=None,
     rnode_exists=True,
@@ -111,6 +112,10 @@ def init_rns_and_lxmf(
         router = LXMF.LXMRouter(identity=identity, storagepath=identity_storage_path)
     except (ValueError, KeyError, IOError, OSError):
         _fatal("Failed to start LXMF router. See log for details.")
+
+    # Register delivery identity (required for LXMF to receive incoming messages)
+    if display_name:
+        router.register_delivery_identity(identity, display_name=display_name)
 
     # Register delivery callback if provided
     if register_delivery_callback is not None:
