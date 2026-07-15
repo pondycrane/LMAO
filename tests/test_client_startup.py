@@ -51,11 +51,16 @@ class TestMain:
         # Verify identity was created
         sys.modules["RNS"].Identity.assert_called_once()
 
-        # Verify LXMF router was created and callback registered
+        # Verify LXMF router was created and callbacks registered
         sys.modules["LXMF"].LXMRouter.assert_called_once_with(
             identity=mock_identity, storagepath="/tmp/lmao_human_client_lxmf"
         )
         mock_router = sys.modules["LXMF"].LXMRouter.return_value
+        # Verify delivery identity registered (required for receiving messages)
+        mock_router.register_delivery_identity.assert_called_once_with(
+            mock_identity, display_name="lmao-client"
+        )
+        # Verify delivery callback registered
         mock_router.register_delivery_callback.assert_called_once()
         # Verify the callback is a bound method of Client
         callback = mock_router.register_delivery_callback.call_args[0][0]

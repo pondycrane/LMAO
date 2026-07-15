@@ -301,6 +301,7 @@ class Client:
             rnode_port=rnode_port,
             configdir_factory=config.get_configdir,
             identity_storage_path="/tmp/lmao_human_client_lxmf",
+            display_name="lmao-client",
             register_delivery_callback=lambda r: r.register_delivery_callback(
                 self.handle_lxmf_delivery
             ),

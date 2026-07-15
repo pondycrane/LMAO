@@ -84,6 +84,7 @@ def _init_rns_and_lxmf(rnode_port, identity_storage_path="/tmp/lmao_server_lxmf"
         rnode_port=rnode_port,
         configdir_factory=config.get_configdir,
         identity_storage_path=identity_storage_path,
+        display_name="lmao-server",
     )
 
 

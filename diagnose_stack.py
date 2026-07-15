@@ -2,14 +2,28 @@
 """
 Diagnose each layer of the LMAO communication stack.
 Tests: RNode hardware → Reticulum → LXMF → Protobuf application
+
+Reticulum is initialized once in Layer 1 and reused in Layer 2,
+avoiding the "already registered destination" error from reinit.
 """
 
 import os
 import sys
 import time
-import tempfile
 import shutil
-import struct
+
+
+def _identity_to_destination(identity):
+    """Wrap an RNS.Identity in an RNS.Destination for LXMF."""
+    from lma_core.rns_di import RNS
+    return RNS.Destination(
+        identity,
+        RNS.Destination.OUT,
+        RNS.Destination.SINGLE,
+        "lxmf",
+        "delivery",
+    )
+
 
 # ── Layer 0: RNode Hardware ──────────────────────────────────────────
 
@@ -44,91 +58,113 @@ for port in serial_ports:
     else:
         print(f"  ⚪ {port} — not found")
 
+
+# ── Shared Reticulum state (used by Layer 1 and Layer 2) ─────────────
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from lma_core.config_utils import RnsConfig
+from lma_core.rns_di import RNS, LXMF
+
+# Reticulum artifacts — cleaned up at the very end
+_rns_configdir = None
+_rns_identity = None
+_lxmf_router = None
+_lxmf_configdir = None
+
+
+def _cleanup():
+    """Final teardown of Reticulum / LXMF state."""
+    if _lxmf_router is not None:
+        try:
+            _lxmf_router.shutdown()
+        except Exception:
+            pass
+    if _lxmf_configdir is not None:
+        shutil.rmtree(_lxmf_configdir, ignore_errors=True)
+    try:
+        RNS.Reticulum.get_instance().teardown()
+    except Exception:
+        pass
+    if _rns_configdir is not None:
+        shutil.rmtree(_rns_configdir, ignore_errors=True)
+    # Reset Reticulum singleton so subsequent runs are clean
+    if hasattr(RNS.Reticulum, '_Reticulum__instance'):
+        RNS.Reticulum._Reticulum__instance = None
+
+
 # ── Layer 1: Reticulum Initialization ────────────────────────────────
 
 print("\n" + "=" * 60)
 print("LAYER 1: Reticulum Network Stack")
 print("=" * 60)
 
-# Use the project's own config builder
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 try:
-    from lma_core.config_utils import RnsConfig
-    from lma_core.rns_di import RNS, LXMF
-
     if RNS is None:
         print("  ❌ RNS module not importable (not installed)")
+        sys.exit(1)
     else:
         print(f"  ✅ RNS module loaded (version: {getattr(RNS, '__version__', '?')})")
 
         # Build config using the project's helper
         cfg = RnsConfig(transport_path="/tmp/lmao_diag_rns")
-        configdir = cfg.get_configdir()
-        print(f"  ✅ Config directory created at {configdir}")
+        _rns_configdir = cfg.get_configdir()
+        print(f"  ✅ Config directory created at {_rns_configdir}")
 
         # Show the config content
-        with open(os.path.join(configdir, "config")) as f:
+        with open(os.path.join(_rns_configdir, "config")) as f:
             config_content = f.read()
         print(f"\n  Config content:\n{config_content}\n")
 
-        # Try to initialize Reticulum
-        try:
-            # We need to set up the config dir first
-            rns_instance = RNS.Reticulum(configdir=configdir)
-            print(f"  ✅ Reticulum initialized successfully")
+        # Initialize Reticulum
+        rns_instance = RNS.Reticulum(configdir=_rns_configdir)
+        print(f"  ✅ Reticulum initialized successfully")
 
-            # Check interfaces
-            rns_inst = RNS.Reticulum.get_instance()
-            # Interfaces are stored in a list; check the attribute
-            ifaces = []
-            for attr_name in ['interfaces', '__interfaces', '_Reticulum__interfaces']:
-                if hasattr(rns_inst, attr_name):
-                    raw = getattr(rns_inst, attr_name)
-                    if isinstance(raw, (list, tuple, dict)):
-                        if isinstance(raw, dict):
-                            ifaces = list(raw.values())
-                        else:
-                            ifaces = list(raw)
-                        break
+        # Check interfaces
+        rns_inst = RNS.Reticulum.get_instance()
+        ifaces = []
+        for attr_name in ['interfaces', '__interfaces', '_Reticulum__interfaces']:
+            if hasattr(rns_inst, attr_name):
+                raw = getattr(rns_inst, attr_name)
+                if isinstance(raw, (list, tuple, dict)):
+                    if isinstance(raw, dict):
+                        ifaces = list(raw.values())
+                    else:
+                        ifaces = list(raw)
+                    break
 
-            if ifaces:
-                print(f"  ✅ Active interfaces ({len(ifaces)}):")
-                for iface in ifaces:
-                    name = getattr(iface, 'name', iface.__class__.__name__)
-                    connected = getattr(iface, 'is_connected', None) or getattr(iface, 'online', False)
-                    status = "✅" if connected else "⚠️"
-                    print(f"     {status} {iface.__class__.__name__}: {name}")
-                    if hasattr(iface, 'port'):
-                        print(f"        Port: {iface.port}")
-                    if hasattr(iface, 'frequency'):
-                        print(f"        Freq: {iface.frequency} Hz")
-                    if hasattr(iface, 'signal_strength'):
-                        ss = getattr(iface, 'signal_strength', None)
-                        print(f"        RSSI: {ss} dBm" if ss is not None else "        RSSI: N/A")
-            else:
-                print("  ⚠️  No interfaces found")
+        if ifaces:
+            print(f"  ✅ Active interfaces ({len(ifaces)}):")
+            for iface in ifaces:
+                name = getattr(iface, 'name', iface.__class__.__name__)
+                connected = getattr(iface, 'is_connected', None) or getattr(iface, 'online', False)
+                status = "✅" if connected else "⚠️"
+                print(f"     {status} {iface.__class__.__name__}: {name}")
+                if hasattr(iface, 'port'):
+                    print(f"        Port: {iface.port}")
+                if hasattr(iface, 'frequency'):
+                    print(f"        Freq: {iface.frequency} Hz")
+                if hasattr(iface, 'signal_strength'):
+                    ss = getattr(iface, 'signal_strength', None)
+                    print(f"        RSSI: {ss} dBm" if ss is not None else "        RSSI: N/A")
+        else:
+            print("  ⚠️  No interfaces found")
 
-            # Check if we have a valid identity
-            identity = RNS.Identity()
-            print(f"  ✅ Identity created: {RNS.hexrep(identity.hash, delimit=False)}")
-
-        except Exception as e:
-            print(f"  ❌ Reticulum init failed: {e}")
-            import traceback
-            traceback.print_exc()
-        finally:
-            # Cleanup - teardown Reticulum for next test
-            try:
-                RNS.Reticulum.get_instance().teardown()
-            except:
-                pass
-            shutil.rmtree(configdir, ignore_errors=True)
-            # Also clear the singleton so next test can reinit
-            if hasattr(RNS.Reticulum, '_Reticulum__instance'):
-                RNS.Reticulum._Reticulum__instance = None
+        # Create identity
+        _rns_identity = RNS.Identity()
+        print(f"  ✅ Identity created: {RNS.hexrep(_rns_identity.hash, delimit=False)}")
 
 except ImportError as e:
     print(f"  ❌ Import error: {e}")
+    _cleanup()
+    sys.exit(1)
+except Exception as e:
+    print(f"  ❌ Reticulum init failed: {e}")
+    import traceback
+    traceback.print_exc()
+    _cleanup()
+    sys.exit(1)
+
 
 # ── Layer 2: LXMF Router ─────────────────────────────────────────────
 
@@ -142,26 +178,16 @@ try:
     else:
         print(f"  ✅ LXMF module loaded (version: {getattr(LXMF, '__version__', '?')})")
 
-        # Initialize Reticulum + LXMF using the shared helper
-        from lma_core.rns_init import init_rns_and_lxmf
-
-        # Temporarily redirect for clean test
-        test_cfg = RnsConfig(transport_path="/tmp/lmao_diag_lxmf")
-        test_configdir = test_cfg.get_configdir()
-
-        # Check RNode availability
-        rnode_port = test_cfg._RNODE_PORT
-        rnode_exists = os.path.exists(rnode_port)
-        print(f"  {'✅' if rnode_exists else '⚠️'}  RNode port {rnode_port}: {'found' if rnode_exists else 'NOT FOUND'}")
-
-        identity, router = init_rns_and_lxmf(
-            rnode_port=rnode_port,
-            configdir_factory=test_cfg.get_configdir,
-            identity_storage_path="/tmp/lmao_diag_identity",
-            rnode_exists=rnode_exists,
+        # Create LXMF router using the already-initialized Reticulum
+        _lxmf_configdir = "/tmp/lmao_diag_lxmf"
+        _lxmf_router = LXMF.LXMRouter(
+            identity=_rns_identity,
+            storagepath=_lxmf_configdir,
         )
+        # Register delivery identity (required for receiving messages)
+        _lxmf_router.register_delivery_identity(_rns_identity, display_name="lmao-diag")
         print(f"  ✅ LXMF router created")
-        print(f"  ✅ Identity: {RNS.hexrep(identity.hash, delimit=False)}")
+        print(f"  ✅ Identity: {RNS.hexrep(_rns_identity.hash, delimit=False)}")
 
         # Test sending a message to self (loopback)
         print(f"\n  → Testing message loopback...")
@@ -176,17 +202,17 @@ try:
             print(f"        From: {source_hash}")
             print(f"        Content: {content}")
 
-        router.register_delivery_callback(test_callback)
+        _lxmf_router.register_delivery_callback(test_callback)
 
-        # Send a test message to self
+        # Send a test message to self — must wrap identity in Destination
         test_msg = LXMF.LXMessage(
-            destination=identity,
-            source=identity,
+            destination=_identity_to_destination(_rns_identity),
+            source=_identity_to_destination(_rns_identity),
             content=b"Hello from diagnostics!",
             title="p:Test",
             desired_method=LXMF.LXMessage.OPPORTUNISTIC,
         )
-        router.handle_outbound(test_msg)
+        _lxmf_router.handle_outbound(test_msg)
         print(f"  ✅ Test message sent to self")
 
         # Give it a moment to be delivered
@@ -197,18 +223,11 @@ try:
         else:
             print(f"  ⚠️  No loopback received (expected for opportunistic delivery without announce)")
 
-        # Cleanup
-        router.shutdown()
-        shutil.rmtree(test_configdir, ignore_errors=True)
-        shutil.rmtree("/tmp/lmao_diag_identity", ignore_errors=True)
-        # Reset singleton
-        if hasattr(RNS.Reticulum, '_Reticulum__instance'):
-            RNS.Reticulum._Reticulum__instance = None
-
 except Exception as e:
     print(f"  ❌ LXMF test failed: {e}")
     import traceback
     traceback.print_exc()
+
 
 # ── Layer 3: Protobuf Application ────────────────────────────────────
 
@@ -220,7 +239,6 @@ try:
     from lma_core import LMAOEnvelope, SensorReport, SensorReading, TextMessage
     from lma_core.message_utils import decode_lmao_message
     from google.protobuf.message import DecodeError
-    import time as time_module
 
     print("  ✅ Protobuf stubs imported successfully")
 
@@ -228,7 +246,7 @@ try:
     envelope = LMAOEnvelope()
     envelope.text.node_id = "deadbeefdeadbeef"
     envelope.text.content = "Hello from diagnostic test!"
-    envelope.text.timestamp = int(time_module.time() * 1000)
+    envelope.text.timestamp = int(time.time() * 1000)
 
     encoded = envelope.SerializeToString()
     print(f"  ✅ TextMessage encoded: {len(encoded)} bytes")
@@ -263,7 +281,16 @@ try:
 
     # Test 5: Cross-validate with the Cardputer encoder
     try:
-        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "cardputer_client"))
+        # The root "proto" module was already loaded when lma_core was imported,
+        # so we must evict it from sys.modules to allow the cardputer_client
+        # proto package to be found instead.
+        for _mod in list(sys.modules):
+            if _mod == "proto" or _mod.startswith("proto."):
+                del sys.modules[_mod]
+        cardputer_path = os.path.join(os.path.dirname(__file__), "cardputer_client")
+        if cardputer_path in sys.path:
+            sys.path.remove(cardputer_path)
+        sys.path.insert(0, cardputer_path)
         from proto.lma_encoder import encode_sensor_report, decode_envelope
 
         # Encode with the MicroPython encoder
@@ -271,13 +298,15 @@ try:
             node_id="cafebabe",
             seq=42,
             battery=3.7,
-            readings=[(1, 23.5), (2, 55.0)],
+            readings=[
+                {"sensor_id": 1, "value": 23.5, "unit": "", "timestamp_ms": 0},
+                {"sensor_id": 2, "value": 55.0, "unit": "", "timestamp_ms": 0},
+            ],
         )
         print(f"  ✅ Cardputer encoder: {len(mp_encoded)} bytes")
         print(f"     Hex: {mp_encoded.hex()}")
 
         # Decode the protobuf version with the MicroPython decoder
-        import binascii
         mp_decoded = decode_envelope(encoded2)
         print(f"  ✅ Cardputer decoder parsed protobuf envelope: {mp_decoded}")
 
@@ -291,7 +320,7 @@ try:
             and env_a.sensor.seq == env_b.sensor.seq
             and abs(env_a.sensor.readings[0].value - env_b.sensor.readings[0].value) < 0.01
         )
-        print(f"  ✅ {'✅' if match else '❌'} Encoder cross-validation: {'MATCH' if match else 'MISMATCH'}")
+        print(f"  {'✅' if match else '❌'} Encoder cross-validation: {'MATCH' if match else 'MISMATCH'}")
 
     except ImportError as e:
         print(f"  ⚠️  Cardputer encoder test skipped: {e}")
@@ -304,6 +333,12 @@ except Exception as e:
     print(f"  ❌ Protobuf test failed: {e}")
     import traceback
     traceback.print_exc()
+
+
+# ── Cleanup ──────────────────────────────────────────────────────────
+
+_cleanup()
+
 
 # ── Summary ──────────────────────────────────────────────────────────
 
