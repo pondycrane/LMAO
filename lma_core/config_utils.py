@@ -62,6 +62,7 @@ def dict_to_ini(sections, interfaces):
             if isinstance(value, bool):
                 value = "yes" if value else "no"
             lines.append(f"{key} = {value}")
+    lines.append("[interfaces]")
     for name, settings in interfaces.items():
         lines.append(f"[[{name}]]")
         for key, value in settings.items():

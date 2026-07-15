@@ -79,7 +79,7 @@ def init_rns_and_lxmf(
             f"Failed to create config directory for Reticulum: {e}",
             extra="Check that /tmp is writable and disk is not full.",
         )
-    except RNS.RNSException as e:
+    except (ValueError, KeyError, IOError, OSError) as e:
         msg = f"Reticulum initialization failed: {e}"
         extra = None
         if rnode_exists:
@@ -102,14 +102,14 @@ def init_rns_and_lxmf(
     # Create identity
     try:
         identity = RNS.Identity()
-    except (RNS.RNSException, OSError):
+    except (ValueError, KeyError, IOError, OSError):
         _fatal("Failed to create identity. See log for details.")
 
     # Create LXMF router
     print("Starting LXMF router...")
     try:
         router = LXMF.LXMRouter(identity=identity, storagepath=identity_storage_path)
-    except (RNS.RNSException, LXMF.LXMFException, OSError):
+    except (ValueError, KeyError, IOError, OSError):
         _fatal("Failed to start LXMF router. See log for details.")
 
     # Register delivery callback if provided
