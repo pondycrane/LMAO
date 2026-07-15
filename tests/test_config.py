@@ -33,7 +33,7 @@ class TestDictToINI:
         """Single section with one key-value pair."""
         sections = {"logging": {"loglevel": 4}}
         result = dict_to_ini(sections, {})
-        assert result == "[logging]\nloglevel = 4\n"
+        assert result == "[logging]\nloglevel = 4\n[interfaces]\n"
 
     def test_multiple_sections(self):
         """Multiple top-level sections."""
@@ -48,7 +48,7 @@ class TestDictToINI:
     def test_simple_interface(self):
         """Single interface with one setting."""
         result = dict_to_ini({}, {"RNode LoRa": {"type": "RNodeInterface"}})
-        assert result == "[[RNode LoRa]]\ntype = RNodeInterface\n"
+        assert result == "[interfaces]\n[[RNode LoRa]]\ntype = RNodeInterface\n"
 
     def test_multiple_interfaces(self):
         """Multiple interfaces."""
@@ -77,9 +77,9 @@ class TestDictToINI:
         assert "debug = no\n" in result
 
     def test_empty_sections_and_interfaces(self):
-        """Empty dicts produce a single trailing newline."""
+        """Empty dicts produce an [interfaces] header only."""
         result = dict_to_ini({}, {})
-        assert result == "\n"
+        assert result == "[interfaces]\n"
 
     def test_mixed_sections_and_interfaces(self):
         """Sections appear before interfaces."""

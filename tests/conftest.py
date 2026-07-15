@@ -84,14 +84,14 @@ def setup_common_mocks(with_grpc=True):
     sys.modules["config"] = MagicMock()
 
     # ── Mock RNS types ─────────────────────────────────────────────
-    sys.modules["RNS"].RNSException = type("RNSException", (Exception,), {})
+    sys.modules["RNS"].RNSException = type("RNSException", (OSError,), {})
     sys.modules["RNS"].hexrep = MagicMock(return_value="testhash1234")
     sys.modules["RNS"].Identity = MagicMock()
     sys.modules["RNS"].Identity.recall = MagicMock()
     sys.modules["RNS"].Reticulum = MagicMock()
 
     # ── Mock LXMF types ────────────────────────────────────────────
-    sys.modules["LXMF"].LXMFException = type("LXMFException", (Exception,), {})
+    sys.modules["LXMF"].LXMFException = type("LXMFException", (OSError,), {})
     sys.modules["LXMF"].LXMessage = MagicMock()
     sys.modules["LXMF"].LXMessage.OPPORTUNISTIC = 1
     sys.modules["LXMF"].LXMRouter = MagicMock()
