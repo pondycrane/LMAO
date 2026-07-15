@@ -164,7 +164,7 @@ class sha512:
 
         self._h = [
             (x + y) & 0xFFFFFFFFFFFFFFFF
-            for x, y in zip(self._h, [a, b, c, d, e, f, g, h], strict=False)
+            for x, y in zip(self._h, [a, b, c, d, e, f, g, h])
         ]
 
     def update(self, m):
