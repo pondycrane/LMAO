@@ -158,7 +158,7 @@ def make_sensor_message(identity_hex, seq, battery=3.7, strict=False):
         temp = 25.0
 
     else:
-        temp = (esp32.raw_temperature() - 32) * 5.0 / 9.0  # Fahrenheit to Celsius
+        temp = esp32.mcu_temperature()  # Celsius (ESP32-S3)
 
     readings = [
         {
