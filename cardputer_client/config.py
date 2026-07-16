@@ -15,8 +15,9 @@ interface config below.
 from lora_boards import LORA_BOARDS
 
 # ---- Node settings ----
-WIFI_SSID = "YOUR_WIFI_SSID"
-WIFI_PASS = "YOUR_WIFI_PASSWORD"
+# WiFi disabled — LoRa-only mode
+WIFI_SSID = None
+WIFI_PASS = None
 NODE_NAME = "LMAO_Cardputer"
 
 # DEBUG levels: 0 = silent, 1 = messages & announces, 2 = full debug
@@ -29,7 +30,7 @@ DEBUG = 2
 #
 # Format: hex string, e.g. "a1b2c3d4e5f6..." (32 hex chars).
 # main.py converts this to bytes at runtime for the urns LXMF router.
-DEST_HASH = None
+DEST_HASH = "deec8d5e99b2d23a374c64633adc2e27"
 
 # Send interval in seconds — how often the Cardputer transmits sensor data.
 # Default 60s = 1 reading per minute. Minimum 10s to avoid LoRa congestion.
@@ -61,17 +62,16 @@ CONFIG = {
         "tolerance": 120,
     },
     "interfaces": [
-        # ---- WiFi UDP (for setup / debugging) ----
-        # Comment out if using LoRa-only mode.
-        {
-            "type": "UDPInterface",
-            "name": "WiFi UDP",
-            "enabled": True,
-            "listen_ip": "0.0.0.0",
-            "listen_port": 4242,
-            "forward_ip": "255.255.255.255",
-            "forward_port": 4242,
-        },
+        # ---- WiFi UDP (disabled — LoRa-only mode) ----
+        # {
+        #     "type": "UDPInterface",
+        #     "name": "WiFi UDP",
+        #     "enabled": False,
+        #     "listen_ip": "0.0.0.0",
+        #     "listen_port": 4242,
+        #     "forward_ip": "255.255.255.255",
+        #     "forward_port": 4242,
+        # },
         # ---- Cardputer onboard SX1262 LoRa radio ----
         # Uses the micropython-lib lora-sx126x driver with the following fixes:
         #   1. JTAG pins (GPIO39=MTCK, GPIO40=MTDO) reclaimed before SPI init
