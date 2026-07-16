@@ -18,8 +18,10 @@ LORA_BOARDS = {
     #   BUSY: GPIO 6
     #   DIO1: GPIO 4  (IRQ)
     #   DIO2_RF_SW: True  (antenna switch on DIO2)
-    #   DIO3_TCXO: 1800 mV (TCXO voltage, 1.8V)
-    #   TCXO startup: 5000 us (some modules need longer than 1000us default)
+    #   DIO3_TCXO: disabled — TCXO init causes Internal radio Status error (7, 3) OpError 0xffff
+    #   on this module. The Cap LoRa-1262 may have a TCXO but the driver's TCXO config
+    #   sequence puts the chip into an unrecoverable state. Running without TCXO config
+    #   works reliably.
     "cardputer_adv": {
         "spi_bus": 2,  # HSPI (SPI3_HOST) — separate from display
         "sck_pin": 40,
@@ -30,8 +32,9 @@ LORA_BOARDS = {
         "dio1_pin": 4,
         "reset_pin": 3,
         "dio2_rf_sw": True,
-        "dio3_tcxo_millivolts": 1800,
-        "dio3_tcxo_start_time_us": 5000,
+        # TCXO disabled — see comment above
+        "dio3_tcxo_millivolts": None,
+        "dio3_tcxo_start_time_us": None,
         # No battery block — the Cardputer ADV doesn't have a battery ADC.
     },
 }
