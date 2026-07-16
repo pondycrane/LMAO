@@ -122,6 +122,18 @@ class LoRaInterface(Interface):
             except Exception:
                 pass  # not a JTAG pin, ignore
 
+        # Explicit hardware reset of the SX1262 radio BEFORE creating the driver.
+        # After an ESP32 soft reset (e.g. Ctrl+D), the GPIO pins (including RST)
+        # retain their previous state — the SX1262 never gets a reset pulse and
+        # may be in an unresponsive state. A hard low→high transition on the
+        # RST pin ensures the radio starts from a known power-on state.
+        _rst = Pin(self._reset_pin, Pin.OUT, value=1)
+        time.sleep(0.01)
+        _rst.value(0)
+        time.sleep(0.05)
+        _rst.value(1)
+        time.sleep(0.02)
+
         if self._external_spi:
             spi = self._external_spi
         else:
@@ -182,8 +194,7 @@ class LoRaInterface(Interface):
         # The lora-sx126x driver defaults to LDO which is insufficient
         # for TX on many boards (e.g. T-Deck SX1262).
         if self._use_dcdc:
-            import time
-
+            # time is already imported at module level
             self._modem._cmd("BB", 0x96, 0x01)
             time.sleep_ms(5)
             self._modem.calibrate()
