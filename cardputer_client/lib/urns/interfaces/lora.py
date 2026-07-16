@@ -56,6 +56,11 @@ class LoRaInterface(Interface):
         self._mosi_pin = config.get("mosi_pin", 9)
         self._miso_pin = config.get("miso_pin", 8)
 
+        # SoftSPI fallback flag — some ESP32-S3 boards have trouble with
+        # hardware SPI bus 2 (HSPI/SPI3_HOST). Set to True to use bit-banged
+        # SoftSPI instead of the hardware SPI peripheral.
+        self._use_soft_spi = config.get("use_soft_spi", False)
+
         # SX1262 control pins
         self._cs_pin = config.get("cs_pin", 41)
         self._busy_pin = config.get("busy_pin", 40)
@@ -109,7 +114,14 @@ class LoRaInterface(Interface):
 
     def _init_modem(self):
         from lora import SX1262
-        from machine import SPI, Pin
+        from machine import Pin
+
+        if self._use_soft_spi:
+            from machine import SoftSPI
+            _spi_cls = SoftSPI
+        else:
+            from machine import SPI
+            _spi_cls = SPI
 
         # ESP32-S3 JTAG workaround: GPIO39 (MTCK) and GPIO40 (MTDO) are used
         # by the internal USB JTAG controller by default. Creating Pin objects
@@ -136,8 +148,15 @@ class LoRaInterface(Interface):
 
         if self._external_spi:
             spi = self._external_spi
+        elif self._use_soft_spi:
+            spi = _spi_cls(
+                baudrate=self._spi_baudrate,
+                sck=Pin(self._sck_pin),
+                mosi=Pin(self._mosi_pin),
+                miso=Pin(self._miso_pin),
+            )
         else:
-            spi = SPI(
+            spi = _spi_cls(
                 self._spi_bus,
                 baudrate=self._spi_baudrate,
                 sck=Pin(self._sck_pin),
