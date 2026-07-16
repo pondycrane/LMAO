@@ -23,7 +23,8 @@ LORA_BOARDS = {
     #   sequence puts the chip into an unrecoverable state. Running without TCXO config
     #   works reliably.
     "cardputer_adv": {
-        "spi_bus": 2,  # HSPI (SPI3_HOST) — separate from display
+        "spi_bus": 2,  # HSPI (SPI3_HOST) — separate from display; SoftSPI is used instead for reliability
+        "use_soft_spi": True,  # SoftSPI fallback — HW bus 2 unreliable on some ESP32-S3 builds
         "sck_pin": 40,
         "mosi_pin": 14,
         "miso_pin": 39,
@@ -32,9 +33,11 @@ LORA_BOARDS = {
         "dio1_pin": 4,
         "reset_pin": 3,
         "dio2_rf_sw": True,
-        # TCXO disabled — see comment above
-        "dio3_tcxo_millivolts": None,
-        "dio3_tcxo_start_time_us": None,
+        # TCXO enabled — Cap LoRa-1262 has a TCXO that needs 1.8V.
+        # On SoftSPI (use_soft_spi=True) this works reliably; hardware
+        # SPI bus 2 was unreliable with TCXO config.
+        "dio3_tcxo_millivolts": 1800,
+        "dio3_tcxo_start_time_us": 5000,
         # No battery block — the Cardputer ADV doesn't have a battery ADC.
     },
 }
