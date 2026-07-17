@@ -30,7 +30,7 @@ DEBUG = 2
 #
 # Format: hex string, e.g. "a1b2c3d4e5f6..." (32 hex chars).
 # main.py converts this to bytes at runtime for the urns LXMF router.
-DEST_HASH = "deec8d5e99b2d23a374c64633adc2e27"
+DEST_HASH = "672e1b5e923e2bc3b977a1777e58dff9"
 
 # Send interval in seconds — how often the Cardputer transmits sensor data.
 # Default 60s = 1 reading per minute. Minimum 10s to avoid LoRa congestion.
