@@ -200,26 +200,33 @@ def _flash_cardputer_client(port: str, client_root: str, result: DeviceResult) -
 def _install_rnode_firmware(port: str, result: DeviceResult) -> None:
     """Check if a Heltec at *port* is running RNode firmware.
 
-    Uses the RNode hardware probe (0x00 byte request). Does NOT flash
+    Uses the RNode DETECT protocol (0x08 + 0x73 signature). Does NOT flash
     programmatically — RNode firmware must be installed via the web
     flasher tool (see rnode_firmware/README.md).
     """
+    import serial as _serial
+
     print(f"\n--- RNode: checking firmware on {port} ---")
 
     try:
-        import serial as _serial
-
-        # Probe the device with the RNode detection handshake.
+        # Probe with proper RNode DETECT command
         ser = _serial.Serial(port, 115200, timeout=2)
-        time.sleep(0.3)
-        ser.write(b"\x00")
         time.sleep(0.5)
-        data = ser.read(200)
+        ser.reset_input_buffer()
+        ser.write(bytes([0xc0, 0x08, 0x73, 0xc0]))
+        time.sleep(0.5)
+        data = ser.read(100)
         ser.close()
 
-        if len(data) > 0 and data[0:1] == b"\xc0":
+        if len(data) >= 4 and data[0:1] == b"\xc0" and data[1] == 0x08 and data[2] == 0x46:
             result.ok(f"RNode firmware detected on {port}")
-            print(f"  OK: RNode firmware detected ({len(data)} bytes response)")
+            print(f"  OK: RNode firmware detected (DETECT signature confirmed)")
+        elif len(data) > 0:
+            result.fail(
+                f"Device on {port} responded but not as RNode. "
+                f"Response: {data.hex()}"
+            )
+            print(f"  FAIL: Unexpected response — {data.hex()}")
         else:
             result.fail(
                 f"Device on {port} is not responding as RNode. "
@@ -228,13 +235,10 @@ def _install_rnode_firmware(port: str, result: DeviceResult) -> None:
             )
             print(f"  FAIL: Not an RNode — manual flash required")
     except Exception as exc:
-        result.fail(f"RNode probe failed: {exc}")
-        print(f"  FAIL: {exc}")
-    except Exception as exc:
         import traceback
 
         traceback.print_exc()
-        result.fail(f"Unexpected error during RNode flashing: {exc}")
+        result.fail(f"RNode probe failed: {exc}")
         print(f"  FAIL: {exc}")
 
 
