@@ -40,13 +40,15 @@ RUN pip install --no-cache-dir \
     lxmf
 
 # Generate protobuf/gRPC stubs
-RUN python -m grpc_tools.protoc -I proto --python_out=proto --grpc_python_out=proto proto/lma.proto
+RUN python -m grpc_tools.protoc -I proto --python_out=proto --grpc_python_out=proto proto/lma_messages.proto proto/lma_grpc.proto
 
 # Fix generated import path for package usage
-RUN sed -i 's/^import lma_pb2/from proto import lma_pb2/' proto/lma_pb2_grpc.py
+RUN sed -i 's/^import lma_grpc_pb2/from proto import lma_grpc_pb2/' proto/lma_grpc_pb2_grpc.py
 
 # Set PYTHONPATH so proto/ and lma_core/ are importable
+# PYTHONUNBUFFERED ensures Reticulum print() output is visible in docker logs
 ENV PYTHONPATH="/app:${PYTHONPATH}"
+ENV PYTHONUNBUFFERED=1
 
 EXPOSE 50051
 

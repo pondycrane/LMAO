@@ -35,6 +35,14 @@ E2E_SENSOR_TYPE=DHT20 bazel test //tests:test_cardputer_lora_e2e --test_output=a
 When `E2E_SENSOR_TYPE` is not set (default), the test runs in single-reading
 mode (die temperature only), which is the normal configuration.
 
+## RNode
+
+The RNode (Heltec ESP32 LoRa on `/dev/ttyUSB0`) is the server's LoRa radio bridge. It was flashed once via the web tool at https://flasher.rnode.network/ and works reliably.
+
+**Do NOT flash the RNode via esptool or any other method.** The web flasher is the only supported flashing method. Using esptool (especially interrupting a flash) bricks the device and requires physical USB reconnection + reflashing via the web tool to recover.
+
+The RNode firmware responds to the standard RNode DETECT protocol (`0xc0 0x08 0x73 0xc0` → `0xc0 0x08 0x46 0xc0`). It is configured at 868 MHz, BW 125 KHz, SF 7, CR 5, TX 17 dBm.
+
 ## Archon GitHub Webhook Relay
 
 A local polling relay lets Archon respond to `@archon` mentions on GitHub
