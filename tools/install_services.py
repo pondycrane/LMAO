@@ -97,46 +97,40 @@ def _probe_for_cardputer(port: str) -> bool:
 
 
 def _probe_for_rnode(port: str) -> bool:
-    """Check whether *port* is running RNode firmware.
+    """Check whether *port* is running RNode firmware using the DETECT protocol.
 
-    Uses ``rnodeconf --info`` for definitive detection.  When ``rns``
-    is not available, falls back to VID/PID heuristics via the caller.
-
-    The ``rnodeconf --info`` command queries the RNode firmware version,
-    frequency, and other parameters.  Non-RNode devices (Cardputer,
-    plain serial adapters) will either time out or return non-zero.
+    Sends the standard RNode DETECT command (0x08 + 0x73 signature) and
+    checks for a valid DETECT_RESP (0x46) in the response.  This is much
+    faster and more reliable than ``rnodeconf --info``.
     """
-    system_python = _find_system_python()
-    if system_python is None:
-        print(f"  Probe[{port}]: no system Python with 'rns' found")
-        return False
+    import serial as _serial
 
     try:
-        # rnodeconf takes port as a positional argument, not --port
-        result = subprocess.run(
-            [system_python, "-m", "RNS.Utilities.rnodeconf", port, "--info"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-    except subprocess.TimeoutExpired:
-        print(f"  Probe[{port}]: rnodeconf --info timed out after 10s")
-        return False
-    except (subprocess.SubprocessError, OSError) as exc:
-        print(f"  Probe[{port}]: rnodeconf failed: {exc}")
+        ser = _serial.Serial(port, 115200, timeout=2)
+        time.sleep(0.5)
+        ser.reset_input_buffer()
+        # Send RNode DETECT command: 0x08 + 0x73 signature
+        ser.write(bytes([0xc0, 0x08, 0x73, 0xc0]))
+        time.sleep(0.5)
+        data = ser.read(100)
+        ser.close()
+
+        if not data:
+            print(f"  Probe[{port}]: no response to DETECT")
+            return False
+
+        # Valid DETECT response: 0xc0 0x08 0x46 0xc0
+        if data[0:1] == b"\xc0" and len(data) >= 4:
+            if data[1] == 0x08 and data[2] == 0x46:
+                print(f"  Probe[{port}]: RNode DETECT signature confirmed")
+                return True
+
+        print(f"  Probe[{port}]: unexpected DETECT response: {data.hex()}")
         return False
 
-    if result.returncode != 0:
-        stderr_tail = result.stderr.strip().split("\n")[-3:]
-        stderr_msg = "; ".join(stderr_tail) if stderr_tail else "unknown error"
-        print(f"  Probe[{port}]: rnodeconf exited {result.returncode}: {stderr_msg}")
+    except Exception as exc:
+        print(f"  Probe[{port}]: serial probe failed: {exc}")
         return False
-
-    combined = (result.stdout + result.stderr).lower()
-    is_rnode = "rnode firmware" in combined or "lora:" in combined
-    if not is_rnode:
-        print(f"  Probe[{port}]: rnodeconf output did not contain RNode signatures")
-    return is_rnode
 
 
 def detect_serial_devices() -> tuple[str | None, str | None]:
@@ -150,8 +144,8 @@ def detect_serial_devices() -> tuple[str | None, str | None]:
          - Espressif (0x303A)    → RNode (Heltec ESP32-LoRa)
          - CP210x (0x10C4)       → Cardputer (M5Stack)
          - CH340 (0x1A86)        → Cardputer (alternative USB-UART)
-      2. ``rnodeconf --info`` probe — definitive check for unknown VID/PID.
-         RNode firmware responds with frequency, bandwidth, and version.
+      2. Serial DETECT probe — sends the RNode DETECT command (0x08 + 0x73)
+         and checks for a valid DETECT_RESP (0x46) signature.
       3. Path-based fallback — first existing port wins.
 
     Note: We do NOT use MicroPython raw REPL probing to distinguish the two
@@ -1092,6 +1086,8 @@ def run_pi_server(result: DeviceResult, repo_root: str | None = None) -> None:
         "lmao-server",
         "--network",
         "host",
+        "-e",
+        "PYTHONUNBUFFERED=1",
         "-e",
         f"NATS_SERVER={nats_server}",
         "-e",
