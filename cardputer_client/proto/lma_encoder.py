@@ -3,7 +3,7 @@ Minimal protobuf encoder/decoder for LMAO messages on MicroPython.
 
 µReticulum / Cardputer cannot use the full protobuf library (~2 MB).
 This hand-coded encoder handles all LMAOEnvelope payload types defined
-in proto/lma.proto.
+in proto/lma_messages.proto.
 
 Wire format:
   LMAOEnvelope:  oneof payload → field number + wire type 2 (length-delimited)
