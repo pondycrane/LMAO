@@ -17,31 +17,27 @@ server and an M5Stack Cardputer ADV client using the
 │  │  Human Client  │  │  ┌────────────┐  │         │  ADV                 │   │
 │  │  (Python CLI)  │  │  │ LMAO Server│  │         │  ┌────────────────┐  │   │
 │  │  WiFi/AutoIFace│──┤  │RNS+LXMF+   │──┤◄──LoRa─┼──┤ µReticulum     │  │   │
-│  │                │  │  │ gRPC API   │  │         │  │ client         │  │   │
-│  └────────────────┘  │  └─────┬──────┘  │         │  └──────┬─────────┘  │   │
-│                      │        │ USB      │         │         │ SPI         │   │
-│  ┌──────────────┐    │  ┌─────┴──────┐  │         │  ┌──────┴─────────┐  │   │
-│  │ Docker       │    │  │ ESP32 RNode│  │         │  │ SX1262 LoRa    │  │   │
-│  │ Container    │────┤  │ (LoRa br.) │──┼────LoRa─┼──│ radio + ant    │  │   │
-│  │ (gRPC client)│    │  └────────────┘  │         │  └────────────────┘  │   │
-│  └──────────────┘    └──────────────────┘         └──────────────────────┘   │
-│                                │ gRPC :50051                                 │
-│                    ┌───────────┴────────────┐                                │
-│                    │  K8s Cluster           │                                │
-│                    │  ┌───────────────────┐ │                                │
-│                    │  │ NATS JetStream    │ │  (persistent queue)            │
-│                    │  │ publish/subscribe │ │                                │
-│                    │  └────────┬──────────┘ │                                │
-│                    │           │             │                                │
-│                    │  ┌────────┴──────────┐ │                                │
-│                    │  │ IoT Ingest Pod    │ │                                │
-│                    │  │ (gRPC+NATS)       │ │                                │
-│                    │  └───────────────────┘ │                                │
-│                    │  ┌───────────────────┐ │                                │
-│                    │  │ Command Dispatch  │ │                                │
-│                    │  │ (gRPC+NATS)       │ │                                │
-│                    │  └───────────────────┘ │                                │
-│                    └────────────────────────┘                                │
+│  │                │  │  │ gRPC +     │  │         │  │ client         │  │   │
+│  └────────────────┘  │  │ NATS pub   │  │         │  └──────┬─────────┘  │   │
+│                      │  └─────┬──────┘  │         │         │ SPI         │   │
+│  ┌──────────────┐    │        │ USB      │         │  ┌──────┴─────────┐  │   │
+│  │ K8s Pod      │    │  ┌─────┴──────┐  │         │  │ SX1262 LoRa    │  │   │
+│  │ (gRPC client)│──┐ │  │ ESP32 RNode│  │         │  │ radio + ant    │  │   │
+│  └──────────────┘  │ │  │ (LoRa br.) │──┼────LoRa─┼──┘                │  │   │
+│                    │ │  └────────────┘  │         │  └────────────────┘  │   │
+│  ┌─────────────────┴─┴──────────────┐   │         └──────────────────────┘   │
+│  │  K8s Cluster                     │   │                                     │
+│  │                                  │   │ (Pi publishes sensor data           │
+│  │  ┌──────────────────────────┐    │   │  to NATS NodePort)                  │
+│  │  │  NATS JetStream ◄──NodePort───┘                                       │
+│  │  │  lmao.messages.env       │                                            │
+│  │  └────────┬───────────────┬──┘                                            │
+│  │           │               │                                               │
+│  │  ┌────────┴──────────┐  ┌─┴─────────────┐                                │
+│  │  │ IoT Ingest Pod    │  │ Command Dispatch│                               │
+│  │  │ (NATS subscribe)  │  │ (gRPC+NATS)    │                               │
+│  │  └───────────────────┘  └───────────────┘                                │
+│  └──────────────────────────────────────────────────────────────────┘       │
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -338,8 +334,9 @@ Manual verification steps:
 The server exposes a gRPC API on port `50051` for K8s pods and other
 automated clients to interact with the LoRa mesh programmatically.
 
-> **Note:** K8s pods can also use NATS JetStream for durable,
-> at-least-once message queuing without gRPC. See [Section 10](#10-nats-queue-k8s-persistent-pubsub).
+> **Note:** The LMAO Server also **publishes incoming sensor data to
+> an in-cluster NATS JetStream** for durable, at-least-once delivery
+> to K8s consumers (e.g. the IoT Ingest pod).  See [Section 10](#10-nats-jetstream--in-cluster-durable-queueing).
 
 **Proto definition**: [`proto/lma_messages.proto`](proto/lma_messages.proto)
 
@@ -393,10 +390,11 @@ docker run --network host --device /dev/ttyUSB0:/dev/ttyUSB0 lmao-server
 - `--network host` is **required** — Reticulum uses UDP multicast for
   AutoInterface discovery and must run on the host network stack.
 - Pass your RNode device with `--device` (adjust path as needed).
-- Set `NATS_SERVER` to enable JetStream publishing:
+- Set `NATS_SERVER` to enable JetStream publishing to the **in-cluster NATS**
+  (deployed via `kubectl apply -f k8s/nats-server.yaml`):
   ```bash
   docker run --network host --device /dev/ttyACM0:/dev/ttyACM0 \
-    -e NATS_SERVER=nats://my-nats-server:4222 \
+    -e NATS_SERVER=nats://192.168.0.43:30146 \
     -e LMAO_RNODE_PORT=/dev/ttyACM0 lmao-server
   ```
 - The gRPC API on port 50051 is accessible on the host.
@@ -426,7 +424,7 @@ Type=simple
 ExecStartPre=-/usr/bin/docker stop lmao-server
 ExecStartPre=-/usr/bin/docker rm lmao-server
 ExecStart=/usr/bin/docker run --rm --name lmao-server --network host \
-  -e NATS_SERVER=nats://localhost:4222 \
+  -e NATS_SERVER=nats://192.168.0.43:30146 \
   -e LMAO_RNODE_PORT=/dev/ttyUSB0 \
   --device /dev/ttyUSB0:/dev/ttyUSB0 \
   lmao-server:latest
@@ -478,7 +476,7 @@ export LMAO_SERVER=lmao-server.default.svc.cluster.local:50051
 python k8s-app/iot_ingest.py --send --get-identity
 ```
 
-> For in-cluster durable message queuing, see [Section 10](#10-nats-queue-k8s-persistent-pubsub)
+> For in-cluster durable message queuing, see [Section 10](#10-nats-jetstream--in-cluster-durable-queueing)
 > for NATS JetStream deployment and usage.
 
 #### Environment Variables
@@ -488,22 +486,44 @@ when running in Docker or systemd):
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `NATS_SERVER` | `nats://localhost:4222` | NATS server URL for JetStream publishing |
+| `NATS_SERVER` | `nats://192.168.0.43:30146` | In-cluster NATS JetStream NodePort URL (K8s worker `tp2`) |
 | `LMAO_RNODE_PORT` | auto-detect | Serial port for RNode LoRa interface |
 | `LMAO_MQTT_HOST` | `localhost` | MQTT broker hostname (IoT ingest) |
 | `LMAO_MQTT_PORT` | `1883` | MQTT broker port |
 | `LMAO_INGEST_DUCKDB_PATH` | `/data/sensors.db` | DuckDB file path (IoT ingest) |
 
-### 10. NATS Queue (K8s Persistent PubSub)
+### 10. NATS JetStream — In-Cluster Durable Queueing
 
-A lightweight NATS server with JetStream persistence can be deployed inside
-the cluster to provide **durable message queuing** between pods. Messages
-published to NATS subjects are persisted on disk and delivered at-least-once
-to consumers — even when consumers restart or scale down.
+NATS JetStream runs **inside the K8s cluster** and provides durable,
+at-least-once message delivery for the IoT sensor pipeline.
 
-This augments (does not replace) the gRPC real-time stream: gRPC remains the
-path for external LMAO server communication, while NATS provides in-cluster
-queueing for pod-to-pod messaging.
+**Architecture overview:**
+
+| Component | Where it runs | Role |
+|-----------|---------------|------|
+| **NATS Server** | K8s pod (`deployment/nats-server`) | Message broker with disk persistence (1Gi PVC) |
+| **IoT Ingest** | K8s pod (`deployment/iot-ingest-consumer`) | Subscribes to sensor data, persists to DuckDB at `/data/sensors.db` |
+| **LMAO Server** | Physical Raspberry Pi (outside cluster) | Publishes incoming sensor data to NATS via NodePort |
+
+**Data flow:**
+
+```
+Cardputer ──LoRa──→ RNode ──USB──→ LMAO Server (Pi 192.168.0.36)
+                                        │
+                                   publishes to
+                                        ▼
+                              ┌─────────────────────┐
+                              │  K8s Cluster        │
+                              │  NATS JetStream     │
+                              │  lmao.messages.env  │
+                              └──────────┬──────────┘
+                                         │ subscribes
+                                         ▼
+                              ┌─────────────────────┐
+                              │  IoT Ingest Pod     │
+                              │  (DuckDB store)     │
+                              └─────────────────────┘
+```
 
 #### Deploy NATS
 
@@ -516,13 +536,39 @@ kubectl get pods -l app=nats-server
 kubectl logs deployment/nats-server
 ```
 
-Pods connect to NATS at `nats://nats-server.default.svc.cluster.local:4222`.
+#### Connect from the Pi (outside the cluster)
 
-> **Note for bare-metal / Raspi K8s**: If the PersistentVolumeClaim stays
-> Pending, install a local-path provisioner:
-> ```bash
-> kubectl apply -f https://raw.githubusercontent.com/rancher/local-path-provisioner/master/deploy/local-path-storage.yaml
-> ```
+The LMAO Server runs on a separate physical Raspberry Pi and connects to the
+in-cluster NATS via a **NodePort** exposed on the K8s worker node:
+
+```bash
+# Set on the Pi — replaces the old default nats://localhost:4222
+export NATS_SERVER=nats://192.168.0.43:30146
+```
+
+The NodePort (`30146`) is defined in `k8s/nats-server.yaml`.  Adjust the IP
+to your worker node's LAN address.  The same value should be used in the
+Docker `-e NATS_SERVER=...` flag and the systemd unit file.
+
+#### Connect from inside the cluster
+
+Pods inside the cluster connect via the ClusterIP DNS name:
+
+```
+nats://nats-server.default.svc.cluster.local:4222
+```
+
+#### Deploy IoT Ingest Consumer
+
+```bash
+kubectl apply -f k8s/iot-ingest.yaml
+```
+
+The IoT Ingest pod subscribes to `lmao.messages.>` on the in-cluster NATS
+and stores validated SensorReport payloads into DuckDB at `/data/sensors.db`
+(backed by a 1Gi PVC).
+
+#### Using `NatsQueue` from Python
 
 #### Using `NatsQueue` from Python
 
