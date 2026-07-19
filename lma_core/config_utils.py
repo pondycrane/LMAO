@@ -104,6 +104,7 @@ class RnsConfig:
                 "spreadingfactor": 7,
                 "codingrate": 5,
                 "txpower": 17,
+                "enabled": True,
             },
             "WiFi": {
                 "type": "AutoInterface",
