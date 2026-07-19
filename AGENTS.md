@@ -43,6 +43,23 @@ The RNode (Heltec ESP32 LoRa on `/dev/ttyUSB0`) is the server's LoRa radio bridg
 
 The RNode firmware responds to the standard RNode DETECT protocol (`0xc0 0x08 0x73 0xc0` → `0xc0 0x08 0x46 0xc0`). It is configured at 868 MHz, BW 125 KHz, SF 7, CR 5, TX 17 dBm.
 
+## Cardputer
+
+**NEVER use esptool on the Cardputer.** It can only be flashed via:
+  1. The Bazel `//cardputer_client:flash` target (uploads MicroPython files via raw REPL)
+  2. The serial flash tool (for initial MicroPython firmware install, done via esptool in download mode with G0+RESET)
+
+**Do NOT run `esptool ... chip_id` or any other esptool probing/inspection command on the Cardputer.** Doing so disconnects the USB-Serial-JTAG interface and requires a physical USB unplug/replug to recover.
+
+The Cardputer runs MicroPython (M5Stack Cardputer ADV firmware), not native firmware. All communication is via the MicroPython raw REPL over `/dev/ttyACM0`.
+
+**Vendored changes to flash.py:**
+- `DEVICE_PREFIX = "/flash"` — M5Stack firmware mounts flash at `/flash/`, not root
+- `boot.py` does `M5.begin()` then runs the LMAO client
+- `ucontextlib.py` must be in `lib/` (MicroPython needs `ucontextlib`, not `contextlib`)
+
+**First-time setup:** Erase + flash MicroPython firmware, then `bazel run //cardputer_client:flash` to upload client files.
+
 ## Archon GitHub Webhook Relay
 
 A local polling relay lets Archon respond to `@archon` mentions on GitHub

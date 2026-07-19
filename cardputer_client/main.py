@@ -14,15 +14,21 @@ import time
 
 gc.collect()
 
-# Try to import the urns library from /lib (where the flash tool places it)
-try:
-    sys.path.insert(0, "/lib")
-    from urns import Identity, Reticulum  # noqa: F401
-    from urns.log import LOG_INFO, LOG_NOTICE  # noqa: F401
-    from urns.lxmf import LXMessage, LXMRouter  # noqa: F401
+# Try to import the urns library from /flash/lib (M5Stack firmware) or /lib
+_LIB_PATHS = ["/flash/lib", "/lib"]
+for _lp in _LIB_PATHS:
+    if _lp not in sys.path:
+        sys.path.insert(0, _lp)
+    try:
+        from urns import Identity, Reticulum  # noqa: F401
+        from urns.log import LOG_INFO, LOG_NOTICE  # noqa: F401
+        from urns.lxmf import LXMessage, LXMRouter  # noqa: F401
 
-    HAS_URNS = True
-except ImportError:
+        HAS_URNS = True
+        break
+    except ImportError:
+        continue
+else:
     HAS_URNS = False
 
 # Display support (if available)

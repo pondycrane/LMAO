@@ -328,9 +328,7 @@ def upload_file(ser, local_path, remote_path, chunk_size=1024):
         return False
 
     file_size = len(content)
-    remote_path = remote_path.replace("\\", "/")
-    if not remote_path.startswith("/"):
-        remote_path = "/" + remote_path
+    remote_path = _prefix_path(remote_path)
     remote_path_esc = _sanitize_path_for_script(remote_path)
 
     # Step 1 — create parent directories
@@ -434,6 +432,20 @@ def _mip_install(ser, package):
 
 
 # ---- Main (entry-point for ``bazel run``) ----
+
+
+DEVICE_PREFIX = "/flash"  # M5Stack firmware mounts flash at /flash
+
+
+def _prefix_path(remote_path: str) -> str:
+    """Prefix a remote path with the device's flash mount point."""
+    remote_path = remote_path.replace("\\", "/")
+    if not remote_path.startswith("/"):
+        remote_path = "/" + remote_path
+    # Strip leading slash and prefix with DEVICE_PREFIX
+    while remote_path.startswith("/"):
+        remote_path = remote_path[1:]
+    return DEVICE_PREFIX + "/" + remote_path
 
 
 def main():
