@@ -504,6 +504,93 @@ def _apply_iot_ingest_manifest(
     print(f"  OK: IoT Ingest Consumer deployed from registry ({registry_image})")
 
 
+def _check_k8s_cluster() -> tuple[bool, str]:
+    """Check if the K8s API server is reachable via kubectl.
+
+    Returns ``(ok, message)`` where *ok* is True when the cluster is
+    healthy (API server responds, at least one node ready), and False
+    otherwise.  *message* contains diagnostic info or error details.
+    """
+    if shutil.which("kubectl") is None:
+        return False, "kubectl not found on PATH"
+
+    try:
+        # Quick check: can we reach the API server?
+        proc = subprocess.run(
+            ["kubectl", "version", "--output=json"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        # kubectl version exits 0 even when the server is unreachable
+        # (client info is returned successfully). Check stderr for server errors.
+        err_output = (proc.stderr or "").strip().lower()
+        if err_output:
+            if "connection refused" in err_output:
+                return False, (
+                    "K8s API server is reachable but refusing connections — "
+                    "the control-plane node may be starting up or stopped"
+                )
+            if "no route to host" in err_output or "i/o timeout" in err_output:
+                return False, (
+                    "K8s API server is unreachable — "
+                    "the control-plane node (192.168.0.45) may be powered off"
+                )
+            return False, f"kubectl version failed: {(proc.stderr or '')[:200]}"
+
+        if proc.returncode != 0:
+            stderr = (proc.stderr or "").strip() + (proc.stdout or "").strip()
+            # kubectl --output=json was added in 1.28; fallback for older versions
+            if "unknown flag" in stderr.lower():
+                fallback = subprocess.run(
+                    ["kubectl", "version"],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                err = (fallback.stderr or "").strip().lower()
+                if "connection refused" in err:
+                    return False, (
+                        "K8s API server is reachable but refusing connections — "
+                        "the control-plane node may be starting up or stopped"
+                    )
+                if "no route to host" in err or "i/o timeout" in err:
+                    return False, (
+                        "K8s API server is unreachable — "
+                        "the control-plane node (192.168.0.45) may be powered off"
+                    )
+                return False, f"kubectl version failed: {(fallback.stderr or '')[:200]}"
+            return False, f"kubectl version failed: {stderr[:200]}"
+
+        # Check that at least one node is Ready
+        proc = subprocess.run(
+            [
+                "kubectl",
+                "get",
+                "nodes",
+                "-o",
+                "jsonpath={.items[*].status.conditions[?(@.type=='Ready')].status}",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if proc.returncode == 0:
+            statuses = proc.stdout.strip().split()
+            ready_count = sum(1 for s in statuses if s == "True")
+            total = len(statuses)
+            if ready_count == 0:
+                return False, f"K8s cluster reachable but {total} node(s) not Ready"
+            return True, f"K8s cluster healthy ({ready_count}/{total} nodes ready)"
+
+        return True, "K8s API server reachable"
+
+    except subprocess.TimeoutExpired:
+        return False, "kubectl command timed out — cluster may be unreachable"
+    except subprocess.SubprocessError as exc:
+        return False, f"kubectl error: {exc}"
+
+
 def install_iot_ingest_consumer(
     result: DeviceResult,
     repo_root: str | None = None,
@@ -519,6 +606,13 @@ def install_iot_ingest_consumer(
     Docker build step is skipped and the deployment is configured to
     pull from the local registry at
     ``{registry_host}:{registry_port}/lmao-iot-ingest:latest`` instead.
+
+    **K8s cluster check:** Before applying the manifest, the function
+    checks whether the K8s API server is reachable. If the cluster is
+    unreachable (e.g. control-plane node powered off), the Docker image
+    is still built and pushed to the local registry (if available) so
+    it is ready to deploy when the cluster recovers.  Clear recovery
+    steps are printed.
 
     The caller must pass a ``DeviceResult`` instance (imported lazily
     from ``install_all``) as *result*.  On success the result is set to
@@ -550,6 +644,10 @@ def install_iot_ingest_consumer(
         _apply_iot_ingest_manifest(result, repo_root, registry_host, registry_port)
         return
 
+    # ── Check K8s cluster health early ──
+    cluster_ok, cluster_msg = _check_k8s_cluster()
+    print(f"  K8s cluster: {cluster_msg}")
+
     # ── Docker build ───────────────────────────────────────────
     dockerfile = os.path.join(repo_root, "Dockerfile.iot-ingest")
 
@@ -563,6 +661,7 @@ def install_iot_ingest_consumer(
         print(f"  FAIL: Dockerfile not found: {dockerfile}")
         return
 
+    # Always build the Docker image (available for registry push or later use)
     try:
         proc = subprocess.run(
             ["docker", "build", "-f", dockerfile, "-t", "lmao-iot-ingest", "."],
@@ -590,7 +689,60 @@ def install_iot_ingest_consumer(
         print(f"  FAIL: {exc}")
         return
 
+    # ── Push to local registry ─────────────────────────────────
+    registry_image = f"{DEFAULT_REGISTRY_HOST}:{DEFAULT_REGISTRY_PORT}/lmao-iot-ingest:latest"
+    try:
+        print(f"  Tagging and pushing to local registry ({registry_image}) ...")
+        subprocess.run(
+            ["docker", "tag", "lmao-iot-ingest", registry_image],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        push_proc = subprocess.run(
+            ["docker", "push", registry_image],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        if push_proc.returncode == 0:
+            print(f"  OK: Image pushed to {registry_image}")
+        else:
+            stderr_tail = push_proc.stderr.strip().split("\n")[-3:]
+            stderr_msg = "; ".join(stderr_tail) if stderr_tail else "unknown error"
+            print(f"  WARNING: Registry push failed — {stderr_msg}")
+            print("  (Image is available locally; push manually later)")
+    except subprocess.TimeoutExpired:
+        print("  WARNING: Registry push timed out — skipping push")
+    except Exception as exc:
+        print(f"  WARNING: Registry push error — {exc}")
+
     # ── kubectl apply ──────────────────────────────────────────
+    if not cluster_ok:
+        print()
+        print(f"  ╔══ K8s cluster unreachable ═══════════════════════════════╗")
+        print(f"  ║  {cluster_msg:<56s}║")
+        print(f"  ║                                                       ║")
+        print(f"  ║  Docker image is built and pushed to the local        ║")
+        print(f"  ║  registry.  When the cluster is back online, deploy   ║")
+        print(f"  ║  with:                                                ║")
+        print(f"  ║                                                       ║")
+        print(f"  ║    kubectl apply -f k8s/iot-ingest.yaml                ║")
+        print(f"  ║                                                       ║")
+        print(f"  ║  To rebuild and push the image:                       ║")
+        print(f"  ║    docker build -f Dockerfile.iot-ingest               ║")
+        print(f"  ║      -t {registry_image} .                ║")
+        print(f"  ║    docker push {registry_image}                    ║")
+        print(f"  ╚═══════════════════════════════════════════════════════╝")
+        print()
+
+        result.ok(
+            f"Docker image built and pushed to {registry_image}. "
+            "K8s cluster unreachable — run 'kubectl apply -f k8s/iot-ingest.yaml' "
+            "when the cluster is back online."
+        )
+        return
+
     if shutil.which("kubectl") is None:
         result.skip("kubectl not found on PATH — install with: apt-get install kubectl")
         print("  SKIP: kubectl not found on PATH")
@@ -658,6 +810,21 @@ def install_k8s_services(result: DeviceResult, repo_root: str | None = None) -> 
     if shutil.which("kubectl") is None:
         result.skip("kubectl not found on PATH — install with: apt-get install kubectl")
         print("  SKIP: kubectl not found on PATH")
+        return
+
+    # ── Check K8s cluster health ──
+    cluster_ok, cluster_msg = _check_k8s_cluster()
+    print(f"  K8s cluster: {cluster_msg}")
+    if not cluster_ok:
+        print()
+        print(f"  ╔══ K8s cluster unreachable ═══════════════════════════════╗")
+        print(f"  ║  {cluster_msg:<56s}║")
+        print(f"  ║                                                       ║")
+        print(f"  ║  Fix the cluster connectivity then re-run:             ║")
+        print(f"  ║    bazel run //tools:install_all -- --include-services  ║")
+        print(f"  ╚═══════════════════════════════════════════════════════╝")
+        print()
+        result.fail(cluster_msg)
         return
 
     manifests = [
@@ -832,6 +999,12 @@ def _resolve_nats_address() -> str | None:
     """
     if shutil.which("kubectl") is None:
         return None
+
+    # Don't bother if the cluster is unreachable
+    cluster_ok, _cluster_msg = _check_k8s_cluster()
+    if not cluster_ok:
+        return None
+
     try:
         # Print current kubectl context for diagnostics
         ctx_proc = subprocess.run(
