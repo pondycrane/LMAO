@@ -104,7 +104,7 @@ replacement for third-party apps (Sideband, NomadNet).
 ### gRPC API
 
 A parallel API surface (alongside LXMF) for automated K8s pod clients.
-Defined in [`proto/lma.proto`](../proto/lma.proto) and served on port 50051.
+Defined in [`proto/lma_grpc.proto`](../proto/lma_grpc.proto) and served on port 50051.
 
 | RPC | Type | Purpose |
 |-----|------|---------|
@@ -164,7 +164,7 @@ chooses whether to respond. This prevents message loops.
 
 ### Where it lives
 
-The canonical protobuf schema lives at `proto/lma.proto` (was `lmao_server/proto/lma.proto`).
+The canonical protobuf schema lives at `proto/lma_messages.proto` (was `lmao_server/proto/lma.proto`).
 Generated stubs are produced by Bazel at build time and are **not** checked in.
 Python code imports via the `lma_core` wrapper:
 
@@ -253,8 +253,8 @@ proto code generation. See `.bazelversion` and `MODULE.bazel`.
 
 #### Proto Schema
 
-The canonical protobuf schema lives at `proto/lma.proto` (was `lmao_server/proto/lma.proto`).
-Generated stubs (`lma_pb2.py`) are produced by Bazel at build time and are **not** checked in.
+The canonical protobuf schema lives at `proto/lma_messages.proto` (was `lmao_server/proto/lma.proto`).
+Generated stubs (`lma_messages_pb2.py`, `lma_grpc_pb2.py`) are produced by Bazel at build time and are **not** checked in.
 
 #### Common Commands
 
@@ -324,7 +324,7 @@ changed — every change is revertible in a single `git revert`.
 | `k8s-app/iot_ingest.py` | Imports proto stubs from `lma_core` instead of `proto.*` directly |
 | `cardputer_client/proto/lma_encoder.py` | Extracted `_decode_proto_message()` generic helper; 5 decode functions simplified |
 | `cardputer_client/main.py` | Removed `_print_exception` CPython shim |
-| `proto/lma.proto` | Commented out `Tunnel` RPC (TODO v0.2) |
+| `proto/lma_grpc.proto` | Commented out `Tunnel` RPC (TODO v0.2) |
 
 ### Test infrastructure
 

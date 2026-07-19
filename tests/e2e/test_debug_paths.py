@@ -17,8 +17,8 @@ for i, p in enumerate(sys.path):
             print("       (no access)")
 
 print()
-print("Checking _main/proto/lma_pb2.py...")
-candidate = os.path.join(os.getcwd(), "_main", "proto", "lma_pb2.py")
+print("Checking _main/proto/lma_messages_pb2.py...")
+candidate = os.path.join(os.getcwd(), "_main", "proto", "lma_messages_pb2.py")
 print(f"  Path: {candidate}")
 print(f"  Exists: {os.path.exists(candidate)}")
 
