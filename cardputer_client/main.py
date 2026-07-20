@@ -83,10 +83,16 @@ def _min_interval(val):
 def _init_rns(config):
     """Initialize µReticulum with the given config dict.
 
+    Uses ``/flash/rns/config.json`` (not the default ``/rns/config.json``)
+    because the M5Stack Cardputer firmware mounts flash at ``/flash``, not
+    ``/``. The default path would try to save the identity to ``/rns/identity``
+    which fails with ``ENODEV``. The config file override via ``rns.config``
+    (set after init) still takes effect for the interface list.
+
     Returns the Reticulum instance.  Raises on failure — the
     caller (``main()``) is responsible for error handling.
     """
-    rns = Reticulum(loglevel=3)
+    rns = Reticulum(loglevel=3, config_path="/flash/rns/config.json")
     rns.config = config
     rns.setup_interfaces()
     return rns
@@ -501,19 +507,49 @@ def main():
     if tft is not None:
         tft = display_status(tft, ["LMAO POC Ready", f"ID: {identity_hex[:24]}"])
 
-    # ---- Main loop: periodic hello + listen for replies ----
+    # ---- Start async event loop ----
+    # The Reticulum event loop runs the LoRa poll_loop (to receive packets)
+    # and the Transport job_loop (to process path responses). The send loop
+    # runs as a concurrent async task, replacing the old sync sleep loop.
+    log("Starting async event loop...", tft, status_lines)
+    try:
+        import uasyncio as asyncio
+
+        asyncio.run(_async_runtime(tft, status_lines, rns, router, identity_hex,
+                        DEST_HASH, SEND_SENSOR, HAS_PROTO, _CONFIG, pending_replies))
+    except KeyboardInterrupt:
+        log("Shutting down...", tft, status_lines)
+    except Exception as e:
+        log(f"Async runtime exited: {type(e).__name__}: {e}", tft, status_lines)
+        sys.print_exception(e)
+
+    # Clean shutdown after event loop exits
+    log("Halting.", tft, status_lines)
+
+
+async def _periodic_send(tft, status_lines, router, identity_hex,
+                      dest_hash, send_sensor, has_proto, config,
+                      pending_replies):
+    """Periodic send loop: sends Hello + SensorReport on interval.
+
+    Defined at module level (not nested) to avoid MicroPython closure
+    scoping issues with async functions and local variable references.
+    """
+    import uasyncio as asyncio
+
     seq = 0
     consecutive_errors = 0
     MAX_CONSECUTIVE_ERRORS = 10
+
     while True:
         try:
             consecutive_errors = 0
             seq += 1
             hello_text = f"Hello from Cardputer — seq {seq}"
 
-            if not HAS_PROTO:
+            if not has_proto:
                 log("Proto encoder not available — cannot send", tft, status_lines)
-            elif DEST_HASH is None:
+            elif dest_hash is None:
                 log("No destination configured — not sending", tft, status_lines)
             else:
                 content = make_poc_message(
@@ -521,7 +557,7 @@ def main():
                 )
                 # Send via urns LXMF router
                 msg = router.send_message(
-                    destination_hash=DEST_HASH,
+                    destination_hash=dest_hash,
                     content=content,
                     title="p:Envelope",
                 )
@@ -530,12 +566,12 @@ def main():
                 else:
                     log("Send returned None", tft, status_lines)
 
-                # Also send SensorReport if enabled (dual-send alongside TextMessage)
-                if SEND_SENSOR:
+                # Also send SensorReport if enabled
+                if send_sensor:
                     try:
                         sensor_content = make_sensor_message(identity_hex, seq)
                         msg2 = router.send_message(
-                            destination_hash=DEST_HASH,
+                            destination_hash=dest_hash,
                             content=sensor_content,
                             title="p:Envelope",
                         )
@@ -552,10 +588,9 @@ def main():
                 tft = log(f"Reply: {reply}", tft, status_lines)
             pending_replies.clear()
 
-            time.sleep(_CONFIG["interval_seconds"])
+            await asyncio.sleep(config["interval_seconds"])
 
-        except KeyboardInterrupt:
-            log("Shutting down...", tft, status_lines)
+        except asyncio.CancelledError:
             break
         except Exception as e:
             consecutive_errors += 1
@@ -570,7 +605,37 @@ def main():
             if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
                 log("FATAL: Too many consecutive errors, halting.", tft, status_lines)
                 break
-            time.sleep(5)
+            await asyncio.sleep(5)
+
+
+async def _async_runtime(tft, status_lines, rns, router, identity_hex,
+                     dest_hash, send_sensor, has_proto, config, pending_replies):
+    """Async runtime: runs the Reticulum event loop (job_loop + poll_loop)
+    alongside a periodic send task for Hello and SensorReport messages.
+
+    Previously the send loop ran synchronously with ``time.sleep()`` but
+    never started ``rns.run()``, so the LoRa ``poll_loop()`` could not
+    drain received packets. Without the poll loop, path responses from the
+    server were never processed — ``send_message`` always returned ``True``
+    ("queued pending path") but the actual Hello/Sensor payloads were never
+    transmitted over LoRa.
+    """
+    import uasyncio as asyncio
+
+    # ---- Launch concurrent tasks ----
+    send_task = asyncio.create_task(
+        _periodic_send(tft, status_lines, router, identity_hex,
+                       dest_hash, send_sensor, has_proto, config,
+                       pending_replies)
+    )
+
+    # Start the Reticulum event loop (job_loop + poll_loop for all interfaces)
+    # This blocks until all tasks finish — send_task runs concurrently in
+    # the background because it was already scheduled above.
+    await rns.run()
+
+    # If we get here, Reticulum tasks have exited — cancel the send task
+    send_task.cancel()
 
 
 # Auto-run when flashed to Cardputer
