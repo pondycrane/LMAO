@@ -1,0 +1,10 @@
+# k3s Agent Configuration (workers)
+# Used by: tp2, tp4
+# Location: /etc/rancher/k3s/config.yaml
+#
+# Replaces hardcoded --node-ip and --server flags in the systemd service.
+# The systemd ExecStart now only contains: agent --token <TOKEN>
+# Update node-ip to match each worker's LAN IP.
+
+node-ip: 192.168.0.XX    # <-- set to 192.168.0.43 (tp2) or 192.168.0.44 (tp4)
+server: https://192.168.0.49:6443

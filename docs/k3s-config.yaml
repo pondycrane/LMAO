@@ -1,0 +1,15 @@
+# k3s Control Plane Configuration
+# Used by: tp3 (control-plane)
+# Location: /etc/rancher/k3s/config.yaml
+#
+# This config replaces hardcoded --tls-san flags in the systemd service.
+# The systemd ExecStart is now just: /usr/local/bin/k3s server
+# All configuration lives here.
+
+tls-san:
+  # Internal cluster network (stable, preferred for node-to-node comms)
+  - 192.168.10.40
+  # LAN IP (DHCP-assigned, may change — update if it does)
+  - 192.168.0.49
+  # Legacy IP (kept for TLS cert backwards compatibility)
+  - 192.168.0.45
