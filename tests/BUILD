@@ -26,6 +26,7 @@ py_test(
     deps = [
         "//lma_core",
         "@lmao_pip//pytest",
+        "@lmao_pip//pyserial",
     ],
 )
 
@@ -136,6 +137,7 @@ py_test(
     deps = [
         "//cardputer_client:main_lib",
         "@lmao_pip//pytest",
+        "@lmao_pip//pytest_asyncio",
     ],
 )
 
