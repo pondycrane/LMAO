@@ -118,7 +118,7 @@ def _init_rns_and_lxmf(rnode_port, identity_storage_path=None):
     )
 
 
-def _print_startup_banner(identity_hex, rnode_port, grpc_available, nats_connected=False):
+def _print_startup_banner(identity_hex, rnode_port, grpc_available, nats_connected=False, delivery_hash_hex=None):
     """Print the server startup banner with identity and status info."""
     rnode_status = (
         f"RNode on {rnode_port}"
@@ -129,6 +129,9 @@ def _print_startup_banner(identity_hex, rnode_port, grpc_available, nats_connect
     print(f"\n{'=' * 50}")
     print("LMAO Server — Running (async mode)")
     print(f"Node identity: {identity_hex}")
+    if delivery_hash_hex:
+        # This is the value clients must set as DEST_HASH — NOT the identity.
+        print(f"Delivery destination (client DEST_HASH): {delivery_hash_hex}")
     print("Listening for LXMF messages...")
     print(f"  LoRa: {rnode_status}")
     print("  WiFi: AutoInterface enabled")
@@ -484,12 +487,19 @@ async def async_main():
             )
             nats_queue = None
 
-    # Print banner
+    # Print banner (including the delivery destination hash clients
+    # must use as DEST_HASH — it differs from the raw identity hash)
+    _delivery_hashes = list(router.delivery_destinations)
     _print_startup_banner(
         RNS.hexrep(server_identity.hash, delimit=False),
         rnode_port,
         GRPC_AVAILABLE,
         nats_queue is not None,
+        delivery_hash_hex=(
+            RNS.hexrep(_delivery_hashes[0], delimit=False)
+            if _delivery_hashes
+            else None
+        ),
     )
 
     # Start gRPC server if available
