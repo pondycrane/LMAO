@@ -21,6 +21,15 @@ py_test(
 )
 
 py_test(
+    name = "test_device_detect",
+    srcs = ["test_device_detect.py"],
+    deps = [
+        "//lma_core",
+        "@lmao_pip//pytest",
+    ],
+)
+
+py_test(
     name = "test_lma_encoder",
     srcs = ["test_lma_encoder.py"],
     deps = [

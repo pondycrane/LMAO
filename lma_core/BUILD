@@ -5,6 +5,7 @@ py_library(
     srcs = [
         "__init__.py",
         "config_utils.py",
+        "device_detect.py",
         "grpc_types.py",
         "message_utils.py",
         "queue.py",

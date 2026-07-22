@@ -154,12 +154,22 @@ def find_cardputer_port(preferred=None):
     """Return the serial device path for a connected Cardputer (ESP32-S3).
 
     When *preferred* is given it is returned immediately (caller-supplied port).
-    Otherwise all available serial ports are scanned for known Espressif USB
-    VID (0x303A) or descriptive strings containing 'esp32', 'jtag', etc.
+    Otherwise all available serial ports are scanned using the shared
+    device detection library (:mod:`lma_core.device_detect`), which uses
+    VID/PID + product strings for exact identification — **no** broad
+    keyword fallback matching.
     """
     if preferred:
         return preferred
 
+    try:
+        from lma_core.device_detect import find_cardputer_port as _find
+
+        return _find()
+    except ImportError:
+        pass
+
+    # Fallback when lma_core is not importable (e.g. running outside Bazel)
     try:
         ports = serial.tools.list_ports.comports()
     except Exception as e:
@@ -169,10 +179,8 @@ def find_cardputer_port(preferred=None):
 
     for p in ports:
         vid = getattr(p, "vid", None)
-        if vid == 0x303A:  # Espressif
-            return p.device
-        desc = (getattr(p, "description", "") or "").lower()
-        if any(kw in desc for kw in ("esp32", "cp210x", "ch340", "jtag", "usb serial")):
+        pid = getattr(p, "pid", None)
+        if vid == 0x303A and pid == 0x8120:  # M5Stack Cardputer ADV (ESP32-S3)
             return p.device
 
     return None
