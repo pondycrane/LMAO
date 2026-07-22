@@ -71,17 +71,22 @@ def _find_system_python() -> str | None:
 def _probe_for_cardputer(port: str) -> bool:
     """Try entering MicroPython raw REPL on *port* to detect a Cardputer.
 
-    Sends Ctrl+C (enter raw REPL), Ctrl+B (exit raw REPL). Returns True if
-    the MicroPython banner is detected.
+    Delegates to :func:`lma_core.device_detect.probe_cardputer_repl`.
     """
+    try:
+        from lma_core.device_detect import probe_cardputer_repl
+
+        return probe_cardputer_repl(port)
+    except ImportError:
+        pass
+
+    # Fallback (pyserial must be available)
     try:
         import serial as _serial
 
         ser = _serial.Serial(port, 115200, timeout=2)
         time.sleep(0.5)
-        # Drain any garbage
         ser.reset_input_buffer()
-        # Send Ctrl+C to interrupt, then Ctrl+A to enter raw REPL
         ser.write(b"\r\x03\x03")
         time.sleep(0.3)
         ser.reset_input_buffer()
@@ -89,7 +94,6 @@ def _probe_for_cardputer(port: str) -> bool:
         time.sleep(0.3)
         banner = ser.read(256)
         ser.close()
-        # Raw REPL banner contains "raw REPL" or "MicroPython"
         combined = banner.lower()
         return b"raw repl" in combined or b"micropython" in combined or b">==" in combined
     except Exception:
@@ -97,158 +101,81 @@ def _probe_for_cardputer(port: str) -> bool:
 
 
 def _probe_for_rnode(port: str) -> bool:
-    """Check whether *port* is running RNode firmware using the DETECT protocol.
+    """Check whether *port* is running RNode firmware.
 
-    Sends the standard RNode DETECT command (0x08 + 0x73 signature) and
-    checks for a valid DETECT_RESP (0x46) in the response.  This is much
-    faster and more reliable than ``rnodeconf --info``.
+    Delegates to :func:`lma_core.device_detect.probe_rnode`.
     """
-    import serial as _serial
-
     try:
-        ser = _serial.Serial(port, 115200, timeout=2)
-        time.sleep(0.5)
-        ser.reset_input_buffer()
-        # Send RNode DETECT command: 0x08 + 0x73 signature
-        ser.write(bytes([0xc0, 0x08, 0x73, 0xc0]))
-        time.sleep(0.5)
-        data = ser.read(100)
-        ser.close()
+        from lma_core.device_detect import probe_rnode
 
-        if not data:
-            print(f"  Probe[{port}]: no response to DETECT")
+        return probe_rnode(port)
+    except ImportError:
+        # Fallback: inline probe
+        import serial as _serial
+
+        try:
+            ser = _serial.Serial(port, 115200, timeout=2)
+            time.sleep(0.5)
+            ser.reset_input_buffer()
+            ser.write(bytes([0xC0, 0x08, 0x73, 0xC0]))
+            time.sleep(0.5)
+            data = ser.read(100)
+            ser.close()
+
+            if not data:
+                return False
+
+            return (
+                len(data) >= 4
+                and data[0:1] == b"\xC0"
+                and data[1] == 0x08
+                and data[2] == 0x46
+            )
+        except Exception:
             return False
-
-        # Valid DETECT response: 0xc0 0x08 0x46 0xc0
-        if data[0:1] == b"\xc0" and len(data) >= 4:
-            if data[1] == 0x08 and data[2] == 0x46:
-                print(f"  Probe[{port}]: RNode DETECT signature confirmed")
-                return True
-
-        print(f"  Probe[{port}]: unexpected DETECT response: {data.hex()}")
-        return False
-
-    except Exception as exc:
-        print(f"  Probe[{port}]: serial probe failed: {exc}")
-        return False
 
 
 def detect_serial_devices() -> tuple[str | None, str | None]:
     """Detect and classify connected USB serial devices.
 
-    Scans all serial ports, classifies each as RNode or Cardputer, and
-    returns ``(rnode_port, cardputer_port)``.
-
-    Detection strategy (in order of application):
-      1. VID/PID lookup — classifies known USB serial adapters:
-         - Espressif (0x303A)    → RNode (Heltec ESP32-LoRa)
-         - CP210x (0x10C4)       → Cardputer (M5Stack)
-         - CH340 (0x1A86)        → Cardputer (alternative USB-UART)
-      2. Serial DETECT probe — sends the RNode DETECT command (0x08 + 0x73)
-         and checks for a valid DETECT_RESP (0x46) signature.
-      3. Path-based fallback — first existing port wins.
-
-    Note: We do NOT use MicroPython raw REPL probing to distinguish the two
-    because the RNode firmware itself is MicroPython-based and responds to
-    the same REPL protocol as the Cardputer.
+    Delegates to :func:`lma_core.device_detect.detect_devices`, which
+    uses VID/PID + product strings from verified real-device fingerprints.
+    No broad keyword fallback matching is performed.
 
     Returns:
         ``(rnode_port, cardputer_port)`` where each is a device path or
-        None if not found.
+        ``None`` if not found.
     """
     try:
-        import serial.tools.list_ports
-    except ImportError:
-        print("  WARNING: pyserial not available — falling back to path-based detection")
-        rn = _detect_rnode_port_fallback()
-        return rn, None
+        from lma_core.device_detect import detect_devices
 
-    ports = list(serial.tools.list_ports.comports())
-    usb_ports = [
-        p
-        for p in ports
-        if p.vid is not None and p.device.startswith("/dev/tty") and "ttyAMA" not in p.device
-    ]
+        result = detect_devices()
+        rnode_port = result.rnode_port
+        cardputer_port = result.cardputer_port
 
-    if not usb_ports:
-        print("  No USB serial devices found — falling back to path-based detection")
-        rn = _detect_rnode_port_fallback()
-        return rn, None
+        # Print detection summary
+        for info in result.all_ports:
+            vid_s = f"0x{info.vid:04X}" if info.vid else "???"
+            pid_s = f"0x{info.pid:04X}" if info.pid else "???"
+            print(f"    {info.port}: {vid_s}:{pid_s}")
 
-    candidates: list[tuple[str, int | None, int | None]] = []
-    for p in usb_ports:
-        candidates.append((p.device, p.vid, p.pid))
-
-    print(f"  Found {len(candidates)} USB serial device(s)")
-    for dev, vid, pid in candidates:
-        vid_s = f"0x{vid:04X}" if vid else "???"
-        pid_s = f"0x{pid:04X}" if pid else "???"
-        print(f"    {dev}: {vid_s}:{pid_s}")
-
-    # ---- Phase 1: identify RNode via VID/PID and rnodeconf validation ----
-    rnode_port: str | None = None
-    cardputer_port: str | None = None
-    unclassified: list[str] = []
-
-    # VID/PID lookup table — maps (vid, pid) to device role
-    # Order matters: more specific matches first
-    vid_pid_map: list[tuple[int, int, str]] = [
-        # Espressif ESP32 native USB → Heltec RNode
-        (0x303A, 0x4001, "rnode"),
-        # RNode firmware changes PID to 0x1001
-        (0x303A, 0x1001, "rnode"),
-        # CP210x → M5Stack Cardputer (or generic USB-UART)
-        (0x10C4, 0xEA60, "cardputer"),
-        # CH340 → generic ESP32 (Cardputer or other)
-        (0x1A86, 0x7523, "cardputer"),
-    ]
-
-    for dev, vid, pid in candidates:
-        print(f"  Checking {dev}...", end="", flush=True)
-        classified = False
-
-        # Check VID/PID first
-        for map_vid, map_pid, role in vid_pid_map:
-            if vid == map_vid and pid == map_pid:
-                print(f" {role} (VID:PID=0x{vid:04X}:0x{pid:04X})")
-                if role == "rnode":
-                    rnode_port = dev
-                elif role == "cardputer":
-                    cardputer_port = dev
-                classified = True
-                break
-
-        if classified:
-            continue
-
-        # Unknown VID/PID — try rnodeconf probe as last resort
-        if _probe_for_rnode(dev):
-            print(" RNode (probe) ✓")
-            rnode_port = dev
+        if rnode_port:
+            conf = result.confidence.get("rnode", "unknown")
+            print(f"  ✓ RNode port: {rnode_port} (confidence: {conf})")
         else:
-            print(" unknown — no matching VID/PID")
-            unclassified.append(dev)
+            print("  ✗ No RNode port detected")
 
-    # ---- Phase 2: report unclassified devices (do NOT blindly assign) ----
-    if rnode_port is None and cardputer_port is None and unclassified:
-        print(
-            f"  WARNING: {len(unclassified)} unclassified device(s) found —"
-            f" skipping automatic role assignment."
-        )
-        for dev in unclassified:
-            print(f"    {dev} — no matching VID/PID and RNode probe failed/not available")
+        if cardputer_port:
+            conf = result.confidence.get("cardputer", "unknown")
+            print(f"  ✓ Cardputer port: {cardputer_port} (confidence: {conf})")
+        else:
+            print("  ✗ No Cardputer port detected")
 
-    if rnode_port:
-        print(f"  ✓ RNode port: {rnode_port}")
-    else:
-        print("  ✗ No RNode port detected")
-
-    if cardputer_port:
-        print(f"  ✓ Cardputer port: {cardputer_port}")
-    else:
-        print("  ✗ No Cardputer port detected")
-
-    return rnode_port, cardputer_port
+        return rnode_port, cardputer_port
+    except ImportError:
+        print("  WARNING: lma_core.device_detect not available — falling back")
+        rn = _detect_rnode_port_fallback()
+        return rn, None
 
 
 def _detect_rnode_port_fallback() -> str | None:
