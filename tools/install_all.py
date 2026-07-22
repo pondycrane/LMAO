@@ -200,40 +200,52 @@ def _flash_cardputer_client(port: str, client_root: str, result: DeviceResult) -
 def _install_rnode_firmware(port: str, result: DeviceResult) -> None:
     """Check if a Heltec at *port* is running RNode firmware.
 
-    Uses the RNode DETECT protocol (0x08 + 0x73 signature). Does NOT flash
-    programmatically — RNode firmware must be installed via the web
-    flasher tool (see rnode_firmware/README.md).
+    Uses :func:`lma_core.device_detect.probe_rnode` (the RNode DETECT
+    protocol 0x08 + 0x73 signature). Does NOT flash programmatically —
+    RNode firmware must be installed via the web flasher tool
+    (see rnode_firmware/README.md).
     """
-    import serial as _serial
-
     print(f"\n--- RNode: checking firmware on {port} ---")
 
     try:
-        # Probe with proper RNode DETECT command
+        from lma_core.device_detect import probe_rnode
+
+        if probe_rnode(port):
+            result.ok(f"RNode firmware detected on {port}")
+            print("  OK: RNode firmware detected (DETECT signature confirmed)")
+            return
+
+    except ImportError:
+        pass
+
+    # Fallback: inline probe
+    try:
+        import serial as _serial
+
         ser = _serial.Serial(port, 115200, timeout=2)
         time.sleep(0.5)
         ser.reset_input_buffer()
-        ser.write(bytes([0xc0, 0x08, 0x73, 0xc0]))
+        ser.write(bytes([0xC0, 0x08, 0x73, 0xC0]))
         time.sleep(0.5)
         data = ser.read(100)
         ser.close()
 
-        if len(data) >= 4 and data[0:1] == b"\xc0" and data[1] == 0x08 and data[2] == 0x46:
+        if len(data) >= 4 and data[0:1] == b"\xC0" and data[1] == 0x08 and data[2] == 0x46:
             result.ok(f"RNode firmware detected on {port}")
-            print(f"  OK: RNode firmware detected (DETECT signature confirmed)")
+            print("  OK: RNode firmware detected (DETECT signature confirmed)")
         elif len(data) > 0:
             result.fail(
                 f"Device on {port} responded but not as RNode. "
                 f"Response: {data.hex()}"
             )
-            print(f"  FAIL: Unexpected response — {data.hex()}")
+            print(f"  FAIL: Unexpected response \u2014 {data.hex()}")
         else:
             result.fail(
                 f"Device on {port} is not responding as RNode. "
                 f"Use the web flasher tool: https://flasher.rnode.ams1.meshkube.com/"
                 f"\n    See rnode_firmware/README.md for instructions."
             )
-            print(f"  FAIL: Not an RNode — manual flash required")
+            print("  FAIL: Not an RNode \u2014 manual flash required")
     except Exception as exc:
         import traceback
 
@@ -388,10 +400,15 @@ def main(argv: list[str] | None = None) -> None:
         if args.rnode_port:
             port = args.rnode_port
         else:
-            # Use VID/PID-based detection instead of find_rnode_port()
-            # which has a too-broad VID set that can match the Cardputer
-            rnode_auto, _ = detect_serial_devices()
-            port = rnode_auto
+            # Use shared device detection library
+            try:
+                from lma_core.device_detect import find_rnode_port
+
+                port = find_rnode_port()
+            except ImportError:
+                # Fallback to detect_serial_devices
+                rnode_auto, _ = detect_serial_devices()
+                port = rnode_auto
 
         if not port:
             rn_result.skip("No RNode/Heltec detected on USB")
