@@ -100,11 +100,28 @@ def init_rns_and_lxmf(
         )
     print("Reticulum initialized.")
 
-    # Create identity
-    try:
-        identity = RNS.Identity()
-    except (ValueError, KeyError, IOError, OSError):
-        _fatal("Failed to create identity. See log for details.")
+    # Load or create identity.  Persisting the identity is critical:
+    # clients (Cardputer) bake the server's lxmf.delivery destination hash
+    # into their config, and that hash is derived from the identity.  A
+    # fresh identity on every boot silently breaks all client configs.
+    identity_file = os.path.join(identity_storage_path, "identity")
+    identity = None
+    if os.path.isfile(identity_file):
+        try:
+            identity = RNS.Identity.from_file(identity_file)
+            if identity is not None:
+                print(f"Loaded identity from {identity_file}")
+        except (ValueError, KeyError, IOError, OSError) as e:
+            print(f"WARNING: could not load identity from {identity_file}: {e}")
+            identity = None
+    if identity is None:
+        try:
+            identity = RNS.Identity()
+            os.makedirs(identity_storage_path, exist_ok=True)
+            identity.to_file(identity_file)
+            print(f"Created new identity, saved to {identity_file}")
+        except (ValueError, KeyError, IOError, OSError) as e:
+            _fatal(f"Failed to create or persist identity: {e}")
 
     # Create LXMF router
     print("Starting LXMF router...")
