@@ -371,7 +371,7 @@ class TestMakeSensorMessage:
         import sys
 
         mock_esp32 = MagicMock()
-        mock_esp32.raw_temperature.return_value = 68  # 68°F → 20°C
+        mock_esp32.mcu_temperature.return_value = 42.5  # °C
 
         mock_encode = MagicMock()
         with (
@@ -382,17 +382,17 @@ class TestMakeSensorMessage:
 
         mock_encode.assert_called_once()
         readings = mock_encode.call_args[0][3]
-        # 68°F → (68 - 32) * 5/9 = 20°C
-        assert readings[0]["value"] == 20.0, (
-            f"Expected 20.0°C for raw_temperature=68°F, got {readings[0]['value']}"
+        # mcu_temperature returns celsius directly
+        assert readings[0]["value"] == 42.5, (
+            f"Expected 42.5°C for mcu_temperature, got {readings[0]['value']}"
         )
 
-    def test_raw_temperature_exception_propagates(self):
-        """When esp32.raw_temperature() raises, exception propagates (no fallback)."""
+    def test_mcu_temperature_exception_propagates(self):
+        """When esp32.mcu_temperature() raises, exception propagates (no fallback)."""
         import sys
 
         mock_esp32 = MagicMock()
-        mock_esp32.raw_temperature.side_effect = OSError("Sensor read failed")
+        mock_esp32.mcu_temperature.side_effect = OSError("Sensor read failed")
 
         import pytest
 
@@ -412,7 +412,7 @@ class TestMakeSensorMessage:
         import sys
 
         mock_esp32 = MagicMock()
-        mock_esp32.raw_temperature.return_value = 86  # 86°F → 30°C
+        mock_esp32.mcu_temperature.return_value = 55.0  # °C
 
         mock_encode = MagicMock()
         with (
@@ -423,8 +423,8 @@ class TestMakeSensorMessage:
 
         mock_encode.assert_called_once()
         readings = mock_encode.call_args[0][3]
-        assert readings[0]["value"] == 30.0, (
-            f"Expected 30.0°C for raw_temperature=86°F, got {readings[0]['value']}"
+        assert readings[0]["value"] == 55.0, (
+            f"Expected 55.0°C for mcu_temperature, got {readings[0]['value']}"
         )
 
 
@@ -730,6 +730,331 @@ class TestIntervalSeconds:
     def test_min_interval_passes_through_3600(self):
         """_min_interval(3600) — 1-hour interval passes through."""
         assert lmao_client._min_interval(3600) == 3600
+
+
+# ── Backoff / error-accumulation tests ──────────────────────────────
+
+
+class TestPeriodicSendBackoff:
+    """Tests for _periodic_send() exponential backoff behaviour.
+
+    _periodic_send() is a MicroPython async function that uses
+    ``import uasyncio as asyncio`` at runtime, so we patch
+    uasyncio → asyncio (CPython stdlib) and mock all dependencies.
+    """
+
+    import pytest
+
+    @pytest.mark.asyncio
+    async def test_consecutive_errors_accumulate_outside_loop(self):
+        """consecutive_errors must NOT be reset at the top of each iteration.
+
+        Previously ``consecutive_errors = 0`` was inside the ``try:`` block
+        at the top of the while loop, so the counter never exceeded 1 and
+        the ``MAX_CONSECUTIVE_ERRORS`` guard never fired.
+        """
+        import asyncio
+        import sys as _sys
+
+        # Patch uasyncio → asyncio so the function can import it.
+        _sys.modules["uasyncio"] = asyncio
+
+        # Mock router: always fails on send_message
+        mock_router = MagicMock()
+        mock_router.send_message.side_effect = OSError("No path to destination")
+
+        # Mock config with a short interval
+        config = {"interval_seconds": 10}
+
+        # Track how many errors before we cancel
+        call_count = [0]
+
+        async def fast_sleep(delay):
+            call_count[0] += 1
+            if call_count[0] >= 5:  # Cancel after 5 sleep calls
+                raise asyncio.CancelledError()
+
+        # Mock log, sys, and sleep
+        with (
+            patch.object(lmao_client, "log") as mock_log,
+            patch.object(lmao_client.sys, "print_exception", create=True),
+            patch.object(lmao_client, "make_poc_message", return_value=b"ok", create=True),
+            patch.object(asyncio, "sleep", fast_sleep),
+        ):
+            try:
+                await lmao_client._periodic_send(
+                    tft=None,
+                    status_lines=[],
+                    router=mock_router,
+                    identity_hex="test",
+                    dest_hash=b"\x00" * 16,
+                    send_sensor=False,
+                    has_proto=True,
+                    config=config,
+                    pending_replies=[],
+                )
+            except asyncio.CancelledError:
+                pass
+
+        # Find the error-count log calls
+        error_logs = [
+            call for call in mock_log.call_args_list
+            if "Error in main loop" in str(call)
+        ]
+        # We should see at least 2 errors (counter should accumulate)
+        assert len(error_logs) >= 2, (
+            f"Expected at least 2 error log calls (accumulating counter), "
+            f"got {len(error_logs)}"
+        )
+
+        # Check that the counter increased over iterations.
+        # Each log should show increasing error count.
+        counts = []
+        for call in error_logs:
+            log_str = str(call)
+            # Extract the count from "(N/10)" pattern
+            import re
+            m = re.search(r"\((\d+)/10\)", log_str)
+            if m:
+                counts.append(int(m.group(1)))
+
+        # The counts should be strictly increasing (or at least non-decreasing)
+        # e.g. [1, 2, 3, 4]
+        assert len(counts) >= 2, f"Expected at least 2 error count log lines, got {len(counts)}"
+        for i in range(1, len(counts)):
+            assert counts[i] >= counts[i - 1], (
+                f"Error counts should not decrease: got {counts}"
+            )
+
+        # Cleanup
+        del _sys.modules["uasyncio"]
+
+    @pytest.mark.asyncio
+    async def test_backoff_delay_increases_with_errors(self):
+        """Each consecutive error should cause a longer asyncio.sleep.
+
+        The backoff formula is: min(interval_seconds, 1 * 2**errors).
+        So: error 1 → 2 s, error 2 → 4 s, error 3 → 8 s, ...
+        """
+        import asyncio
+        import sys as _sys
+
+        _sys.modules["uasyncio"] = asyncio
+
+        mock_router = MagicMock()
+        mock_router.send_message.side_effect = OSError("No path")
+
+        config = {"interval_seconds": 60}
+
+        sleep_delays = []
+
+        # Patch asyncio.sleep to record delays, then raise to stop
+        call_count = [0]
+
+        async def tracking_sleep(delay):
+            call_count[0] += 1
+            sleep_delays.append(delay)
+            if call_count[0] >= 7:  # Stop after 7 sleeps
+                raise asyncio.CancelledError()
+
+        with (
+            patch.object(lmao_client, "log"),
+            patch.object(lmao_client.sys, "print_exception", create=True),
+            patch.object(lmao_client, "make_poc_message", return_value=b"ok", create=True),
+            patch.object(asyncio, "sleep", tracking_sleep),
+        ):
+            try:
+                await lmao_client._periodic_send(
+                    tft=None,
+                    status_lines=[],
+                    router=mock_router,
+                    identity_hex="test",
+                    dest_hash=b"\x00" * 16,
+                    send_sensor=False,
+                    has_proto=True,
+                    config=config,
+                    pending_replies=[],
+                )
+            except asyncio.CancelledError:
+                pass
+
+        # First sleep should be after the first error — delay = min(60, 1*2^1) = 2
+        # Second: min(60, 1*2^2) = 4
+        # Third: min(60, 1*2^3) = 8
+        # etc.
+        assert len(sleep_delays) >= 3, (
+            f"Expected at least 3 sleep calls, got {len(sleep_delays)}"
+        )
+        # The backoff delays should be non-decreasing (strictly increasing
+        # until they hit the cap)
+        for i in range(1, min(len(sleep_delays), 6)):
+            assert sleep_delays[i] >= sleep_delays[i - 1], (
+                f"Backoff delays must increase: {sleep_delays}"
+            )
+
+        # First sleep delay should be 2 (BACKOFF_BASE * 2^1)
+        assert sleep_delays[0] == 2, (
+            f"First error backoff should be 2 s (1 * 2^1), got {sleep_delays[0]}"
+        )
+
+        del _sys.modules["uasyncio"]
+
+    @pytest.mark.asyncio
+    async def test_backoff_capped_at_interval(self):
+        """Backoff delay must never exceed the normal send interval."""
+        import asyncio
+        import sys as _sys
+
+        _sys.modules["uasyncio"] = asyncio
+
+        mock_router = MagicMock()
+        mock_router.send_message.side_effect = OSError("No path")
+
+        # Small interval so cap is easily tested
+        config = {"interval_seconds": 10}
+
+        sleep_delays = []
+        call_count = [0]
+
+        async def tracking_sleep(delay):
+            call_count[0] += 1
+            sleep_delays.append(delay)
+            if call_count[0] >= 10:
+                raise asyncio.CancelledError()
+
+        with (
+            patch.object(lmao_client, "log"),
+            patch.object(lmao_client.sys, "print_exception", create=True),
+            patch.object(lmao_client, "make_poc_message", return_value=b"ok", create=True),
+            patch.object(asyncio, "sleep", tracking_sleep),
+        ):
+            try:
+                await lmao_client._periodic_send(
+                    tft=None,
+                    status_lines=[],
+                    router=mock_router,
+                    identity_hex="test",
+                    dest_hash=b"\x00" * 16,
+                    send_sensor=False,
+                    has_proto=True,
+                    config=config,
+                    pending_replies=[],
+                )
+            except asyncio.CancelledError:
+                pass
+
+        # All sleep delays must be <= interval (capped)
+        for delay in sleep_delays:
+            assert delay <= config["interval_seconds"], (
+                f"Backoff delay {delay}s exceeds interval cap "
+                f"{config['interval_seconds']}s"
+            )
+
+        del _sys.modules["uasyncio"]
+
+    @pytest.mark.asyncio
+    async def test_errors_reset_after_success(self):
+        """After a successful send, consecutive_errors must reset to 0."""
+        import asyncio
+        import sys as _sys
+
+        _sys.modules["uasyncio"] = asyncio
+
+        mock_router = MagicMock()
+        # First call fails, second succeeds
+        mock_router.send_message.side_effect = [
+            OSError("No path"),
+            MagicMock(),  # Success — returns a message-like object
+        ]
+
+        config = {"interval_seconds": 10}
+
+        sleep_delays = []
+        call_count = [0]
+
+        async def tracking_sleep(delay):
+            call_count[0] += 1
+            sleep_delays.append(delay)
+            if call_count[0] >= 3:
+                raise asyncio.CancelledError()
+
+        with (
+            patch.object(lmao_client, "log") as mock_log,
+            patch.object(lmao_client.sys, "print_exception", create=True),
+            patch.object(lmao_client, "HAS_PROTO", True),
+            patch.object(lmao_client, "make_poc_message", return_value=b"ok", create=True),
+            patch.object(asyncio, "sleep", tracking_sleep),
+        ):
+            try:
+                await lmao_client._periodic_send(
+                    tft=None,
+                    status_lines=[],
+                    router=mock_router,
+                    identity_hex="test",
+                    dest_hash=b"\x00" * 16,
+                    send_sensor=False,
+                    has_proto=True,
+                    config=config,
+                    pending_replies=[],
+                )
+            except asyncio.CancelledError:
+                pass
+
+        # After the successful send, the next sleep should be the normal
+        # interval (10 s), not a backoff delay.
+        # Sleep sequence: first error → 2 s, success → 10 s (normal interval)
+        assert len(sleep_delays) >= 2, (
+            f"Expected at least 2 sleeps, got {len(sleep_delays)}"
+        )
+        # Second sleep (after success) should be the normal interval
+        assert sleep_delays[1] == config["interval_seconds"], (
+            f"After success, sleep should be normal interval "
+            f"{config['interval_seconds']}s, got {sleep_delays[1]}s"
+        )
+
+        del _sys.modules["uasyncio"]
+
+    @pytest.mark.asyncio
+    async def test_max_errors_halts_loop(self):
+        """After MAX_CONSECUTIVE_ERRORS (10), the loop breaks."""
+        import asyncio
+        import sys as _sys
+
+        _sys.modules["uasyncio"] = asyncio
+
+        mock_router = MagicMock()
+        mock_router.send_message.side_effect = OSError("No path")
+
+        # Very short interval so the error cap is reached quickly
+        config = {"interval_seconds": 2}
+
+        with (
+            patch.object(lmao_client, "log") as mock_log,
+            patch.object(lmao_client.sys, "print_exception", create=True),
+            patch.object(lmao_client, "make_poc_message", return_value=b"ok", create=True),
+        ):
+            await lmao_client._periodic_send(
+                tft=None,
+                status_lines=[],
+                router=mock_router,
+                identity_hex="test",
+                dest_hash=b"\x00" * 16,
+                send_sensor=False,
+                has_proto=True,
+                config=config,
+                pending_replies=[],
+            )
+
+        # Should have logged the FATAL message
+        fatal_logs = [
+            call for call in mock_log.call_args_list
+            if "FATAL" in str(call)
+        ]
+        assert len(fatal_logs) >= 1, (
+            "Should log FATAL after MAX_CONSECUTIVE_ERRORS"
+        )
+
+        del _sys.modules["uasyncio"]
 
 
 # ── import guard ────────────────────────────────────────────────────

@@ -19,11 +19,13 @@ class TestAsyncMain:
 
         setup_common_mocks(with_grpc=True)
 
-        # Force GRPC_AVAILABLE to False
+        # Force GRPC_AVAILABLE to False and disable NATS
         from lmao_server import server as server_mod
 
         original_grpc = server_mod.GRPC_AVAILABLE
+        original_nats = server_mod.NATS_AVAILABLE
         server_mod.GRPC_AVAILABLE = False
+        server_mod.NATS_AVAILABLE = False
 
         # Make RNS init work
         mock_identity = MagicMock()
@@ -38,8 +40,9 @@ class TestAsyncMain:
         assert "Running (async mode)" in captured.out
         assert "Reticulum initialized" in captured.out
 
-        # Restore GRPC_AVAILABLE
+        # Restore
         server_mod.GRPC_AVAILABLE = original_grpc
+        server_mod.NATS_AVAILABLE = original_nats
         cleanup_common_mocks()
 
     @pytest.mark.asyncio
@@ -52,6 +55,9 @@ class TestAsyncMain:
         setup_common_mocks(with_grpc=True)
 
         from lmao_server import server as server_mod
+
+        original_nats = server_mod.NATS_AVAILABLE
+        server_mod.NATS_AVAILABLE = False
         # GRPC_AVAILABLE is True by default with these mocks
 
         # Make RNS init work
@@ -88,6 +94,103 @@ class TestAsyncMain:
         # Verify cleanup on shutdown
         mock_grpc_server.stop.assert_awaited_once_with(5)
 
+        server_mod.NATS_AVAILABLE = original_nats
+        cleanup_common_mocks()
+
+
+class TestAnnounceOnStartup:
+    """Tests for router.announce() called during async_main."""
+
+    @pytest.mark.asyncio
+    async def test_announce_called_on_startup(self, capsys, caplog):
+        """async_main should call router.announce() after registering callback."""
+        for _mod in ("server", "lmao_server", "lmao_server.server"):
+            if _mod in sys.modules:
+                del sys.modules[_mod]
+
+        setup_common_mocks(with_grpc=True)
+
+        from lmao_server import server as server_mod
+
+        # Disable both gRPC and NATS so only our loop runs
+        original_grpc = server_mod.GRPC_AVAILABLE
+        original_nats = server_mod.NATS_AVAILABLE
+        server_mod.GRPC_AVAILABLE = False
+        server_mod.NATS_AVAILABLE = False
+
+        mock_identity = MagicMock()
+        type(mock_identity).hash = PropertyMock(return_value=b"\x01" * 16)
+        sys.modules["RNS"].Identity.return_value = mock_identity
+
+        # Track announce calls.  The server announces each registered
+        # delivery destination (see server._announce_delivery_destinations),
+        # so the mock router must expose a delivery_destinations dict.
+        mock_router = sys.modules["LXMF"].LXMRouter.return_value
+        mock_router.delivery_destinations = {b"\x02" * 16: MagicMock()}
+
+        # Make asyncio.sleep raise KeyboardInterrupt after two sleeps
+        # (one normal sleep, one periodic check)
+        with patch.object(
+            server_mod.asyncio, "sleep", side_effect=[None, KeyboardInterrupt]
+        ):
+            await server_mod.async_main()
+
+        captured = capsys.readouterr()
+        assert "Running (async mode)" in captured.out
+
+        # router.announce() should have been called at least once
+        assert mock_router.announce.call_count >= 1, (
+            f"Expected router.announce() to be called, got {mock_router.announce.call_count}"
+        )
+
+        # Restore
+        server_mod.GRPC_AVAILABLE = original_grpc
+        server_mod.NATS_AVAILABLE = original_nats
+        cleanup_common_mocks()
+
+    @pytest.mark.asyncio
+    async def test_announce_failure_does_not_block_startup(self, capsys, caplog):
+        """If router.announce() fails, server should still start."""
+        for _mod in ("server", "lmao_server", "lmao_server.server"):
+            if _mod in sys.modules:
+                del sys.modules[_mod]
+
+        setup_common_mocks(with_grpc=True)
+
+        from lmao_server import server as server_mod
+
+        original_grpc = server_mod.GRPC_AVAILABLE
+        original_nats = server_mod.NATS_AVAILABLE
+        server_mod.GRPC_AVAILABLE = False
+        server_mod.NATS_AVAILABLE = False
+
+        mock_identity = MagicMock()
+        type(mock_identity).hash = PropertyMock(return_value=b"\x01" * 16)
+        sys.modules["RNS"].Identity.return_value = mock_identity
+
+        # Make announce raise an exception
+        mock_router = sys.modules["LXMF"].LXMRouter.return_value
+        mock_router.delivery_destinations = {b"\x02" * 16: MagicMock()}
+        mock_router.announce.side_effect = OSError("RNode not connected")
+
+        with patch.object(
+            server_mod.asyncio, "sleep", side_effect=[None, KeyboardInterrupt]
+        ):
+            await server_mod.async_main()
+
+        captured = capsys.readouterr()
+        assert "Running (async mode)" in captured.out
+
+        # Announce should still have been attempted
+        assert mock_router.announce.called, (
+            "router.announce() should have been called even though it raised"
+        )
+
+        # Server should have continued (banner printed)
+        assert "LMAO Server" in captured.out
+
+        server_mod.GRPC_AVAILABLE = original_grpc
+        server_mod.NATS_AVAILABLE = original_nats
         cleanup_common_mocks()
 
 
@@ -114,20 +217,54 @@ class TestInitRnsAndLxmf:
         assert router is sys.modules["LXMF"].LXMRouter.return_value
         sys.modules["RNS"].Reticulum.assert_called_once()
         sys.modules["RNS"].Identity.assert_called_once()
-        sys.modules["LXMF"].LXMRouter.assert_called_once_with(
-            identity=identity, storagepath="/tmp/lmao_server_lxmf"
-        )
+        # Default identity path is now ~/.local/share/lmao_server/lxmf
+        _, kwargs = sys.modules["LXMF"].LXMRouter.call_args
+        assert "storagepath" in kwargs
+        assert kwargs["storagepath"].endswith(
+            "/.local/share/lmao_server/lxmf"
+        ), f"Expected persistent path, got {kwargs['storagepath']}"
         # Verify delivery identity is registered (required for receiving messages)
         router.register_delivery_identity.assert_called_once_with(
             identity, display_name="lmao-server"
         )
 
-    def test_init_custom_storage_path(self, server_mod):
+    def test_init_without_path_uses_default(self, server_mod):
+        """_init_rns_and_lxmf should default to ~/.local/share/lmao_server/lxmf."""
+        server_mod._init_rns_and_lxmf("/dev/ttyUSB0")
+        _, kwargs = sys.modules["LXMF"].LXMRouter.call_args
+        assert kwargs["storagepath"].endswith("/.local/share/lmao_server/lxmf"), (
+            f"Expected persistent default, got {kwargs['storagepath']}"
+        )
+
+    def test_init_default_path_not_tmp(self, server_mod):
+        """_init_rns_and_lxmf should NOT default to /tmp (survives reboots)."""
+        server_mod._init_rns_and_lxmf("/dev/ttyUSB0")
+        _, kwargs = sys.modules["LXMF"].LXMRouter.call_args
+        assert not kwargs["storagepath"].startswith("/tmp"), (
+            f"Identity path must be persistent, not {kwargs['storagepath']}"
+        )
+
+    def test_init_custom_storage_path(self, server_mod, tmp_path):
         """_init_rns_and_lxmf should pass custom identity_storage_path."""
-        server_mod._init_rns_and_lxmf("/dev/ttyUSB0", identity_storage_path="/custom/path")
+        custom = str(tmp_path / "custom_lxmf")
+        server_mod._init_rns_and_lxmf("/dev/ttyUSB0", identity_storage_path=custom)
 
         _, kwargs = sys.modules["LXMF"].LXMRouter.call_args
-        assert kwargs.get("storagepath") == "/custom/path"
+        assert kwargs.get("storagepath") == custom
+
+    @pytest.mark.parametrize(
+        "env_subpath",
+        ["lxmf_a", "lxmf_b"],
+    )
+    def test_init_identity_path_from_env(self, server_mod, monkeypatch, tmp_path, env_subpath):
+        """LMAO_SERVER_IDENTITY_PATH env var should override the default path."""
+        env_value = str(tmp_path / env_subpath)
+        monkeypatch.setenv("LMAO_SERVER_IDENTITY_PATH", env_value)
+        server_mod._init_rns_and_lxmf("/dev/ttyUSB0")
+        _, kwargs = sys.modules["LXMF"].LXMRouter.call_args
+        assert kwargs["storagepath"] == env_value, (
+            f"Env var should set path to {env_value}, got {kwargs['storagepath']}"
+        )
 
     def test_init_exits_on_oserror(self, server_mod, capsys):
         """_init_rns_and_lxmf should sys.exit(1) on OSError from Reticulum init."""
