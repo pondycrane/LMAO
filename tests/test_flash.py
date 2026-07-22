@@ -157,72 +157,74 @@ class TestFindCardputerPort:
         mock_comports.assert_not_called()
         assert result == "/dev/ttyS0"
 
-    def test_matches_by_espressif_vid(self):
-        """Espressif VID (0x303A) devices are matched."""
+    def test_matches_by_cardputer_vid_pid(self):
+        """Cardputer VID (0x303A) + PID (0x8120) devices are matched."""
         mock_ports = [
             _make_port("/dev/ttyUSB0", 0x303A, "USB JTAG/serial debug unit"),
             _make_port("/dev/ttyUSB1", 0x0403, "FTDI FT232"),
         ]
         with patch("serial.tools.list_ports.comports", return_value=mock_ports):
-            result = cardputer_flash.find_cardputer_port()
+            with patch.object(mock_ports[0], "pid", 0x8120, create=True):
+                result = cardputer_flash.find_cardputer_port()
         assert result == "/dev/ttyUSB0"
 
-    def test_fallback_by_description_keyword(self):
-        """Devices without known VID fall back to keyword matching."""
+    def test_esp32_with_wrong_pid_not_matched(self):
+        """ESP32-S3 VID=0x303A but wrong PID → no match (no keyword fallback)."""
         mock_ports = [
-            _make_port("/dev/ttyS0", None, "Silicon Labs CP210x USB to UART Bridge"),
+            _make_port("/dev/ttyUSB0", 0x303A, "USB JTAG/serial debug unit"),
         ]
         with patch("serial.tools.list_ports.comports", return_value=mock_ports):
+            # No pid attribute → won't match 0x8120
             result = cardputer_flash.find_cardputer_port()
-        assert result == "/dev/ttyS0"
+        assert result is None
 
-    def test_first_matching_port_wins(self):
-        """When multiple ports match, the first one encountered is returned."""
+    def test_keyword_cp210x_not_matched(self):
+        """CP210x devices are NOT matched as Cardputer (no keyword fallback)."""
         mock_ports = [
-            _make_port("/dev/ttyUSB0", 0x0403, "ESP32 CP210x USB UART"),
-            _make_port("/dev/ttyACM0", 0x303A, "USB JTAG/serial debug unit"),
+            _make_port("/dev/ttyS0", 0x10C4, "Silicon Labs CP210x USB to UART Bridge"),
         ]
         with patch("serial.tools.list_ports.comports", return_value=mock_ports):
-            result = cardputer_flash.find_cardputer_port()
-        # The first port matches by keyword 'esp32' before the VID port is reached
-        assert result == "/dev/ttyUSB0"
+            with patch.object(mock_ports[0], "pid", 0xEA60, create=True):
+                result = cardputer_flash.find_cardputer_port()
+        assert result is None  # CP210x is RNode, not Cardputer
 
-    def test_vid_match_wins_when_listed_first(self):
-        """When a VID=0x303A port is listed first, it wins."""
+    def test_vid_match_with_correct_pid_wins(self):
+        """When a VID=0x303A PID=0x8120 port is listed first, it wins."""
         mock_ports = [
             _make_port("/dev/ttyACM0", 0x303A, "USB JTAG/serial debug unit"),
             _make_port("/dev/ttyUSB0", 0x0403, "ESP32 CP210x USB UART"),
         ]
         with patch("serial.tools.list_ports.comports", return_value=mock_ports):
-            result = cardputer_flash.find_cardputer_port()
+            with patch.object(mock_ports[0], "pid", 0x8120, create=True):
+                result = cardputer_flash.find_cardputer_port()
         assert result == "/dev/ttyACM0"
 
-    def test_matches_ch340_by_keyword(self):
-        """CH340 devices are matched via keyword."""
+    def test_ch340_not_matched(self):
+        """CH340 devices are NOT matched as Cardputer (no keyword fallback)."""
         mock_ports = [
             _make_port("/dev/ttyUSB0", 0x1A86, "USB Serial CH340"),
         ]
         with patch("serial.tools.list_ports.comports", return_value=mock_ports):
             result = cardputer_flash.find_cardputer_port()
-        assert result == "/dev/ttyUSB0"
+        assert result is None  # CH340 is not Cardputer
 
-    def test_matches_usb_serial_by_keyword(self):
-        """'usb serial' in description triggers a match."""
+    def test_usb_serial_not_matched(self):
+        """'USB Serial' keyword no longer triggers a match."""
         mock_ports = [
             _make_port("/dev/ttyACM0", 0x2341, "USB Serial Device"),
         ]
         with patch("serial.tools.list_ports.comports", return_value=mock_ports):
             result = cardputer_flash.find_cardputer_port()
-        assert result == "/dev/ttyACM0"
+        assert result is None
 
-    def test_matches_jtag_by_keyword(self):
-        """'jtag' in description triggers a match."""
+    def test_jtag_not_matched(self):
+        """'JTAG' keyword no longer triggers a match."""
         mock_ports = [
             _make_port("/dev/ttyUSB0", 0x10C4, "USB JTAG Debug"),
         ]
         with patch("serial.tools.list_ports.comports", return_value=mock_ports):
             result = cardputer_flash.find_cardputer_port()
-        assert result == "/dev/ttyUSB0"
+        assert result is None  # CP210x with 'jtag' is no longer matched
 
     def test_returns_none_when_no_match(self):
         """None is returned when no Cardputer-compatible port is found."""
@@ -281,12 +283,12 @@ class TestFindCardputerPort:
             assert result is None
 
     def test_comports_exception_when_no_preferred(self, capsys):
-        """Warning message is printed when comports() fails."""
+        """When comports() fails, return None gracefully (no crash)."""
         with patch("serial.tools.list_ports.comports", side_effect=OSError("permission denied")):
             result = cardputer_flash.find_cardputer_port()
         assert result is None
-        captured = capsys.readouterr()
-        assert "Could not enumerate serial ports" in captured.out
+        # With the shared module path, errors are handled silently
+        # (the function returns None rather than printing a warning)
 
 
 # ── main() CLI error paths ──────────────────────────────────────────
