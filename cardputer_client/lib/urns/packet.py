@@ -131,8 +131,13 @@ class Packet:
     def pack(self):
         self.destination_hash = self.destination.hash
 
-        # Auto-upgrade to HDR_2 if destination is reachable via a transport
-        # node (learned from HDR_2 announces stored in Transport.path_table).
+        # Auto-upgrade to HDR_2 only if the destination is reachable via a
+        # transport node, i.e. the known path is MORE than one hop away
+        # (matches reference RNS Transport.outbound).  For a direct 1-hop
+        # path the packet must be sent as HDR_1: the path-table next hop is
+        # the announcing identity, not a transport identity, so inserting
+        # it as a HDR_2 transport_id would make every receiving node drop
+        # the packet ("ignored ... for other transport instance").
         if (
             self.header_type == const.HDR_1
             and self.transport_id is None
@@ -141,8 +146,9 @@ class Packet:
             from .transport import Transport
 
             _entry = Transport.path_table.get(self.destination_hash)
-            if _entry is not None:
+            if _entry is not None and _entry[const.IDX_PT_HOPS] > 1:
                 self.header_type = const.HDR_2
+                self.transport_type = const.TRANSPORT_TRANSPORT
                 self.transport_id = _entry[const.IDX_PT_NEXT_HOP]
                 self.flags = self._get_packed_flags()
 

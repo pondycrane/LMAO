@@ -21,7 +21,7 @@ for _lp in _LIB_PATHS:
         sys.path.insert(0, _lp)
     try:
         from urns import Identity, Reticulum  # noqa: F401
-        from urns.log import LOG_INFO, LOG_NOTICE  # noqa: F401
+        from urns.log import LOG_DEBUG, LOG_ERROR, LOG_INFO, LOG_NOTICE  # noqa: F401
         from urns.lxmf import LXMessage, LXMRouter  # noqa: F401
 
         HAS_URNS = True
@@ -80,7 +80,17 @@ def _min_interval(val):
     return max(val, 10)
 
 
-def _init_rns(config):
+# Map config.py DEBUG level (0/1/2) to urns log levels.
+# 0 = errors only, 1 = messages & announces, 2 = full radio debug.
+# Guarded: when the urns library is missing (HAS_URNS=False) the log
+# constants are undefined — fall back to the numeric urns level values.
+try:
+    _DEBUG_TO_LOGLEVEL = {0: LOG_ERROR, 1: LOG_NOTICE, 2: LOG_DEBUG}
+except NameError:
+    _DEBUG_TO_LOGLEVEL = {0: 1, 1: 3, 2: 6}
+
+
+def _init_rns(config, debug=1):
     """Initialize µReticulum with the given config dict.
 
     Uses ``/flash/rns/config.json`` (not the default ``/rns/config.json``)
@@ -92,7 +102,8 @@ def _init_rns(config):
     Returns the Reticulum instance.  Raises on failure — the
     caller (``main()``) is responsible for error handling.
     """
-    rns = Reticulum(loglevel=3, config_path="/flash/rns/config.json")
+    loglevel = _DEBUG_TO_LOGLEVEL.get(debug, LOG_NOTICE)
+    rns = Reticulum(loglevel=loglevel, config_path="/flash/rns/config.json")
     rns.config = config
     rns.setup_interfaces()
     return rns
@@ -475,7 +486,7 @@ def main():
     # ---- Start µReticulum ----
     tft = log("Init Reticulum...", tft, status_lines)
     try:
-        rns = _init_rns(CONFIG)
+        rns = _init_rns(CONFIG, DEBUG)
         tft = log("Reticulum OK.", tft, status_lines)
     except Exception as e:
         log(f"FATAL: Reticulum init failed: {e}", tft, status_lines)

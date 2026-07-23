@@ -326,6 +326,9 @@ class TestMain:
                 return_value=(True, "ESP32 / esp32 / Cardputer"),
             ),
             patch("cardputer_client.flash.upload_file", return_value=True),
+            # Patch _mip_install: unit tests must not exercise the real mip
+            # flow (exec_raw would grind through full 30s timeouts per package).
+            patch("cardputer_client.flash._mip_install", return_value=True),
             patch("os.path.getsize", return_value=1234),
         ):
             cardputer_flash.main()
@@ -351,6 +354,9 @@ class TestMain:
                 return_value=(True, "ESP32 / esp32 / Cardputer"),
             ),
             patch("cardputer_client.flash.upload_file", return_value=True),
+            # Patch _mip_install: unit tests must not exercise the real mip
+            # flow (exec_raw would grind through full 30s timeouts per package).
+            patch("cardputer_client.flash._mip_install", return_value=True),
             patch("os.path.getsize", return_value=1234),
             patch("cardputer_client.flash.auto_discover_lib_files", return_value=[]),
         ):
@@ -402,6 +408,9 @@ class TestMain:
                 return_value=(False, "Not an ESP32 — platform='win32'"),
             ),
             patch("cardputer_client.flash.upload_file", return_value=True),
+            # Patch _mip_install: unit tests must not exercise the real mip
+            # flow (exec_raw would grind through full 30s timeouts per package).
+            patch("cardputer_client.flash._mip_install", return_value=True),
             patch("os.path.getsize", return_value=1234),
         ):
             cardputer_flash.main()
@@ -425,6 +434,9 @@ class TestMain:
             patch("cardputer_client.flash.enter_raw_repl", return_value=True),
             patch("cardputer_client.flash.verify_device", return_value=(True, "ESP32")),
             patch("cardputer_client.flash.upload_file", return_value=True),
+            # Patch _mip_install: unit tests must not exercise the real mip
+            # flow (exec_raw would grind through full 30s timeouts per package).
+            patch("cardputer_client.flash._mip_install", return_value=True),
             patch("os.path.getsize", return_value=1234),
         ):
             cardputer_flash.main()
@@ -780,6 +792,45 @@ class TestVerifyFilesExist:
         assert result is None
 
 
+class TestDeviceFileSha256:
+    """Tests for device_file_sha256() output parsing and stall handling."""
+
+    def test_parses_glued_ok_ack(self):
+        """The raw REPL 'OK' ack is glued onto the output line (OKSHA:...)."""
+        mock_ser = MagicMock()
+        digest = "ab" * 32
+        with patch(
+            "cardputer_client.flash.exec_raw",
+            return_value=(True, f"OKSHA:{digest}\r\n\x04\x04>"),
+        ):
+            assert cardputer_flash.device_file_sha256(mock_ser, "/flash/main.py") == digest
+
+    def test_missing_file_returns_none(self):
+        mock_ser = MagicMock()
+        with patch(
+            "cardputer_client.flash.exec_raw",
+            return_value=(True, "OKSHA:MISSING\r\n\x04\x04>"),
+        ):
+            assert cardputer_flash.device_file_sha256(mock_ser, "/flash/nope.py") is None
+
+    def test_timeout_raises_device_stalled(self):
+        mock_ser = MagicMock()
+        with patch(
+            "cardputer_client.flash.exec_raw",
+            return_value=(False, "Timeout waiting for device response"),
+        ):
+            with pytest.raises(cardputer_flash.DeviceStalledError):
+                cardputer_flash.device_file_sha256(mock_ser, "/flash/main.py")
+
+    def test_non_timeout_failure_returns_none(self):
+        mock_ser = MagicMock()
+        with patch(
+            "cardputer_client.flash.exec_raw",
+            return_value=(False, "some other error"),
+        ):
+            assert cardputer_flash.device_file_sha256(mock_ser, "/flash/main.py") is None
+
+
 class TestUploadFileChunked:
     """Direct tests for upload_file() chunked streaming protocol.
 
@@ -868,13 +919,17 @@ class TestUploadFileChunked:
         assert result is False
 
     def test_upload_fails_on_chunk_error_closes_handle(self):
-        """upload_file should close dangling handle when a chunk write fails."""
+        """upload_file retries a failed chunk, then raises DeviceStalledError
+        after _STALL_LIMIT consecutive failures and closes the dangling handle."""
         mock_ser = self._make_ser()
 
         responses = [
             (True, "RM_OK"),
             (True, "OPEN_OK"),
-            (False, "CHUNK_ERR"),  # Chunk write fails
+            # Every chunk attempt fails — after _STALL_LIMIT the upload aborts
+            (False, "CHUNK_ERR"),
+            (False, "CHUNK_ERR"),
+            (False, "CHUNK_ERR"),
         ]
         response_iter = iter(responses)
 
@@ -884,9 +939,9 @@ class TestUploadFileChunked:
         ):
             mock_exec_raw.side_effect = lambda *args, **kw: next(response_iter)
 
-            result = cardputer_flash.upload_file(mock_ser, "/fake/local.py", "/main.py")
+            with pytest.raises(cardputer_flash.DeviceStalledError):
+                cardputer_flash.upload_file(mock_ser, "/fake/local.py", "/main.py")
 
-        assert result is False
         # Should attempt to close the dangling handle via ser.write
         assert mock_ser.write.called
 
