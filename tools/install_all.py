@@ -110,7 +110,7 @@ def _flash_cardputer_client(port: str, client_root: str, result: DeviceResult) -
     """
     try:
         print(f"\n--- Cardputer: opening {port} ---")
-        ser = serial.Serial(port, 115200, timeout=1)
+        ser = serial.Serial(port, 115200, timeout=1, write_timeout=10)
         time.sleep(0.6)
     except serial.SerialException as exc:
         result.fail(f"Cannot open serial port {port}: {exc}")

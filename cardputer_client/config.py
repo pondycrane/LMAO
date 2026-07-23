@@ -21,7 +21,13 @@ WIFI_PASS = None
 NODE_NAME = "LMAO_Cardputer"
 
 # DEBUG levels: 0 = silent, 1 = messages & announces, 2 = full debug
-DEBUG = 2
+# WARNING: keep this at 1 (or 0) for unattended operation.  At level 2
+# the client prints radio diagnostics every few seconds; when no host
+# reads the USB-CDC port the TX FIFO fills up and the MicroPython VM
+# blocks inside print(), freezing the device (REPL lockout — recovery
+# requires a physical reset).  The LoRa E2E test patches this to 2 on
+# the device because the host drains the serial port during the test.
+DEBUG = 1
 
 # Destination hash of the server's lxmf.delivery destination (hex string
 # of a 16-byte hash).  NOTE: this is the *destination* hash derived from

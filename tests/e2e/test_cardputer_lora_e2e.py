@@ -136,7 +136,7 @@ def _probe_hardware():
 
         # Try opening the Cardputer port to verify MicroPython REPL
         try:
-            with serial.Serial(_CARDCOMPUTER_PORT, 115200, timeout=1) as ser:
+            with serial.Serial(_CARDCOMPUTER_PORT, 115200, timeout=1, write_timeout=10) as ser:
                 time.sleep(0.6)
                 ok = cardputer_flash.enter_raw_repl(ser)
                 if not ok:
@@ -459,9 +459,22 @@ class TestCardputerLoRaE2E:
 
             # Set a shorter interval for E2E tests (avoids exceeding the 30s serial deadline)
             # and enable the external sensor if one is configured via env var.
+            assert "INTERVAL_SECONDS = 15" in patched_config.replace(
+                "INTERVAL_SECONDS = 60",
+                "INTERVAL_SECONDS = 15",
+            ), "INTERVAL_SECONDS patch failed"
             patched_config = patched_config.replace(
                 "INTERVAL_SECONDS = 60",
                 "INTERVAL_SECONDS = 15",
+            )
+            # Verbose radio diagnostics during the E2E (the host drains the
+            # serial port continuously, so the USB-CDC TX FIFO cannot fill
+            # up and block the VM).  Must NOT be the committed default —
+            # see config.py's DEBUG comment.
+            assert "DEBUG = 1" in patched_config, "DEBUG patch target missing"
+            patched_config = patched_config.replace(
+                "DEBUG = 1",
+                "DEBUG = 2",
             )
             _e2e_sensor_type = os.environ.get("E2E_SENSOR_TYPE", "None")
             if _e2e_sensor_type not in ("None", ""):
@@ -473,7 +486,7 @@ class TestCardputerLoRaE2E:
             cardputer_ser = None
             try:
                 # Flash the Cardputer with client files
-                cardputer_ser = serial.Serial(_CARDCOMPUTER_PORT, 115200, timeout=1)
+                cardputer_ser = serial.Serial(_CARDCOMPUTER_PORT, 115200, timeout=1, write_timeout=10)
                 time.sleep(0.6)
 
                 ok = cardputer_flash.enter_raw_repl(cardputer_ser)
@@ -680,14 +693,37 @@ class TestCardputerLoRaE2E:
                 print(f"   Messages received by server: {len(received_messages)}")
 
             finally:
-                # Close serial port (note: we no longer modify config.py on
-                # disk — the patched config is written directly to the device
-                # via exec_raw, so there is nothing to restore).
+                # Restore the production-quiet config on the device.  The
+                # E2E config is deliberately chatty (DEBUG=2, 15s interval);
+                # left running unattended it can fill the USB-CDC TX FIFO
+                # and freeze the VM (REPL lockout).  Best-effort — the
+                # device may already be gone.
                 if cardputer_ser is not None:
                     try:
-                        cardputer_ser.close()
+                        if cardputer_flash.enter_raw_repl(cardputer_ser, max_attempts=2):
+                            import tempfile as _tf
+
+                            with _tf.NamedTemporaryFile(
+                                mode="w", suffix=".py", delete=False
+                            ) as _tmp:
+                                _tmp.write(original_config)
+                                _tmp_path = _tmp.name
+                            try:
+                                cardputer_flash.upload_file(
+                                    cardputer_ser, _tmp_path, "config.py"
+                                )
+                            finally:
+                                with contextlib.suppress(OSError):
+                                    os.unlink(_tmp_path)
+                            cardputer_flash.exit_raw_repl(cardputer_ser)
+                            cardputer_ser.write(b"\x04")  # soft reset
                     except Exception:
-                        _logger.warning("Serial close failed", exc_info=True)
+                        _logger.warning("Config restore failed", exc_info=True)
+                    finally:
+                        try:
+                            cardputer_ser.close()
+                        except Exception:
+                            _logger.warning("Serial close failed", exc_info=True)
 
                 # Close DuckDB store and clean up temp file
                 try:
