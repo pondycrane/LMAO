@@ -792,6 +792,45 @@ class TestVerifyFilesExist:
         assert result is None
 
 
+class TestDeviceFileSha256:
+    """Tests for device_file_sha256() output parsing and stall handling."""
+
+    def test_parses_glued_ok_ack(self):
+        """The raw REPL 'OK' ack is glued onto the output line (OKSHA:...)."""
+        mock_ser = MagicMock()
+        digest = "ab" * 32
+        with patch(
+            "cardputer_client.flash.exec_raw",
+            return_value=(True, f"OKSHA:{digest}\r\n\x04\x04>"),
+        ):
+            assert cardputer_flash.device_file_sha256(mock_ser, "/flash/main.py") == digest
+
+    def test_missing_file_returns_none(self):
+        mock_ser = MagicMock()
+        with patch(
+            "cardputer_client.flash.exec_raw",
+            return_value=(True, "OKSHA:MISSING\r\n\x04\x04>"),
+        ):
+            assert cardputer_flash.device_file_sha256(mock_ser, "/flash/nope.py") is None
+
+    def test_timeout_raises_device_stalled(self):
+        mock_ser = MagicMock()
+        with patch(
+            "cardputer_client.flash.exec_raw",
+            return_value=(False, "Timeout waiting for device response"),
+        ):
+            with pytest.raises(cardputer_flash.DeviceStalledError):
+                cardputer_flash.device_file_sha256(mock_ser, "/flash/main.py")
+
+    def test_non_timeout_failure_returns_none(self):
+        mock_ser = MagicMock()
+        with patch(
+            "cardputer_client.flash.exec_raw",
+            return_value=(False, "some other error"),
+        ):
+            assert cardputer_flash.device_file_sha256(mock_ser, "/flash/main.py") is None
+
+
 class TestUploadFileChunked:
     """Direct tests for upload_file() chunked streaming protocol.
 
