@@ -149,12 +149,13 @@ def _probe_hardware():
                 # Check for native LoRa driver (required for on-board SX1262)
                 ok, out = cardputer_flash.exec_raw(
                     ser,
-                    "import sys; ok = False; "
-                    "try: import lora; ok = True\n"
-                    "except ImportError: pass\n"
-                    "print('__LORA_OK__' if ok else '__LORA_MISSING__')",
+                    "try:\n"
+                    "    import lora\n"
+                    "    print('__LORA_OK__')\n"
+                    "except ImportError:\n"
+                    "    print('__LORA_MISSING__')\n",
                 )
-                if not ok or b"__LORA_OK__" not in out:
+                if not ok or "__LORA_OK__" not in out:
                     _HARDWARE_REASON = (
                         f"Cardputer at {_CARDCOMPUTER_PORT} is missing the native "
                         "LoRa driver (SX1262). The 'lora' module is not "
@@ -296,7 +297,7 @@ class TestCardputerLoRaE2E:
         try:
             config_content = dict_to_ini(
                 {
-                    "logging": {"loglevel": 3},
+                    "logging": {"loglevel": 7},
                     "transport": {"path": "/tmp/lmao_e2e_rns_state"},
                 },
                 {"RNode LoRa": cfg_dict["interfaces"]["RNode LoRa"]},
@@ -306,9 +307,18 @@ class TestCardputerLoRaE2E:
 
             RNS.Reticulum(configdir=configdir)
             identity = RNS.Identity()
-            server_hash = RNS.hexrep(identity.hash, delimit=False)
 
             router = LXMF.LXMRouter(identity=identity, storagepath="/tmp/lmao_e2e_lxmf")
+
+            # Register the delivery identity — required for LXMF to receive
+            # incoming messages (mirrors lma_core/rns_init.py).
+            router.register_delivery_identity(identity, display_name="lmao-e2e-server")
+
+            # The urns client addresses LXMF messages to the server's
+            # lxmf.delivery *destination hash* (derived from the identity),
+            # not the raw identity hash — see urns/lxmf.py send_message().
+            server_dest_hash_bytes = next(iter(router.delivery_destinations))
+            server_hash = RNS.hexrep(server_dest_hash_bytes, delimit=False)
 
             # Shared state between server thread and test main thread
             received_messages = []
@@ -319,6 +329,9 @@ class TestCardputerLoRaE2E:
             # ── Temporary DuckDB for sensor pipeline validation ──
             db_fd, db_path = tempfile.mkstemp(suffix=".duckdb", prefix="lmao_e2e_")
             os.close(db_fd)
+            # mkstemp creates a 0-byte file, but DuckDB refuses to open an
+            # existing empty file — remove it so DuckDB creates a fresh DB.
+            os.unlink(db_path)
             store = DuckDbStore()
             store.initialize(db_path)
 
@@ -386,6 +399,12 @@ class TestCardputerLoRaE2E:
 
             router.register_delivery_callback(capture_delivery)
 
+            # Announce so the Cardputer can discover a path and recall the
+            # server's identity.  Re-announced periodically in the wait loop
+            # below — a single path-request/response exchange is timing-
+            # sensitive over a half-duplex LoRa link.
+            router.announce(server_dest_hash_bytes)
+
             # ── Prepare and flash the Cardputer ──
 
             root = cardputer_flash.find_client_root()
@@ -401,9 +420,16 @@ class TestCardputerLoRaE2E:
             with open(config_path) as f:
                 original_config = f.read()
 
-            patched_config = original_config.replace(
-                "DEST_HASH = None",
+            import re as _re
+
+            patched_config, _n_subs = _re.subn(
+                r'DEST_HASH\s*=\s*(?:"[^"]*"|None)',
                 f'DEST_HASH = "{server_hash}"',
+                original_config,
+            )
+            assert _n_subs == 1, (
+                "Could not patch DEST_HASH in config.py — expected exactly one "
+                "DEST_HASH assignment (string or None)."
             )
 
             # Set a shorter interval for E2E tests (avoids exceeding the 30s serial deadline)
@@ -465,12 +491,19 @@ class TestCardputerLoRaE2E:
                         os.unlink(tmp_path)
 
                 # Verify the hash is present in the config on the device
+                # Force a fresh import — if main.py already ran on the device,
+                # the old 'config' module is cached in sys.modules and would
+                # report the stale DEST_HASH.
                 ok, out = cardputer_flash.exec_raw(
                     cardputer_ser,
-                    "import config; print(config.DEST_HASH)",
+                    "import sys\n"
+                    "if 'config' in sys.modules:\n"
+                    "    del sys.modules['config']\n"
+                    "import config\n"
+                    "print(config.DEST_HASH)\n",
                 )
                 assert ok, f"exec_raw failed: {out[:200]}"
-                assert server_hash in out.decode("utf-8", errors="replace"), (
+                assert server_hash in out, (
                     f"Server hash {server_hash} not found in device config output: {out[:200]}"
                 )
 
@@ -484,9 +517,20 @@ class TestCardputerLoRaE2E:
                 cardputer_output = b""
                 found_banner = False
                 found_ack = False
-                serial_deadline = time.time() + 30
+                # The Cardputer needs ~25s to boot, and sends at
+                # INTERVAL_SECONDS=15 — the first send(s) may still miss the
+                # server's announce, so allow boot + 2 full intervals.
+                serial_deadline = time.time() + 75
 
+                last_announce = 0.0
                 while time.time() < serial_deadline:
+                    if time.time() - last_announce > 8:
+                        try:
+                            router.announce(server_dest_hash_bytes)
+                        except Exception:
+                            pass
+                        last_announce = time.time()
+
                     if cardputer_ser.in_waiting:
                         cardputer_output += cardputer_ser.read(cardputer_ser.in_waiting)
 
