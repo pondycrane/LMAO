@@ -357,8 +357,16 @@ def device_file_sha256(ser, remote_path):
         b"except OSError:\n"
         b"    print('SHA:MISSING')\n"
     )
-    ok, out = exec_raw(ser, script, timeout=30)
+    ok, out = exec_raw(ser, script, timeout=10)
     if not ok:
+        if "Timeout" in out:
+            # Device is not answering — no point grinding through the
+            # remaining files at one timeout each.
+            raise DeviceStalledError(
+                f"Device stopped responding while checking {remote_path}. "
+                "The USB-Serial-JTAG interface may be wedged — press the "
+                "Cardputer's RESET button (or power-cycle it), then retry."
+            )
         return None
     for line in out.splitlines():
         if line.startswith("SHA:"):
@@ -628,7 +636,7 @@ def main():
     print(f"Connecting to Cardputer on {port} …")
 
     try:
-        ser = serial.Serial(port, 115200, timeout=1)
+        ser = serial.Serial(port, 115200, timeout=1, write_timeout=10)
         # Give the device a moment after DTR/RTS toggle
         time.sleep(0.6)
     except serial.SerialException as e:

@@ -77,7 +77,7 @@ def _probe_hardware():
 
     # Try opening the port and entering raw REPL to verify MicroPython
     try:
-        with serial.Serial(_CARDCOMPUTER_PORT, 115200, timeout=1) as ser:
+        with serial.Serial(_CARDCOMPUTER_PORT, 115200, timeout=1, write_timeout=10) as ser:
             time.sleep(0.6)
             ok = cardputer_flash.enter_raw_repl(ser)
             if ok:
@@ -163,7 +163,7 @@ class TestCardputerE2E:
     @pytest.fixture
     def serial_conn(self):
         """Open and yield a serial connection to the Cardputer."""
-        ser = serial.Serial(_CARDCOMPUTER_PORT, 115200, timeout=1)
+        ser = serial.Serial(_CARDCOMPUTER_PORT, 115200, timeout=1, write_timeout=10)
         time.sleep(0.6)
         try:
             yield ser
@@ -204,16 +204,19 @@ class TestCardputerE2E:
         ok = cardputer_flash.enter_raw_repl(serial_conn)
         assert ok, "Cannot enter raw REPL"
 
-        # Write a small temporary file to the device
+        # Write a small temporary file to the device.
+        # NOTE: the M5Stack firmware mounts flash at DEVICE_PREFIX (/flash),
+        # not at / — writing to the filesystem root fails with ENODEV.
+        test_path = cardputer_flash.DEVICE_PREFIX + "/__e2e_test__.py"
         ok, out = cardputer_flash.exec_raw(
             serial_conn,
-            """
+            f"""
 try:
     import os as _os
-    _os.remove('/__e2e_test__.py')
+    _os.remove('{test_path}')
 except:
     pass
-_f = open('/__e2e_test__.py', 'w')
+_f = open('{test_path}', 'w')
 _f.write('ANSWER = 42\\n')
 _f.close()
 print('WRITE_OK')
@@ -224,9 +227,9 @@ print('WRITE_OK')
         # Read back the file
         ok, out = cardputer_flash.exec_raw(
             serial_conn,
-            """
+            f"""
 try:
-    _f = open('/__e2e_test__.py', 'r')
+    _f = open('{test_path}', 'r')
     print(_f.read())
     _f.close()
 except Exception as _e:
@@ -238,10 +241,10 @@ except Exception as _e:
         # Clean up
         cardputer_flash.exec_raw(
             serial_conn,
-            """
+            f"""
 try:
     import os as _os
-    _os.remove('/__e2e_test__.py')
+    _os.remove('{test_path}')
 except:
     pass
 """,
