@@ -75,11 +75,24 @@ def auto_discover_lib_files(client_root):
 
 
 def _upload_files(ser, client_root, file_list):
-    """Upload a list of files to the device, exiting on failure."""
+    """Upload a list of files to the device, exiting on failure.
+
+    Files whose content already matches the device copy are skipped
+    (SHA-256 compare), which makes re-flashing fast.  Aborts the whole
+    run immediately when the device stalls mid-upload.
+    """
     for rel in file_list:
         local_path = os.path.join(client_root, rel)
         print(f"  {rel:30s} … ", end="", flush=True)
-        if upload_file(ser, local_path, rel):
+        try:
+            res = upload_file(ser, local_path, rel, skip_if_unchanged=True)
+        except DeviceStalledError as e:
+            print("FAILED")
+            print(f"\nERROR: {e}")
+            sys.exit(1)
+        if res == "unchanged":
+            print("OK  (unchanged)")
+        elif res:
             size = os.path.getsize(local_path)
             print(f"OK  ({size} B)")
         else:
@@ -186,33 +199,43 @@ def find_cardputer_port(preferred=None):
     return None
 
 
-def enter_raw_repl(ser):
+def enter_raw_repl(ser, max_attempts=5):
     """Sends Ctrl+C (twice) + Ctrl+A to enter MicroPython raw REPL mode.
 
-    Blocks until the ``raw REPL; CTRL-B to exit`` banner is received
-    (or a 3-second timeout elapses).
+    Retries the interrupt sequence up to *max_attempts* times.  A single
+    Ctrl+C window can be missed when the device is busy in a long blocking
+    section (e.g. a split-frame LoRa TX burst takes ~800ms, crypto, gc),
+    so the whole sequence is repeated until the ``raw REPL; CTRL-B to
+    exit`` banner is received or all attempts are exhausted (~15s total).
     """
     try:
-        # Interrupt anything that may be running
-        ser.write(b"\r\x03\x03")
-        time.sleep(0.3)
-        ser.read(ser.in_waiting)  # drain any residual output
+        for attempt in range(max_attempts):
+            # Interrupt anything that may be running
+            ser.write(b"\r\x03\x03")
+            time.sleep(0.5)
+            ser.read(ser.in_waiting)  # drain any residual output
 
-        # Request raw REPL
-        ser.write(b"\r\x01")
-        time.sleep(0.3)
+            # Request raw REPL
+            ser.write(b"\r\x01")
+            time.sleep(0.3)
 
-        data = b""
-        deadline = time.time() + 3
-        while time.time() < deadline:
-            if ser.in_waiting:
-                data += ser.read(ser.in_waiting)
-            if b"raw REPL" in data:
-                # Give device a moment to print the '>' prompt, then drain
-                time.sleep(0.15)
-                ser.read(ser.in_waiting)
-                return True
-            time.sleep(0.05)
+            data = b""
+            deadline = time.time() + 2
+            while time.time() < deadline:
+                if ser.in_waiting:
+                    data += ser.read(ser.in_waiting)
+                if b"raw REPL" in data:
+                    # Give device a moment to print the '>' prompt, then drain
+                    time.sleep(0.15)
+                    ser.read(ser.in_waiting)
+                    return True
+                time.sleep(0.05)
+
+            if attempt == 0:
+                print(
+                    "Device did not respond to interrupt — retrying "
+                    "(it may be busy in its main loop)..."
+                )
 
         return False
     except (serial.SerialException, OSError) as e:
@@ -293,7 +316,58 @@ print(_os.uname().machine)
     return False, f"Not an ESP32 device — platform={platform!r}, machine={machine!r}"
 
 
-def upload_file(ser, local_path, remote_path, chunk_size=1024):
+class DeviceStalledError(Exception):
+    """The device stopped responding mid-upload.
+
+    Raised when several consecutive chunk writes time out, which almost
+    always means the ESP32-S3 USB-Serial-JTAG interface has wedged (it
+    cannot be recovered from software — a physical reset is required).
+    """
+
+
+# Number of consecutive chunk-write failures before declaring the device
+# wedged and aborting the upload.  Each failed attempt costs one exec_raw
+# timeout (~15s), so 3 failures ≈ 45s before giving up.
+_STALL_LIMIT = 3
+
+
+def device_file_sha256(ser, remote_path):
+    """Return the hex SHA-256 of a file on the device, or *None*.
+
+    *remote_path* must already be a device-absolute path (i.e. with the
+    ``/flash`` prefix applied) — it is NOT prefixed again here.
+
+    Returns *None* when the file does not exist on the device or the
+    digest could not be computed.  Used to skip uploading files whose
+    content is already present, which makes re-installs fast.
+    """
+    remote_path_esc = _sanitize_path_for_script(remote_path)
+    script = (
+        b"import uhashlib as _h\n"
+        b"try:\n"
+        b"    _f = open('" + remote_path_esc.encode("utf-8") + b"', 'rb')\n"
+        b"    _s = _h.sha256()\n"
+        b"    while True:\n"
+        b"        _b = _f.read(4096)\n"
+        b"        if not _b:\n"
+        b"            break\n"
+        b"        _s.update(_b)\n"
+        b"    _f.close()\n"
+        b"    print('SHA:' + ''.join('%02x' % _c for _c in _s.digest()))\n"
+        b"except OSError:\n"
+        b"    print('SHA:MISSING')\n"
+    )
+    ok, out = exec_raw(ser, script, timeout=30)
+    if not ok:
+        return None
+    for line in out.splitlines():
+        if line.startswith("SHA:"):
+            val = line[4:].strip()
+            return None if val == "MISSING" else val
+    return None
+
+
+def upload_file(ser, local_path, remote_path, chunk_size=1024, skip_if_unchanged=False):
     """Upload a single file to the MicroPython device using raw REPL.
 
     The file content is sent in multiple small ``exec_raw`` calls rather
@@ -301,6 +375,15 @@ def upload_file(ser, local_path, remote_path, chunk_size=1024):
     limit on ESP32-S3 (~6 KB for REPL paste compilation), which would
     crash the device with ``MemoryError`` for files larger than a few KB
     if sent as a single paste.
+
+    When *skip_if_unchanged* is True, the file's SHA-256 is compared
+    against the copy already on the device and the upload is skipped
+    when they match (returns the string ``"unchanged"``, which is
+    truthy, instead of ``True``).
+
+    Raises :class:`DeviceStalledError` when the device stops responding
+    mid-upload (consecutive chunk timeouts) instead of grinding through
+    multi-minute timeouts for every remaining chunk.
 
     In raw REPL mode, variables defined at module scope persist between
     consecutive paste blocks.  We exploit this to keep a single file
@@ -339,9 +422,22 @@ def upload_file(ser, local_path, remote_path, chunk_size=1024):
     remote_path = _prefix_path(remote_path)
     remote_path_esc = _sanitize_path_for_script(remote_path)
 
-    # Step 1 — create parent directories
+    # Step 0 — skip when the device already holds identical content.
+    # MUST run before the remove/open steps below (both destroy the
+    # existing device copy).
+    if skip_if_unchanged:
+        import hashlib
+
+        local_sha = hashlib.sha256(content).hexdigest()
+        if device_file_sha256(ser, remote_path) == local_sha:
+            return "unchanged"
+
+    # Step 1 — create parent directories.
+    # Skipped when the parent IS the device flash root (DEVICE_PREFIX,
+    # e.g. /flash) — that directory always exists, so the round trip is
+    # pure overhead for top-level files like main.py / config.py.
     dirname = os.path.dirname(remote_path).replace("\\", "/")
-    if dirname and dirname != "/":
+    if dirname and dirname != "/" and dirname != DEVICE_PREFIX:
         safe_dirname = _sanitize_path_for_script(dirname)
         script = (
             b"import os as _os\n"
@@ -382,8 +478,13 @@ def upload_file(ser, local_path, remote_path, chunk_size=1024):
     if not ok or "OPEN_OK" not in _out:
         return False
 
-    # Step 4 — stream each chunk (one exec_raw per chunk)
-    for offset in range(0, file_size, chunk_size):
+    # Step 4 — stream each chunk (one exec_raw per chunk), retrying a
+    # failed chunk up to _STALL_LIMIT times before declaring the device
+    # wedged.  A failed chunk is re-sent in full (the device only writes
+    # when it acknowledges with CHUNK_OK, so retries cannot corrupt).
+    offset = 0
+    consecutive_failures = 0
+    while offset < file_size:
         chunk = content[offset : offset + chunk_size]
         encoded = base64.b64encode(chunk).decode("ascii")
         chunk_script = (
@@ -392,13 +493,27 @@ def upload_file(ser, local_path, remote_path, chunk_size=1024):
             b"print('CHUNK_OK')\n"
         )
         ok, _out = exec_raw(ser, chunk_script)
-        if not ok or "CHUNK_OK" not in _out:
-            # Try to close the dangling handle
-            ser.write(b"_lmao_f.close()\n")
-            ser.write(b"\x04")
-            time.sleep(0.3)
-            ser.read(ser.in_waiting)
-            return False
+        if ok and "CHUNK_OK" in _out:
+            consecutive_failures = 0
+            offset += chunk_size
+            continue
+
+        consecutive_failures += 1
+        if consecutive_failures >= _STALL_LIMIT:
+            # Device appears wedged — close the dangling handle and bail out.
+            try:
+                ser.write(b"_lmao_f.close()\n")
+                ser.write(b"\x04")
+                time.sleep(0.3)
+                ser.read(ser.in_waiting)
+            except (serial.SerialException, OSError):
+                pass
+            raise DeviceStalledError(
+                f"Device stopped responding at byte {offset} of {file_size} "
+                f"while uploading {remote_path}. The USB-Serial-JTAG interface "
+                "may be wedged — press the Cardputer's RESET button (or "
+                "power-cycle it), then retry."
+            )
 
     # Step 5 — close file and report success
     script = b"_lmao_f.close()\nprint('UPLOAD_OK')\n"

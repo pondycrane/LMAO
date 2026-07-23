@@ -303,7 +303,7 @@ a **Cap LoRa-1262** module (SX1262) connected via the rear EXT 2.54-14P header.
 | Bandwidth | 125 kHz |
 | Coding Rate | 4:5 |
 | TX Power | 14 dBm |
-| Preamble | 8 symbols |
+| Preamble | 24 symbols (must match RNode firmware's dynamic preamble — 8 symbols loses ~80% of RX packets) |
 | Syncword | 0x1424 (Reticulum default) |
 
 See `cardputer_client/lora_boards.py` for the `cardputer_adv` board preset

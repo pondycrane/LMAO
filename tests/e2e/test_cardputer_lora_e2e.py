@@ -256,6 +256,31 @@ class TestCardputerLoRaE2E:
         )
         assert server_lora["codingrate"] == 5, f"Server CR {server_lora['codingrate']} != 5"
 
+        # Client-side radio params (cardputer_client/config.py) must match the
+        # server, and the preamble must match the RNode firmware's dynamic
+        # preamble (24 symbols at SF7/BW125 — measured on the bench: a client
+        # preamble of 8 decodes only ~20% of RNode transmissions).
+        root = cardputer_flash.find_client_root()
+        assert root, "Cannot find cardputer_client/ source directory"
+        with open(os.path.join(root, "config.py")) as f:
+            client_cfg = f.read()
+
+        import re as _re
+
+        def _client_param(name):
+            m = _re.search(rf'"{name}":\s*([\w".]+)', client_cfg)
+            assert m, f'cardputer_client/config.py missing "{name}"'
+            return m.group(1).strip('"')
+
+        assert _client_param("freq_khz") == "868000", "Client freq must be 868 MHz"
+        assert _client_param("sf") == "7", "Client SF must be 7"
+        assert _client_param("bw") == "125", "Client BW must be 125 kHz"
+        assert _client_param("coding_rate") == "5", "Client CR must be 4:5"
+        assert _client_param("preamble_len") == "24", (
+            "Client preamble_len must be 24 to match the RNode firmware's "
+            "dynamic preamble (min 18 symbols; 24 at SF7/BW125)."
+        )
+
     def test_lora_full_e2e(self):
         """Full LoRa E2E: flash Cardputer with server hash, start server,
         and verify bidirectional LoRa message delivery.
@@ -454,12 +479,16 @@ class TestCardputerLoRaE2E:
                 ok = cardputer_flash.enter_raw_repl(cardputer_ser)
                 assert ok, "Cannot enter raw REPL on Cardputer"
 
-                # Upload all client files (config.py uploaded with DEST_HASH = None)
+                # Upload all client files (config.py uploaded with DEST_HASH = None).
+                # skip_if_unchanged: files already identical on the device are
+                # skipped (SHA-256 compare) — faster and gentler on the device.
                 for rel in cardputer_flash.FILES_TO_UPLOAD:
                     local_path = os.path.join(root, rel)
                     remote_path = rel
                     assert os.path.isfile(local_path), f"Missing source: {local_path}"
-                    uploaded = cardputer_flash.upload_file(cardputer_ser, local_path, remote_path)
+                    uploaded = cardputer_flash.upload_file(
+                        cardputer_ser, local_path, remote_path, skip_if_unchanged=True
+                    )
                     assert uploaded, f"Failed to upload {rel}"
 
                 # Upload all library files (auto-discovered, like the flash tool does).
@@ -470,7 +499,9 @@ class TestCardputerLoRaE2E:
                     if not os.path.isfile(local_path):
                         continue
                     remote_path = rel
-                    uploaded = cardputer_flash.upload_file(cardputer_ser, local_path, remote_path)
+                    uploaded = cardputer_flash.upload_file(
+                        cardputer_ser, local_path, remote_path, skip_if_unchanged=True
+                    )
                     assert uploaded, f"Failed to upload lib/{rel}"
 
                 # Overwrite /config.py on the device with the patched version
@@ -559,7 +590,7 @@ class TestCardputerLoRaE2E:
                 # ── Report captured output ──
                 captured = cardputer_output.decode("utf-8", errors="replace")
                 print(f"\n[Cardputer serial output — {len(cardputer_output)} bytes]")
-                print(captured[:2000])
+                print(captured[:8000])
 
                 # ── Assertions ──
                 assert found_banner, (
@@ -592,7 +623,7 @@ class TestCardputerLoRaE2E:
                 # SensorReports are sent by default (SEND_SENSOR=True), validate ingestion
                 rows = asyncio.run(
                     store.query(
-                        "SELECT node_id, value, unit FROM sensor_readings ORDER BY id DESC LIMIT 5",
+                        "SELECT node_id, value, unit FROM sensor_readings ORDER BY timestamp_ms DESC LIMIT 5",
                     )
                 )
                 assert len(rows) > 0, (
