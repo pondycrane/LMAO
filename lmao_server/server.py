@@ -78,8 +78,38 @@ def _warn_if_rnode_missing(rnode_port):
     warn_if_rnode_missing(rnode_port, role="server")
 
 
-def _init_rns_and_lxmf(rnode_port, identity_storage_path="/tmp/lmao_server_lxmf"):
-    """Initialize Reticulum + LXMF for the server (delegates to shared helper)."""
+def _init_rns_and_lxmf(rnode_port, identity_storage_path=None):
+    """Initialize Reticulum + LXMF for the server (delegates to shared helper).
+
+    The LXMF identity (and therefore the destination hash that Cardputer
+    clients bake into their config.py) is stored in *identity_storage_path*.
+
+    The default is ``~/.local/share/lmao_server/lxmf`` — a per-user location
+    that survives reboots (unlike ``/tmp`` which is wiped on restart).  A
+    stale destination hash on the Cardputer causes every LXMF send to fail
+    silently ("no path"), so keeping the server identity stable across
+    reboots is critical for reliable LoRa mesh operation.
+
+    The path can be overridden via the *identity_storage_path* parameter or
+    the ``LMAO_SERVER_IDENTITY_PATH`` environment variable.
+    """
+    if identity_storage_path is None:
+        identity_storage_path = os.environ.get(
+            "LMAO_SERVER_IDENTITY_PATH",
+            os.path.expanduser("~/.local/share/lmao_server/lxmf"),
+        )
+    # Ensure the parent directory exists.
+    parent = os.path.dirname(identity_storage_path)
+    if parent:
+        try:
+            os.makedirs(parent, exist_ok=True)
+        except PermissionError:
+            logger.warning(
+                "Cannot create identity storage directory %s — "
+                "the LXMF router may fail if the path does not exist.",
+                parent,
+            )
+
     return _shared_init(
         rnode_port=rnode_port,
         configdir_factory=config.get_configdir,
@@ -88,7 +118,7 @@ def _init_rns_and_lxmf(rnode_port, identity_storage_path="/tmp/lmao_server_lxmf"
     )
 
 
-def _print_startup_banner(identity_hex, rnode_port, grpc_available, nats_connected=False):
+def _print_startup_banner(identity_hex, rnode_port, grpc_available, nats_connected=False, delivery_hash_hex=None):
     """Print the server startup banner with identity and status info."""
     rnode_status = (
         f"RNode on {rnode_port}"
@@ -99,6 +129,9 @@ def _print_startup_banner(identity_hex, rnode_port, grpc_available, nats_connect
     print(f"\n{'=' * 50}")
     print("LMAO Server — Running (async mode)")
     print(f"Node identity: {identity_hex}")
+    if delivery_hash_hex:
+        # This is the value clients must set as DEST_HASH — NOT the identity.
+        print(f"Delivery destination (client DEST_HASH): {delivery_hash_hex}")
     print("Listening for LXMF messages...")
     print(f"  LoRa: {rnode_status}")
     print("  WiFi: AutoInterface enabled")
@@ -417,6 +450,23 @@ async def async_main():
     # Register the delivery callback
     router.register_delivery_callback(lmao_server.handle_lxmf_delivery)
 
+    # ── Announce presence for LoRa path discovery ─────────────────
+    # Clients (e.g. Cardputer) need the server to announce so they can
+    # discover a path and recall the server's identity keys.  LXMF's
+    # router.announce() requires the *delivery destination hash* (keyed
+    # in router.delivery_destinations), NOT the raw identity hash —
+    # passing the identity hash is a silent no-op.
+    def _announce_delivery_destinations():
+        for dest_hash in list(router.delivery_destinations):
+            router.announce(dest_hash)
+
+    logger.info("Announcing server presence for LoRa path discovery...")
+    try:
+        _announce_delivery_destinations()
+        logger.info("Server announce sent.")
+    except Exception as e:
+        logger.warning("Server announce failed (LoRa may be unavailable): %s", e)
+
     # ── NATS connect (optional) ─────────────────────────────────
     nats_queue = None
     if NATS_AVAILABLE:
@@ -437,12 +487,19 @@ async def async_main():
             )
             nats_queue = None
 
-    # Print banner
+    # Print banner (including the delivery destination hash clients
+    # must use as DEST_HASH — it differs from the raw identity hash)
+    _delivery_hashes = list(router.delivery_destinations)
     _print_startup_banner(
         RNS.hexrep(server_identity.hash, delimit=False),
         rnode_port,
         GRPC_AVAILABLE,
         nats_queue is not None,
+        delivery_hash_hex=(
+            RNS.hexrep(_delivery_hashes[0], delimit=False)
+            if _delivery_hashes
+            else None
+        ),
     )
 
     # Start gRPC server if available
@@ -458,7 +515,21 @@ async def async_main():
         logger.info("gRPC server started on 0.0.0.0:50051")
         print("gRPC server ready on 0.0.0.0:50051")
 
-    # Keep running
+    # Keep running, re-announcing periodically so late-joining clients
+    # can discover a path.  Runs as a background task so it works whether
+    # or not gRPC is active.
+    ANNOUNCE_INTERVAL = 300  # re-announce every 5 minutes
+
+    async def _periodic_announce():
+        while True:
+            await asyncio.sleep(ANNOUNCE_INTERVAL)
+            try:
+                _announce_delivery_destinations()
+                logger.debug("Periodic announce sent.")
+            except Exception as e:
+                logger.warning("Periodic announce failed: %s", e)
+
+    announce_task = asyncio.ensure_future(_periodic_announce())
     try:
         if grpc_server:
             await grpc_server.wait_for_termination()
@@ -469,6 +540,7 @@ async def async_main():
     except KeyboardInterrupt:
         print("\nShutting down...")
     finally:
+        announce_task.cancel()
         if grpc_server:
             await grpc_server.stop(5)
         if lmao_server:

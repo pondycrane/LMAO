@@ -534,16 +534,25 @@ async def _periodic_send(tft, status_lines, router, identity_hex,
 
     Defined at module level (not nested) to avoid MicroPython closure
     scoping issues with async functions and local variable references.
+
+    Error handling uses exponential backoff capped at the normal
+    send interval.  This guarantees the MicroPython VM always yields
+    to the event loop (so Ctrl+C is never starved) and prevents
+    rapid-fire retry storms on permanent failures (e.g. stale
+    DEST_HASH after server reboot).
     """
     import uasyncio as asyncio
 
     seq = 0
-    consecutive_errors = 0
     MAX_CONSECUTIVE_ERRORS = 10
+    BACKOFF_BASE = 1  # seconds — doubles each error
+
+    # consecutive_errors lives OUTSIDE the while loop so it actually
+    # accumulates across iterations.  It is reset ONLY on success.
+    consecutive_errors = 0
 
     while True:
         try:
-            consecutive_errors = 0
             seq += 1
             hello_text = f"Hello from Cardputer — seq {seq}"
 
@@ -588,6 +597,8 @@ async def _periodic_send(tft, status_lines, router, identity_hex,
                 tft = log(f"Reply: {reply}", tft, status_lines)
             pending_replies.clear()
 
+            # Success — reset error counter and sleep the normal interval.
+            consecutive_errors = 0
             await asyncio.sleep(config["interval_seconds"])
 
         except asyncio.CancelledError:
@@ -605,7 +616,14 @@ async def _periodic_send(tft, status_lines, router, identity_hex,
             if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
                 log("FATAL: Too many consecutive errors, halting.", tft, status_lines)
                 break
-            await asyncio.sleep(5)
+
+            # Exponential backoff capped at the normal interval so the
+            # VM always yields and Ctrl+C is always processed.
+            delay = min(
+                config["interval_seconds"],
+                BACKOFF_BASE * (2 ** consecutive_errors),
+            )
+            await asyncio.sleep(delay)
 
 
 async def _async_runtime(tft, status_lines, rns, router, identity_hex,
