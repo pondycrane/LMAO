@@ -21,7 +21,13 @@ WIFI_PASS = None
 NODE_NAME = "LMAO_Cardputer"
 
 # DEBUG levels: 0 = silent, 1 = messages & announces, 2 = full debug
-DEBUG = 2
+# WARNING: keep this at 1 (or 0) for unattended operation.  At level 2
+# the client prints radio diagnostics every few seconds; when no host
+# reads the USB-CDC port the TX FIFO fills up and the MicroPython VM
+# blocks inside print(), freezing the device (REPL lockout — recovery
+# requires a physical reset).  The LoRa E2E test patches this to 2 on
+# the device because the host drains the serial port during the test.
+DEBUG = 1
 
 # Destination hash of the server's lxmf.delivery destination (hex string
 # of a 16-byte hash).  NOTE: this is the *destination* hash derived from
@@ -91,7 +97,12 @@ CONFIG = {
             "bw": "125",  # 125 kHz
             "coding_rate": 5,  # 4:5
             "tx_power": 14,  # dBm
-            "preamble_len": 8,
+            # Preamble length MUST match the RNode firmware's dynamic
+            # preamble (LORA_PREAMBLE_TARGET_MS / symbol_time, min 18 —
+            # 24 symbols at SF7/BW125).  With the old value of 8 the
+            # SX1262 decoded only ~20% of RNode transmissions (measured
+            # 1/11 packets on the bench); 24 gives 12/12.
+            "preamble_len": 24,
             "crc_en": True,
             "syncword": 0x1424,  # Reticulum default syncword
         },

@@ -4,7 +4,9 @@ py_library(
     name = "install_services_lib",
     srcs = ["install_services.py"],
     visibility = ["//visibility:public"],
-    deps = [],
+    deps = [
+        "//lma_core",
+    ],
 )
 
 py_library(
@@ -14,6 +16,7 @@ py_library(
     deps = [
         ":install_services_lib",
         "//cardputer_client:flash_lib",
+        "//lma_core",
         "//tests:e2e_helpers_lib",
         "@lmao_pip//pyserial",
     ],

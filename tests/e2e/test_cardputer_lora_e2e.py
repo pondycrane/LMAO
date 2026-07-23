@@ -136,7 +136,7 @@ def _probe_hardware():
 
         # Try opening the Cardputer port to verify MicroPython REPL
         try:
-            with serial.Serial(_CARDCOMPUTER_PORT, 115200, timeout=1) as ser:
+            with serial.Serial(_CARDCOMPUTER_PORT, 115200, timeout=1, write_timeout=10) as ser:
                 time.sleep(0.6)
                 ok = cardputer_flash.enter_raw_repl(ser)
                 if not ok:
@@ -149,12 +149,13 @@ def _probe_hardware():
                 # Check for native LoRa driver (required for on-board SX1262)
                 ok, out = cardputer_flash.exec_raw(
                     ser,
-                    "import sys; ok = False; "
-                    "try: import lora; ok = True\n"
-                    "except ImportError: pass\n"
-                    "print('__LORA_OK__' if ok else '__LORA_MISSING__')",
+                    "try:\n"
+                    "    import lora\n"
+                    "    print('__LORA_OK__')\n"
+                    "except ImportError:\n"
+                    "    print('__LORA_MISSING__')\n",
                 )
-                if not ok or b"__LORA_OK__" not in out:
+                if not ok or "__LORA_OK__" not in out:
                     _HARDWARE_REASON = (
                         f"Cardputer at {_CARDCOMPUTER_PORT} is missing the native "
                         "LoRa driver (SX1262). The 'lora' module is not "
@@ -255,6 +256,31 @@ class TestCardputerLoRaE2E:
         )
         assert server_lora["codingrate"] == 5, f"Server CR {server_lora['codingrate']} != 5"
 
+        # Client-side radio params (cardputer_client/config.py) must match the
+        # server, and the preamble must match the RNode firmware's dynamic
+        # preamble (24 symbols at SF7/BW125 — measured on the bench: a client
+        # preamble of 8 decodes only ~20% of RNode transmissions).
+        root = cardputer_flash.find_client_root()
+        assert root, "Cannot find cardputer_client/ source directory"
+        with open(os.path.join(root, "config.py")) as f:
+            client_cfg = f.read()
+
+        import re as _re
+
+        def _client_param(name):
+            m = _re.search(rf'"{name}":\s*([\w".]+)', client_cfg)
+            assert m, f'cardputer_client/config.py missing "{name}"'
+            return m.group(1).strip('"')
+
+        assert _client_param("freq_khz") == "868000", "Client freq must be 868 MHz"
+        assert _client_param("sf") == "7", "Client SF must be 7"
+        assert _client_param("bw") == "125", "Client BW must be 125 kHz"
+        assert _client_param("coding_rate") == "5", "Client CR must be 4:5"
+        assert _client_param("preamble_len") == "24", (
+            "Client preamble_len must be 24 to match the RNode firmware's "
+            "dynamic preamble (min 18 symbols; 24 at SF7/BW125)."
+        )
+
     def test_lora_full_e2e(self):
         """Full LoRa E2E: flash Cardputer with server hash, start server,
         and verify bidirectional LoRa message delivery.
@@ -296,7 +322,7 @@ class TestCardputerLoRaE2E:
         try:
             config_content = dict_to_ini(
                 {
-                    "logging": {"loglevel": 3},
+                    "logging": {"loglevel": 7},
                     "transport": {"path": "/tmp/lmao_e2e_rns_state"},
                 },
                 {"RNode LoRa": cfg_dict["interfaces"]["RNode LoRa"]},
@@ -306,9 +332,18 @@ class TestCardputerLoRaE2E:
 
             RNS.Reticulum(configdir=configdir)
             identity = RNS.Identity()
-            server_hash = RNS.hexrep(identity.hash, delimit=False)
 
             router = LXMF.LXMRouter(identity=identity, storagepath="/tmp/lmao_e2e_lxmf")
+
+            # Register the delivery identity — required for LXMF to receive
+            # incoming messages (mirrors lma_core/rns_init.py).
+            router.register_delivery_identity(identity, display_name="lmao-e2e-server")
+
+            # The urns client addresses LXMF messages to the server's
+            # lxmf.delivery *destination hash* (derived from the identity),
+            # not the raw identity hash — see urns/lxmf.py send_message().
+            server_dest_hash_bytes = next(iter(router.delivery_destinations))
+            server_hash = RNS.hexrep(server_dest_hash_bytes, delimit=False)
 
             # Shared state between server thread and test main thread
             received_messages = []
@@ -319,6 +354,9 @@ class TestCardputerLoRaE2E:
             # ── Temporary DuckDB for sensor pipeline validation ──
             db_fd, db_path = tempfile.mkstemp(suffix=".duckdb", prefix="lmao_e2e_")
             os.close(db_fd)
+            # mkstemp creates a 0-byte file, but DuckDB refuses to open an
+            # existing empty file — remove it so DuckDB creates a fresh DB.
+            os.unlink(db_path)
             store = DuckDbStore()
             store.initialize(db_path)
 
@@ -386,6 +424,12 @@ class TestCardputerLoRaE2E:
 
             router.register_delivery_callback(capture_delivery)
 
+            # Announce so the Cardputer can discover a path and recall the
+            # server's identity.  Re-announced periodically in the wait loop
+            # below — a single path-request/response exchange is timing-
+            # sensitive over a half-duplex LoRa link.
+            router.announce(server_dest_hash_bytes)
+
             # ── Prepare and flash the Cardputer ──
 
             root = cardputer_flash.find_client_root()
@@ -401,16 +445,36 @@ class TestCardputerLoRaE2E:
             with open(config_path) as f:
                 original_config = f.read()
 
-            patched_config = original_config.replace(
-                "DEST_HASH = None",
+            import re as _re
+
+            patched_config, _n_subs = _re.subn(
+                r'DEST_HASH\s*=\s*(?:"[^"]*"|None)',
                 f'DEST_HASH = "{server_hash}"',
+                original_config,
+            )
+            assert _n_subs == 1, (
+                "Could not patch DEST_HASH in config.py — expected exactly one "
+                "DEST_HASH assignment (string or None)."
             )
 
             # Set a shorter interval for E2E tests (avoids exceeding the 30s serial deadline)
             # and enable the external sensor if one is configured via env var.
+            assert "INTERVAL_SECONDS = 15" in patched_config.replace(
+                "INTERVAL_SECONDS = 60",
+                "INTERVAL_SECONDS = 15",
+            ), "INTERVAL_SECONDS patch failed"
             patched_config = patched_config.replace(
                 "INTERVAL_SECONDS = 60",
                 "INTERVAL_SECONDS = 15",
+            )
+            # Verbose radio diagnostics during the E2E (the host drains the
+            # serial port continuously, so the USB-CDC TX FIFO cannot fill
+            # up and block the VM).  Must NOT be the committed default —
+            # see config.py's DEBUG comment.
+            assert "DEBUG = 1" in patched_config, "DEBUG patch target missing"
+            patched_config = patched_config.replace(
+                "DEBUG = 1",
+                "DEBUG = 2",
             )
             _e2e_sensor_type = os.environ.get("E2E_SENSOR_TYPE", "None")
             if _e2e_sensor_type not in ("None", ""):
@@ -422,18 +486,22 @@ class TestCardputerLoRaE2E:
             cardputer_ser = None
             try:
                 # Flash the Cardputer with client files
-                cardputer_ser = serial.Serial(_CARDCOMPUTER_PORT, 115200, timeout=1)
+                cardputer_ser = serial.Serial(_CARDCOMPUTER_PORT, 115200, timeout=1, write_timeout=10)
                 time.sleep(0.6)
 
                 ok = cardputer_flash.enter_raw_repl(cardputer_ser)
                 assert ok, "Cannot enter raw REPL on Cardputer"
 
-                # Upload all client files (config.py uploaded with DEST_HASH = None)
+                # Upload all client files (config.py uploaded with DEST_HASH = None).
+                # skip_if_unchanged: files already identical on the device are
+                # skipped (SHA-256 compare) — faster and gentler on the device.
                 for rel in cardputer_flash.FILES_TO_UPLOAD:
                     local_path = os.path.join(root, rel)
                     remote_path = rel
                     assert os.path.isfile(local_path), f"Missing source: {local_path}"
-                    uploaded = cardputer_flash.upload_file(cardputer_ser, local_path, remote_path)
+                    uploaded = cardputer_flash.upload_file(
+                        cardputer_ser, local_path, remote_path, skip_if_unchanged=True
+                    )
                     assert uploaded, f"Failed to upload {rel}"
 
                 # Upload all library files (auto-discovered, like the flash tool does).
@@ -444,7 +512,9 @@ class TestCardputerLoRaE2E:
                     if not os.path.isfile(local_path):
                         continue
                     remote_path = rel
-                    uploaded = cardputer_flash.upload_file(cardputer_ser, local_path, remote_path)
+                    uploaded = cardputer_flash.upload_file(
+                        cardputer_ser, local_path, remote_path, skip_if_unchanged=True
+                    )
                     assert uploaded, f"Failed to upload lib/{rel}"
 
                 # Overwrite /config.py on the device with the patched version
@@ -465,12 +535,19 @@ class TestCardputerLoRaE2E:
                         os.unlink(tmp_path)
 
                 # Verify the hash is present in the config on the device
+                # Force a fresh import — if main.py already ran on the device,
+                # the old 'config' module is cached in sys.modules and would
+                # report the stale DEST_HASH.
                 ok, out = cardputer_flash.exec_raw(
                     cardputer_ser,
-                    "import config; print(config.DEST_HASH)",
+                    "import sys\n"
+                    "if 'config' in sys.modules:\n"
+                    "    del sys.modules['config']\n"
+                    "import config\n"
+                    "print(config.DEST_HASH)\n",
                 )
                 assert ok, f"exec_raw failed: {out[:200]}"
-                assert server_hash in out.decode("utf-8", errors="replace"), (
+                assert server_hash in out, (
                     f"Server hash {server_hash} not found in device config output: {out[:200]}"
                 )
 
@@ -484,9 +561,20 @@ class TestCardputerLoRaE2E:
                 cardputer_output = b""
                 found_banner = False
                 found_ack = False
-                serial_deadline = time.time() + 30
+                # The Cardputer needs ~25s to boot, and sends at
+                # INTERVAL_SECONDS=15 — the first send(s) may still miss the
+                # server's announce, so allow boot + 2 full intervals.
+                serial_deadline = time.time() + 75
 
+                last_announce = 0.0
                 while time.time() < serial_deadline:
+                    if time.time() - last_announce > 8:
+                        try:
+                            router.announce(server_dest_hash_bytes)
+                        except Exception:
+                            pass
+                        last_announce = time.time()
+
                     if cardputer_ser.in_waiting:
                         cardputer_output += cardputer_ser.read(cardputer_ser.in_waiting)
 
@@ -515,7 +603,7 @@ class TestCardputerLoRaE2E:
                 # ── Report captured output ──
                 captured = cardputer_output.decode("utf-8", errors="replace")
                 print(f"\n[Cardputer serial output — {len(cardputer_output)} bytes]")
-                print(captured[:2000])
+                print(captured[:8000])
 
                 # ── Assertions ──
                 assert found_banner, (
@@ -548,7 +636,7 @@ class TestCardputerLoRaE2E:
                 # SensorReports are sent by default (SEND_SENSOR=True), validate ingestion
                 rows = asyncio.run(
                     store.query(
-                        "SELECT node_id, value, unit FROM sensor_readings ORDER BY id DESC LIMIT 5",
+                        "SELECT node_id, value, unit FROM sensor_readings ORDER BY timestamp_ms DESC LIMIT 5",
                     )
                 )
                 assert len(rows) > 0, (
@@ -605,14 +693,37 @@ class TestCardputerLoRaE2E:
                 print(f"   Messages received by server: {len(received_messages)}")
 
             finally:
-                # Close serial port (note: we no longer modify config.py on
-                # disk — the patched config is written directly to the device
-                # via exec_raw, so there is nothing to restore).
+                # Restore the production-quiet config on the device.  The
+                # E2E config is deliberately chatty (DEBUG=2, 15s interval);
+                # left running unattended it can fill the USB-CDC TX FIFO
+                # and freeze the VM (REPL lockout).  Best-effort — the
+                # device may already be gone.
                 if cardputer_ser is not None:
                     try:
-                        cardputer_ser.close()
+                        if cardputer_flash.enter_raw_repl(cardputer_ser, max_attempts=2):
+                            import tempfile as _tf
+
+                            with _tf.NamedTemporaryFile(
+                                mode="w", suffix=".py", delete=False
+                            ) as _tmp:
+                                _tmp.write(original_config)
+                                _tmp_path = _tmp.name
+                            try:
+                                cardputer_flash.upload_file(
+                                    cardputer_ser, _tmp_path, "config.py"
+                                )
+                            finally:
+                                with contextlib.suppress(OSError):
+                                    os.unlink(_tmp_path)
+                            cardputer_flash.exit_raw_repl(cardputer_ser)
+                            cardputer_ser.write(b"\x04")  # soft reset
                     except Exception:
-                        _logger.warning("Serial close failed", exc_info=True)
+                        _logger.warning("Config restore failed", exc_info=True)
+                    finally:
+                        try:
+                            cardputer_ser.close()
+                        except Exception:
+                            _logger.warning("Serial close failed", exc_info=True)
 
                 # Close DuckDB store and clean up temp file
                 try:
