@@ -44,6 +44,7 @@ except ImportError:
 # Cardputer flashing helpers (from cardputer_client/flash.py via flash_lib).
 from cardputer_client.flash import (
     FILES_TO_UPLOAD,
+    DeviceStalledError,
     _mip_install,
     auto_discover_lib_files,
     enter_raw_repl,
@@ -144,7 +145,7 @@ def _flash_cardputer_client(port: str, client_root: str, result: DeviceResult) -
             print(f"  FAIL: {exc}")
             return
 
-        # Upload each file.
+        # Upload each file (skipping files already identical on the device).
         total = len(all_files)
         print(f"  Uploading {total} file(s) ...")
         failed = 0
@@ -152,7 +153,16 @@ def _flash_cardputer_client(port: str, client_root: str, result: DeviceResult) -
             local_path = os.path.join(client_root, rel)
             size = os.path.getsize(local_path)
             print(f"    {rel:35s} … ", end="", flush=True)
-            if upload_file(ser, local_path, rel):
+            try:
+                res = upload_file(ser, local_path, rel, skip_if_unchanged=True)
+            except DeviceStalledError as exc:
+                print("FAILED")
+                result.fail(str(exc))
+                print(f"  FAIL: {exc}")
+                return
+            if res == "unchanged":
+                print("OK  (unchanged)")
+            elif res:
                 print(f"OK  ({size} B)")
             else:
                 print("FAILED")
@@ -181,6 +191,9 @@ def _flash_cardputer_client(port: str, client_root: str, result: DeviceResult) -
         result.fail("Aborted by user")
         print("\n  Interrupted by user — Cardputer flash cancelled.")
         return
+    except DeviceStalledError as exc:
+        result.fail(str(exc))
+        print(f"  FAIL: {exc}")
     except serial.SerialException as exc:
         result.fail(f"Serial error: {exc}")
         print(f"  FAIL: {exc}")
