@@ -368,10 +368,12 @@ def device_file_sha256(ser, remote_path):
                 "Cardputer's RESET button (or power-cycle it), then retry."
             )
         return None
-    for line in out.splitlines():
-        if line.startswith("SHA:"):
-            val = line[4:].strip()
-            return None if val == "MISSING" else val
+    # NOTE: the raw REPL "OK" ack is glued directly onto the first line of
+    # output ("OKSHA:..."), so match the marker anywhere, not at line start.
+    idx = out.find("SHA:")
+    if idx >= 0:
+        val = out[idx + 4 :].splitlines()[0].strip()
+        return None if val == "MISSING" else val
     return None
 
 
