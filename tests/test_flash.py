@@ -302,6 +302,14 @@ class TestMain:
         """Reset sys.argv for each test so argparse doesn't see pytest args."""
         monkeypatch.setattr(sys, "argv", ["flash"])
 
+    @pytest.fixture(autouse=True)
+    def _patch_watchdog_disarm(self):
+        """Keep disarm_watchdog off the mock serial port (a real call would
+        grind through the full exec_raw timeout against a MagicMock)."""
+        with patch("cardputer_client.flash.disarm_watchdog", return_value=True) as m:
+            self.mock_disarm = m
+            yield
+
     @staticmethod
     def _set_argv(*args):
         """Override sys.argv with flash + given args."""
@@ -551,6 +559,106 @@ class TestMain:
         assert exc.value.code == 1
         captured = capsys.readouterr()
         assert "FAILED" in captured.out
+
+    def test_main_recovers_from_wedged_device(self, capsys):
+        """main() attempts automatic recovery on DeviceStalledError, then
+        resumes the upload on the recovered connection (issue #74)."""
+        port = "/dev/ttyACM0"
+        fake_root = "/tmp/fake_client"
+        mock_ser = MagicMock()
+        recovered_ser = MagicMock()
+
+        with (
+            patch("cardputer_client.flash.find_client_root", return_value=fake_root),
+            patch("os.path.isfile", return_value=True),
+            patch("cardputer_client.flash.find_cardputer_port", return_value=port),
+            patch("serial.Serial", return_value=mock_ser),
+            patch("cardputer_client.flash.enter_raw_repl", return_value=True),
+            patch("cardputer_client.flash.verify_device", return_value=(True, "ESP32")),
+            patch("cardputer_client.flash._mip_install", return_value=True),
+            patch("os.path.getsize", return_value=1234),
+            patch("cardputer_client.flash.auto_discover_lib_files", return_value=[]),
+            patch(
+                "cardputer_client.flash.upload_file",
+                side_effect=[
+                    cardputer_flash.DeviceStalledError("wedged at byte 0"),
+                    True, True, True, True, True,
+                ],
+            ),
+            patch(
+                "cardputer_client.flash.recover_wedged_device",
+                return_value=recovered_ser,
+            ) as mock_recover,
+        ):
+            cardputer_flash.main()
+
+        captured = capsys.readouterr()
+        assert "Resuming upload after recovery" in captured.out
+        assert "Flash complete" in captured.out
+        mock_recover.assert_called_once_with(mock_ser, port)
+        recovered_ser.close.assert_called_once()
+
+    def test_main_exits_when_recovery_fails(self, capsys):
+        """main() exits(1) with the physical-reset hint when the wedge
+        cannot be recovered in software."""
+        port = "/dev/ttyACM0"
+        fake_root = "/tmp/fake_client"
+        mock_ser = MagicMock()
+
+        with (
+            patch("cardputer_client.flash.find_client_root", return_value=fake_root),
+            patch("os.path.isfile", return_value=True),
+            patch("cardputer_client.flash.find_cardputer_port", return_value=port),
+            patch("serial.Serial", return_value=mock_ser),
+            patch("cardputer_client.flash.enter_raw_repl", return_value=True),
+            patch("cardputer_client.flash.verify_device", return_value=(True, "ESP32")),
+            patch("cardputer_client.flash._mip_install", return_value=True),
+            patch("os.path.getsize", return_value=1234),
+            patch("cardputer_client.flash.auto_discover_lib_files", return_value=[]),
+            patch(
+                "cardputer_client.flash.upload_file",
+                side_effect=cardputer_flash.DeviceStalledError("wedged"),
+            ),
+            patch("cardputer_client.flash.recover_wedged_device", return_value=None),
+            pytest.raises(SystemExit) as exc,
+        ):
+            cardputer_flash.main()
+
+        assert exc.value.code == 1
+        captured = capsys.readouterr()
+        assert "RESET button" in captured.out
+
+    def test_main_exits_when_device_restalls_after_recovery(self, capsys):
+        """Only one recovery attempt is made; a second stall exits(1)."""
+        port = "/dev/ttyACM0"
+        fake_root = "/tmp/fake_client"
+        mock_ser = MagicMock()
+        recovered_ser = MagicMock()
+
+        with (
+            patch("cardputer_client.flash.find_client_root", return_value=fake_root),
+            patch("os.path.isfile", return_value=True),
+            patch("cardputer_client.flash.find_cardputer_port", return_value=port),
+            patch("serial.Serial", return_value=mock_ser),
+            patch("cardputer_client.flash.enter_raw_repl", return_value=True),
+            patch("cardputer_client.flash.verify_device", return_value=(True, "ESP32")),
+            patch("cardputer_client.flash._mip_install", return_value=True),
+            patch("os.path.getsize", return_value=1234),
+            patch("cardputer_client.flash.auto_discover_lib_files", return_value=[]),
+            patch(
+                "cardputer_client.flash.upload_file",
+                side_effect=cardputer_flash.DeviceStalledError("still wedged"),
+            ),
+            patch(
+                "cardputer_client.flash.recover_wedged_device",
+                return_value=recovered_ser,
+            ) as mock_recover,
+            pytest.raises(SystemExit) as exc,
+        ):
+            cardputer_flash.main()
+
+        assert exc.value.code == 1
+        assert mock_recover.call_count == 1
 
     def test_main_handles_keyboard_interrupt(self, capsys):
         """main() exits(1) gracefully on Ctrl+C."""
@@ -829,6 +937,142 @@ class TestDeviceFileSha256:
             return_value=(False, "some other error"),
         ):
             assert cardputer_flash.device_file_sha256(mock_ser, "/flash/main.py") is None
+
+
+class TestDisarmWatchdog:
+    """Tests for disarm_watchdog() — extends any client-armed WDT while flashing."""
+
+    def test_sends_disarm_script_and_returns_true_on_ack(self):
+        mock_ser = MagicMock()
+        with patch(
+            "cardputer_client.flash.exec_raw",
+            return_value=(True, "OKWDT_DISARMED\r\n\x04>"),
+        ) as mock_exec:
+            assert cardputer_flash.disarm_watchdog(mock_ser) is True
+        script = mock_exec.call_args[0][1]
+        assert b"WDT" in script
+        assert b"3600000" in script
+
+    def test_returns_false_on_timeout(self):
+        mock_ser = MagicMock()
+        with patch(
+            "cardputer_client.flash.exec_raw",
+            return_value=(False, "Timeout waiting for device response"),
+        ):
+            assert cardputer_flash.disarm_watchdog(mock_ser) is False
+
+
+class TestRequestDeviceReset:
+    """Tests for _request_device_reset() acknowledgement handling."""
+
+    def test_acknowledged_returns_true(self):
+        with patch("cardputer_client.flash.exec_raw", return_value=(True, "OK")):
+            assert cardputer_flash._request_device_reset(MagicMock()) is True
+
+    def test_eio_means_device_rebooted(self):
+        """An I/O error mid-command means the chip reset before answering."""
+        with patch(
+            "cardputer_client.flash.exec_raw",
+            return_value=(
+                False,
+                "Serial communication error during exec_raw: "
+                "[Errno 5] Input/output error",
+            ),
+        ):
+            assert cardputer_flash._request_device_reset(MagicMock()) is True
+
+    def test_plain_timeout_returns_false(self):
+        with patch(
+            "cardputer_client.flash.exec_raw",
+            return_value=(False, "Timeout waiting for device response"),
+        ):
+            assert cardputer_flash._request_device_reset(MagicMock()) is False
+
+
+class TestRecoverWedgedDevice:
+    """Tests for recover_wedged_device() — software wedge recovery (#74)."""
+
+    @staticmethod
+    def _patches(**overrides):
+        """Common patch context for recovery tests."""
+        import contextlib
+
+        defaults = {
+            "_request_device_reset": True,
+            "_wait_for_port": MagicMock(),
+            "enter_raw_repl": True,
+            "verify_device": (True, "ESP32 / esp32 / Cardputer"),
+        }
+        defaults.update(overrides)
+        return contextlib.ExitStack(), defaults
+
+    def _run(self, **overrides):
+        old_ser = MagicMock()
+        stack, targets = self._patches(**overrides)
+        with stack:
+            for name, ret in targets.items():
+                if name == "_arm_watchdog_reset":
+                    stack.enter_context(
+                        patch(f"cardputer_client.flash.{name}")
+                    )
+                else:
+                    stack.enter_context(
+                        patch(f"cardputer_client.flash.{name}", return_value=ret)
+                    )
+            stack.enter_context(patch("cardputer_client.flash.time.sleep"))
+            result = cardputer_flash.recover_wedged_device(old_ser, "/dev/ttyACM0")
+        return result, old_ser, targets
+
+    def test_success_returns_new_serial(self):
+        new_ser = MagicMock()
+        result, old_ser, _ = self._run(_wait_for_port=new_ser)
+        assert result is new_ser
+        old_ser.close.assert_called_once()
+
+    def test_falls_back_to_watchdog_when_reset_not_acknowledged(self):
+        new_ser = MagicMock()
+        with (
+            patch("cardputer_client.flash._request_device_reset", return_value=False),
+            patch("cardputer_client.flash._arm_watchdog_reset") as mock_arm,
+            patch("cardputer_client.flash._wait_for_port", return_value=new_ser),
+            patch("cardputer_client.flash.enter_raw_repl", return_value=True),
+            patch("cardputer_client.flash.verify_device", return_value=(True, "ESP32")),
+            patch("cardputer_client.flash.time.sleep"),
+        ):
+            result = cardputer_flash.recover_wedged_device(MagicMock(), "/dev/ttyACM0")
+        assert result is new_ser
+        mock_arm.assert_called_once()
+
+    def test_watchdog_not_armed_when_reset_acknowledged(self):
+        new_ser = MagicMock()
+        with (
+            patch("cardputer_client.flash._request_device_reset", return_value=True),
+            patch("cardputer_client.flash._arm_watchdog_reset") as mock_arm,
+            patch("cardputer_client.flash._wait_for_port", return_value=new_ser),
+            patch("cardputer_client.flash.enter_raw_repl", return_value=True),
+            patch("cardputer_client.flash.verify_device", return_value=(True, "ESP32")),
+            patch("cardputer_client.flash.time.sleep"),
+        ):
+            cardputer_flash.recover_wedged_device(MagicMock(), "/dev/ttyACM0")
+        mock_arm.assert_not_called()
+
+    def test_returns_none_when_port_never_reappears(self):
+        result, _, _ = self._run(_wait_for_port=None)
+        assert result is None
+
+    def test_returns_none_when_raw_repl_fails(self):
+        new_ser = MagicMock()
+        result, _, _ = self._run(_wait_for_port=new_ser, enter_raw_repl=False)
+        assert result is None
+        new_ser.close.assert_called_once()
+
+    def test_returns_none_when_verify_fails(self):
+        new_ser = MagicMock()
+        result, _, _ = self._run(
+            _wait_for_port=new_ser, verify_device=(False, "not esp32")
+        )
+        assert result is None
+        new_ser.close.assert_called_once()
 
 
 class TestUploadFileChunked:
