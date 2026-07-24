@@ -31,13 +31,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY . .
 
 # Install Python dependencies
+# rns/lxmf are pinned to match lmao_server/requirements_lock.txt — unpinned
+# installs drifted the production image (rns 1.4.0/lxmf 1.1.0) away from the
+# Bazel-tested versions and broke the LXMF ACK path (issue #70).
 RUN pip install --no-cache-dir \
     grpcio \
     grpcio-tools \
     nats-py \
     protobuf \
-    rns \
-    lxmf
+    rns==1.3.5 \
+    lxmf==1.0.1
 
 # Generate protobuf/gRPC stubs
 RUN python -m grpc_tools.protoc -I proto --python_out=proto --grpc_python_out=proto proto/lma_messages.proto proto/lma_grpc.proto

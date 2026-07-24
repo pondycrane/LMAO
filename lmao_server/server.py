@@ -217,9 +217,14 @@ class Server:
         to gRPC subscribers so streaming clients receive the message.
         """
         try:
-            source_identity = message.get_source()
+            # get_source() returns the sender's RNS.Destination (an OUT
+            # lxmf.delivery destination in LXMF >= 1.0.1), NOT an Identity.
+            # It must be used directly as the reply destination — wrapping it
+            # in another RNS.Destination raises TypeError ("Invalid material
+            # supplied for destination hash calculation").
+            source_dest = message.get_source()
             source_hash = (
-                RNS.hexrep(source_identity.hash, delimit=False) if source_identity else "<unknown>"
+                RNS.hexrep(source_dest.hash, delimit=False) if source_dest else "<unknown>"
             )
             content_bytes = message.content if hasattr(message, "content") else b""
             title = message.title_as_string() if hasattr(message, "title_as_string") else ""
@@ -240,7 +245,7 @@ class Server:
             )
             logger.info("Reply: %s", reply_text)
 
-            if source_identity is not None and self.router is not None:
+            if source_dest is not None and self.router is not None:
                 # Build protobuf envelope with TextMessage
                 reply_envelope = LMAOEnvelope()
                 reply_envelope.text.node_id = source_hash
@@ -248,7 +253,7 @@ class Server:
                 reply_envelope.text.timestamp = int(time.time() * 1000)
 
                 reply_msg = LXMF.LXMessage(
-                    destination=_identity_to_destination(source_identity),
+                    destination=source_dest,
                     source=_identity_to_destination(self.server_identity),
                     content=reply_envelope.SerializeToString(),
                     title="p:Envelope",
@@ -257,7 +262,7 @@ class Server:
                 self.router.handle_outbound(reply_msg)
                 logger.info("Reply sent.")
             else:
-                logger.warning("Could not send reply (no source identity or router).")
+                logger.warning("Could not send reply (no source destination or router).")
 
             # Publish to NATS JetStream (fire-and-forget from sync context)
             if self._nats_queue is not None and self._loop is not None:

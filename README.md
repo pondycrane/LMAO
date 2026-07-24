@@ -398,6 +398,10 @@ docker run --network host --device /dev/ttyUSB0:/dev/ttyUSB0 lmao-server
 - `--network host` is **required** — Reticulum uses UDP multicast for
   AutoInterface discovery and must run on the host network stack.
 - Pass your RNode device with `--device` (adjust path as needed).
+- Mount the identity directory (`-v ~/.local/share/lmao_server:/root/.local/share/lmao_server`)
+  so the LXMF identity persists across container restarts — otherwise the
+  server gets a fresh identity on every start and the `DEST_HASH` baked into
+  Cardputer clients silently stops matching (issue #70).
 - Set `NATS_SERVER` to enable JetStream publishing to the **in-cluster NATS**
   (deployed via `kubectl apply -f k8s/nats-server.yaml`):
   ```bash
@@ -435,6 +439,7 @@ ExecStart=/usr/bin/docker run --rm --name lmao-server --network host \
   -e NATS_SERVER=nats://192.168.0.43:30146 \
   -e LMAO_RNODE_PORT=/dev/ttyUSB0 \
   --device /dev/ttyUSB0:/dev/ttyUSB0 \
+  -v /home/pondycrane/.local/share/lmao_server:/root/.local/share/lmao_server \
   192.168.0.36:5000/lmao-server:latest
 ExecStop=/usr/bin/docker stop lmao-server
 Restart=always
