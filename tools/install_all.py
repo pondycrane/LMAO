@@ -62,14 +62,14 @@ from cardputer_client.flash import (
 
 # Server-service install helpers (from tools/install_services.py).
 from tools.install_services import (
-    DEFAULT_REGISTRY_HOST,
-    DEFAULT_REGISTRY_PORT,
+    _docker_psql,
     detect_serial_devices,
     install_iot_ingest_consumer,
     install_k8s_services,
     install_pi_server,
     run_pi_server,
     setup_registry,
+    stop_pi_server_container,
 )
 
 # ---- Result tracking ----
@@ -210,6 +210,27 @@ def _flash_cardputer_client(port: str, client_root: str, result: DeviceResult) -
 # ---- RNode operations ----
 
 
+def _rnode_probe_hint() -> str:
+    """Return a diagnostic hint when the lmao-server container is running.
+
+    A running server holds the RNode serial port and races the DETECT
+    probe (async LoRa KISS frames interleave with the probe response).
+    """
+    try:
+        import shutil as _shutil
+
+        if _shutil.which("docker") and _docker_psql("name=lmao-server"):
+            return (
+                " HINT: the lmao-server container is running and holds the RNode "
+                "port, which races this probe. Stop it first "
+                "(docker stop lmao-server) or re-run with --include-services "
+                "(stops and redeploys it)."
+            )
+    except Exception:
+        pass
+    return ""
+
+
 def _install_rnode_firmware(port: str, result: DeviceResult) -> None:
     """Check if a Heltec at *port* is running RNode firmware.
 
@@ -247,16 +268,18 @@ def _install_rnode_firmware(port: str, result: DeviceResult) -> None:
             result.ok(f"RNode firmware detected on {port}")
             print("  OK: RNode firmware detected (DETECT signature confirmed)")
         elif len(data) > 0:
+            hint = _rnode_probe_hint()
             result.fail(
                 f"Device on {port} responded but not as RNode. "
-                f"Response: {data.hex()}"
+                f"Response: {data.hex()}{hint}"
             )
-            print(f"  FAIL: Unexpected response \u2014 {data.hex()}")
+            print(f"  FAIL: Unexpected response \u2014 {data.hex()}{hint}")
         else:
+            hint = _rnode_probe_hint()
             result.fail(
                 f"Device on {port} is not responding as RNode. "
                 f"Use the web flasher tool: https://flasher.rnode.ams1.meshkube.com/"
-                f"\n    See rnode_firmware/README.md for instructions."
+                f"\n    See rnode_firmware/README.md for instructions.{hint}"
             )
             print("  FAIL: Not an RNode \u2014 manual flash required")
     except Exception as exc:
@@ -379,6 +402,12 @@ def main(argv: list[str] | None = None) -> None:
     """
     args = _parse_args(argv)
 
+    # When services will be (re)deployed, stop the running lmao-server
+    # container first so it does not hold the RNode serial port during
+    # hardware probing (a running server races the RNode DETECT probe).
+    if args.include_services and not args.skip_server:
+        stop_pi_server_container()
+
     results: list[DeviceResult] = []
 
     # ── Cardputer ──
@@ -461,7 +490,10 @@ def main(argv: list[str] | None = None) -> None:
                 pi_result.skip("--skip-server")
             else:
                 install_pi_server(pi_result)
-                run_pi_server(pi_result)
+                if pi_result.status == "OK":
+                    run_pi_server(pi_result)
+                else:
+                    print("  Skipping container deploy — image build/release did not succeed")
 
             if args.skip_k8s:
                 k8s_result.skip("--skip-k8s")
@@ -472,15 +504,9 @@ def main(argv: list[str] | None = None) -> None:
                 iot_result.skip("--skip-iot-ingest")
             elif args.skip_k8s:
                 iot_result.skip("--skip-k8s (K8s services skipped)")
-            elif args.setup_registry and registry_ready:
-                install_iot_ingest_consumer(
-                    iot_result,
-                    registry_host=DEFAULT_REGISTRY_HOST,
-                    registry_port=DEFAULT_REGISTRY_PORT,
-                )
             else:
                 if args.setup_registry and not registry_ready:
-                    print("  Registry unavailable, falling back to local Docker build")
+                    print("  WARNING: registry setup did not succeed — iot-ingest push may fail")
                 install_iot_ingest_consumer(iot_result)
         except Exception as exc:
             import traceback

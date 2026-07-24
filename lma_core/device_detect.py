@@ -334,18 +334,24 @@ def find_rnode_port(preferred: str | None = None) -> str | None:
 # ---------------------------------------------------------------------------
 
 
-def probe_rnode(port: str, timeout: float = 0.5) -> bool:
+def probe_rnode(port: str, timeout: float = 0.5, attempts: int = 3) -> bool:
     """Check whether *port* is running RNode firmware using the DETECT protocol.
 
     Opens *port* at 115200 baud, sends the standard RNode DETECT command
     (``0xC0 0x08 0x73 0xC0``), and checks for a valid DETECT response
     (``0xC0 0x08 0x46 0xC0``) in the reply.
 
+    The probe retries up to *attempts* times, flushing the input buffer
+    before each attempt.  This tolerates asynchronous KISS frames (e.g.
+    LoRa RX packets) that may interleave with the DETECT response when
+    the radio is active.
+
     Uses short timeouts — this probe will never hang.
 
     Args:
         port: Serial device path (e.g. ``/dev/ttyUSB0``).
         timeout: Read timeout in seconds (default 0.5).
+        attempts: Number of DETECT attempts (default 3).
 
     Returns:
         ``True`` if the port responds as an RNode.
@@ -354,19 +360,24 @@ def probe_rnode(port: str, timeout: float = 0.5) -> bool:
         import serial as _serial
 
         ser = _serial.Serial(port, 115200, timeout=timeout)
-        time.sleep(0.3)
-        ser.reset_input_buffer()
-        ser.write(bytes([0xC0, 0x08, 0x73, 0xC0]))
-        time.sleep(0.3)
-        data = ser.read(100)
-        ser.close()
+        try:
+            time.sleep(0.3)
+            for _ in range(max(1, attempts)):
+                ser.reset_input_buffer()
+                ser.write(bytes([0xC0, 0x08, 0x73, 0xC0]))
+                time.sleep(0.3)
+                data = ser.read(100)
 
-        return (
-            len(data) >= 4
-            and data[0:1] == b"\xC0"
-            and data[1] == 0x08
-            and data[2] == 0x46
-        )
+                if (
+                    len(data) >= 4
+                    and data[0:1] == b"\xC0"
+                    and data[1] == 0x08
+                    and data[2] == 0x46
+                ):
+                    return True
+            return False
+        finally:
+            ser.close()
     except Exception:
         return False
 

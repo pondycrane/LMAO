@@ -8,11 +8,25 @@ pipeline when the --include-services flag is set.
 Usage (via Bazel):
     bazel run //tools:install_all -- --include-services
 
+Release flow (internal services):
+    All internal services are released through the local Docker registry
+    (default ``192.168.0.36:5000``) and deployed via Docker from the
+    registry image — a single, consistent release path:
+
+    - Pi server: build → push ``lmao-server`` → ``docker pull`` +
+      ``docker run`` the registry image (plus a systemd unit for
+      auto-start on boot).
+    - IoT ingest consumer: build → push ``lmao-iot-ingest`` →
+      ``kubectl apply`` (the manifest references the registry image) →
+      wait for the rollout and verify a pod is Running.
+
 Prerequisites:
     - docker CLI installed and accessible on PATH
     - kubectl CLI installed and configured for a reachable cluster
-    - Dockerfile at repo root
-    - k8s/lmao-service.yaml and k8s/nats-server.yaml at repo root
+    - local Docker registry running (``--setup-registry`` or
+      ``docker/registry/manage.sh start``)
+    - Dockerfile and Dockerfile.iot-ingest at repo root
+    - k8s/lmao-service.yaml, k8s/nats-server.yaml, k8s/iot-ingest.yaml
 """
 
 # Error handling convention:
@@ -273,20 +287,103 @@ def _find_repo_root() -> str | None:
     return None
 
 
+def _check_registry(
+    host: str = DEFAULT_REGISTRY_HOST,
+    port: int = DEFAULT_REGISTRY_PORT,
+) -> tuple[bool, str]:
+    """Check whether the local Docker registry API is reachable.
+
+    Performs an HTTP GET against ``http://{host}:{port}/v2/`` (the
+    registry API base, which returns 200 when healthy).
+
+    Returns ``(ok, message)`` where *ok* is True when the registry
+    responded with HTTP 200.  *message* contains diagnostic info or
+    recovery instructions when the registry is unreachable.
+    """
+    import urllib.error
+    import urllib.request
+
+    url = f"http://{host}:{port}/v2/"
+    try:
+        with urllib.request.urlopen(url, timeout=5) as resp:
+            if resp.status == 200:
+                return True, f"registry reachable at {host}:{port}"
+            return False, f"registry at {host}:{port} returned HTTP {resp.status}"
+    except (urllib.error.URLError, OSError) as exc:
+        reason = getattr(exc, "reason", exc)
+        return False, (
+            f"local Docker registry unreachable at {host}:{port} ({reason}) — "
+            "start it with --setup-registry or ./docker/registry/manage.sh start"
+        )
+
+
+def _tag_and_push(result: DeviceResult, local_tag: str, registry_image: str) -> bool:
+    """Tag *local_tag* as *registry_image* and push to the local registry.
+
+    Returns True on success.  On failure updates *result* to FAIL,
+    prints diagnostics, and returns False (caller must return early).
+    """
+    try:
+        tag_proc = subprocess.run(
+            ["docker", "tag", local_tag, registry_image],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if tag_proc.returncode != 0:
+            err = tag_proc.stderr.strip() or "unknown error"
+            result.fail(f"docker tag failed: {err}")
+            print(f"  FAIL: docker tag failed — {err}")
+            return False
+        print(f"  Pushing {registry_image} ...")
+        push_proc = subprocess.run(
+            ["docker", "push", registry_image],
+            capture_output=True,
+            text=True,
+            timeout=600,
+        )
+        if push_proc.returncode != 0:
+            stderr_tail = push_proc.stderr.strip().split("\n")[-3:]
+            err = "; ".join(stderr_tail) if stderr_tail else "unknown error"
+            result.fail(f"docker push {registry_image} failed: {err}")
+            print(f"  FAIL: docker push failed — {err}")
+            return False
+        print(f"  OK: pushed {registry_image}")
+        return True
+    except subprocess.SubprocessError as exc:
+        result.fail(f"docker push error: {exc}")
+        print(f"  FAIL: {exc}")
+        return False
+    except Exception as exc:
+        import traceback
+
+        traceback.print_exc()
+        result.fail(f"Unexpected error during docker push: {exc}")
+        print(f"  FAIL: {exc}")
+        return False
+
+
 def install_pi_server(result: DeviceResult, repo_root: str | None = None) -> None:
-    """Build the lmao-server Docker image via ``docker build``.
+    """Build the lmao-server image and release it via the local registry.
+
+    Runs ``docker build -t lmao-server:latest .`` from *repo_root*, then
+    tags and pushes the image to the local Docker registry
+    (``{DEFAULT_REGISTRY_HOST}:{DEFAULT_REGISTRY_PORT}/lmao-server:latest``).
+    Internal services are always released through the local registry so
+    every deploy (Pi container, K8s pods) uses the same image source.
 
     Checks for the ``docker`` CLI on PATH; if not found, marks the
-    result as SKIP with a diagnostic message.  Otherwise runs
-    ``docker build -t lmao-server .`` from *repo_root*.
+    result as SKIP with a diagnostic message.
 
     The caller must pass a ``DeviceResult`` instance (imported lazily
     from ``install_all``) as *result*.  On success the result is set to
-    OK; on failure it is set to FAIL.
+    OK; on failure (build failure, unreachable registry, or push
+    failure) it is set to FAIL.
 
     Note:
-        This function builds the image only.  Starting the container
-        is left to the operator (e.g. ``docker run lmao-server``).
+        This function builds and pushes the image only.  Deploying the
+        container is handled by :func:`run_pi_server`, which pulls and
+        runs the registry image via Docker.
 
     Args:
         result: A ``DeviceResult`` instance (from ``tools.install_all``).
@@ -294,7 +391,7 @@ def install_pi_server(result: DeviceResult, repo_root: str | None = None) -> Non
             When ``None``, auto-detected via ``_find_repo_root()``.
     """
 
-    print("\n--- Pi Server: Docker build ---")
+    print("\n--- Pi Server: Docker build + push to local registry ---")
 
     if repo_root is None:
         repo_root = _find_repo_root()
@@ -309,126 +406,47 @@ def install_pi_server(result: DeviceResult, repo_root: str | None = None) -> Non
         print("  SKIP: Docker not found on PATH")
         return
 
+    registry_image = f"{DEFAULT_REGISTRY_HOST}:{DEFAULT_REGISTRY_PORT}/lmao-server:latest"
+
+    # ── Build ──
     try:
         proc = subprocess.run(
-            ["docker", "build", "-t", "lmao-server", "."],
+            ["docker", "build", "-t", "lmao-server:latest", "."],
             cwd=repo_root,
             capture_output=True,
             text=True,
         )
-        if proc.returncode == 0:
-            result.ok("Docker image built (lmao-server:latest)")
-            print("  OK: Docker image built (lmao-server:latest)")
-        else:
+        if proc.returncode != 0:
             stderr_tail = proc.stderr.strip().split("\n")[-3:]
             stderr_msg = "; ".join(stderr_tail) if stderr_tail else "unknown error"
             result.fail(f"Docker build failed: {stderr_msg}")
             print(f"  FAIL: Docker build failed — {stderr_msg}")
+            return
+        print("  OK: Docker image built (lmao-server:latest)")
     except subprocess.SubprocessError as exc:
         result.fail(f"Docker build error: {exc}")
         print(f"  FAIL: {exc}")
+        return
     except Exception as exc:
         import traceback
 
         traceback.print_exc()
         result.fail(f"Unexpected error during Docker build: {exc}")
         print(f"  FAIL: {exc}")
-
-
-def _apply_iot_ingest_manifest(
-    result: DeviceResult,
-    repo_root: str,
-    registry_host: str,
-    registry_port: int,
-) -> None:
-    """Apply the IoT ingest K8s manifest and configure the deployment
-    to pull from a local Docker registry.
-
-    Applies ``k8s/iot-ingest.yaml``, then sets the container image to
-    ``{registry_host}:{registry_port}/lmao-iot-ingest:latest`` and
-    patches ``imagePullPolicy`` to ``Always``.
-
-    Args:
-        result: A ``DeviceResult`` instance (from ``tools.install_all``).
-        repo_root: Path to the repository root containing ``k8s/``.
-        registry_host: Hostname or IP of the local Docker registry.
-        registry_port: Port of the local Docker registry.
-    """
-
-    print(
-        f"\n--- IoT Ingest Consumer: deploy from registry "
-        f"({registry_host}:{registry_port}/lmao-iot-ingest:latest) ---"
-    )
-
-    if shutil.which("kubectl") is None:
-        result.skip("kubectl not found on PATH — install with: apt-get install kubectl")
-        print("  SKIP: kubectl not found on PATH")
         return
 
-    manifest_path = os.path.join(repo_root, "k8s", "iot-ingest.yaml")
-    if not os.path.isfile(manifest_path):
-        result.fail(f"Manifest not found: {manifest_path}")
-        print(f"  FAIL: Manifest not found: {manifest_path}")
+    # ── Release via the local Docker registry ──
+    registry_ok, registry_msg = _check_registry()
+    if not registry_ok:
+        result.fail(f"Cannot release image: {registry_msg}")
+        print(f"  FAIL: {registry_msg}")
         return
 
-    _applied = False  # Track whether base manifest was applied
-
-    # Step 1 — apply the base manifest (PVC, ConfigMap, Deployment)
-    proc = _run_kubectl_step(result, "apply", ["kubectl", "apply", "-f", manifest_path])
-    if proc is None:
+    if not _tag_and_push(result, "lmao-server:latest", registry_image):
         return
-    _applied = True
 
-    # Step 2 — set container image to registry reference
-    registry_image = f"{registry_host}:{registry_port}/lmao-iot-ingest:latest"
-    proc = _run_kubectl_step(
-        result,
-        "set image",
-        [
-            "kubectl",
-            "set",
-            "image",
-            "deployment/iot-ingest-consumer",
-            f"consumer={registry_image}",
-        ],
-    )
-    if proc is None:
-        if _applied:
-            warning = (
-                "  WARNING: k8s/iot-ingest.yaml was already applied. "
-                "Manual rollback: kubectl delete -f k8s/iot-ingest.yaml"
-            )
-            print(warning)
-            result.detail += " " + warning
-        return
-    print(f"  Image set to: {registry_image}")
-
-    # Step 3 — patch imagePullPolicy to Always
-    proc = _run_kubectl_step(
-        result,
-        "patch",
-        [
-            "kubectl",
-            "patch",
-            "deployment",
-            "iot-ingest-consumer",
-            "-p",
-            '{"spec":{"template":{"spec":{"containers":[{"name":"consumer","imagePullPolicy":"Always"}]}}}}',
-        ],
-    )
-    if proc is None:
-        if _applied:
-            warning = (
-                "  WARNING: k8s/iot-ingest.yaml was already applied. "
-                "Manual rollback: kubectl delete -f k8s/iot-ingest.yaml"
-            )
-            print(warning)
-            result.detail += " " + warning
-        return
-    print("  imagePullPolicy patched to Always")
-
-    result.ok(f"IoT Ingest Consumer deployed from registry ({registry_image})")
-    print(f"  OK: IoT Ingest Consumer deployed from registry ({registry_image})")
+    result.ok(f"Image released to local registry ({registry_image})")
+    print(f"  OK: {registry_image} released")
 
 
 def _check_k8s_cluster() -> tuple[bool, str]:
@@ -449,23 +467,20 @@ def _check_k8s_cluster() -> tuple[bool, str]:
             text=True,
             timeout=10,
         )
-        # kubectl version exits 0 even when the server is unreachable
-        # (client info is returned successfully). Check stderr for server errors.
-        err_output = (proc.stderr or "").strip().lower()
-        if err_output:
-            if "connection refused" in err_output:
-                return False, (
-                    "K8s API server is reachable but refusing connections — "
-                    "the control-plane node may be starting up or stopped"
-                )
-            if "no route to host" in err_output or "i/o timeout" in err_output:
-                return False, (
-                    "K8s API server is unreachable — "
-                    "the control-plane node (192.168.0.45) may be powered off"
-                )
-            return False, f"kubectl version failed: {(proc.stderr or '')[:200]}"
+        # A reachable API server shows up as "serverVersion" in the JSON
+        # output — this is authoritative.  stderr is NOT a reliable error
+        # indicator: kubectl prints benign warnings there (e.g. client/server
+        # minor version skew) even on success.
+        server_reachable = False
+        if proc.returncode == 0 and proc.stdout:
+            try:
+                import json
 
-        if proc.returncode != 0:
+                server_reachable = "serverVersion" in json.loads(proc.stdout)
+            except ValueError:
+                server_reachable = False
+
+        if not server_reachable:
             stderr = (proc.stderr or "").strip() + (proc.stdout or "").strip()
             # kubectl --output=json was added in 1.28; fallback for older versions
             if "unknown flag" in stderr.lower():
@@ -475,8 +490,24 @@ def _check_k8s_cluster() -> tuple[bool, str]:
                     text=True,
                     timeout=10,
                 )
-                err = (fallback.stderr or "").strip().lower()
-                if "connection refused" in err:
+                if fallback.returncode == 0 and "Server Version" in (fallback.stdout or ""):
+                    server_reachable = True
+                else:
+                    err = ((fallback.stderr or "") + (fallback.stdout or "")).strip().lower()
+                    if "connection refused" in err or "was refused" in err:
+                        return False, (
+                            "K8s API server is reachable but refusing connections — "
+                            "the control-plane node may be starting up or stopped"
+                        )
+                    if "no route to host" in err or "i/o timeout" in err:
+                        return False, (
+                            "K8s API server is unreachable — "
+                            "the control-plane node (192.168.0.45) may be powered off"
+                        )
+                    return False, f"kubectl version failed: {(fallback.stderr or '')[:200]}"
+            else:
+                err = stderr.lower()
+                if "connection refused" in err or "was refused" in err:
                     return False, (
                         "K8s API server is reachable but refusing connections — "
                         "the control-plane node may be starting up or stopped"
@@ -486,8 +517,7 @@ def _check_k8s_cluster() -> tuple[bool, str]:
                         "K8s API server is unreachable — "
                         "the control-plane node (192.168.0.45) may be powered off"
                     )
-                return False, f"kubectl version failed: {(fallback.stderr or '')[:200]}"
-            return False, f"kubectl version failed: {stderr[:200]}"
+                return False, f"kubectl version failed: {(proc.stderr or '')[:200]}"
 
         # Check that at least one node is Ready
         proc = subprocess.run(
@@ -518,45 +548,40 @@ def _check_k8s_cluster() -> tuple[bool, str]:
         return False, f"kubectl error: {exc}"
 
 
-def install_iot_ingest_consumer(
-    result: DeviceResult,
-    repo_root: str | None = None,
-    registry_host: str | None = None,
-    registry_port: int | None = None,
-) -> None:
-    """Build the iot-ingest Docker image and apply its K8s manifest.
+def install_iot_ingest_consumer(result: DeviceResult, repo_root: str | None = None) -> None:
+    """Build, release, and deploy the IoT ingest consumer.
 
-    Builds ``Dockerfile.iot-ingest`` via ``docker build``, then applies
-    ``k8s/iot-ingest.yaml`` via ``kubectl apply -f``.
+    Consistent release flow for internal services:
 
-    When *registry_host* and *registry_port* are both provided, the
-    Docker build step is skipped and the deployment is configured to
-    pull from the local registry at
-    ``{registry_host}:{registry_port}/lmao-iot-ingest:latest`` instead.
+    1. Build ``lmao-iot-ingest:latest`` from ``Dockerfile.iot-ingest``.
+    2. Tag and push to the local Docker registry
+       (``{DEFAULT_REGISTRY_HOST}:{DEFAULT_REGISTRY_PORT}``) — the single
+       source of truth for internal service images.
+    3. Apply ``k8s/iot-ingest.yaml`` (which references the registry
+       image directly).
+    4. Wait for the Deployment rollout and verify a pod is Running, so
+       a broken deploy is reported ``[FAIL]`` instead of silently
+       succeeding.
 
     **K8s cluster check:** Before applying the manifest, the function
     checks whether the K8s API server is reachable. If the cluster is
     unreachable (e.g. control-plane node powered off), the Docker image
-    is still built and pushed to the local registry (if available) so
-    it is ready to deploy when the cluster recovers.  Clear recovery
-    steps are printed.
+    is still built and pushed to the local registry so it is ready to
+    deploy when the cluster recovers.  Clear recovery steps are printed
+    and the stage is reported OK.
 
     The caller must pass a ``DeviceResult`` instance (imported lazily
     from ``install_all``) as *result*.  On success the result is set to
-    OK; on failure it is set to FAIL.  Missing prerequisites (Docker,
-    kubectl) result in SKIP.
+    OK; on failure (build, registry push, apply, or rollout) it is set
+    to FAIL.  Missing prerequisites (Docker, kubectl) result in SKIP.
 
     Args:
         result: A ``DeviceResult`` instance (from ``tools.install_all``).
         repo_root: Path to the repository root containing ``Dockerfile.iot-ingest``
             and ``k8s/``.  When ``None``, auto-detected via ``_find_repo_root()``.
-        registry_host: Hostname or IP of the local Docker registry.
-            When provided together with *registry_port*, the Docker build
-            step is skipped and the deployment pulls from the registry.
-        registry_port: Port of the local Docker registry.
     """
 
-    print("\n--- IoT Ingest Consumer: Docker build + K8s apply ---")
+    print("\n--- IoT Ingest Consumer: build + push + K8s deploy ---")
 
     if repo_root is None:
         repo_root = _find_repo_root()
@@ -566,14 +591,11 @@ def install_iot_ingest_consumer(
         print("  FAIL: Cannot locate repo root (no Dockerfile found)")
         return
 
-    # ── Registry path: skip docker build, use local registry ──
-    if registry_host is not None and registry_port is not None:
-        _apply_iot_ingest_manifest(result, repo_root, registry_host, registry_port)
-        return
-
-    # ── Check K8s cluster health early ──
+    # ── Check K8s cluster + local registry health early ──
     cluster_ok, cluster_msg = _check_k8s_cluster()
     print(f"  K8s cluster: {cluster_msg}")
+    registry_ok, registry_msg = _check_registry()
+    print(f"  Local registry: {registry_msg}")
 
     # ── Docker build ───────────────────────────────────────────
     dockerfile = os.path.join(repo_root, "Dockerfile.iot-ingest")
@@ -616,33 +638,14 @@ def install_iot_ingest_consumer(
         print(f"  FAIL: {exc}")
         return
 
-    # ── Push to local registry ─────────────────────────────────
+    # ── Release via the local Docker registry ──────────────────
     registry_image = f"{DEFAULT_REGISTRY_HOST}:{DEFAULT_REGISTRY_PORT}/lmao-iot-ingest:latest"
-    try:
-        print(f"  Tagging and pushing to local registry ({registry_image}) ...")
-        subprocess.run(
-            ["docker", "tag", "lmao-iot-ingest", registry_image],
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
-        push_proc = subprocess.run(
-            ["docker", "push", registry_image],
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-        if push_proc.returncode == 0:
-            print(f"  OK: Image pushed to {registry_image}")
-        else:
-            stderr_tail = push_proc.stderr.strip().split("\n")[-3:]
-            stderr_msg = "; ".join(stderr_tail) if stderr_tail else "unknown error"
-            print(f"  WARNING: Registry push failed — {stderr_msg}")
-            print("  (Image is available locally; push manually later)")
-    except subprocess.TimeoutExpired:
-        print("  WARNING: Registry push timed out — skipping push")
-    except Exception as exc:
-        print(f"  WARNING: Registry push error — {exc}")
+    if not registry_ok:
+        result.fail(f"Cannot release image: {registry_msg}")
+        print(f"  FAIL: {registry_msg}")
+        return
+    if not _tag_and_push(result, "lmao-iot-ingest:latest", registry_image):
+        return
 
     # ── kubectl apply ──────────────────────────────────────────
     if not cluster_ok:
@@ -681,30 +684,55 @@ def install_iot_ingest_consumer(
         print(f"  FAIL: Manifest not found: {manifest_path}")
         return
 
-    try:
-        proc = subprocess.run(
-            ["kubectl", "apply", "-f", manifest_path],
-            capture_output=True,
-            text=True,
+    # ── Deploy from the registry image ──
+    proc = _run_kubectl_step(result, "apply", ["kubectl", "apply", "-f", manifest_path])
+    if proc is None:
+        return
+
+    # Wait for the rollout so a broken deploy is reported [FAIL]
+    # instead of silently succeeding.
+    proc = _run_kubectl_step(
+        result,
+        "rollout status",
+        [
+            "kubectl",
+            "rollout",
+            "status",
+            "deployment/iot-ingest-consumer",
+            "--timeout=180s",
+        ],
+    )
+    if proc is None:
+        print(
+            "  Rollout did not complete — check: "
+            "kubectl describe deployment iot-ingest-consumer"
         )
-        if proc.returncode != 0:
-            stderr_tail = proc.stderr.strip().split("\n")[-3:]
-            stderr_msg = "; ".join(stderr_tail) if stderr_tail else "unknown error"
-            result.fail(f"kubectl apply -f k8s/iot-ingest.yaml failed: {stderr_msg}")
-            print(f"  FAIL: kubectl apply failed — {stderr_msg}")
-            return
+        return
 
-        result.ok("IoT Ingest Consumer deployed (Docker build + kubectl apply)")
-        print("  OK: IoT Ingest Consumer deployed")
-    except subprocess.SubprocessError as exc:
-        result.fail(f"kubectl error: {exc}")
-        print(f"  FAIL: {exc}")
-    except Exception as exc:
-        import traceback
+    # Verify at least one pod is Running.
+    proc = _run_kubectl_step(
+        result,
+        "get pods",
+        [
+            "kubectl",
+            "get",
+            "pods",
+            "-l",
+            "app=iot-ingest-consumer",
+            "-o",
+            "jsonpath={.items[*].status.phase}",
+        ],
+    )
+    if proc is None:
+        return
+    phases = proc.stdout.split()
+    if "Running" not in phases:
+        result.fail(f"No iot-ingest-consumer pod Running (phases: {phases})")
+        print(f"  FAIL: no iot-ingest-consumer pod Running (phases: {phases})")
+        return
 
-        traceback.print_exc()
-        result.fail(f"Unexpected error during kubectl apply: {exc}")
-        print(f"  FAIL: {exc}")
+    result.ok(f"IoT Ingest Consumer deployed and Running ({registry_image})")
+    print(f"  OK: IoT Ingest Consumer Running ({registry_image})")
 
 
 def install_k8s_services(result: DeviceResult, repo_root: str | None = None) -> None:
@@ -1052,10 +1080,13 @@ def _detect_rnode_port() -> str | None:
     return None
 
 
-def _docker_psql(filter_expr: str) -> str | None:
-    """Return the container ID matching a Docker filter, or None."""
+def _docker_psql(filter_expr: str, all: bool = False) -> str | None:
+    """Return the container ID matching a Docker filter, or None.
+
+    When *all* is True, stopped containers are included (``docker ps -aq``).
+    """
     result = subprocess.run(
-        ["docker", "ps", "-q", "--filter", filter_expr],
+        ["docker", "ps", "-aq" if all else "-q", "--filter", filter_expr],
         capture_output=True,
         text=True,
         timeout=15,
@@ -1064,13 +1095,50 @@ def _docker_psql(filter_expr: str) -> str | None:
     return cid if cid else None
 
 
-def run_pi_server(result: DeviceResult, repo_root: str | None = None) -> None:
-    """Run the lmao-server Docker container and install a systemd service.
+def stop_pi_server_container() -> bool:
+    """Best-effort stop of a running ``lmao-server`` container.
 
-    Stops any existing ``lmao-server`` container, starts a new one with
-    ``--network host`` and the detected RNode device passthrough, and
-    creates a systemd unit at ``/etc/systemd/system/lmao-server.service``
-    so the container starts on boot.
+    Used before hardware probing/flashing so the server does not hold
+    the RNode serial port — a running server races the RNode DETECT
+    probe (async LoRa KISS frames interleave with the probe response).
+
+    Never fails the pipeline: returns True when a container was found
+    and stopped, False otherwise (no docker, no container, or error).
+    """
+    if shutil.which("docker") is None:
+        return False
+    try:
+        if not _docker_psql("name=lmao-server", all=True):
+            return False
+        print("  Stopping lmao-server container (redeployed by the services stage) ...")
+        subprocess.run(
+            ["docker", "stop", "lmao-server"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        # Remove as well so the container name is free for the redeploy.
+        subprocess.run(
+            ["docker", "rm", "lmao-server"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        return True
+    except subprocess.SubprocessError:
+        return False
+
+
+def run_pi_server(result: DeviceResult, repo_root: str | None = None) -> None:
+    """Deploy the lmao-server container from the local registry + systemd.
+
+    Pulls ``{DEFAULT_REGISTRY_HOST}:{DEFAULT_REGISTRY_PORT}/lmao-server:latest``
+    from the local Docker registry (the consistent release source for
+    internal services), stops any existing ``lmao-server`` container,
+    starts a new one with ``--network host`` and the detected RNode
+    device passthrough, and creates a systemd unit at
+    ``/etc/systemd/system/lmao-server.service`` so the container starts
+    on boot.  The systemd unit references the same registry image.
 
     The ``NATS_SERVER`` environment variable is passed through so the
     server can publish to the in-cluster NATS JetStream.  If unset, the
@@ -1120,6 +1188,27 @@ def run_pi_server(result: DeviceResult, repo_root: str | None = None) -> None:
         print("  SKIP: Docker not found on PATH")
         return
 
+    # ── Pull the release image from the local registry ──
+    image = f"{DEFAULT_REGISTRY_HOST}:{DEFAULT_REGISTRY_PORT}/lmao-server:latest"
+    print(f"  Pulling {image} ...")
+    try:
+        pull_proc = subprocess.run(
+            ["docker", "pull", image],
+            capture_output=True,
+            text=True,
+            timeout=600,
+        )
+        if pull_proc.returncode != 0:
+            stderr_tail = pull_proc.stderr.strip().split("\n")[-3:]
+            err = "; ".join(stderr_tail) if stderr_tail else "unknown error"
+            result.fail(f"docker pull {image} failed: {err}")
+            print(f"  FAIL: docker pull failed — {err}")
+            return
+    except subprocess.SubprocessError as exc:
+        result.fail(f"docker pull error: {exc}")
+        print(f"  FAIL: {exc}")
+        return
+
     # ── Detect RNode port ──
     rnode_port = _detect_rnode_port()
     rdevice_exists = rnode_port is not None and os.path.exists(rnode_port)
@@ -1143,8 +1232,19 @@ def run_pi_server(result: DeviceResult, repo_root: str | None = None) -> None:
 
     # ── Stop any existing lmao-server container ──
     print("  Stopping existing lmao-server container (if any)...")
+    # Best-effort: stop the systemd unit first so Restart=always does not
+    # resurrect the container while we remove it.
     try:
-        existing = _docker_psql("name=lmao-server")
+        subprocess.run(
+            ["sudo", "systemctl", "stop", "lmao-server"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except subprocess.SubprocessError:
+        pass
+    try:
+        existing = _docker_psql("name=lmao-server", all=True)
     except subprocess.SubprocessError as exc:
         print(f"  WARNING: docker ps failed \u2014 {exc}")
         existing = None
@@ -1195,7 +1295,7 @@ def run_pi_server(result: DeviceResult, repo_root: str | None = None) -> None:
     ]
     if rdevice_exists:
         exec_args.extend(["--device", f"{rnode_port}:{rnode_port}"])
-    exec_args.append("lmao-server:latest")
+    exec_args.append(image)
 
     # ── Install systemd service FIRST (always \u2014 persistence mechanism) ──
     service_unit = """[Unit]
@@ -1282,46 +1382,89 @@ WantedBy=multi-user.target
         traceback.print_exc()
         print(f"  WARNING: systemd install error: {exc}")
 
-    # ── Start container (now, so it runs immediately) ──
-    run_args = list(exec_args)
-    # Change --rm to -d --restart unless-stopped for immediate run
-    rm_idx = run_args.index("--rm")
-    run_args[rm_idx] = "-d"
-    restart_idx = run_args.index("--name")
-    run_args.insert(restart_idx, "unless-stopped")
-    run_args.insert(restart_idx, "--restart")
-
-    print("  Starting container: {}".format(" ".join(run_args)))
-
-    container_id = None
-    try:
-        proc = subprocess.run(run_args, capture_output=True, text=True, timeout=60)
-        if proc.returncode == 0:
-            container_id = proc.stdout.strip()[:12]
-            print(f"  Container started: {container_id}")
-        else:
-            stderr_tail = proc.stderr.strip().split("\n")[-3:]
-            err_msg = "; ".join(stderr_tail) if stderr_tail else "unknown error"
-            print(f"  WARNING: docker run failed \u2014 {err_msg}")
-            print("  Systemd service is installed. Fix the issue then:")
-            print("    sudo systemctl start lmao-server")
-    except subprocess.SubprocessError as exc:
-        print(f"  WARNING: docker run error \u2014 {exc}")
-        print("  Systemd service is installed. Fix the issue then:")
-        print("    sudo systemctl start lmao-server")
-
-    # ── Verify container is running ──
-    if container_id:
-        print("  Verifying container...")
+    # ── Start the service ──
+    # Preferred path: start via systemd so `systemctl status lmao-server`
+    # is authoritative and Restart=always is managed by systemd.
+    # Fallback: direct `docker run -d` when systemd is unavailable.
+    started = False
+    if systemd_ok:
+        print("  Starting service: sudo systemctl start lmao-server")
         try:
             proc = subprocess.run(
-                ["docker", "ps", "--filter", "name=lmao-server", "--format", "{{.Status}}"],
+                ["sudo", "systemctl", "start", "lmao-server"],
                 capture_output=True,
                 text=True,
-                timeout=15,
+                timeout=60,
             )
-            status = proc.stdout.strip()
-            if status:
+            if proc.returncode == 0:
+                started = True
+            else:
+                stderr_tail = proc.stderr.strip().split("\n")[-3:]
+                err_msg = "; ".join(stderr_tail) if stderr_tail else "unknown error"
+                print(f"  WARNING: systemctl start failed \u2014 {err_msg}")
+                print("  Falling back to direct docker run ...")
+        except subprocess.SubprocessError as exc:
+            print(f"  WARNING: systemctl start error \u2014 {exc}")
+            print("  Falling back to direct docker run ...")
+
+    if not started:
+        run_args = list(exec_args)
+        # Change --rm to -d --restart unless-stopped for the direct run
+        rm_idx = run_args.index("--rm")
+        run_args[rm_idx] = "-d"
+        restart_idx = run_args.index("--name")
+        run_args.insert(restart_idx, "unless-stopped")
+        run_args.insert(restart_idx, "--restart")
+
+        print("  Starting container: {}".format(" ".join(run_args)))
+        try:
+            proc = subprocess.run(run_args, capture_output=True, text=True, timeout=60)
+            if proc.returncode == 0:
+                started = True
+                print(f"  Container started: {proc.stdout.strip()[:12]}")
+            else:
+                stderr_tail = proc.stderr.strip().split("\n")[-3:]
+                err_msg = "; ".join(stderr_tail) if stderr_tail else "unknown error"
+                print(f"  WARNING: docker run failed \u2014 {err_msg}")
+                if systemd_ok:
+                    print("  Systemd service is installed. Fix the issue then:")
+                    print("    sudo systemctl start lmao-server")
+        except subprocess.SubprocessError as exc:
+            print(f"  WARNING: docker run error \u2014 {exc}")
+            if systemd_ok:
+                print("  Systemd service is installed. Fix the issue then:")
+                print("    sudo systemctl start lmao-server")
+
+    # ── Verify container is running ──
+    if started:
+        print("  Verifying container...")
+        try:
+            # The container may take a moment to register with the daemon
+            # (especially when started via systemd) — retry a few times.
+            container_id = ""
+            status = ""
+            for attempt in range(5):
+                proc = subprocess.run(
+                    [
+                        "docker",
+                        "ps",
+                        "--filter",
+                        "name=lmao-server",
+                        "--format",
+                        "{{.ID}} {{.Status}}",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                )
+                fields = proc.stdout.strip().split(None, 1)
+                container_id = fields[0][:12] if fields else ""
+                status = fields[1] if len(fields) > 1 else ""
+                if container_id:
+                    break
+                if attempt < 4:
+                    time.sleep(2)
+            if container_id:
                 print(f"  Container status: {status}")
                 if systemd_ok:
                     result.ok(f"Container running + systemd: {container_id}")
