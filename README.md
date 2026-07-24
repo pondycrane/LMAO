@@ -1014,6 +1014,7 @@ For the full system design, see [`ARCHITECTURE.md`](ARCHITECTURE.md).
 | No LoRa packets | Both devices on same frequency? In range? |
 | Cardputer display blank | ST7789 driver installed? SPI pins correct? |
 | Cardputer wedged (REPL OK but uploads stall at byte 0) | Flash tooling auto-recovers via `machine.reset()`/watchdog reset (#74); the client also arms a hardware watchdog (`WDT_TIMEOUT_MS` in `main.py`) so unattended wedges self-heal. Physical RESET is only needed if both fail. |
+| Cardputer stops sending after ~1 h, still powered (serial shows `memory allocation failed`) | GC heap fragmentation from long-running urns traffic (#71) — free bytes remain but no contiguous 2 KiB block for inbound packets. The client gc.collects every cycle, probes the heap, and hard-resets itself when fragmented (also on `MemoryError` or 10 consecutive loop errors). If running older client code, re-flash. |
 | "Permission denied" on serial | `sudo usermod -a -G dialout $USER` |
 | Protobuf import error | Bazel: run `bazel build //proto:lma_messages_py_proto //proto:lma_grpc_py_proto`. Without Bazel: run `protoc --python_out=. proto/lma_messages.proto proto/lma_grpc.proto` from repo root, then set `PYTHONPATH="$PWD"` when running the server. |
 
