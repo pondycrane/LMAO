@@ -209,20 +209,25 @@ class TestInitRnsAndLxmf:
         yield mod
         cleanup_common_mocks()
 
-    def test_init_success_returns_identity_and_router(self, server_mod):
-        """_init_rns_and_lxmf should return (identity, router) on success."""
-        identity, router = server_mod._init_rns_and_lxmf("/dev/ttyUSB0")
+    def test_init_success_returns_identity_and_router(self, server_mod, tmp_path):
+        """_init_rns_and_lxmf should return (identity, router) on success.
+
+        Uses an empty tmp identity path so the create-path is exercised
+        regardless of whether the host has a persisted production
+        identity at ~/.local/share/lmao_server/lxmf/identity (the
+        default-path assertion lives in test_init_without_path_uses_default).
+        """
+        storage = str(tmp_path / "lxmf")
+        identity, router = server_mod._init_rns_and_lxmf(
+            "/dev/ttyUSB0", identity_storage_path=storage
+        )
 
         assert identity is not None
         assert router is sys.modules["LXMF"].LXMRouter.return_value
         sys.modules["RNS"].Reticulum.assert_called_once()
         sys.modules["RNS"].Identity.assert_called_once()
-        # Default identity path is now ~/.local/share/lmao_server/lxmf
         _, kwargs = sys.modules["LXMF"].LXMRouter.call_args
-        assert "storagepath" in kwargs
-        assert kwargs["storagepath"].endswith(
-            "/.local/share/lmao_server/lxmf"
-        ), f"Expected persistent path, got {kwargs['storagepath']}"
+        assert kwargs.get("storagepath") == storage
         # Verify delivery identity is registered (required for receiving messages)
         router.register_delivery_identity.assert_called_once_with(
             identity, display_name="lmao-server"
@@ -289,13 +294,19 @@ class TestInitRnsAndLxmf:
         captured = capsys.readouterr()
         assert "FATAL" in captured.out + captured.err
 
-    def test_init_exits_on_identity_failure(self, server_mod, capsys):
-        """_init_rns_and_lxmf should sys.exit(1) when identity creation fails."""
+    def test_init_exits_on_identity_failure(self, server_mod, capsys, tmp_path):
+        """_init_rns_and_lxmf should sys.exit(1) when identity creation fails.
+
+        Uses an empty tmp identity path so the create-path is exercised
+        even on hosts with a persisted production identity.
+        """
         RNSException = sys.modules["RNS"].RNSException
         sys.modules["RNS"].Identity.side_effect = RNSException("OOM")
 
         with pytest.raises(SystemExit) as exc:
-            server_mod._init_rns_and_lxmf("/dev/ttyUSB0")
+            server_mod._init_rns_and_lxmf(
+                "/dev/ttyUSB0", identity_storage_path=str(tmp_path / "lxmf")
+            )
 
         assert exc.value.code == 1
         captured = capsys.readouterr()
