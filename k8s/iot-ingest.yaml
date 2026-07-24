@@ -7,13 +7,16 @@
 #
 # Prerequisites:
 #   - NATS server running in the cluster (k8s/nats-server.yaml)
-#   - Docker image built and pushed to the local Docker registry:
+#   - Docker image released to the local Docker registry:
 #       ./docker/registry/manage.sh push-ingest
 #     (see README §13 for local registry setup)
+#   - K3s nodes configured to pull from the local registry
+#     (/etc/rancher/k3s/registries.yaml — see README §13)
 #
-#   Alternatively, load the image directly into K3s containerd:
-#       docker build -f Dockerfile.iot-ingest -t lmao-iot-ingest .
-#       docker save lmao-iot-ingest:latest | k3s ctr image import -
+# Internal services are always deployed from the local Docker registry
+# (192.168.0.36:5000) for a consistent release path.  Do not revert to
+# a local/daemon-only image tag — cluster nodes cannot see the Pi's
+# Docker daemon.
 #
 # Usage:
 #   kubectl apply -f k8s/iot-ingest.yaml
@@ -59,6 +62,12 @@ metadata:
     app: iot-ingest-consumer
 spec:
   replicas: 1
+  revisionHistoryLimit: 2
+  # Recreate (not RollingUpdate): the consumer holds an exclusive DuckDB
+  # file lock on the RWO PVC, so old and new pods must never run at the
+  # same time — a rolling update deadlocks the rollout.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: iot-ingest-consumer
@@ -67,11 +76,10 @@ spec:
       labels:
         app: iot-ingest-consumer
     spec:
-      revisionHistoryLimit: 2
       containers:
         - name: consumer
-          image: lmao-iot-ingest:latest
-          imagePullPolicy: IfNotPresent
+          image: 192.168.0.36:5000/lmao-iot-ingest:latest
+          imagePullPolicy: Always
           envFrom:
             - configMapRef:
                 name: iot-ingest-config
@@ -101,7 +109,9 @@ spec:
                 - "import lma_core.queue, lma_core.storage; print('ready')"
             initialDelaySeconds: 5
             periodSeconds: 10
-            timeoutSeconds: 2
+            # Importing duckdb takes ~4s on ARM — 2s times out every probe
+            # and the rollout never completes.
+            timeoutSeconds: 10
       volumes:
         - name: duckdb-data
           persistentVolumeClaim:
