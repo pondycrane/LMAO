@@ -146,6 +146,10 @@ def _probe_hardware():
                     )
                     return
 
+                # Extend any client-armed hardware watchdog so it cannot
+                # reset the device while a test holds the raw REPL.
+                cardputer_flash.disarm_watchdog(ser)
+
                 # Check for native LoRa driver (required for on-board SX1262)
                 ok, out = cardputer_flash.exec_raw(
                     ser,
@@ -491,6 +495,7 @@ class TestCardputerLoRaE2E:
 
                 ok = cardputer_flash.enter_raw_repl(cardputer_ser)
                 assert ok, "Cannot enter raw REPL on Cardputer"
+                cardputer_flash.disarm_watchdog(cardputer_ser)
 
                 # Upload all client files (config.py uploaded with DEST_HASH = None).
                 # skip_if_unchanged: files already identical on the device are
@@ -701,6 +706,7 @@ class TestCardputerLoRaE2E:
                 if cardputer_ser is not None:
                     try:
                         if cardputer_flash.enter_raw_repl(cardputer_ser, max_attempts=2):
+                            cardputer_flash.disarm_watchdog(cardputer_ser)
                             import tempfile as _tf
 
                             with _tf.NamedTemporaryFile(
