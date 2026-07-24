@@ -320,6 +320,58 @@ async def _feed_watchdog(wdt):
         await asyncio.sleep(interval)
 
 
+# ---- Heap fragmentation self-recovery (issue #71) ----
+#
+# MicroPython's GC does not compact the heap.  The urns event loop
+# fragments it over time: after ~1 h of production traffic the largest
+# contiguous free block can shrink below the 2 KiB inbound packet buffer
+# even with tens of KB still free, so every inbound packet fails with
+# "memory allocation failed" and the node silently dies (observed on the
+# production Cardputer: SensorReports stopped after 48 min, the send loop
+# hit MAX_CONSECUTIVE_ERRORS 10 min later and halted forever — the
+# hardware watchdog does NOT fire in that state because the event loop
+# keeps running).  Mitigation: gc.collect() every send cycle, probe for a
+# large contiguous block, and hard-reset while we still can.  A reset
+# re-runs boot.py → main() with a fresh heap and the persisted identity,
+# so the node rejoins the mesh within seconds.
+
+# Largest single allocation the urns stack must satisfy to keep receiving
+# packets (the inbound packet buffer).  When this fails, RX is dead.
+_HEAP_PROBE_BYTES = 2048
+
+
+def _heap_can_alloc(size=_HEAP_PROBE_BYTES):
+    """Probe whether the GC heap can still satisfy a *size*-byte allocation.
+
+    Free-byte counts are meaningless once the heap fragments (no
+    compaction) — the only reliable check is attempting the allocation.
+    """
+    try:
+        probe = bytearray(size)
+        del probe
+        return True
+    except MemoryError:
+        return False
+
+
+def _reset_device(reason, tft=None, status_lines=None):
+    """Log *reason* and hard-reset the device to recover with a fresh heap.
+
+    A memory-starved or halted node never recovers on its own; a reset is
+    the only reliable recovery and is cheap (identity persists on flash).
+    Complements the hardware watchdog, which only fires when the event
+    loop starves — not when the send loop dies cleanly.  Returns without
+    resetting on hosts without the ``machine`` module (unit tests).
+    """
+    log(f"{reason} — resetting device to recover", tft, status_lines)
+    try:
+        import machine
+    except ImportError:
+        return  # host test environment — no machine module
+    time.sleep(1)  # let the serial log flush before reset
+    machine.reset()
+
+
 # ---- LXMF message handler ----
 
 
@@ -614,6 +666,16 @@ async def _periodic_send(tft, status_lines, router, identity_hex,
 
     while True:
         try:
+            # ---- Heap maintenance (issue #71) ----
+            # Collect garbage every cycle to slow fragmentation, then
+            # probe for a large contiguous block.  When the probe fails
+            # the next inbound packet would die on a 2 KiB allocation
+            # anyway — reset now, while we still can.
+            gc.collect()
+            if not _heap_can_alloc():
+                _reset_device("Heap exhausted/fragmented", tft, status_lines)
+                break  # unreachable on hardware (reset does not return)
+
             seq += 1
             hello_text = f"Hello from Cardputer — seq {seq}"
 
@@ -664,6 +726,12 @@ async def _periodic_send(tft, status_lines, router, identity_hex,
 
         except asyncio.CancelledError:
             break
+        except MemoryError as e:
+            # GC heap exhausted/fragmented — backoff can never fix this;
+            # only a reset reliably recovers (issue #71).
+            sys.print_exception(e)
+            _reset_device("MemoryError in main loop", tft, status_lines)
+            break  # unreachable on hardware
         except Exception as e:
             consecutive_errors += 1
             sys.print_exception(e)
@@ -675,8 +743,16 @@ async def _periodic_send(tft, status_lines, router, identity_hex,
                 status_lines,
             )
             if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
-                log("FATAL: Too many consecutive errors, halting.", tft, status_lines)
-                break
+                # A halted send loop is a dead node: the watchdog feeder
+                # keeps running so the WDT never fires, and the node
+                # stays offline forever (observed in production, #71).
+                # Reset instead — boot.py restarts the client cleanly.
+                _reset_device(
+                    f"FATAL: {MAX_CONSECUTIVE_ERRORS} consecutive errors",
+                    tft,
+                    status_lines,
+                )
+                break  # unreachable on hardware
 
             # Exponential backoff capped at the normal interval so the
             # VM always yields and Ctrl+C is always processed.

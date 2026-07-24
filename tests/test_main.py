@@ -1057,6 +1057,163 @@ class TestPeriodicSendBackoff:
         del _sys.modules["uasyncio"]
 
 
+# ── heap fragmentation self-recovery (issue #71) ────────────────────
+
+
+class TestHeapRecovery:
+    """Tests for the heap-fragmentation self-recovery in _periodic_send.
+
+    Production failure mode (issue #71): MicroPython's non-compacting GC
+    heap fragments after ~1 h of urns traffic until the 2 KiB inbound
+    packet buffer can no longer be allocated.  The node then dies
+    silently — the hardware watchdog never fires because the event loop
+    keeps running.  The send loop must gc.collect() every cycle, probe
+    for a large contiguous block, and reset the device when recovery is
+    otherwise impossible.
+    """
+
+    import pytest
+
+    def test_heap_can_alloc_success(self):
+        """A small allocation must succeed on any healthy heap."""
+        assert lmao_client._heap_can_alloc(64) is True
+
+    @pytest.mark.asyncio
+    async def test_heap_probe_failure_resets_and_breaks(self):
+        """When the heap probe fails, reset the device and exit the loop."""
+        import asyncio
+        import sys as _sys
+
+        _sys.modules["uasyncio"] = asyncio
+
+        mock_router = MagicMock()
+        config = {"interval_seconds": 10}
+
+        with (
+            patch.object(lmao_client, "log"),
+            patch.object(lmao_client, "_heap_can_alloc", return_value=False),
+            patch.object(lmao_client, "_reset_device") as mock_reset,
+        ):
+            # Loop must break on its own (no CancelledError needed).
+            await asyncio.wait_for(
+                lmao_client._periodic_send(
+                    tft=None,
+                    status_lines=[],
+                    router=mock_router,
+                    identity_hex="test",
+                    dest_hash=b"\x00" * 16,
+                    send_sensor=False,
+                    has_proto=True,
+                    config=config,
+                    pending_replies=[],
+                ),
+                timeout=5,
+            )
+
+        mock_reset.assert_called_once()
+        assert "Heap" in str(mock_reset.call_args)
+        mock_router.send_message.assert_not_called()
+
+        del _sys.modules["uasyncio"]
+
+    @pytest.mark.asyncio
+    async def test_memory_error_triggers_reset_not_backoff(self):
+        """A MemoryError must reset immediately — backoff can never fix
+        an exhausted/fragmented GC heap."""
+        import asyncio
+        import sys as _sys
+
+        _sys.modules["uasyncio"] = asyncio
+
+        mock_router = MagicMock()
+        mock_router.send_message.side_effect = MemoryError("alloc failed")
+        config = {"interval_seconds": 10}
+
+        with (
+            patch.object(lmao_client, "log") as mock_log,
+            patch.object(lmao_client.sys, "print_exception", create=True),
+            patch.object(lmao_client, "make_poc_message", return_value=b"ok", create=True),
+            patch.object(lmao_client, "_reset_device") as mock_reset,
+        ):
+            await asyncio.wait_for(
+                lmao_client._periodic_send(
+                    tft=None,
+                    status_lines=[],
+                    router=mock_router,
+                    identity_hex="test",
+                    dest_hash=b"\x00" * 16,
+                    send_sensor=False,
+                    has_proto=True,
+                    config=config,
+                    pending_replies=[],
+                ),
+                timeout=5,
+            )
+
+        mock_reset.assert_called_once()
+        assert "MemoryError" in str(mock_reset.call_args)
+        # Must NOT be treated as a regular consecutive error
+        error_logs = [
+            call for call in mock_log.call_args_list
+            if "Error in main loop" in str(call)
+        ]
+        assert not error_logs
+
+        del _sys.modules["uasyncio"]
+
+    @pytest.mark.asyncio
+    async def test_max_consecutive_errors_resets_device(self):
+        """MAX_CONSECUTIVE_ERRORS must reset the device, not halt forever.
+
+        A halted send loop is a dead node: the watchdog feeder keeps the
+        WDT happy, so the node would stay offline until physically
+        power-cycled.
+        """
+        import asyncio
+        import sys as _sys
+
+        _sys.modules["uasyncio"] = asyncio
+
+        mock_router = MagicMock()
+        mock_router.send_message.side_effect = OSError("No path")
+        config = {"interval_seconds": 10}
+
+        async def fast_sleep(delay):
+            return
+
+        with (
+            patch.object(lmao_client, "log") as mock_log,
+            patch.object(lmao_client.sys, "print_exception", create=True),
+            patch.object(lmao_client, "make_poc_message", return_value=b"ok", create=True),
+            patch.object(lmao_client, "_reset_device") as mock_reset,
+            patch.object(asyncio, "sleep", fast_sleep),
+        ):
+            await asyncio.wait_for(
+                lmao_client._periodic_send(
+                    tft=None,
+                    status_lines=[],
+                    router=mock_router,
+                    identity_hex="test",
+                    dest_hash=b"\x00" * 16,
+                    send_sensor=False,
+                    has_proto=True,
+                    config=config,
+                    pending_replies=[],
+                ),
+                timeout=5,
+            )
+
+        mock_reset.assert_called_once()
+        assert "FATAL" in str(mock_reset.call_args)
+        fatal_logs = [
+            call for call in mock_log.call_args_list
+            if "FATAL" in str(call)
+        ]
+        assert fatal_logs, "reset reason must be logged"
+
+        del _sys.modules["uasyncio"]
+
+
 # ── import guard ────────────────────────────────────────────────────
 
 
