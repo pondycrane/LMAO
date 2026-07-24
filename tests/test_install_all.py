@@ -351,6 +351,12 @@ class TestFlashCardputerClient:
             ),
             "upload_file": patch.object(install_all, "upload_file", return_value=True),
             "exit_raw_repl": patch.object(install_all, "exit_raw_repl", return_value=None),
+            "disarm_watchdog": patch.object(
+                install_all, "disarm_watchdog", return_value=True
+            ),
+            "recover_wedged_device": patch.object(
+                install_all, "recover_wedged_device", return_value=None
+            ),
             "verify_files_exist": patch.object(
                 install_all, "verify_files_exist", return_value=None
             ),
@@ -439,6 +445,55 @@ class TestFlashCardputerClient:
         assert result.status == "FAIL"
         assert "failed to upload" in result.detail
         self.mock_ser.close.assert_called_once()
+
+    # ── wedge recovery (issue #74) ──
+
+    def test_wedged_device_recovers_and_completes(self):
+        """A DeviceStalledError triggers one recovery attempt; the failed
+        file is retried on the recovered connection and the flash completes."""
+        from cardputer_client.flash import DeviceStalledError
+
+        new_ser = MagicMock()
+        self.mocks["recover_wedged_device"].return_value = new_ser
+        # First upload_file call stalls; retry (and remaining files) succeed.
+        self.mocks["upload_file"].side_effect = [
+            DeviceStalledError("wedged at byte 0"),
+            True,
+            True,
+        ]
+        result = self._make_result()
+        install_all._flash_cardputer_client("/dev/ttyACM0", "/fake/root", result)
+        assert result.status == "OK"
+        self.mocks["recover_wedged_device"].assert_called_once()
+        # Old port closed by recovery path, new port closed at the end.
+        new_ser.close.assert_called_once()
+
+    def test_wedged_device_unrecoverable_sets_fail(self):
+        """When recovery returns None the install fails with the stall error."""
+        from cardputer_client.flash import DeviceStalledError
+
+        self.mocks["recover_wedged_device"].return_value = None
+        self.mocks["upload_file"].side_effect = DeviceStalledError("wedged")
+        result = self._make_result()
+        install_all._flash_cardputer_client("/dev/ttyACM0", "/fake/root", result)
+        assert result.status == "FAIL"
+        assert "wedged" in result.detail
+
+    def test_wedged_device_restall_after_recovery_sets_fail(self):
+        """Only one recovery is attempted; a second stall fails the install."""
+        from cardputer_client.flash import DeviceStalledError
+
+        new_ser = MagicMock()
+        self.mocks["recover_wedged_device"].return_value = new_ser
+        self.mocks["upload_file"].side_effect = [
+            DeviceStalledError("wedged"),
+            DeviceStalledError("still wedged"),
+        ]
+        result = self._make_result()
+        install_all._flash_cardputer_client("/dev/ttyACM0", "/fake/root", result)
+        assert result.status == "FAIL"
+        assert "still wedged" in result.detail
+        self.mocks["recover_wedged_device"].assert_called_once()
 
     # ── serial exception during operations ──
 

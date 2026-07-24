@@ -1008,6 +1008,7 @@ For the full system design, see [`ARCHITECTURE.md`](ARCHITECTURE.md).
 | Cardputer has µReticulum firmware, not MicroPython | That's expected with rsCardputer firmware — it's a valid LXMF client. Use Option B above. |
 | No LoRa packets | Both devices on same frequency? In range? |
 | Cardputer display blank | ST7789 driver installed? SPI pins correct? |
+| Cardputer wedged (REPL OK but uploads stall at byte 0) | Flash tooling auto-recovers via `machine.reset()`/watchdog reset (#74); the client also arms a hardware watchdog (`WDT_TIMEOUT_MS` in `main.py`) so unattended wedges self-heal. Physical RESET is only needed if both fail. |
 | "Permission denied" on serial | `sudo usermod -a -G dialout $USER` |
 | Protobuf import error | Bazel: run `bazel build //proto:lma_messages_py_proto //proto:lma_grpc_py_proto`. Without Bazel: run `protoc --python_out=. proto/lma_messages.proto proto/lma_grpc.proto` from repo root, then set `PYTHONPATH="$PWD"` when running the server. |
 
