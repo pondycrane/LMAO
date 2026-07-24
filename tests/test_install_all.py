@@ -24,22 +24,32 @@ except ImportError:
 
 # ── helpers ─────────────────────────────────────────────────────────
 
+# RNode DETECT protocol response signature (firmware v1.x).
+_RNODE_DETECT_RESPONSE = bytes([0xC0, 0x08, 0x46, 0xC0])
+
+
+def _make_serial_mock(read_data: bytes = _RNODE_DETECT_RESPONSE) -> MagicMock:
+    """Return a mock serial port whose ``read()`` yields *read_data*."""
+    ser = MagicMock()
+    ser.read.return_value = read_data
+    return ser
+
 
 def _patch_imports():
     """Patch pyserial and install_all hardware-detection functions.
 
     Returns a dict of patches keyed by target string so callers can
     start/stop them independently.
+
+    The mock serial port answers the RNode DETECT signature by default,
+    so the inline RNode probe fallback (used when ``lma_core`` is not
+    importable) also succeeds without hardware.
     """
     patches = {
-        "serial_serial": patch("tools.install_all.serial.Serial", MagicMock()),
+        "serial_serial": patch(
+            "tools.install_all.serial.Serial", return_value=_make_serial_mock()
+        ),
         "find_cardputer_port": patch.object(install_all, "find_cardputer_port", return_value=None),
-        "check_rnode_firmware": patch.object(
-            install_all, "check_rnode_firmware", return_value=False
-        ),
-        "flash_rnode": patch.object(
-            install_all, "flash_rnode", return_value=(True, "OK")
-        ),
         "find_client_root": patch.object(
             install_all, "find_client_root", return_value="/fake/client_root"
         ),
@@ -47,6 +57,7 @@ def _patch_imports():
         "verify_files_exist": patch.object(install_all, "verify_files_exist", return_value=None),
         "upload_file": patch.object(install_all, "upload_file", return_value=True),
         "exit_raw_repl": patch.object(install_all, "exit_raw_repl", return_value=None),
+        "mip_install": patch.object(install_all, "_mip_install", return_value=None),
         "auto_discover_lib_files": patch.object(
             install_all, "auto_discover_lib_files", return_value=[]
         ),
@@ -57,8 +68,22 @@ def _patch_imports():
         "detect_serial_devices": patch.object(
             install_all, "detect_serial_devices", return_value=(None, None)
         ),
+        "stop_pi_server_container": patch.object(
+            install_all, "stop_pi_server_container", return_value=False
+        ),
         "comports": patch("serial.tools.list_ports.comports", return_value=[]),
     }
+    # install_all/install_services import lma_core.device_detect lazily
+    # inside functions.  When lma_core is importable (always the case
+    # under Bazel — it is a dep of install_all_lib), patch its helpers
+    # so tests never touch real hardware regardless of import path.
+    try:
+        import lma_core.device_detect as _dd
+
+        patches["probe_rnode"] = patch.object(_dd, "probe_rnode", return_value=True)
+        patches["find_rnode_port"] = patch.object(_dd, "find_rnode_port", return_value=None)
+    except ImportError:
+        pass
     return patches
 
 
@@ -332,6 +357,7 @@ class TestFlashCardputerClient:
             "auto_discover_lib_files": patch.object(
                 install_all, "auto_discover_lib_files", return_value=[]
             ),
+            "mip_install": patch.object(install_all, "_mip_install", return_value=None),
             "os.path.getsize": patch("os.path.getsize", return_value=100),
         }
         self._all_patches = patches
@@ -460,55 +486,20 @@ class TestMainPipeline:
     @pytest.fixture(autouse=True)
     def _setup_mocks(self):
         """Mock out all hardware-dependent functions."""
-        patches = {
-            "serial": patch("tools.install_all.serial", MagicMock()),
-            "serial.tools": patch("tools.install_all.serial.tools", MagicMock()),
-            "serial.tools.list_ports": patch(
-                "tools.install_all.serial.tools.list_ports", MagicMock()
-            ),
-            "comports": patch("serial.tools.list_ports.comports", return_value=[]),
-            "find_cardputer_port": patch.object(
-                install_all, "find_cardputer_port", return_value=None
-            ),
-            "check_rnode_firmware": patch.object(
-                install_all, "check_rnode_firmware", return_value=False
-            ),
-            "flash_rnode": patch.object(
-                install_all, "flash_rnode", return_value=(True, "OK")
-            ),
-            "find_client_root": patch.object(
-                install_all, "find_client_root", return_value="/fake/client_root"
-            ),
-            "enter_raw_repl": patch.object(install_all, "enter_raw_repl", return_value=True),
-            "verify_device": patch.object(
-                install_all, "verify_device", return_value=(True, "ESP32 detected")
-            ),
-            "upload_file": patch.object(install_all, "upload_file", return_value=True),
-            "exit_raw_repl": patch.object(install_all, "exit_raw_repl", return_value=None),
-            "verify_files_exist": patch.object(
-                install_all, "verify_files_exist", return_value=None
-            ),
-            "auto_discover_lib_files": patch.object(
-                install_all, "auto_discover_lib_files", return_value=[]
-            ),
-            "detect_serial_devices": patch.object(
-                install_all, "detect_serial_devices", return_value=(None, None)
-            ),
-        }
+        patches = _patch_imports()
         self.mocks, self._patches = _start_patches(patches)
         # Patch FILES_TO_UPLOAD (a list, not compatible with patch.object dict)
         self._saved_files = install_all.FILES_TO_UPLOAD
         install_all.FILES_TO_UPLOAD = ["main.py", "config.py"]
-        self._getsizep = patch("os.path.getsize", return_value=100)
-        self._getsizep.start()
-        # Also mock serial.Serial for _flash_cardputer_client
-        self._serial_patch = patch("tools.install_all.serial.Serial", MagicMock())
-        self._serial_patch.start()
         yield
         _stop_patches(self._patches)
         install_all.FILES_TO_UPLOAD = self._saved_files
-        self._getsizep.stop()
-        self._serial_patch.stop()
+
+    def _set_rnode_detected(self, port: str = "/dev/ttyUSB0") -> None:
+        """Configure mocks so the RNode is detected on *port*."""
+        if "find_rnode_port" in self.mocks:
+            self.mocks["find_rnode_port"].return_value = port
+        self.mocks["detect_serial_devices"].return_value = (port, None)
 
     def test_cardputer_detected_and_flash_succeeds_exits_0(self, capsys):
         """Cardputer detected + flash succeeds → exit 0 with OK summary."""
@@ -533,13 +524,11 @@ class TestMainPipeline:
     def test_both_devices_detected_both_processed(self):
         """Both Cardputer and RNode detected → both processed."""
         self.mocks["find_cardputer_port"].return_value = "/dev/ttyACM0"
-        self.mocks["detect_serial_devices"].return_value = ("/dev/ttyUSB0", None)
-        self.mocks["check_rnode_firmware"].return_value = True
+        self._set_rnode_detected("/dev/ttyUSB0")
         with pytest.raises(SystemExit) as exc_info:
             install_all.main([])
         assert exc_info.value.code == 0
         self.mocks["find_cardputer_port"].assert_called_once()
-        self.mocks["detect_serial_devices"].assert_called_once()
 
     def test_cardputer_port_override_bypasses_auto_detection(self):
         """--cardputer-port override bypasses auto-detection."""
@@ -577,14 +566,13 @@ class TestMainSkipFlags:
 
     def test_skip_cardputer_only(self):
         """When Cardputer is skipped, RNode should still be processed."""
-        # Mock detect_serial_devices to return a port
+        # Mock RNode detection to return a port
+        if "find_rnode_port" in self.mocks:
+            self.mocks["find_rnode_port"].return_value = "/dev/ttyUSB0"
         self.mocks["detect_serial_devices"].return_value = ("/dev/ttyUSB0", None)
-        self.mocks["check_rnode_firmware"].return_value = True
         with pytest.raises(SystemExit) as exc_info:
             install_all.main(["--skip-cardputer"])
         assert exc_info.value.code == 0
-        # RNode detection should have been called
-        self.mocks["detect_serial_devices"].assert_called_once()
         # Cardputer detection should NOT have been called
         self.mocks["find_cardputer_port"].assert_not_called()
 
@@ -634,45 +622,54 @@ class TestMainRNodeDetected:
         patches = _patch_imports()
         self.mocks, self._patches = _start_patches(patches)
         self.mocks["find_cardputer_port"].return_value = None
+        if "find_rnode_port" in self.mocks:
+            self.mocks["find_rnode_port"].return_value = "/dev/ttyUSB0"
         self.mocks["detect_serial_devices"].return_value = ("/dev/ttyUSB0", None)
-        self.mocks["check_rnode_firmware"].return_value = True  # already RNode
         yield
         _stop_patches(self._patches)
 
-    def test_rnode_already_firmware_exits_0(self):
-        """When RNode already has firmware, should exit 0 without flashing."""
+    def test_rnode_firmware_detected_exits_0(self):
+        """RNode probe confirms firmware → exit 0 (no programmatic flashing)."""
         with pytest.raises(SystemExit) as exc_info:
             install_all.main([])
         assert exc_info.value.code == 0
-        # Should check firmware but NOT flash
-        self.mocks["check_rnode_firmware"].assert_called_once_with("/dev/ttyUSB0")
-        self.mocks["flash_rnode"].assert_not_called()
+        if "probe_rnode" in self.mocks:
+            self.mocks["probe_rnode"].assert_called_once_with("/dev/ttyUSB0")
 
-    def test_rnode_needs_flashing(self):
-        """When RNode lacks firmware, it should be flashed."""
-        self.mocks["check_rnode_firmware"].return_value = False
+    def test_rnode_not_responding_exits_1(self):
+        """RNode detected on USB but not answering the probe → FAIL, exit 1.
+
+        RNode firmware is never flashed programmatically (web flasher
+        only), so a non-responsive device must be reported as [FAIL].
+        """
+        if "probe_rnode" in self.mocks:
+            self.mocks["probe_rnode"].return_value = False
+        self.mocks["serial_serial"].return_value.read.return_value = b""
         with pytest.raises(SystemExit) as exc_info:
             install_all.main([])
-        assert exc_info.value.code == 0
-        self.mocks["flash_rnode"].assert_called_once()
+        assert exc_info.value.code == 1
 
 
-class TestMainRNodeFlashFails:
-    """Test main() when RNode flashing fails."""
+class TestMainRNodeProbeFails:
+    """Test main() when the RNode probe fails on a detected port."""
 
     @pytest.fixture(autouse=True)
     def _setup_mocks(self):
         patches = _patch_imports()
         self.mocks, self._patches = _start_patches(patches)
         self.mocks["find_cardputer_port"].return_value = None
+        if "find_rnode_port" in self.mocks:
+            self.mocks["find_rnode_port"].return_value = "/dev/ttyUSB0"
         self.mocks["detect_serial_devices"].return_value = ("/dev/ttyUSB0", None)
-        self.mocks["check_rnode_firmware"].return_value = False
-        self.mocks["flash_rnode"].return_value = (False, "Flash error")
+        if "probe_rnode" in self.mocks:
+            self.mocks["probe_rnode"].return_value = False
+        # Inline fallback probe also gets an unexpected (non-RNode) response
+        self.mocks["serial_serial"].return_value.read.return_value = b"\x01\x02\x03"
         yield
         _stop_patches(self._patches)
 
-    def test_flash_failure_exits_1(self):
-        """When flashing fails, should exit 1."""
+    def test_probe_failure_exits_1(self):
+        """When the device does not answer as an RNode, should exit 1."""
         with pytest.raises(SystemExit) as exc_info:
             install_all.main([])
         assert exc_info.value.code == 1
@@ -707,7 +704,6 @@ class TestMainRNodePortOverride:
         self.mocks, self._patches = _start_patches(patches)
         self.mocks["find_cardputer_port"].return_value = None
         self.mocks["detect_serial_devices"].return_value = (None, None)
-        self.mocks["check_rnode_firmware"].return_value = True
         yield
         _stop_patches(self._patches)
 
@@ -716,10 +712,13 @@ class TestMainRNodePortOverride:
         with pytest.raises(SystemExit) as exc_info:
             install_all.main(["--rnode-port", "/dev/customUSB0"])
         assert exc_info.value.code == 0
-        # detect_serial_devices should NOT be called (explicit port given)
+        # Auto-detection should NOT run (explicit port given)
         self.mocks["detect_serial_devices"].assert_not_called()
-        # check_rnode_firmware should be called with the explicit port
-        self.mocks["check_rnode_firmware"].assert_called_once_with("/dev/customUSB0")
+        if "find_rnode_port" in self.mocks:
+            self.mocks["find_rnode_port"].assert_not_called()
+        # The RNode probe should run against the explicit port
+        if "probe_rnode" in self.mocks:
+            self.mocks["probe_rnode"].assert_called_once_with("/dev/customUSB0")
 
 
 # ── Main pipeline — include-services integration ────────────────────
@@ -851,80 +850,108 @@ class TestMainWithServices:
         assert "K8s Services" in captured
         assert "IoT Ingest Consumer" in captured
 
+    def test_run_pi_server_called_after_successful_release(self):
+        """run_pi_server should deploy the container when the build/push OK."""
+        self.mocks["install_pi_server"].side_effect = lambda result: result.ok("released")
+        with pytest.raises(SystemExit):
+            install_all.main(["--include-services"])
+        self.mocks["run_pi_server"].assert_called_once()
+
+    def test_stops_server_container_before_hardware_stages(self):
+        """--include-services should stop a running lmao-server container
+        before hardware probing so it cannot race the RNode probe."""
+        with pytest.raises(SystemExit):
+            install_all.main(["--include-services"])
+        self.mocks["stop_pi_server_container"].assert_called_once()
+
+    def test_no_container_stop_when_server_skipped(self):
+        """--skip-server should not stop the container."""
+        with pytest.raises(SystemExit):
+            install_all.main(["--include-services", "--skip-server"])
+        self.mocks["stop_pi_server_container"].assert_not_called()
+
+    def test_run_pi_server_skipped_when_release_fails(self):
+        """run_pi_server must NOT run when the image build/push failed —
+        the stage stays [FAIL] and the summary exits non-zero."""
+        self.mocks["install_pi_server"].side_effect = lambda result: result.fail("push failed")
+        with pytest.raises(SystemExit) as exc_info:
+            install_all.main(["--include-services"])
+        self.mocks["run_pi_server"].assert_not_called()
+        assert exc_info.value.code == 1
+
 
 # ── Unit tests for install_services.py ─────────────────────────────
 
 
 class TestInstallRNodeFirmware:
-    """Direct unit tests for _install_rnode_firmware()."""
+    """Direct unit tests for _install_rnode_firmware().
+
+    The current implementation probes for RNode firmware via
+    ``lma_core.device_detect.probe_rnode`` (falling back to an inline
+    serial probe when lma_core is unavailable).  It never flashes
+    programmatically — the web flasher is the only supported method.
+    """
 
     def _make_result(self):
         return install_all.DeviceResult("RNode (Heltec)")
 
-    def test_already_rnode_returns_ok(self):
-        """check_rnode_firmware returns True → status OK, no flash called."""
+    def test_probe_ok_returns_ok(self):
+        """probe_rnode returns True → status OK."""
         result = self._make_result()
-        with (
-            patch.object(install_all, "check_rnode_firmware", return_value=True),
-            patch.object(install_all, "flash_rnode") as mock_flash,
-        ):
+        with patch("lma_core.device_detect.probe_rnode", return_value=True):
             install_all._install_rnode_firmware("/dev/ttyUSB0", result)
         assert result.status == "OK"
-        assert "already installed" in result.detail
-        mock_flash.assert_not_called()
+        assert "RNode firmware detected" in result.detail
 
-    def test_flash_success_sets_ok(self):
-        """check returns False, flash returns (True, "OK") → status OK."""
+    def test_probe_false_inline_signature_returns_ok(self):
+        """probe_rnode False, inline probe gets DETECT signature → OK."""
         result = self._make_result()
         with (
-            patch.object(install_all, "check_rnode_firmware", return_value=False),
-            patch.object(
-                install_all,
-                "flash_rnode",
-                return_value=(True, "Flashed successfully"),
+            patch("lma_core.device_detect.probe_rnode", return_value=False),
+            patch(
+                "tools.install_all.serial.Serial",
+                return_value=_make_serial_mock(_RNODE_DETECT_RESPONSE),
             ),
         ):
             install_all._install_rnode_firmware("/dev/ttyUSB0", result)
         assert result.status == "OK"
-        assert "Flashed" in result.detail
+        assert "RNode firmware detected" in result.detail
 
-    def test_flash_failure_sets_fail(self):
-        """check returns False, flash returns (False, "error") → status FAIL."""
+    def test_probe_false_unexpected_response_sets_fail(self):
+        """Device responds but not as RNode → status FAIL."""
         result = self._make_result()
         with (
-            patch.object(install_all, "check_rnode_firmware", return_value=False),
-            patch.object(
-                install_all,
-                "flash_rnode",
-                return_value=(False, "Flash error: device not found"),
+            patch("lma_core.device_detect.probe_rnode", return_value=False),
+            patch(
+                "tools.install_all.serial.Serial",
+                return_value=_make_serial_mock(b"\x01\x02\x03"),
             ),
         ):
             install_all._install_rnode_firmware("/dev/ttyUSB0", result)
         assert result.status == "FAIL"
-        assert "Flash error" in result.detail
+        assert "responded but not as RNode" in result.detail
 
-    def test_exception_during_check_sets_fail(self):
-        """check_rnode_firmware raises → status FAIL, traceback printed."""
-        result = self._make_result()
-        with patch.object(install_all, "check_rnode_firmware", side_effect=OSError("serial error")):
-            install_all._install_rnode_firmware("/dev/ttyUSB0", result)
-        assert result.status == "FAIL"
-        assert "Unexpected error" in result.detail
-
-    def test_exception_during_flash_sets_fail(self):
-        """flash_rnode_firmware raises → status FAIL."""
+    def test_probe_false_no_response_sets_fail(self):
+        """Device does not respond at all → status FAIL with web-flasher hint."""
         result = self._make_result()
         with (
-            patch.object(install_all, "check_rnode_firmware", return_value=False),
-            patch.object(
-                install_all,
-                "flash_rnode",
-                side_effect=RuntimeError("timeout"),
-            ),
+            patch("lma_core.device_detect.probe_rnode", return_value=False),
+            patch("tools.install_all.serial.Serial", return_value=_make_serial_mock(b"")),
         ):
             install_all._install_rnode_firmware("/dev/ttyUSB0", result)
         assert result.status == "FAIL"
-        assert "Unexpected error" in result.detail
+        assert "not responding as RNode" in result.detail
+
+    def test_serial_exception_sets_fail(self):
+        """Serial error during probe → status FAIL."""
+        result = self._make_result()
+        with (
+            patch("lma_core.device_detect.probe_rnode", return_value=False),
+            patch("tools.install_all.serial.Serial", side_effect=OSError("serial error")),
+        ):
+            install_all._install_rnode_firmware("/dev/ttyUSB0", result)
+        assert result.status == "FAIL"
+        assert "RNode probe failed" in result.detail
 
 
 # ── Unit tests for install_services.py ─────────────────────────────
@@ -1044,18 +1071,55 @@ class TestInstallPiServer:
             assert result.status == "FAIL"
             assert "repo root" in result.detail.lower()
 
-    def test_builds_when_docker_found_and_succeeds(self):
-        """Result should be OK when docker build succeeds."""
+    def test_releases_image_when_build_and_push_succeed(self):
+        """Result should be OK when build + registry push both succeed."""
         mock_proc = MagicMock()
         mock_proc.returncode = 0
         with (
             patch("shutil.which", return_value="/usr/bin/docker"),
             patch("subprocess.run", return_value=mock_proc),
+            patch.object(install_services, "_check_registry", return_value=(True, "reachable")),
         ):
             result = self._make_result()
             install_services.install_pi_server(result, "/fake/repo")
             assert result.status == "OK"
-            assert "Docker image built" in result.detail
+            assert "released to local registry" in result.detail
+            assert "192.168.0.36:5000/lmao-server:latest" in result.detail
+
+    def test_fails_when_registry_unreachable(self):
+        """Result should be FAIL when the local registry is unreachable."""
+        mock_proc = MagicMock()
+        mock_proc.returncode = 0
+        with (
+            patch("shutil.which", return_value="/usr/bin/docker"),
+            patch("subprocess.run", return_value=mock_proc),
+            patch.object(
+                install_services,
+                "_check_registry",
+                return_value=(False, "registry unreachable — start it"),
+            ),
+        ):
+            result = self._make_result()
+            install_services.install_pi_server(result, "/fake/repo")
+            assert result.status == "FAIL"
+            assert "Cannot release image" in result.detail
+
+    def test_fails_when_push_fails(self):
+        """Result should be FAIL when docker push returns non-zero."""
+        mock_ok = MagicMock()
+        mock_ok.returncode = 0
+        mock_fail = MagicMock()
+        mock_fail.returncode = 1
+        mock_fail.stderr = "denied: access forbidden"
+        with (
+            patch("shutil.which", return_value="/usr/bin/docker"),
+            patch("subprocess.run", side_effect=[mock_ok, mock_ok, mock_fail]),
+            patch.object(install_services, "_check_registry", return_value=(True, "reachable")),
+        ):
+            result = self._make_result()
+            install_services.install_pi_server(result, "/fake/repo")
+            assert result.status == "FAIL"
+            assert "docker push" in result.detail
 
     def test_fails_when_docker_build_returns_nonzero(self):
         """Result should be FAIL when docker build returns non-zero."""
@@ -1098,6 +1162,14 @@ class TestInstallPiServer:
 
 class TestInstallK8sServices:
     """Unit tests for install_services.install_k8s_services()."""
+
+    @pytest.fixture(autouse=True)
+    def _patch_cluster_check(self):
+        """Patch the K8s cluster health check (no real cluster in tests)."""
+        with patch.object(
+            install_services, "_check_k8s_cluster", return_value=(True, "cluster healthy")
+        ):
+            yield
 
     def _make_result(self):
         return install_all.DeviceResult("K8s Services")
@@ -1190,6 +1262,19 @@ class TestInstallK8sServices:
 class TestInstallIotIngestConsumer:
     """Unit tests for install_services.install_iot_ingest_consumer()."""
 
+    @pytest.fixture(autouse=True)
+    def _patch_health_checks(self):
+        """Patch cluster + registry health checks (no real network)."""
+        with (
+            patch.object(
+                install_services, "_check_k8s_cluster", return_value=(True, "cluster healthy")
+            ),
+            patch.object(
+                install_services, "_check_registry", return_value=(True, "registry reachable")
+            ),
+        ):
+            yield
+
     def _make_result(self):
         return install_all.DeviceResult("IoT Ingest Consumer")
 
@@ -1220,10 +1305,11 @@ class TestInstallIotIngestConsumer:
             assert result.status == "FAIL"
             assert "Dockerfile not found" in result.detail
 
-    def test_builds_and_applies_when_all_clis_found(self):
-        """Result should be OK when Docker build + kubectl apply both succeed."""
+    def test_deploys_and_verifies_running_when_all_succeed(self):
+        """OK when build + push + apply + rollout + pod check all succeed."""
         mock_proc = MagicMock()
         mock_proc.returncode = 0
+        mock_proc.stdout = "Running"
         with (
             patch("shutil.which", return_value="/usr/bin/docker"),
             patch("os.path.isfile", return_value=True),
@@ -1232,7 +1318,103 @@ class TestInstallIotIngestConsumer:
             result = self._make_result()
             install_services.install_iot_ingest_consumer(result, "/fake/repo")
             assert result.status == "OK"
-            assert "deployed" in result.detail.lower()
+            assert "deployed and Running" in result.detail
+            assert "192.168.0.36:5000/lmao-iot-ingest:latest" in result.detail
+
+    def test_fails_when_registry_unreachable(self):
+        """Result should be FAIL when the local registry is unreachable."""
+        mock_proc = MagicMock()
+        mock_proc.returncode = 0
+        with (
+            patch("shutil.which", return_value="/usr/bin/docker"),
+            patch("os.path.isfile", return_value=True),
+            patch("subprocess.run", return_value=mock_proc),
+            patch.object(
+                install_services, "_check_registry", return_value=(False, "registry down")
+            ),
+        ):
+            result = self._make_result()
+            install_services.install_iot_ingest_consumer(result, "/fake/repo")
+            assert result.status == "FAIL"
+            assert "Cannot release image" in result.detail
+
+    def test_fails_when_push_fails(self):
+        """Result should be FAIL when docker push returns non-zero."""
+        mock_ok = MagicMock()
+        mock_ok.returncode = 0
+        mock_fail = MagicMock()
+        mock_fail.returncode = 1
+        mock_fail.stderr = "denied"
+        with (
+            patch("shutil.which", return_value="/usr/bin/docker"),
+            patch("os.path.isfile", return_value=True),
+            # build ok, tag ok, push fails
+            patch("subprocess.run", side_effect=[mock_ok, mock_ok, mock_fail]),
+        ):
+            result = self._make_result()
+            install_services.install_iot_ingest_consumer(result, "/fake/repo")
+            assert result.status == "FAIL"
+            assert "docker push" in result.detail
+
+    def test_fails_when_rollout_does_not_complete(self):
+        """Result should be FAIL when the Deployment rollout times out."""
+        mock_ok = MagicMock()
+        mock_ok.returncode = 0
+        mock_rollout_fail = MagicMock()
+        mock_rollout_fail.returncode = 1
+        mock_rollout_fail.stderr = "error: timed out waiting for the condition"
+        with (
+            patch("shutil.which", return_value="/usr/bin/docker"),
+            patch("os.path.isfile", return_value=True),
+            # build, tag, push, apply all ok; rollout fails
+            patch(
+                "subprocess.run",
+                side_effect=[mock_ok, mock_ok, mock_ok, mock_ok, mock_rollout_fail],
+            ),
+        ):
+            result = self._make_result()
+            install_services.install_iot_ingest_consumer(result, "/fake/repo")
+            assert result.status == "FAIL"
+            assert "rollout status" in result.detail
+
+    def test_fails_when_no_pod_running(self):
+        """Result should be FAIL when no consumer pod reaches Running."""
+        mock_ok = MagicMock()
+        mock_ok.returncode = 0
+        mock_pods = MagicMock()
+        mock_pods.returncode = 0
+        mock_pods.stdout = "Pending"
+        with (
+            patch("shutil.which", return_value="/usr/bin/docker"),
+            patch("os.path.isfile", return_value=True),
+            # build, tag, push, apply, rollout ok; pod check returns Pending
+            patch(
+                "subprocess.run",
+                side_effect=[mock_ok, mock_ok, mock_ok, mock_ok, mock_ok, mock_pods],
+            ),
+        ):
+            result = self._make_result()
+            install_services.install_iot_ingest_consumer(result, "/fake/repo")
+            assert result.status == "FAIL"
+            assert "No iot-ingest-consumer pod Running" in result.detail
+
+    def test_ok_when_cluster_unreachable_after_push(self):
+        """Image is released even when the cluster is down; stage reports OK
+        with recovery instructions (deploy when cluster recovers)."""
+        mock_proc = MagicMock()
+        mock_proc.returncode = 0
+        with (
+            patch("shutil.which", return_value="/usr/bin/docker"),
+            patch("os.path.isfile", return_value=True),
+            patch("subprocess.run", return_value=mock_proc),
+            patch.object(
+                install_services, "_check_k8s_cluster", return_value=(False, "cluster down")
+            ),
+        ):
+            result = self._make_result()
+            install_services.install_iot_ingest_consumer(result, "/fake/repo")
+            assert result.status == "OK"
+            assert "kubectl apply" in result.detail
 
     def test_fails_when_docker_build_returns_nonzero(self):
         """Result should be FAIL when docker build returns non-zero."""
@@ -1296,7 +1478,7 @@ class TestInstallIotIngestConsumer:
         mock_proc.returncode = 0  # Docker succeeds
         mock_proc.stderr = ""
 
-        # Second call (kubectl) fails
+        # build, tag, push succeed; kubectl apply fails
         mock_fail_proc = MagicMock()
         mock_fail_proc.returncode = 1
         mock_fail_proc.stderr = "connection refused"
@@ -1306,7 +1488,7 @@ class TestInstallIotIngestConsumer:
             patch("os.path.isfile", return_value=True),
             patch(
                 "subprocess.run",
-                side_effect=[mock_proc, mock_fail_proc],
+                side_effect=[mock_proc, mock_proc, mock_proc, mock_fail_proc],
             ),
         ):
             result = self._make_result()
@@ -1321,9 +1503,15 @@ class TestInstallIotIngestConsumer:
         with (
             patch("shutil.which", return_value="/usr/bin/docker"),
             patch("os.path.isfile", return_value=True),
+            # build, tag, push succeed; kubectl apply raises
             patch(
                 "subprocess.run",
-                side_effect=[mock_proc, subprocess.SubprocessError("kubectl error")],
+                side_effect=[
+                    mock_proc,
+                    mock_proc,
+                    mock_proc,
+                    subprocess.SubprocessError("kubectl error"),
+                ],
             ),
         ):
             result = self._make_result()
@@ -1366,243 +1554,160 @@ class TestInstallIotIngestConsumer:
             assert result.status == "FAIL"
             assert "iot-ingest.yaml" in result.detail.lower()
 
-    # ── Registry path tests ──
+# ── Unit tests for _check_registry() / _tag_and_push() ─────────────
 
-    def test_registry_path_skips_docker_build(self):
-        """When registry_host and registry_port are set, should skip docker build."""
-        result = self._make_result()
+
+class TestCheckRegistry:
+    """Unit tests for install_services._check_registry()."""
+
+    def test_ok_when_registry_responds_200(self):
+        """HTTP 200 from /v2/ means the registry is reachable."""
+        mock_resp = MagicMock()
+        mock_resp.status = 200
+        mock_resp.__enter__.return_value = mock_resp
+        mock_resp.__exit__.return_value = False
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            ok, msg = install_services._check_registry()
+            assert ok is True
+            assert "reachable" in msg
+
+    def test_fails_when_connection_refused(self):
+        """Connection error → not ok, with recovery instructions."""
+        import urllib.error
+
+        with patch(
+            "urllib.request.urlopen",
+            side_effect=urllib.error.URLError("connection refused"),
+        ):
+            ok, msg = install_services._check_registry()
+            assert ok is False
+            assert "unreachable" in msg
+            assert "manage.sh start" in msg
+
+
+class TestCheckK8sCluster:
+    """Unit tests for install_services._check_k8s_cluster()."""
+
+    def test_fails_when_kubectl_not_found(self):
+        with patch("shutil.which", return_value=None):
+            ok, msg = install_services._check_k8s_cluster()
+            assert ok is False
+            assert "kubectl not found" in msg
+
+    def test_healthy_cluster_with_version_skew_warning(self):
+        """Benign stderr warnings (client/server version skew) must NOT be
+        treated as cluster failure — serverVersion in stdout is authoritative."""
+        import json
+
+        version_proc = MagicMock()
+        version_proc.returncode = 0
+        version_proc.stdout = json.dumps(
+            {"clientVersion": {"gitVersion": "v1.30.0"}, "serverVersion": {"gitVersion": "v1.35.5"}}
+        )
+        version_proc.stderr = (
+            "WARNING: version difference between client (1.30) and server (1.35) "
+            "exceeds the supported minor version skew of +/-1"
+        )
+        nodes_proc = MagicMock()
+        nodes_proc.returncode = 0
+        nodes_proc.stdout = "True True True"
         with (
             patch("shutil.which", return_value="/usr/bin/kubectl"),
-            patch("os.path.isfile", return_value=True),
-            patch("subprocess.run") as mock_run,
+            patch("subprocess.run", side_effect=[version_proc, nodes_proc]),
         ):
-            mock_proc = MagicMock()
-            mock_proc.returncode = 0
-            mock_run.return_value = mock_proc
-            install_services.install_iot_ingest_consumer(
-                result,
-                "/fake/repo",
-                registry_host="192.168.0.36",
-                registry_port=5000,
-            )
-            # Should be OK (registry deploy succeeded)
-            assert result.status == "OK"
-            assert "deployed from registry" in result.detail.lower()
-            # Should NOT have called docker build (only kubectl commands)
-            for call_args in mock_run.call_args_list:
-                args = call_args[0][0]
-                assert "docker" not in args
+            ok, msg = install_services._check_k8s_cluster()
+            assert ok is True
+            assert "3/3" in msg
 
-    def test_registry_path_delegates_to_helper(self):
-        """When registry params are set, should delegate to _apply_iot_ingest_manifest."""
-        result = self._make_result()
-        with patch.object(
-            install_services,
-            "_apply_iot_ingest_manifest",
-        ) as mock_helper:
-            install_services.install_iot_ingest_consumer(
-                result,
-                "/fake/repo",
-                registry_host="192.168.0.36",
-                registry_port=5000,
-            )
-            mock_helper.assert_called_once_with(result, "/fake/repo", "192.168.0.36", 5000)
-
-    def test_registry_path_still_checks_repo_root(self):
-        """Registry path should still check repo_root before delegating."""
-        result = self._make_result()
-        with patch.object(install_services, "_find_repo_root", return_value=None):
-            install_services.install_iot_ingest_consumer(
-                result,
-                None,
-                registry_host="192.168.0.36",
-                registry_port=5000,
-            )
-            assert result.status == "FAIL"
-            assert "repo root" in result.detail.lower()
-
-    def test_no_registry_preserves_local_build(self):
-        """Without registry params, existing docker build + kubectl apply is preserved."""
-        mock_proc = MagicMock()
-        mock_proc.returncode = 0
-        result = self._make_result()
+    def test_fails_when_connection_refused(self):
+        version_proc = MagicMock()
+        version_proc.returncode = 1
+        version_proc.stdout = ""
+        version_proc.stderr = "The connection to the server 192.168.0.45:6443 was refused"
         with (
-            patch("shutil.which", return_value="/usr/bin/docker"),
-            patch("os.path.isfile", return_value=True),
-            patch("subprocess.run", return_value=mock_proc) as mock_run,
+            patch("shutil.which", return_value="/usr/bin/kubectl"),
+            patch("subprocess.run", return_value=version_proc),
         ):
-            install_services.install_iot_ingest_consumer(result, "/fake/repo")
-            assert result.status == "OK"
-            # Should have called docker build
-            docker_calls = [c for c in mock_run.call_args_list if "docker" in c[0][0]]
-            assert len(docker_calls) > 0
+            ok, msg = install_services._check_k8s_cluster()
+            assert ok is False
+            assert "refusing connections" in msg
 
-    def test_registry_host_only_does_not_activate(self):
-        """registry_host alone without registry_port should not activate registry path."""
-        mock_proc = MagicMock()
-        mock_proc.returncode = 0
-        result = self._make_result()
+    def test_fails_when_no_route_to_host(self):
+        version_proc = MagicMock()
+        version_proc.returncode = 1
+        version_proc.stdout = ""
+        version_proc.stderr = "Unable to connect to the server: dial tcp: no route to host"
         with (
-            patch("shutil.which", return_value="/usr/bin/docker"),
-            patch("os.path.isfile", return_value=True),
-            patch("subprocess.run", return_value=mock_proc) as mock_run,
+            patch("shutil.which", return_value="/usr/bin/kubectl"),
+            patch("subprocess.run", return_value=version_proc),
         ):
-            install_services.install_iot_ingest_consumer(
-                result,
-                "/fake/repo",
-                registry_host="192.168.0.36",
-            )
-            # Should have followed the normal docker build path
-            docker_calls = [c for c in mock_run.call_args_list if "docker" in c[0][0]]
-            assert len(docker_calls) > 0
+            ok, msg = install_services._check_k8s_cluster()
+            assert ok is False
+            assert "unreachable" in msg
+
+    def test_fails_when_no_nodes_ready(self):
+        import json
+
+        version_proc = MagicMock()
+        version_proc.returncode = 0
+        version_proc.stdout = json.dumps({"serverVersion": {"gitVersion": "v1.35.5"}})
+        version_proc.stderr = ""
+        nodes_proc = MagicMock()
+        nodes_proc.returncode = 0
+        nodes_proc.stdout = "False False"
+        with (
+            patch("shutil.which", return_value="/usr/bin/kubectl"),
+            patch("subprocess.run", side_effect=[version_proc, nodes_proc]),
+        ):
+            ok, msg = install_services._check_k8s_cluster()
+            assert ok is False
+            assert "not Ready" in msg
 
 
-# ── Unit tests for _apply_iot_ingest_manifest() ──────────────────
-
-
-class TestApplyIotIngestManifest:
-    """Unit tests for install_services._apply_iot_ingest_manifest()."""
+class TestTagAndPush:
+    """Unit tests for install_services._tag_and_push()."""
 
     def _make_result(self):
-        return install_all.DeviceResult("IoT Ingest Consumer")
+        return install_all.DeviceResult("Test")
 
-    def test_skips_when_kubectl_not_found(self):
-        """Result should be SKIP when kubectl is not on PATH."""
-        with patch("shutil.which", return_value=None):
-            result = self._make_result()
-            install_services._apply_iot_ingest_manifest(result, "/fake/repo", "192.168.0.36", 5000)
-            assert result.status == "SKIP"
-            assert "kubectl" in result.detail.lower()
-
-    def test_fails_when_manifest_not_found(self):
-        """Result should be FAIL when k8s/iot-ingest.yaml does not exist."""
-        with (
-            patch("shutil.which", return_value="/usr/bin/kubectl"),
-            patch("os.path.isfile", return_value=False),
-        ):
-            result = self._make_result()
-            install_services._apply_iot_ingest_manifest(result, "/fake/repo", "192.168.0.36", 5000)
-            assert result.status == "FAIL"
-            assert "iot-ingest.yaml" in result.detail.lower()
-
-    def test_ok_when_all_steps_succeed(self):
-        """Result should be OK when apply + set image + patch all succeed."""
+    def test_ok_when_tag_and_push_succeed(self):
+        """Returns True when docker tag + push both succeed."""
         mock_proc = MagicMock()
         mock_proc.returncode = 0
-        with (
-            patch("shutil.which", return_value="/usr/bin/kubectl"),
-            patch("os.path.isfile", return_value=True),
-            patch("subprocess.run", return_value=mock_proc),
-        ):
-            result = self._make_result()
-            install_services._apply_iot_ingest_manifest(result, "/fake/repo", "192.168.0.36", 5000)
-            assert result.status == "OK"
-            assert "192.168.0.36:5000/lmao-iot-ingest:latest" in result.detail
+        result = self._make_result()
+        with patch("subprocess.run", return_value=mock_proc):
+            assert install_services._tag_and_push(
+                result, "lmao-server:latest", "reg:5000/lmao-server:latest"
+            )
+        assert result.status != "FAIL"
 
-    def test_sets_image_and_patch_pull_policy(self):
-        """Should call kubectl apply, set image, and patch pull policy."""
-        mock_proc = MagicMock()
-        mock_proc.returncode = 0
-        with (
-            patch("shutil.which", return_value="/usr/bin/kubectl"),
-            patch("os.path.isfile", return_value=True),
-            patch("subprocess.run", return_value=mock_proc) as mock_run,
-        ):
-            result = self._make_result()
-            install_services._apply_iot_ingest_manifest(result, "/fake/repo", "192.168.0.36", 5000)
-            assert result.status == "OK"
-            # Should have made 3 subprocess calls
-            assert mock_run.call_count == 3
-            # First call: kubectl apply
-            first_call_args = mock_run.call_args_list[0][0][0]
-            assert "apply" in first_call_args
-            # Second call: kubectl set image
-            second_call_args = mock_run.call_args_list[1][0][0]
-            assert "set" in second_call_args
-            assert "image" in second_call_args
-            assert "192.168.0.36:5000/lmao-iot-ingest:latest" in str(second_call_args)
-            # Third call: kubectl patch
-            third_call_args = mock_run.call_args_list[2][0][0]
-            assert "patch" in third_call_args
-            assert "Always" in str(third_call_args)
-
-    def test_fails_when_kubectl_apply_returns_nonzero(self):
-        """Result should be FAIL when kubectl apply fails."""
+    def test_fails_when_tag_fails(self):
+        """Returns False and marks FAIL when docker tag fails."""
         mock_fail = MagicMock()
         mock_fail.returncode = 1
-        mock_fail.stderr = "connection refused"
-        with (
-            patch("shutil.which", return_value="/usr/bin/kubectl"),
-            patch("os.path.isfile", return_value=True),
-            patch("subprocess.run", return_value=mock_fail),
-        ):
-            result = self._make_result()
-            install_services._apply_iot_ingest_manifest(result, "/fake/repo", "192.168.0.36", 5000)
-            assert result.status == "FAIL"
-            assert "kubectl apply failed" in result.detail
+        mock_fail.stderr = "no such image"
+        result = self._make_result()
+        with patch("subprocess.run", return_value=mock_fail):
+            assert not install_services._tag_and_push(
+                result, "lmao-server:latest", "reg:5000/lmao-server:latest"
+            )
+        assert result.status == "FAIL"
+        assert "docker tag failed" in result.detail
 
-    def test_fails_when_set_image_fails(self):
-        """Result should be FAIL when kubectl set image fails."""
+    def test_fails_when_push_fails(self):
+        """Returns False and marks FAIL when docker push fails."""
         mock_ok = MagicMock()
         mock_ok.returncode = 0
         mock_fail = MagicMock()
         mock_fail.returncode = 1
-        mock_fail.stderr = "deployment not found"
-        with (
-            patch("shutil.which", return_value="/usr/bin/kubectl"),
-            patch("os.path.isfile", return_value=True),
-            patch("subprocess.run", side_effect=[mock_ok, mock_fail]),
-        ):
-            result = self._make_result()
-            install_services._apply_iot_ingest_manifest(result, "/fake/repo", "192.168.0.36", 5000)
-            assert result.status == "FAIL"
-            assert "set image failed" in result.detail
-
-    def test_fails_when_patch_fails(self):
-        """Result should be FAIL when kubectl patch fails."""
-        mock_ok = MagicMock()
-        mock_ok.returncode = 0
-        mock_fail = MagicMock()
-        mock_fail.returncode = 1
-        mock_fail.stderr = "forbidden"
-        with (
-            patch("shutil.which", return_value="/usr/bin/kubectl"),
-            patch("os.path.isfile", return_value=True),
-            patch("subprocess.run", side_effect=[mock_ok, mock_ok, mock_fail]),
-        ):
-            result = self._make_result()
-            install_services._apply_iot_ingest_manifest(result, "/fake/repo", "192.168.0.36", 5000)
-            assert result.status == "FAIL"
-            assert "patch failed" in result.detail
-
-    def test_fails_when_subprocess_raises(self):
-        """Result should be FAIL when subprocess.run raises SubprocessError."""
-        with (
-            patch("shutil.which", return_value="/usr/bin/kubectl"),
-            patch("os.path.isfile", return_value=True),
-            patch(
-                "subprocess.run",
-                side_effect=subprocess.SubprocessError("command timeout"),
-            ),
-        ):
-            result = self._make_result()
-            install_services._apply_iot_ingest_manifest(result, "/fake/repo", "192.168.0.36", 5000)
-            assert result.status == "FAIL"
-
-    def test_fails_when_generic_exception_raised(self):
-        """Result should be FAIL when an unexpected exception occurs."""
-        with (
-            patch("shutil.which", return_value="/usr/bin/kubectl"),
-            patch("os.path.isfile", return_value=True),
-            patch(
-                "subprocess.run",
-                side_effect=OSError("disk full"),
-            ),
-        ):
-            result = self._make_result()
-            install_services._apply_iot_ingest_manifest(result, "/fake/repo", "192.168.0.36", 5000)
-            assert result.status == "FAIL"
-            assert "Unexpected error" in result.detail
+        mock_fail.stderr = "denied"
+        result = self._make_result()
+        with patch("subprocess.run", side_effect=[mock_ok, mock_fail]):
+            assert not install_services._tag_and_push(
+                result, "lmao-server:latest", "reg:5000/lmao-server:latest"
+            )
+        assert result.status == "FAIL"
+        assert "docker push" in result.detail
 
 
 # ── Unit tests for setup_registry() ─────────────────────────────────
@@ -1781,17 +1886,18 @@ class TestMainWithRegistryAndServices:
         yield
         _stop_patches(self._patches)
 
-    def test_registry_with_services_passes_registry_to_iot(self):
+    def test_registry_with_services_calls_iot_deploy(self):
         """When both --setup-registry and --include-services are set,
-        install_iot_ingest_consumer should receive registry_host and registry_port."""
+        install_iot_ingest_consumer should be called (it releases through
+        the local registry internally — no registry kwargs needed)."""
         # Simulate successful registry setup (sets result.status to "OK")
         self.mocks["setup_registry"].side_effect = lambda result: setattr(result, "status", "OK")
         with pytest.raises(SystemExit):
             install_all.main(["--setup-registry", "--include-services"])
         self.mocks["install_iot_ingest_consumer"].assert_called_once()
         call_kwargs = self.mocks["install_iot_ingest_consumer"].call_args.kwargs
-        assert call_kwargs.get("registry_host") == "192.168.0.36"
-        assert call_kwargs.get("registry_port") == 5000
+        assert "registry_host" not in call_kwargs
+        assert "registry_port" not in call_kwargs
 
     def test_services_only_no_registry_passed_to_iot(self):
         """When only --include-services (no --setup-registry) is set,
@@ -1817,16 +1923,15 @@ class TestMainWithRegistryAndServices:
             install_all.main(["--setup-registry", "--include-services", "--skip-iot-ingest"])
         self.mocks["install_iot_ingest_consumer"].assert_not_called()
 
-    def test_registry_failure_falls_back_to_local_build(self):
-        """When registry setup fails, IoT deploy should fall back to local Docker build
-        without registry params."""
+    def test_registry_failure_still_attempts_iot_deploy(self):
+        """When registry setup fails, IoT deploy is still attempted (it will
+        fail at the push step with a clear message if the registry is down)."""
         # Simulate registry failure (status stays SKIP or becomes FAIL)
         self.mocks["setup_registry"].side_effect = lambda result: setattr(result, "status", "FAIL")
         with pytest.raises(SystemExit):
             install_all.main(["--setup-registry", "--include-services"])
         self.mocks["install_iot_ingest_consumer"].assert_called_once()
         call_kwargs = self.mocks["install_iot_ingest_consumer"].call_args.kwargs
-        # Should NOT pass registry params on fallback
         assert "registry_host" not in call_kwargs
         assert "registry_port" not in call_kwargs
 
@@ -1912,248 +2017,113 @@ def _make_port(device, vid, pid, description="USB device"):
 
 
 class TestDetectSerialDevices:
-    """Tests for install_services.detect_serial_devices()."""
+    """Tests for install_services.detect_serial_devices().
 
-    # ── VID/PID matching ──
+    The function delegates to ``lma_core.device_detect.detect_devices()``;
+    VID/PID fingerprint matching itself is covered by
+    ``tests/test_device_detect.py``.  These tests cover the delegation
+    and the ImportError fallback only.
+    """
 
-    def test_espressif_vid_detected_as_rnode(self):
-        """0x303A:0x4001 (Espressif ESP32-S3) → rnode detected, no cardputer."""
-        mock_ports = [
-            _make_port("/dev/ttyACM0", 0x303A, 0x4001, "ESP32-S3"),
-        ]
-        with (
-            patch("serial.tools.list_ports.comports", return_value=mock_ports),
-        ):
-            rnode, cardputer = install_services.detect_serial_devices()
-        assert rnode == "/dev/ttyACM0"
-        assert cardputer is None
+    def _make_detection(self, rnode_port=None, cardputer_port=None):
+        from types import SimpleNamespace
 
-    def test_espressif_pid_1001_detected_as_rnode(self):
-        """0x303A:0x1001 (RNode firmware PID) → rnode detected."""
-        mock_ports = [
-            _make_port("/dev/ttyACM0", 0x303A, 0x1001, "ESP32-S3"),
-        ]
-        with (
-            patch("serial.tools.list_ports.comports", return_value=mock_ports),
-        ):
-            rnode, cardputer = install_services.detect_serial_devices()
-        assert rnode == "/dev/ttyACM0"
-        assert cardputer is None
+        return SimpleNamespace(
+            rnode_port=rnode_port,
+            cardputer_port=cardputer_port,
+            all_ports=[],
+            confidence={},
+        )
 
-    def test_cp210x_vid_detected_as_cardputer(self):
-        """0x10C4:0xEA60 (CP210x) → cardputer detected, no rnode."""
-        mock_ports = [
-            _make_port("/dev/ttyUSB0", 0x10C4, 0xEA60, "CP2102 USB to UART Bridge"),
-        ]
-        with (
-            patch("serial.tools.list_ports.comports", return_value=mock_ports),
-        ):
-            rnode, cardputer = install_services.detect_serial_devices()
-        assert rnode is None
-        assert cardputer == "/dev/ttyUSB0"
-
-    def test_ch340_vid_detected_as_cardputer(self):
-        """0x1A86:0x7523 (CH340) → cardputer detected."""
-        mock_ports = [
-            _make_port("/dev/ttyUSB0", 0x1A86, 0x7523, "USB Serial CH340"),
-        ]
-        with (
-            patch("serial.tools.list_ports.comports", return_value=mock_ports),
-        ):
-            rnode, cardputer = install_services.detect_serial_devices()
-        assert rnode is None
-        assert cardputer == "/dev/ttyUSB0"
-
-    def test_both_devices_detected(self):
-        """Both RNode and Cardputer present → both identified."""
-        mock_ports = [
-            _make_port("/dev/ttyUSB0", 0x10C4, 0xEA60, "CP2102"),
-            _make_port("/dev/ttyACM0", 0x303A, 0x4001, "ESP32-S3"),
-        ]
-        with (
-            patch("serial.tools.list_ports.comports", return_value=mock_ports),
-        ):
-            rnode, cardputer = install_services.detect_serial_devices()
-        assert rnode == "/dev/ttyACM0"
-        assert cardputer == "/dev/ttyUSB0"
-
-    # ── Unknown VID/PID falls through to probe ──
-
-    def test_unknown_vid_probes_via_rnodeconf(self):
-        """Unknown VID/PID → falls through to _probe_for_rnode()."""
-        mock_ports = [
-            _make_port("/dev/ttyUSB0", 0x0403, 0x6001, "FTDI FT232"),
-        ]
-        with (
-            patch("serial.tools.list_ports.comports", return_value=mock_ports),
-            patch.object(install_services, "_probe_for_rnode", return_value=True),
+    def test_returns_detected_ports(self):
+        """Both devices detected → both ports returned."""
+        with patch(
+            "lma_core.device_detect.detect_devices",
+            return_value=self._make_detection("/dev/ttyUSB0", "/dev/ttyACM0"),
         ):
             rnode, cardputer = install_services.detect_serial_devices()
         assert rnode == "/dev/ttyUSB0"
+        assert cardputer == "/dev/ttyACM0"
 
-    def test_unknown_vid_probe_fails_adds_to_unclassified(self):
-        """Unknown VID/PID and probe fails → device added to unclassified list."""
-        mock_ports = [
-            _make_port("/dev/ttyUSB0", 0x0403, 0x6001, "FTDI FT232"),
-        ]
-        with (
-            patch("serial.tools.list_ports.comports", return_value=mock_ports),
-            patch.object(install_services, "_probe_for_rnode", return_value=False),
+    def test_returns_none_when_nothing_detected(self):
+        """Nothing detected → (None, None)."""
+        with patch(
+            "lma_core.device_detect.detect_devices",
+            return_value=self._make_detection(),
         ):
             rnode, cardputer = install_services.detect_serial_devices()
         assert rnode is None
         assert cardputer is None
 
-    # ── Fallback paths ──
+    def test_import_error_uses_fallback(self):
+        """ImportError on lma_core → falls back to _detect_rnode_port_fallback()."""
+        import builtins
 
-    def test_no_usb_ports_uses_fallback(self):
-        """No USB serial devices → falls back to _detect_rnode_port_fallback()."""
-        with (
-            patch("serial.tools.list_ports.comports", return_value=[]),
-            patch.object(
-                install_services, "_detect_rnode_port_fallback", return_value="/dev/ttyUSB0"
-            ),
-        ):
-            rnode, cardputer = install_services.detect_serial_devices()
-        assert rnode == "/dev/ttyUSB0"
-        assert cardputer is None
+        real_import = builtins.__import__
 
-    def test_pyserial_unavailable_uses_fallback(self):
-        """ImportError on serial.tools.list_ports → falls back."""
+        def mock_import(name, *args, **kwargs):
+            if name == "lma_core.device_detect":
+                raise ImportError("no lma_core")
+            return real_import(name, *args, **kwargs)
+
         with (
             patch.object(
                 install_services, "_detect_rnode_port_fallback", return_value="/dev/ttyACM0"
             ),
+            patch("builtins.__import__", side_effect=mock_import),
         ):
-            # Simulate ImportError by patching serial.tools.list_ports import
-            import builtins
-
-            real_import = builtins.__import__
-
-            def mock_import(name, *args, **kwargs):
-                if name == "serial.tools.list_ports":
-                    raise ImportError("no pyserial")
-                return real_import(name, *args, **kwargs)
-
-            with patch("builtins.__import__", side_effect=mock_import):
-                rnode, cardputer = install_services.detect_serial_devices()
+            rnode, cardputer = install_services.detect_serial_devices()
         assert rnode == "/dev/ttyACM0"
         assert cardputer is None
-
-    def test_ttyama_ports_excluded(self):
-        """ttyAMA ports should be filtered out (not USB serial)."""
-        mock_ports = [
-            _make_port("/dev/ttyAMA0", 0x303A, 0x4001, "ESP32"),
-        ]
-        with (
-            patch("serial.tools.list_ports.comports", return_value=mock_ports),
-            patch.object(install_services, "_detect_rnode_port_fallback", return_value=None),
-        ):
-            rnode, cardputer = install_services.detect_serial_devices()
-        assert rnode is None  # filtered out
-        assert cardputer is None
-
-    def test_ports_without_vid_skipped(self):
-        """Ports with vid=None should be skipped."""
-        mock_ports = [
-            _make_port("/dev/ttyS0", None, None, "Unknown device"),
-        ]
-        with (
-            patch("serial.tools.list_ports.comports", return_value=mock_ports),
-            patch.object(install_services, "_detect_rnode_port_fallback", return_value=None),
-        ):
-            rnode, cardputer = install_services.detect_serial_devices()
-        assert rnode is None
-        assert cardputer is None
-
-    def test_cardputer_detection_requires_pyserial(self):
-        """Without pyserial, cardputer is always None."""
-        with (
-            patch.object(
-                install_services, "_detect_rnode_port_fallback", return_value="/dev/ttyACM0"
-            ),
-        ):
-            import builtins
-
-            real_import = builtins.__import__
-
-            def mock_import(name, *args, **kwargs):
-                if name == "serial.tools.list_ports":
-                    raise ImportError("no pyserial")
-                return real_import(name, *args, **kwargs)
-
-            with patch("builtins.__import__", side_effect=mock_import):
-                rnode, cardputer = install_services.detect_serial_devices()
-        assert cardputer is None  # Cardputer detection requires pyserial
-
 
 class TestProbeForRNode:
-    """Tests for install_services._probe_for_rnode()."""
+    """Tests for install_services._probe_for_rnode().
 
-    # ── Normal detection paths ──
+    The function delegates to ``lma_core.device_detect.probe_rnode``
+    (covered by tests/test_device_detect.py) with an inline serial
+    fallback when lma_core is not importable.
+    """
 
-    def test_detects_rnode_from_stdout(self):
-        """'RNode Firmware' in stdout → True."""
+    def test_delegates_to_lma_core(self):
+        """Return value comes from lma_core.device_detect.probe_rnode."""
+        with patch("lma_core.device_detect.probe_rnode", return_value=True):
+            assert install_services._probe_for_rnode("/dev/ttyUSB0") is True
+        with patch("lma_core.device_detect.probe_rnode", return_value=False):
+            assert install_services._probe_for_rnode("/dev/ttyUSB0") is False
+
+    def _force_lma_core_import_error(self):
+        import builtins
+
+        real_import = builtins.__import__
+
+        def mock_import(name, *args, **kwargs):
+            if name == "lma_core.device_detect":
+                raise ImportError("no lma_core")
+            return real_import(name, *args, **kwargs)
+
+        return patch("builtins.__import__", side_effect=mock_import)
+
+    def test_inline_fallback_detects_signature(self):
+        """ImportError fallback: DETECT signature on serial → True."""
         with (
-            patch.object(install_services, "_find_system_python", return_value="/usr/bin/python3"),
-            patch("subprocess.run") as mock_run,
+            self._force_lma_core_import_error(),
+            patch("serial.Serial", return_value=_make_serial_mock(_RNODE_DETECT_RESPONSE)),
         ):
-            mock_run.return_value = MagicMock(
-                returncode=0, stdout="RNode Firmware v1.73\nLoRa: ON\n", stderr=""
-            )
             assert install_services._probe_for_rnode("/dev/ttyUSB0") is True
 
-    def test_detects_rnode_from_lora_keyword(self):
-        """'LoRa:' (without 'RNode Firmware') → True."""
+    def test_inline_fallback_no_response_returns_false(self):
+        """ImportError fallback: no response → False."""
         with (
-            patch.object(install_services, "_find_system_python", return_value="/usr/bin/python3"),
-            patch("subprocess.run") as mock_run,
-        ):
-            mock_run.return_value = MagicMock(
-                returncode=0, stdout="Device info\nLoRa: SX1262\n", stderr=""
-            )
-            assert install_services._probe_for_rnode("/dev/ttyUSB0") is True
-
-    # ── Failure paths ──
-
-    def test_non_rnode_returns_false(self):
-        """Non-RNode output → False."""
-        with (
-            patch.object(install_services, "_find_system_python", return_value="/usr/bin/python3"),
-            patch("subprocess.run") as mock_run,
-        ):
-            mock_run.return_value = MagicMock(returncode=0, stdout="USB Serial Device\n", stderr="")
-            assert install_services._probe_for_rnode("/dev/ttyUSB0") is False
-
-    def test_nonzero_exit_returns_false(self):
-        """rnodeconf non-zero exit → False."""
-        with (
-            patch.object(install_services, "_find_system_python", return_value="/usr/bin/python3"),
-            patch("subprocess.run") as mock_run,
-        ):
-            mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="could not open port")
-            assert install_services._probe_for_rnode("/dev/ttyUSB0") is False
-
-    def test_timeout_returns_false(self):
-        """subprocess timeout → False (no crash)."""
-        with (
-            patch.object(install_services, "_find_system_python", return_value="/usr/bin/python3"),
-            patch("subprocess.run", side_effect=subprocess.TimeoutExpired("cmd", 10)),
+            self._force_lma_core_import_error(),
+            patch("serial.Serial", return_value=_make_serial_mock(b"")),
         ):
             assert install_services._probe_for_rnode("/dev/ttyUSB0") is False
 
-    def test_subprocess_error_returns_false(self):
-        """SubprocessError → False."""
+    def test_inline_fallback_serial_error_returns_false(self):
+        """ImportError fallback: serial error → False (no crash)."""
         with (
-            patch.object(install_services, "_find_system_python", return_value="/usr/bin/python3"),
-            patch("subprocess.run", side_effect=OSError("no such file")),
-        ):
-            assert install_services._probe_for_rnode("/dev/ttyUSB0") is False
-
-    def test_no_system_python_returns_false(self):
-        """_find_system_python returns None → False."""
-        with (
-            patch.object(install_services, "_find_system_python", return_value=None),
+            self._force_lma_core_import_error(),
+            patch("serial.Serial", side_effect=OSError("no such port")),
         ):
             assert install_services._probe_for_rnode("/dev/ttyUSB0") is False
 
@@ -2188,7 +2158,8 @@ class TestMainDetectSerialDevices:
 
     def test_rnode_detected_via_detect_serial_devices(self):
         """RNode detected by detect_serial_devices → processed."""
-        self.mocks["check_rnode_firmware"].return_value = True
+        if "find_rnode_port" in self.mocks:
+            self.mocks["find_rnode_port"].return_value = "/dev/ttyUSB0"
         with pytest.raises(SystemExit) as exc_info:
             install_all.main([])
         assert exc_info.value.code == 0
@@ -2231,6 +2202,14 @@ class TestDockerPsql:
 
 class TestResolveNatsAddress:
     """Unit tests for install_services._resolve_nats_address()."""
+
+    @pytest.fixture(autouse=True)
+    def _patch_cluster_check(self):
+        """Patch the K8s cluster health check (no real cluster in tests)."""
+        with patch.object(
+            install_services, "_check_k8s_cluster", return_value=(True, "cluster healthy")
+        ):
+            yield
 
     def test_returns_none_when_kubectl_not_found(self):
         """No kubectl on PATH should return None."""
@@ -2392,11 +2371,10 @@ class TestRunPiServer:
         mock_docker_stop.returncode = 0
         mock_docker_rm = MagicMock()
         mock_docker_rm.returncode = 0
-        mock_docker_run = MagicMock()
-        mock_docker_run.returncode = 0
-        mock_docker_run.stdout = "new-container-id\n"
+        mock_systemctl_start = MagicMock()
+        mock_systemctl_start.returncode = 0
         mock_docker_verify = MagicMock()
-        mock_docker_verify.stdout = "Up 10 seconds\n"
+        mock_docker_verify.stdout = "abc123def456 Up 10 seconds\n"
         mock_sudo_mv = MagicMock()
         mock_sudo_mv.returncode = 0
         mock_sudo_reload = MagicMock()
@@ -2414,20 +2392,47 @@ class TestRunPiServer:
             patch("os.fdopen"),
             patch("os.unlink"),
         ):
-            # New code flow: systemd FIRST (stop, rm, mv, reload, enable), then docker run, verify
+            # Flow: pull from registry, stop, rm, systemd install (mv,
+            # reload, enable), systemctl start, then verify
+            mock_docker_pull = MagicMock()
+            mock_docker_pull.returncode = 0
             mock_run.side_effect = [
+                mock_docker_pull,  # docker pull (registry release image)
+                mock_sudo_mv,  # sudo systemctl stop (best-effort)
                 mock_docker_stop,  # docker stop
                 mock_docker_rm,  # docker rm
                 mock_sudo_mv,  # sudo mv
                 mock_sudo_reload,  # sudo systemctl daemon-reload
                 mock_sudo_enable,  # sudo systemctl enable
-                mock_docker_run,  # docker run
+                mock_systemctl_start,  # sudo systemctl start lmao-server
                 mock_docker_verify,  # docker ps --filter --format
             ]
             result = self._make_result()
             install_services.run_pi_server(result)
             assert result.status == "OK"
             assert "running" in result.detail.lower()
+            # The container must run the registry release image — check the
+            # systemd unit content (written via tempfile) or the run args
+            run_calls = [
+                c for c in mock_run.call_args_list if "docker" in str(c[0][0])
+            ]
+            assert any(
+                "192.168.0.36:5000/lmao-server:latest" in str(c) for c in run_calls
+            )
+
+    def test_fails_when_docker_pull_fails(self):
+        """Result should be FAIL when the registry image cannot be pulled."""
+        mock_pull_fail = MagicMock()
+        mock_pull_fail.returncode = 1
+        mock_pull_fail.stderr = "Error response from daemon: manifest unknown\n"
+        with (
+            patch("shutil.which", return_value="/usr/bin/docker"),
+            patch("subprocess.run", return_value=mock_pull_fail),
+        ):
+            result = self._make_result()
+            install_services.run_pi_server(result)
+            assert result.status == "FAIL"
+            assert "docker pull" in result.detail
 
     def test_graceful_degradation_when_docker_run_fails(self):
         """Result should not be FAIL when docker run fails; systemd is already installed."""
@@ -2448,12 +2453,19 @@ class TestRunPiServer:
             patch("os.fdopen"),
             patch("os.unlink"),
         ):
-            # sudo mv, sudo reload, sudo enable all succeed; docker run fails
+            # pull ok; sudo mv, reload, enable succeed; systemctl start
+            # fails; fallback docker run also fails
+            mock_systemctl_start = MagicMock()
+            mock_systemctl_start.returncode = 1
+            mock_systemctl_start.stderr = "Failed to start lmao-server.service\n"
             mock_run.side_effect = [
+                mock_sudo,  # docker pull
+                mock_sudo,  # sudo systemctl stop (best-effort)
                 mock_sudo,  # sudo mv
                 mock_sudo,  # sudo daemon-reload
                 mock_sudo,  # sudo enable
-                mock_docker_run,  # docker run (fails)
+                mock_systemctl_start,  # sudo systemctl start (fails)
+                mock_docker_run,  # docker run fallback (fails)
             ]
             result = self._make_result()
             install_services.run_pi_server(result)
@@ -2516,12 +2528,15 @@ class TestRunPiServer:
             output=b"",
             stderr=b"Error: port in use\n",
         )
+        mock_pull = MagicMock()
+        mock_pull.returncode = 0
         with (
             patch("shutil.which", return_value="/usr/bin/docker"),
             patch.object(install_services, "_resolve_nats_address", return_value=None),
             patch.object(install_services, "_docker_psql", return_value=None),
             patch("os.path.exists", return_value=True),
-            patch("subprocess.run", side_effect=bytes_error),
+            # docker pull succeeds; the sudo/systemd step raises with bytes stderr
+            patch("subprocess.run", side_effect=[mock_pull, bytes_error] * 4),
             patch("tempfile.mkstemp", return_value=(3, "/tmp/lmao-server-xxx.service")),
             patch("os.fdopen"),
             patch("os.unlink"),
@@ -2535,3 +2550,9 @@ class TestRunPiServer:
             # Both systemd and docker run fail, so result is FAIL — but the
             # key assertion is that no AttributeError was raised by .decode()
             assert result.status in ("OK", "FAIL")
+
+
+if __name__ == "__main__":
+    import sys
+
+    sys.exit(pytest.main([__file__] + sys.argv[1:]))
