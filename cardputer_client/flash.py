@@ -79,7 +79,9 @@ def _upload_files(ser, client_root, file_list):
 
     Files whose content already matches the device copy are skipped
     (SHA-256 compare), which makes re-flashing fast.  Aborts the whole
-    run immediately when the device stalls mid-upload.
+    run immediately when the device stalls mid-upload by raising
+    :class:`DeviceStalledError` — the caller is responsible for wedge
+    recovery (see :func:`recover_wedged_device`).
     """
     for rel in file_list:
         local_path = os.path.join(client_root, rel)
@@ -88,8 +90,7 @@ def _upload_files(ser, client_root, file_list):
             res = upload_file(ser, local_path, rel, skip_if_unchanged=True)
         except DeviceStalledError as e:
             print("FAILED")
-            print(f"\nERROR: {e}")
-            sys.exit(1)
+            raise
         if res == "unchanged":
             print("OK  (unchanged)")
         elif res:
@@ -320,8 +321,9 @@ class DeviceStalledError(Exception):
     """The device stopped responding mid-upload.
 
     Raised when several consecutive chunk writes time out, which almost
-    always means the ESP32-S3 USB-Serial-JTAG interface has wedged (it
-    cannot be recovered from software — a physical reset is required).
+    always means the ESP32-S3 USB-Serial-JTAG interface has wedged.
+    Callers should attempt :func:`recover_wedged_device` before falling
+    back to asking for a physical reset.
     """
 
 
@@ -329,6 +331,151 @@ class DeviceStalledError(Exception):
 # wedged and aborting the upload.  Each failed attempt costs one exec_raw
 # timeout (~15s), so 3 failures ≈ 45s before giving up.
 _STALL_LIMIT = 3
+
+
+# ---- Wedge recovery (issue #74) ----
+#
+# Two software recovery primitives, both validated on the Cardputer ADV
+# (ESP32-S3, MicroPython v1.25):
+#
+#   1. ``machine.reset()`` via raw REPL — works when the VM still
+#      processes REPL input (the observed wedge signature: raw REPL entry
+#      and device verification succeed, but the first file write stalls).
+#   2. Arming the hardware watchdog (``WDT(timeout=2000)``) — a guaranteed
+#      hard reset ~2s later even if the VM wedges immediately afterwards.
+#
+# Both drop the USB port for ~7s while the chip reboots; the recovery
+# flow waits for re-enumeration and re-enters raw REPL.
+#
+# NOTE: the esptool-style DTR/RTS reset sequence does NOT work on this
+# board (verified empirically — the M5Stack native USB-Serial-JTAG does
+# not map line states to EN/IO0), so it is intentionally not attempted.
+
+# Watchdog timeout used to disarm a client-armed watchdog for the
+# duration of a flash/install session (see disarm_watchdog).
+_DISARM_WDT_TIMEOUT_MS = 3600000  # 1 hour
+
+
+# MicroPython script that extends any client-armed hardware watchdog to a
+# 1-hour timeout so it cannot fire mid-flash.  No-op when no watchdog is
+# armed or the firmware lacks machine.WDT.
+_DISARM_WATCHDOG_SCRIPT = (
+    b"try:\n"
+    b"    from machine import WDT as _WDT\n"
+    b"    _lmao_flash_wdt = _WDT(timeout=" + str(_DISARM_WDT_TIMEOUT_MS).encode() + b")\n"
+    b"    print('WDT_DISARMED')\n"
+    b"except Exception:\n"
+    b"    pass\n"
+)
+
+
+def disarm_watchdog(ser):
+    """Extend any client-armed hardware watchdog to a 1-hour timeout.
+
+    The LMAO client (main.py) arms a hardware watchdog while it runs.
+    Interrupting it with Ctrl+C stops the feeder task, so without this
+    call the armed watchdog would hard-reset the device mid-flash.
+    Reconfiguring the WDT with a long timeout moves the deadline well
+    beyond any flash/install session.  Non-fatal: returns False when the
+    device did not acknowledge (e.g. no watchdog support).
+    """
+    ok, _out = exec_raw(ser, _DISARM_WATCHDOG_SCRIPT, timeout=5)
+    return ok
+
+
+def _wait_for_port(port, timeout_s=40):
+    """Wait for *port* to (re-)appear after a device reboot.
+
+    Returns an open ``serial.Serial`` or *None* on timeout.
+    """
+    deadline = time.time() + timeout_s
+    # Give the device a moment to drop off the USB bus first.
+    time.sleep(2)
+    while time.time() < deadline:
+        if os.path.exists(port):
+            try:
+                return serial.Serial(port, 115200, timeout=1, write_timeout=10)
+            except (serial.SerialException, OSError):
+                pass  # re-enumerating — not ready yet
+        time.sleep(0.5)
+    return None
+
+
+def _request_device_reset(ser):
+    """Ask MicroPython to reboot via raw REPL ``machine.reset()``.
+
+    Returns *True* when a reset was likely triggered.  An I/O error or
+    lost connection mid-command means the device went down — i.e. the
+    reset executed before the acknowledgement could be read.
+    """
+    ok, out = exec_raw(ser, "import machine\nmachine.reset()\n", timeout=5)
+    if ok:
+        return True
+    # EIO / broken port = the chip rebooted before answering.
+    return "Errno 5" in out or "Input/output error" in out
+
+
+def _arm_watchdog_reset(ser):
+    """Arm a 2s hardware watchdog so the chip hard-resets itself.
+
+    Fallback for when ``machine.reset()`` is not acknowledged: if the VM
+    still processes REPL input at all, this guarantees a full hardware
+    reset ~2s later even if it wedges immediately afterwards.
+    """
+    exec_raw(ser, "from machine import WDT\nWDT(timeout=2000)\n", timeout=5)
+
+
+def recover_wedged_device(ser, port):
+    """Attempt software recovery of a wedged Cardputer (issue #74).
+
+    Recovery ladder:
+      1. ``machine.reset()`` via raw REPL (VM often still accepts commands
+         even when the USB-CDC write path is wedged).
+      2. Arm the hardware watchdog (hard reset even if the VM wedges
+         right after).
+      3. Wait for USB re-enumeration, re-enter raw REPL, verify device.
+
+    *ser* is closed by this function.  Returns a fresh ``serial.Serial``
+    already in raw REPL on success, *None* when recovery failed (a
+    physical reset is then the only option).
+    """
+    print("  Device appears wedged — attempting automatic recovery ...")
+
+    if not _request_device_reset(ser):
+        print("  machine.reset() not acknowledged — arming hardware watchdog ...")
+        _arm_watchdog_reset(ser)
+
+    try:
+        ser.close()
+    except Exception:
+        pass
+
+    new_ser = _wait_for_port(port)
+    if new_ser is None:
+        print("  Recovery failed: device did not come back on the USB bus.")
+        return None
+
+    # Boot runs boot.py → main.py (WiFi connect etc.) — give it a moment,
+    # then interrupt into raw REPL (enter_raw_repl retries Ctrl+C).
+    time.sleep(3)
+    try:
+        new_ser.read(new_ser.in_waiting)
+    except (serial.SerialException, OSError):
+        pass
+
+    if not enter_raw_repl(new_ser):
+        print("  Recovery failed: could not re-enter raw REPL after reboot.")
+        new_ser.close()
+        return None
+
+    ok, info = verify_device(new_ser)
+    if not ok:
+        print(f"  Recovery failed: device verification failed ({info}).")
+        new_ser.close()
+        return None
+
+    print(f"  Recovery successful — device rebooted ({info}).")
+    return new_ser
 
 
 def device_file_sha256(ser, remote_path):
@@ -667,11 +814,37 @@ def main():
             print("Verification complete (--verify-only).")
             return
 
+        # — Disarm client watchdog —
+        # If the LMAO client was running, its hardware watchdog is armed;
+        # extend it so it cannot reset the device mid-flash.
+        disarm_watchdog(ser)
+
         # — Upload files —
+        # On a wedged device (raw REPL OK but writes stall — issue #74),
+        # attempt one automatic recovery (machine.reset()/watchdog reset)
+        # before asking for a physical reset.
         total_files = len(FILES_TO_UPLOAD) + len(lib_files)
         print(f"Uploading {total_files} file(s) …")
-        _upload_files(ser, client_root, FILES_TO_UPLOAD)
-        _upload_files(ser, client_root, lib_files)
+        recovered = False
+        while True:
+            try:
+                _upload_files(ser, client_root, FILES_TO_UPLOAD)
+                _upload_files(ser, client_root, lib_files)
+                break
+            except DeviceStalledError as e:
+                if recovered:
+                    print(f"\nERROR: {e}")
+                    sys.exit(1)
+                recovered = True
+                new_ser = recover_wedged_device(ser, port)
+                if new_ser is None:
+                    print(f"\nERROR: {e}")
+                    print("Automatic recovery failed — press the Cardputer's "
+                          "RESET button (or power-cycle it), then retry.")
+                    sys.exit(1)
+                ser = new_ser
+                disarm_watchdog(ser)
+                print("Resuming upload after recovery …")
 
         # — Install dependencies via mip —
         print("\nInstalling MicroPython dependencies …")

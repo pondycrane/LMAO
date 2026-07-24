@@ -278,6 +278,48 @@ def log(msg, tft=None, status_lines=None):
     return tft
 
 
+# ---- Hardware watchdog (issue #74) ----
+#
+# Reboots the Cardputer automatically when the VM wedges — e.g. the
+# USB-CDC TX FIFO fills while no host drains the port and print() blocks
+# forever, freezing the whole VM (the state that previously required a
+# physical RESET button press).  The WDT is fed by an async task; if the
+# event loop starves longer than WDT_TIMEOUT_MS the ESP32 resets itself
+# and reboots into a healthy state.  The flash/install tooling
+# reconfigures the WDT to a 1-hour timeout while it holds the raw REPL
+# (see flash.py disarm_watchdog), so flashing is never interrupted.
+WDT_TIMEOUT_MS = 120000  # 2 minutes without a feed -> hardware reset
+
+
+def _start_watchdog(timeout_ms=WDT_TIMEOUT_MS):
+    """Arm the ESP32 hardware watchdog.
+
+    Retries with halved timeouts for firmwares that cap the maximum.
+    Returns the WDT object, or None when unsupported/unavailable.
+    """
+    try:
+        from machine import WDT
+    except ImportError:
+        return None
+    t = timeout_ms
+    while t >= 10000:
+        try:
+            return WDT(timeout=t)
+        except Exception:
+            t //= 2
+    return None
+
+
+async def _feed_watchdog(wdt):
+    """Feed the hardware watchdog while the event loop is alive."""
+    import uasyncio as asyncio
+
+    interval = max(5, WDT_TIMEOUT_MS // 4000)  # seconds, well under timeout
+    while True:
+        wdt.feed()
+        await asyncio.sleep(interval)
+
+
 # ---- LXMF message handler ----
 
 
@@ -518,6 +560,13 @@ def main():
     if tft is not None:
         tft = display_status(tft, ["LMAO POC Ready", f"ID: {identity_hex[:24]}"])
 
+    # ---- Arm hardware watchdog ----
+    # Armed just before the event loop starts; from here on a VM wedge
+    # self-recovers via hardware reset instead of needing physical access.
+    wdt = _start_watchdog()
+    if wdt is not None:
+        log(f"Watchdog armed ({WDT_TIMEOUT_MS // 1000}s).", tft, status_lines)
+
     # ---- Start async event loop ----
     # The Reticulum event loop runs the LoRa poll_loop (to receive packets)
     # and the Transport job_loop (to process path responses). The send loop
@@ -527,7 +576,8 @@ def main():
         import uasyncio as asyncio
 
         asyncio.run(_async_runtime(tft, status_lines, rns, router, identity_hex,
-                        DEST_HASH, SEND_SENSOR, HAS_PROTO, _CONFIG, pending_replies))
+                        DEST_HASH, SEND_SENSOR, HAS_PROTO, _CONFIG, pending_replies,
+                        wdt))
     except KeyboardInterrupt:
         log("Shutting down...", tft, status_lines)
     except Exception as e:
@@ -638,7 +688,8 @@ async def _periodic_send(tft, status_lines, router, identity_hex,
 
 
 async def _async_runtime(tft, status_lines, rns, router, identity_hex,
-                     dest_hash, send_sensor, has_proto, config, pending_replies):
+                     dest_hash, send_sensor, has_proto, config, pending_replies,
+                     wdt=None):
     """Async runtime: runs the Reticulum event loop (job_loop + poll_loop)
     alongside a periodic send task for Hello and SensorReport messages.
 
@@ -648,6 +699,10 @@ async def _async_runtime(tft, status_lines, rns, router, identity_hex,
     server were never processed — ``send_message`` always returned ``True``
     ("queued pending path") but the actual Hello/Sensor payloads were never
     transmitted over LoRa.
+
+    When *wdt* is a machine.WDT instance, a feeder task keeps the
+    hardware watchdog satisfied; if the event loop starves (VM wedge),
+    the watchdog hard-resets the device (issue #74).
     """
     import uasyncio as asyncio
 
@@ -657,6 +712,10 @@ async def _async_runtime(tft, status_lines, rns, router, identity_hex,
                        dest_hash, send_sensor, has_proto, config,
                        pending_replies)
     )
+
+    # Hardware watchdog feeder — only task whose starvation is fatal.
+    if wdt is not None:
+        asyncio.create_task(_feed_watchdog(wdt))
 
     # Start the Reticulum event loop (job_loop + poll_loop for all interfaces)
     # This blocks until all tasks finish — send_task runs concurrently in

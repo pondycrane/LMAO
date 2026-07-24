@@ -81,6 +81,9 @@ def _probe_hardware():
             time.sleep(0.6)
             ok = cardputer_flash.enter_raw_repl(ser)
             if ok:
+                # Extend any client-armed hardware watchdog so it cannot
+                # reset the device while a test holds the raw REPL.
+                cardputer_flash.disarm_watchdog(ser)
                 _HARDWARE_READY = True
             else:
                 _HARDWARE_REASON = (
@@ -175,11 +178,13 @@ class TestCardputerE2E:
         assert cardputer_flash.enter_raw_repl(serial_conn), (
             "Cannot enter raw REPL. Is MicroPython running on the device?"
         )
+        cardputer_flash.disarm_watchdog(serial_conn)
 
     def test_verify_device(self, serial_conn):
         """Device reports as an ESP32 platform."""
         ok = cardputer_flash.enter_raw_repl(serial_conn)
         assert ok, "Cannot enter raw REPL"
+        cardputer_flash.disarm_watchdog(serial_conn)
 
         ok, info = cardputer_flash.verify_device(serial_conn)
         assert ok, f"Device verification failed: {info}"
@@ -191,6 +196,7 @@ class TestCardputerE2E:
         """exec_raw communicates with the device and returns output."""
         ok = cardputer_flash.enter_raw_repl(serial_conn)
         assert ok, "Cannot enter raw REPL"
+        cardputer_flash.disarm_watchdog(serial_conn)
 
         # Simple expression that must return successfully
         ok, out = cardputer_flash.exec_raw(serial_conn, "print('hello')")
@@ -203,6 +209,7 @@ class TestCardputerE2E:
         """Upload a tiny file and verify it was written on the device."""
         ok = cardputer_flash.enter_raw_repl(serial_conn)
         assert ok, "Cannot enter raw REPL"
+        cardputer_flash.disarm_watchdog(serial_conn)
 
         # Write a small temporary file to the device.
         # NOTE: the M5Stack firmware mounts flash at DEVICE_PREFIX (/flash),
@@ -263,6 +270,7 @@ except:
         """
         ok = cardputer_flash.enter_raw_repl(serial_conn)
         assert ok, "Cannot enter raw REPL"
+        cardputer_flash.disarm_watchdog(serial_conn)
 
         # Locate source files
         root = cardputer_flash.find_client_root()
