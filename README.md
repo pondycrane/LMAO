@@ -231,6 +231,8 @@ bazel run //tools:install_all -- --skip-rnode
 bazel run //tools:install_all -- --client-root /path/to/cardputer_client
 
 # Also deploy Pi server and K8s services
+# (internal services are released through the local Docker registry at
+#  192.168.0.36:5000 and deployed via Docker from the registry image)
 bazel run //tools:install_all -- --include-services
 bazel run //tools:install_all -- --include-services --skip-server
 bazel run //tools:install_all -- --include-services --skip-k8s
@@ -378,6 +380,12 @@ See [`k8s-app/iot_ingest.py`](k8s-app/iot_ingest.py) for a complete example.
 A Docker image is available for containerized deployment of the server
 (on the Raspberry Pi or any Linux host with an RNode).
 
+> **Release flow:** internal services (Pi server, IoT ingest consumer) are
+> always released through the [local Docker registry](#13-local-docker-registry)
+> (`192.168.0.36:5000`) and deployed via Docker from the registry image.
+> `bazel run //tools:install_all -- --include-services` performs the full
+> build → push → deploy cycle automatically.
+
 ```bash
 # Build the image
 docker build -t lmao-server .
@@ -427,7 +435,7 @@ ExecStart=/usr/bin/docker run --rm --name lmao-server --network host \
   -e NATS_SERVER=nats://192.168.0.43:30146 \
   -e LMAO_RNODE_PORT=/dev/ttyUSB0 \
   --device /dev/ttyUSB0:/dev/ttyUSB0 \
-  lmao-server:latest
+  192.168.0.36:5000/lmao-server:latest
 ExecStop=/usr/bin/docker stop lmao-server
 Restart=always
 RestartSec=10
@@ -651,12 +659,12 @@ kubectl apply -f k8s/iot-ingest.yaml
 bazel run //tools:install_all -- --include-services
 ```
 
-> **Using the local registry:** If you have the [local Docker registry](#13-local-docker-registry)
-> running, push the image and update the Deployment manifest before applying:
+> **Using the local registry:** The Deployment manifest references the
+> [local Docker registry](#13-local-docker-registry) image
+> (`192.168.0.36:5000/lmao-iot-ingest:latest`) directly.  Release a new
+> version by pushing the image, then re-apply:
 > ```bash
 > ./docker/registry/manage.sh push-ingest
-> # Edit k8s/iot-ingest.yaml — change image to:
-> #   image: 192.168.0.36:5000/lmao-iot-ingest:latest
 > kubectl apply -f k8s/iot-ingest.yaml
 > ```
 > This replaces the manual `docker save | k3s ctr image import -` workflow.
