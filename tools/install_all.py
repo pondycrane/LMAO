@@ -47,10 +47,12 @@ from cardputer_client.flash import (
     DeviceStalledError,
     _mip_install,
     auto_discover_lib_files,
+    disarm_watchdog,
     enter_raw_repl,
     exit_raw_repl,
     find_cardputer_port,
     find_client_root,
+    recover_wedged_device,
     upload_file,
     verify_device,
     verify_files_exist,
@@ -133,6 +135,10 @@ def _flash_cardputer_client(port: str, client_root: str, result: DeviceResult) -
         else:
             print(f"    WARNING: {info}")
 
+        # Extend any client-armed hardware watchdog so it cannot reset
+        # the device mid-install (the LMAO client arms one at boot).
+        disarm_watchdog(ser)
+
         # Discover library files.
         lib_files = auto_discover_lib_files(client_root)
         all_files = list(FILES_TO_UPLOAD) + lib_files
@@ -146,9 +152,12 @@ def _flash_cardputer_client(port: str, client_root: str, result: DeviceResult) -
             return
 
         # Upload each file (skipping files already identical on the device).
+        # On a wedged device (raw REPL OK but writes stall — issue #74),
+        # attempt one automatic recovery before failing the install.
         total = len(all_files)
         print(f"  Uploading {total} file(s) ...")
         failed = 0
+        recovery_attempted = False
         for rel in all_files:
             local_path = os.path.join(client_root, rel)
             size = os.path.getsize(local_path)
@@ -156,10 +165,30 @@ def _flash_cardputer_client(port: str, client_root: str, result: DeviceResult) -
             try:
                 res = upload_file(ser, local_path, rel, skip_if_unchanged=True)
             except DeviceStalledError as exc:
-                print("FAILED")
-                result.fail(str(exc))
-                print(f"  FAIL: {exc}")
-                return
+                if recovery_attempted:
+                    print("FAILED")
+                    result.fail(str(exc))
+                    print(f"  FAIL: {exc}")
+                    return
+                recovery_attempted = True
+                new_ser = recover_wedged_device(ser, port)
+                if new_ser is None:
+                    print("FAILED")
+                    result.fail(str(exc))
+                    print(f"  FAIL: {exc}")
+                    print("  Automatic recovery failed — press the Cardputer's "
+                          "RESET button (or power-cycle it), then retry.")
+                    return
+                ser = new_ser
+                disarm_watchdog(ser)
+                print("RECOVERED — retrying ", end="", flush=True)
+                try:
+                    res = upload_file(ser, local_path, rel, skip_if_unchanged=True)
+                except DeviceStalledError as exc2:
+                    print("FAILED")
+                    result.fail(str(exc2))
+                    print(f"  FAIL: {exc2}")
+                    return
             if res == "unchanged":
                 print("OK  (unchanged)")
             elif res:
