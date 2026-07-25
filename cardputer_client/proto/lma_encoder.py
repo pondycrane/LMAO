@@ -575,7 +575,13 @@ def parse_poc_message(data):
     """Parse a POC message, returning the text content string or None."""
     try:
         result = decode_envelope(data)
-    except Exception:
+    except (ValueError, IndexError, TypeError, KeyError) as e:
+        print(f"parse_poc_message: protobuf decode failed: {type(e).__name__}: {e}")
+        result = None
+    except Exception as e:
+        import sys
+        print(f"parse_poc_message: unexpected error: {type(e).__name__}: {e}")
+        sys.print_exception(e)
         result = None
     # Return content if protobuf produced a dict; fall through to raw-UTF-8 fallback
     if isinstance(result, dict):
