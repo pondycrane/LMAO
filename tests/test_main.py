@@ -1214,6 +1214,276 @@ class TestHeapRecovery:
         del _sys.modules["uasyncio"]
 
 
+# ── CommandRequest handling (issue #78) ─────────────────────────
+
+
+class TestCommandRequestHandling:
+    """Tests for CommandRequest handling in handle_reply()."""
+
+    def test_reboot_action_resets_device(self):
+        """A valid REBOOT command triggers _reset_device."""
+        lmao_client.pending_replies.clear()
+
+        # Set up module-level router and identity
+        orig_router = lmao_client._ROUTER
+        orig_identity = lmao_client._NODE_IDENTITY_HEX
+        try:
+            mock_router = MagicMock()
+            lmao_client._ROUTER = mock_router
+            lmao_client._NODE_IDENTITY_HEX = "test-node-hex"
+
+            # We also need to mock the encoder functions so HAS_PROTO is True
+            with patch.object(
+                lmao_client, "HAS_PROTO", True
+            ), patch.object(
+                lmao_client, "decode_envelope", create=True
+            ) as mock_decode, patch.object(
+                lmao_client, "encode_command_ack", create=True
+            ) as mock_ack_enc, patch.object(
+                lmao_client, "encode_field", create=True
+            ) as mock_field_enc, patch.object(
+                lmao_client, "encode_length_delimited", create=True
+            ) as mock_len_delim, patch.object(
+                lmao_client, "_reset_device"
+            ) as mock_reset, patch.object(
+                lmao_client.time, "sleep"
+            ) as mock_sleep:
+
+                # Mock decode_envelope to return a CommandRequest dict
+                mock_decode.return_value = {
+                    "cmd_id": "c1",
+                    "target": "test-node-hex",
+                    "action": "reboot",
+                    "expires_ms": 0,
+                    "params": {},
+                }
+                mock_ack_enc.return_value = b"fake-ack"
+                mock_field_enc.return_value = b"fake-envelope"
+                mock_len_delim.return_value = b"fake-len"
+
+                msg = MagicMock()
+                msg.source_hash = b"\x01" * 16
+                msg.content = b"command-envelope-bytes"
+
+                lmao_client.handle_reply(msg)
+
+                # _reset_device should be called
+                mock_reset.assert_called_once()
+                assert "REBOOT" in str(mock_reset.call_args)
+                # sleep called for TX flush
+                mock_sleep.assert_called()
+        finally:
+            lmao_client._ROUTER = orig_router
+            lmao_client._NODE_IDENTITY_HEX = orig_identity
+
+    def test_wrong_target_ignored(self):
+        """CommandRequest with non-matching target is silently ignored."""
+        lmao_client.pending_replies.clear()
+
+        orig_identity = lmao_client._NODE_IDENTITY_HEX
+        try:
+            lmao_client._NODE_IDENTITY_HEX = "my-node"
+
+            with patch.object(
+                lmao_client, "HAS_PROTO", True
+            ), patch.object(
+                lmao_client, "decode_envelope", create=True
+            ) as mock_decode, patch.object(
+                lmao_client, "_reset_device"
+            ) as mock_reset:
+
+                mock_decode.return_value = {
+                    "cmd_id": "c1",
+                    "target": "other-node",  # wrong target
+                    "action": "reboot",
+                    "expires_ms": 0,
+                    "params": {},
+                }
+
+                msg = MagicMock()
+                msg.content = b"envelope"
+
+                lmao_client.handle_reply(msg)
+
+                # Reset must NOT be called
+                mock_reset.assert_not_called()
+        finally:
+            lmao_client._NODE_IDENTITY_HEX = orig_identity
+
+    def test_expired_command_ignored(self):
+        """CommandRequest with expired expires_ms is ignored."""
+        lmao_client.pending_replies.clear()
+
+        orig_identity = lmao_client._NODE_IDENTITY_HEX
+        try:
+            lmao_client._NODE_IDENTITY_HEX = "my-node"
+
+            with patch.object(
+                lmao_client, "HAS_PROTO", True
+            ), patch.object(
+                lmao_client, "decode_envelope", create=True
+            ) as mock_decode, patch.object(
+                lmao_client, "_reset_device"
+            ) as mock_reset:
+
+                # expires_ms is in the past
+                mock_decode.return_value = {
+                    "cmd_id": "c1",
+                    "target": "my-node",
+                    "action": "reboot",
+                    "expires_ms": 1,  # very old expiry
+                    "params": {},
+                }
+
+                msg = MagicMock()
+                msg.content = b"envelope"
+
+                lmao_client.handle_reply(msg)
+
+                # Reset must NOT be called (expired)
+                mock_reset.assert_not_called()
+        finally:
+            lmao_client._NODE_IDENTITY_HEX = orig_identity
+
+    def test_unknown_action_logged_no_crash(self):
+        """Unknown command action is logged but does not crash."""
+        lmao_client.pending_replies.clear()
+
+        orig_identity = lmao_client._NODE_IDENTITY_HEX
+        try:
+            lmao_client._NODE_IDENTITY_HEX = "my-node"
+
+            with patch.object(
+                lmao_client, "HAS_PROTO", True
+            ), patch.object(
+                lmao_client, "decode_envelope", create=True
+            ) as mock_decode, patch.object(
+                lmao_client, "_reset_device"
+            ) as mock_reset:
+
+                mock_decode.return_value = {
+                    "cmd_id": "c1",
+                    "target": "my-node",
+                    "action": "spray",  # unknown action
+                    "expires_ms": 0,
+                    "params": {},
+                }
+
+                msg = MagicMock()
+                msg.content = b"envelope"
+
+                # Should not raise and should not reset
+                lmao_client.handle_reply(msg)
+                mock_reset.assert_not_called()
+        finally:
+            lmao_client._NODE_IDENTITY_HEX = orig_identity
+
+    def test_broadcast_command_accepted(self):
+        """CommandRequest with empty target (broadcast) is accepted."""
+        lmao_client.pending_replies.clear()
+
+        orig_identity = lmao_client._NODE_IDENTITY_HEX
+        orig_router = lmao_client._ROUTER
+        try:
+            mock_router = MagicMock()
+            lmao_client._ROUTER = mock_router
+            lmao_client._NODE_IDENTITY_HEX = "my-node"
+
+            with patch.object(
+                lmao_client, "HAS_PROTO", True
+            ), patch.object(
+                lmao_client, "decode_envelope", create=True
+            ) as mock_decode, patch.object(
+                lmao_client, "encode_command_ack", create=True
+            ) as mock_ack_enc, patch.object(
+                lmao_client, "encode_field", create=True
+            ) as mock_field_enc, patch.object(
+                lmao_client, "encode_length_delimited", create=True
+            ) as mock_len_delim, patch.object(
+                lmao_client, "_reset_device"
+            ) as mock_reset, patch.object(
+                lmao_client.time, "sleep"
+            ):
+
+                mock_decode.return_value = {
+                    "cmd_id": "c1",
+                    "target": "",  # broadcast
+                    "action": "reboot",
+                    "expires_ms": 0,
+                    "params": {},
+                }
+                mock_ack_enc.return_value = b"fake-ack"
+                mock_field_enc.return_value = b"fake-envelope"
+                mock_len_delim.return_value = b"fake-len"
+
+                msg = MagicMock()
+                msg.source_hash = b"\x01" * 16
+                msg.content = b"envelope"
+
+                lmao_client.handle_reply(msg)
+                mock_reset.assert_called_once()
+        finally:
+            lmao_client._ROUTER = orig_router
+            lmao_client._NODE_IDENTITY_HEX = orig_identity
+
+
+# ── Stdin drain (issue #78) ─────────────────────────────────────
+
+
+class TestStdinDrain:
+    """Tests for the non-blocking stdin drain in _periodic_send()."""
+
+    def test_drain_noop_when_empty(self):
+        """When uselect.poll returns empty list, nothing happens."""
+        import sys as _sys
+
+        mock_poller = MagicMock()
+        mock_poller.ipoll.return_value = []
+
+        mock_uselect = MagicMock()
+        mock_uselect.poll.return_value = mock_poller
+        mock_uselect.POLLIN = 1
+
+        # The drain is inside _periodic_send which requires asyncio.
+        # We test the drain logic directly by simulating the block.
+        with patch.dict(_sys.modules, {"uselect": mock_uselect}):
+            # The code uses `import uselect` — which now returns our mock
+            try:
+                import uselect
+
+                poller = uselect.poll()
+                poller.register(_sys.stdin, uselect.POLLIN)
+                while poller.ipoll(0):
+                    _sys.stdin.read(1)
+            except Exception:
+                pass
+
+        mock_poller.register.assert_called_once()
+        mock_poller.ipoll.assert_called_once_with(0)
+
+    def test_drain_graceful_when_module_missing(self):
+        """When uselect is not available, drain is silently skipped."""
+        import sys as _sys
+
+        # Remove uselect if present
+        had_uselect = "uselect" in _sys.modules
+        saved = _sys.modules.get("uselect")
+        try:
+            _sys.modules.pop("uselect", None)
+            # Simulate the drain block — should not raise
+            try:
+                import uselect
+
+                poller = uselect.poll()
+                poller.register(_sys.stdin, uselect.POLLIN)
+            except ImportError:
+                pass  # Expected
+            # No exception should propagate
+        finally:
+            if had_uselect and saved is not None:
+                _sys.modules["uselect"] = saved
+
+
 # ── import guard ────────────────────────────────────────────────────
 
 

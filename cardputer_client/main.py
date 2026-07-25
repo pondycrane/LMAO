@@ -43,7 +43,13 @@ except ImportError:
 # Proto encoder (optional — gracefully degrades if not on device)
 try:
     from proto.lma_encoder import (
+        decode_envelope,
+        encode_command_ack,
+        encode_command_envelope,
+        encode_field,
+        encode_length_delimited,
         encode_sensor_envelope,
+        FIELD_ACK,
         make_poc_message,
         parse_poc_message,
     )
@@ -52,6 +58,12 @@ try:
 except ImportError:
     HAS_PROTO = False
     parse_poc_message = None  # type: ignore[assignment]
+    decode_envelope = None  # type: ignore[assignment]
+    encode_command_ack = None  # type: ignore[assignment]
+    encode_command_envelope = None  # type: ignore[assignment]
+    encode_field = None  # type: ignore[assignment]
+    encode_length_delimited = None  # type: ignore[assignment]
+    FIELD_ACK = None  # type: ignore[assignment]
 
 # Feature flag to disable SensorReport sending; defaults True for backward compatibility
 SEND_SENSOR = True
@@ -374,6 +386,10 @@ def _reset_device(reason, tft=None, status_lines=None):
 
 # ---- LXMF message handler ----
 
+# Module-level vars set by main() so handle_reply can access them
+_ROUTER = None
+_NODE_IDENTITY_HEX = None
+
 
 def handle_reply(message):
     """Callback invoked when an LXMF reply is received.
@@ -382,6 +398,10 @@ def handle_reply(message):
     (uasyncio task, callback handler, etc.). Replies are buffered
     in ``pending_replies`` for the main loop to drain — do NOT
     add blocking calls or locking here.
+
+    When a CommandRequest is decoded (field 11 in the LMAOEnvelope),
+    the handler validates target and expiry and, on a REBOOT action,
+    sends a CommandAck and hard-resets the device (issue #78).
     """
     content = ""
     source_info = "unknown"
@@ -400,6 +420,70 @@ def handle_reply(message):
         print(f"handle_reply: content extraction failed from {source_info}: {e}")
         sys.print_exception(e)
         return  # Don't add empty content to pending_replies
+
+    # ── CommandRequest detection (issue #78) ─────────────────
+    # Check whether the envelope contains a CommandRequest (field 11).
+    if HAS_PROTO and decode_envelope is not None:
+        try:
+            raw = message.content if hasattr(message, "content") else b""
+            result = decode_envelope(raw)
+            if isinstance(result, dict) and "cmd_id" in result:
+                self_hex = _NODE_IDENTITY_HEX or ""
+                target = result.get("target", "")
+                action = result.get("action", "")
+                expires_ms = result.get("expires_ms", 0)
+                cmd_id = result.get("cmd_id", "")
+
+                # Validate target: must be empty (broadcast) or match this node
+                if target and target != self_hex:
+                    print(
+                        f"handle_reply: ignoring CommandRequest {cmd_id} "
+                        f"— target mismatch (got {target}, node is {self_hex})"
+                    )
+                    return
+
+                # Validate expiry: 0 = no expiry, otherwise must be in the future
+                now_ms = time.ticks_ms() if hasattr(time, "ticks_ms") else int(time.time() * 1000)
+                if expires_ms and expires_ms < now_ms:
+                    print(
+                        f"handle_reply: ignoring expired CommandRequest {cmd_id} "
+                        f"(expired at {expires_ms}, now {now_ms})"
+                    )
+                    return
+
+                action_lower = action.lower()
+                if action_lower == "reboot":
+                    print(f"handle_reply: REBOOT command received (id={cmd_id})")
+                    # Send best-effort CommandAck before resetting
+                    if _ROUTER is not None and encode_command_ack is not None and encode_field is not None:
+                        try:
+                            ack_bytes = encode_command_ack(cmd_id, self_hex, True, "Rebooting")
+                            ack_envelope = encode_field(
+                                FIELD_ACK, 2, encode_length_delimited(ack_bytes)  # noqa: F821
+                            )
+                            _ROUTER.send_message(
+                                destination_hash=message.source_hash,
+                                content=ack_envelope,
+                                title="p:Envelope",
+                            )
+                            print("handle_reply: CommandAck sent")
+                        except Exception as ack_err:
+                            print(f"handle_reply: failed to send CommandAck: {ack_err}")
+                    # Log, wait for radio TX flush, then reset
+                    time.sleep(2)
+                    _reset_device("Remote REBOOT command received")
+                    return
+
+                # Unknown action — log but don't crash
+                print(
+                    f"handle_reply: unknown command action '{action}' "
+                    f"(id={cmd_id}) — ignoring"
+                )
+                return
+        except Exception as cmd_err:
+            print(f"handle_reply: CommandRequest decode error: {cmd_err}")
+            sys.print_exception(cmd_err)
+            # Fall through — still append text content if any
 
     if content:
         print(f"\n>>> REPLY from server ({source_info}): {content}")
@@ -600,6 +684,12 @@ def main():
         while True:
             time.sleep(1)
 
+    # Store router and identity at module level so handle_reply() can
+    # send CommandAck and validate target for incoming CommandRequest (issue #78).
+    global _ROUTER, _NODE_IDENTITY_HEX
+    _ROUTER = router
+    _NODE_IDENTITY_HEX = identity_hex
+
     # ---- Announce ----
     tft = log("Announcing presence...", tft, status_lines)
     try:
@@ -672,6 +762,20 @@ async def _periodic_send(tft, status_lines, router, identity_hex,
             # the next inbound packet would die on a 2 KiB allocation
             # anyway — reset now, while we still can.
             gc.collect()
+
+            # Drain USB-CDC stdin to prevent ring-buffer overflow (issue #78).
+            # Non-blocking: polls with zero timeout so it never stalls the
+            # event loop.  Silently skipped when uselect is unavailable.
+            try:
+                import uselect
+
+                poller = uselect.poll()
+                poller.register(sys.stdin, uselect.POLLIN)
+                while poller.ipoll(0):
+                    sys.stdin.read(1)
+            except Exception:
+                pass
+
             if not _heap_can_alloc():
                 _reset_device("Heap exhausted/fragmented", tft, status_lines)
                 break  # unreachable on hardware (reset does not return)
