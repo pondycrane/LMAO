@@ -512,6 +512,15 @@ def encode_sensor_envelope(node_id, seq, battery, readings):
     return encode_field(FIELD_SENSOR, 2, encode_length_delimited(sensor_bytes))
 
 
+def encode_command_envelope(cmd_id, target, action, params, issued_ms, expires_ms):
+    """Wrap a CommandRequest in an LMAOEnvelope (field 11, wire type 2).
+
+    Returns the full LMAOEnvelope bytes ready for LXMF Content.
+    """
+    cmd_bytes = encode_command_request(cmd_id, target, action, params, issued_ms, expires_ms)
+    return encode_field(FIELD_COMMAND, 2, encode_length_delimited(cmd_bytes))
+
+
 def decode_envelope(data):
     """Decode an LMAOEnvelope, dispatching to the correct sub-message decoder.
 

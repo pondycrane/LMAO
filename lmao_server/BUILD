@@ -27,3 +27,11 @@ py_binary(
     visibility = ["//visibility:public"],
     deps = [":server_lib"],
 )
+
+py_binary(
+    name = "send_command",
+    srcs = ["send_command.py"],
+    main = "send_command.py",
+    visibility = ["//visibility:public"],
+    deps = [":server_lib"],
+)
