@@ -594,6 +594,44 @@ class TestEncodeSensorEnvelopeEdgeCases:
         assert decoded["seq"] == 127
 
 
+# ── encode_command_envelope ──────────────────────────────────────
+
+
+class TestCommandEnvelope:
+    """Tests for encode_command_envelope() (issue #78)."""
+
+    def test_round_trip(self):
+        """encode_command_envelope → decode_envelope round-trip."""
+        envelope = enc.encode_command_envelope(
+            "cmd1", "target1", "reboot", {}, 100, 200
+        )
+        result = enc.decode_envelope(envelope)
+        assert result is not None
+        assert result["cmd_id"] == "cmd1"
+        assert result["action"] == "reboot"
+        assert result["target"] == "target1"
+        assert result["params"] == {}
+        assert result["issued_ms"] == 100
+        assert result["expires_ms"] == 200
+
+    def test_decode_envelope_dispatches_to_command(self):
+        """decode_envelope dispatches field 11 to CommandRequest decoder."""
+        inner = enc.encode_command_request("c", "t", "a", {}, 0, 0)
+        envelope = enc.encode_field(11, 2, enc.encode_length_delimited(inner))
+        result = enc.decode_envelope(envelope)
+        assert result is not None
+        assert result["cmd_id"] == "c"
+
+    def test_with_params(self):
+        """encode_command_envelope with map params."""
+        params = {"duration": "60", "valve": "open"}
+        envelope = enc.encode_command_envelope(
+            "c2", "t2", "spray", params, 0, 0
+        )
+        result = enc.decode_envelope(envelope)
+        assert result["params"] == params
+
+
 if __name__ == "__main__":
     import sys
 
