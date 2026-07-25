@@ -258,6 +258,47 @@ Output shows a per-device summary table with OK/FAIL/SKIP status:
 The tool auto-detects connected hardware via USB and exits with code 1
 if any device fails.
 
+### 6. Send Remote Commands (issue #78)
+
+The LMAO server can dispatch CommandRequest messages over LoRa to trigger
+actions on remote nodes (e.g., reboot a wedged Cardputer without physical
+access). The `send_command` CLI tool sends a single command and exits.
+
+**Send a REBOOT command to a specific node:**
+
+```bash
+# Find the node's identity hex (printed at boot as "ID: a1b2c3...")
+bazel run //lmao_server:send_command -- --target a1b2c3d4e5f6... --action reboot
+```
+
+**With optional parameters:**
+
+```bash
+bazel run //lmao_server:send_command -- --target a1b2c3... --action reboot \
+    --params '{"reason":"fw-update"}'
+```
+
+**Override the RNode port:**
+
+```bash
+bazel run //lmao_server:send_command -- --target a1b2c3... --action reboot \
+    --rnode-port /dev/ttyUSB0
+```
+
+**Arguments:**
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--target` | (required) | Target node's identity hex (printed at boot as ``ID: a1b2c3...``). |
+| `--action` | `reboot` | Command action. Currently only ``reboot`` is implemented. |
+| `--params` | `null` | Optional JSON dict (e.g. ``'{"key":"val"}'``). |
+| `--rnode-port` | `$LMAO_RNODE_PORT` or auto-detect | RNode serial port. |
+| `--timeout` | `60000` | Command expiry in milliseconds. |
+
+The target node sends back a CommandAck confirming receipt before executing
+the action. If the node is asleep, the command waits on the propagation node
+until the node wakes and collects its messages.
+
 ### 5a. Cardputer ADV Hardware Reference
 
 The target device is **M5Stack Cardputer ADV** (Stamp-S3A, ESP32-S3FN8) with

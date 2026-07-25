@@ -459,7 +459,7 @@ def handle_reply(message):
                         try:
                             ack_bytes = encode_command_ack(cmd_id, self_hex, True, "Rebooting")
                             ack_envelope = encode_field(
-                                FIELD_ACK, 2, encode_length_delimited(ack_bytes)  # noqa: F821
+                                FIELD_ACK, 2, encode_length_delimited(ack_bytes)
                             )
                             _ROUTER.send_message(
                                 destination_hash=message.source_hash,
