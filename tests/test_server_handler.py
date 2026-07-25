@@ -429,6 +429,120 @@ class TestSubscriberManagement:
         loop.close()
 
 
+# ── send_command (issue #78) ─────────────────────────────────────
+
+
+class TestSendCommand:
+    """Tests for Server.send_command() method."""
+
+    def test_builds_correct_lxmf_message(self, server_with_mocks):
+        """send_command dispatches an LXMF message with correct title."""
+        import sys as _sys
+
+        server = server_with_mocks
+
+        # Mock RNS.Identity.from_hex to return a valid identity
+        mock_identity = MagicMock()
+        _sys.modules["RNS"].Identity.from_hex.return_value = mock_identity
+
+        # Mock server_identity.hash for hex conversion
+        server.server_identity.hash = b"\x03" * 16
+
+        result = server.send_command(
+            target_identity_hex="a1b2c3d4e5f6",
+            action="reboot",
+        )
+
+        assert result is True
+        server.router.handle_outbound.assert_called_once()
+        # Check that LXMessage was constructed
+        call_kwargs = _sys.modules["LXMF"].LXMessage.call_args.kwargs
+        assert call_kwargs["title"] == "p:Envelope"
+        assert call_kwargs["desired_method"] == 1  # OPPORTUNISTIC
+
+    def test_dispatches_twice_correctly(self, server_with_mocks):
+        """Multiple send_command calls dispatch independently."""
+        import sys as _sys
+
+        server = server_with_mocks
+        mock_identity = MagicMock()
+        _sys.modules["RNS"].Identity.from_hex.return_value = mock_identity
+        server.server_identity.hash = b"\x04" * 16
+
+        result1 = server.send_command(target_identity_hex="aabb", action="reboot")
+        result2 = server.send_command(target_identity_hex="ccdd", action="reboot")
+
+        assert result1 is True
+        assert result2 is True
+        assert server.router.handle_outbound.call_count == 2
+
+    def test_invalid_target_returns_false(self, server_with_mocks):
+        """send_command with an invalid target identity returns False."""
+        import sys as _sys
+
+        server = server_with_mocks
+        _sys.modules["RNS"].Identity.from_hex.side_effect = ValueError("bad hex")
+        server.server_identity.hash = b"\x05" * 16
+
+        result = server.send_command(
+            target_identity_hex="not-valid-hex!!",
+            action="reboot",
+        )
+
+        assert result is False
+        server.router.handle_outbound.assert_not_called()
+
+    def test_returns_false_when_no_router(self, server_with_mocks):
+        """send_command returns False when router is not initialised."""
+        server = server_with_mocks
+        server.router = None
+
+        result = server.send_command(
+            target_identity_hex="aabbccdd",
+            action="reboot",
+        )
+
+        assert result is False
+
+    def test_auto_generates_cmd_id(self, server_with_mocks):
+        """send_command auto-generates cmd_id when not provided."""
+        import sys as _sys
+
+        server = server_with_mocks
+        mock_identity = MagicMock()
+        _sys.modules["RNS"].Identity.from_hex.return_value = mock_identity
+        server.server_identity.hash = b"\x06" * 16
+
+        result = server.send_command(
+            target_identity_hex="aabb",
+            action="reboot",
+        )
+
+        assert result is True
+        # Check the envelope content contains a cmd_id starting with "cmd-"
+        call_args = _sys.modules["LXMF"].LXMessage.call_args.kwargs
+        content = call_args["content"]
+        assert len(content) > 0
+
+    def test_broadcast_when_target_empty(self, server_with_mocks):
+        """send_command with empty target sends broadcast (no specific destination)."""
+        import sys as _sys
+
+        server = server_with_mocks
+        server.server_identity.hash = b"\x07" * 16
+
+        result = server.send_command(
+            target_identity_hex="",
+            action="reboot",
+        )
+
+        assert result is True
+        server.router.handle_outbound.assert_called_once()
+        # Check destination is None (broadcast)
+        call_kwargs = _sys.modules["LXMF"].LXMessage.call_args.kwargs
+        assert call_kwargs["destination"] is None
+
+
 if __name__ == "__main__":
     import sys
 

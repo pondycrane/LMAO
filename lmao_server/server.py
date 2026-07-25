@@ -205,6 +205,88 @@ class Server:
         for q in dead:
             self.unregister_grpc_subscriber(q)
 
+    def send_command(self, target_identity_hex, action, params=None, cmd_id=None,
+                     timeout_ms=60000):
+        """Send a CommandRequest to a target node over LXMF (issue #78).
+
+        Builds a protobuf CommandRequest, wraps it in an LMAOEnvelope,
+        resolves the target RNS.Identity, and dispatches via the LXMF router.
+
+        Args:
+            target_identity_hex: Target node's identity hash as hex string.
+                Empty string or ``None`` = broadcast to all nodes.
+            action: Command action string (e.g. ``"reboot"``).
+            params: Optional dict of string→string parameters.
+            cmd_id: Optional command ID (auto-generated if ``None``).
+            timeout_ms: Command expiry in milliseconds from now.
+
+        Returns:
+            ``True`` if the message was queued for delivery, ``False`` on failure.
+        """
+        if self.router is None:
+            logger.error("send_command: router not initialised")
+            return False
+
+        if cmd_id is None:
+            cmd_id = f"cmd-{int(time.time() * 1000)}"
+
+        now_ms = int(time.time() * 1000)
+        issued_ms = now_ms
+        expires_ms = now_ms + timeout_ms
+
+        if params is None:
+            params = {}
+
+        # Build protobuf CommandRequest
+        from lma_core import CommandRequest, LMAOEnvelope  # noqa: F811
+
+        cmd = CommandRequest()
+        cmd.cmd_id = cmd_id
+        cmd.target = target_identity_hex or ""
+        cmd.action = action
+        cmd.issued_ms = issued_ms
+        cmd.expires_ms = expires_ms
+        for k, v in params.items():
+            cmd.params[k] = v
+
+        # Wrap in LMAOEnvelope
+        envelope = LMAOEnvelope()
+        envelope.command.CopyFrom(cmd)
+
+        # Resolve target identity
+        if target_identity_hex:
+            try:
+                dest_identity = RNS.Identity.from_hex(target_identity_hex)
+                dest = _identity_to_destination(dest_identity)
+            except (ValueError, TypeError, KeyError) as e:
+                logger.error(
+                    "send_command: invalid target identity %s: %s",
+                    target_identity_hex[:16], e,
+                )
+                return False
+        else:
+            # Broadcast: no specific destination
+            dest = None
+
+        # Dispatch via LXMF router
+        try:
+            lxmf_msg = LXMF.LXMessage(
+                destination=dest,
+                source=_identity_to_destination(self.server_identity),
+                content=envelope.SerializeToString(),
+                title="p:Envelope",
+                desired_method=LXMF.LXMessage.OPPORTUNISTIC,
+            )
+            self.router.handle_outbound(lxmf_msg)
+            logger.info(
+                "CommandRequest %s dispatched: action=%s target=%s",
+                cmd_id, action, target_identity_hex or "<broadcast>",
+            )
+            return True
+        except (OSError, ValueError, KeyError, AttributeError) as e:
+            logger.error("send_command: dispatch failed: %s", e, exc_info=True)
+            return False
+
     def handle_lxmf_delivery(self, message):
         """Decodes incoming content as a protobuf LMAOEnvelope. The protocol uses
         title="p:Envelope" as a convention, but the handler attempts protobuf
