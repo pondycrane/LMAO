@@ -45,23 +45,29 @@ class TestLMAOGrpcService:
         mock_context = AsyncMock()
         request = MagicMock()
         request.envelope = b"valid-envelope"
-        request.destination_hash = "a1b2c3d4"
 
-        # Mock Identity.from_hex
+        # Envelope carries a CommandRequest whose target is the destination
+        mock_env = sys.modules["lma_core"].LMAOEnvelope.return_value
+        mock_env.HasField.return_value = True
+        mock_env.command.target = "a1b2c3d4"
+
+        # Mock Identity.recall
         mock_dest = MagicMock()
-        sys.modules["RNS"].Identity.from_hex.return_value = mock_dest
+        sys.modules["RNS"].Identity.recall.return_value = mock_dest
 
         SendResponse = sys.modules["lma_core"].SendResponse
         SendResponse.side_effect = lambda **kw: MagicMock(**kw)
 
         await grpc_svc.Send(request, mock_context)
 
-        # Verify destination was resolved
-        sys.modules["RNS"].Identity.from_hex.assert_called_once_with("a1b2c3d4")
+        # Verify destination was resolved via the identity cache (bytes arg)
+        sys.modules["RNS"].Identity.recall.assert_called_once_with(bytes.fromhex("a1b2c3d4"))
 
         # Verify LXMF message was constructed with correct destination
+        # (the identity from recall is wrapped via _identity_to_destination
+        # → RNS.Destination, which is also mocked).
         call_kwargs = sys.modules["LXMF"].LXMessage.call_args.kwargs
-        assert call_kwargs["destination"] == mock_dest
+        assert call_kwargs["destination"] == sys.modules["RNS"].Destination.return_value
         assert call_kwargs["title"] == "p:Envelope"
 
         # Verify router was called
@@ -96,10 +102,13 @@ class TestLMAOGrpcService:
         mock_context = AsyncMock()
         request = MagicMock()
         request.envelope = b"valid"
-        request.destination_hash = "bad-hash"
 
-        # from_hex raises
-        sys.modules["RNS"].Identity.from_hex.side_effect = ValueError("bad hash")
+        mock_env = sys.modules["lma_core"].LMAOEnvelope.return_value
+        mock_env.HasField.return_value = True
+        mock_env.command.target = "bad-hash"
+
+        # recall raises
+        sys.modules["RNS"].Identity.recall.side_effect = ValueError("bad hash")
 
         SendResponse = sys.modules["lma_core"].SendResponse
         SendResponse.side_effect = lambda **kw: MagicMock(**kw)
@@ -116,7 +125,10 @@ class TestLMAOGrpcService:
         mock_context = AsyncMock()
         request = MagicMock()
         request.envelope = b"valid"
-        request.destination_hash = ""
+
+        # Envelope with no command payload → no destination to resolve
+        mock_env = sys.modules["lma_core"].LMAOEnvelope.return_value
+        mock_env.HasField.return_value = False
 
         SendResponse = sys.modules["lma_core"].SendResponse
         SendResponse.side_effect = lambda **kw: MagicMock(**kw)
@@ -133,10 +145,13 @@ class TestLMAOGrpcService:
         mock_context = AsyncMock()
         request = MagicMock()
         request.envelope = b"valid"
-        request.destination_hash = "a1b2c3d4"
+
+        mock_env = sys.modules["lma_core"].LMAOEnvelope.return_value
+        mock_env.HasField.return_value = True
+        mock_env.command.target = "a1b2c3d4"
 
         mock_dest = MagicMock()
-        sys.modules["RNS"].Identity.from_hex.return_value = mock_dest
+        sys.modules["RNS"].Identity.recall.return_value = mock_dest
 
         # Router throws
         RNSException = sys.modules["RNS"].RNSException

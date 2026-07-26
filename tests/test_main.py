@@ -1434,32 +1434,107 @@ class TestStdinDrain:
     """Tests for the non-blocking stdin drain in _periodic_send()."""
 
     def test_drain_noop_when_empty(self):
-        """When uselect.poll returns empty list, nothing happens."""
+        """When ipoll yields no events, no reads happen and the loop exits."""
         import sys as _sys
 
+        # MicroPython's ipoll() returns a GENERATOR (always truthy) — the
+        # mock must match that semantics or it cannot catch the regression
+        # where `while poller.ipoll(0):` spun forever.
         mock_poller = MagicMock()
-        mock_poller.ipoll.return_value = []
+        mock_poller.ipoll.side_effect = lambda timeout: iter([])
 
         mock_uselect = MagicMock()
         mock_uselect.poll.return_value = mock_poller
         mock_uselect.POLLIN = 1
 
+        mock_stdin = MagicMock()
+
         # The drain is inside _periodic_send which requires asyncio.
         # We test the drain logic directly by simulating the block.
-        with patch.dict(_sys.modules, {"uselect": mock_uselect}):
-            # The code uses `import uselect` — which now returns our mock
+        with (
+            patch.dict(_sys.modules, {"uselect": mock_uselect}),
+            patch.object(_sys, "stdin", mock_stdin),
+        ):
             try:
                 import uselect
 
                 poller = uselect.poll()
                 poller.register(_sys.stdin, uselect.POLLIN)
-                while poller.ipoll(0):
+                for _ in range(256):
+                    if not list(poller.ipoll(0)):
+                        break
                     _sys.stdin.read(1)
             except Exception:
                 pass
 
         mock_poller.register.assert_called_once()
-        mock_poller.ipoll.assert_called_once_with(0)
+        mock_poller.ipoll.assert_called_with(0)
+        mock_stdin.read.assert_not_called()
+
+    def test_drain_terminates_with_truthy_empty_generator(self):
+        """Regression: ipoll() returning an always-truthy generator must
+        not loop forever when it yields no events (watchdog boot-loop)."""
+        import sys as _sys
+
+        mock_poller = MagicMock()
+        # Always-truthy generator that yields nothing — real MicroPython
+        # behaviour with zero pending events.
+        mock_poller.ipoll.side_effect = lambda timeout: iter([])
+
+        mock_uselect = MagicMock()
+        mock_uselect.poll.return_value = mock_poller
+        mock_uselect.POLLIN = 1
+
+        with patch.dict(_sys.modules, {"uselect": mock_uselect}):
+            import uselect
+
+            poller = uselect.poll()
+            poller.register(_sys.stdin, uselect.POLLIN)
+            # Must complete — the old `while poller.ipoll(0):` form would
+            # spin/block here forever.
+            iterations = 0
+            for _ in range(256):
+                iterations += 1
+                if not list(poller.ipoll(0)):
+                    break
+                _sys.stdin.read(1)
+            assert iterations == 1
+
+    def test_drain_reads_pending_bytes_and_stops(self):
+        """Pending stdin bytes are drained until ipoll reports none left."""
+        import sys as _sys
+
+        pending = [1, 1, 1]  # three bytes arrive, then empty
+
+        def fake_ipoll(timeout):
+            if pending:
+                yield (object(), 1)
+
+        mock_poller = MagicMock()
+        mock_poller.ipoll.side_effect = fake_ipoll
+
+        mock_uselect = MagicMock()
+        mock_uselect.poll.return_value = mock_poller
+        mock_uselect.POLLIN = 1
+
+        reads = []
+        mock_stdin = MagicMock()
+        mock_stdin.read.side_effect = lambda n: reads.append(n) or pending.pop()
+
+        with (
+            patch.dict(_sys.modules, {"uselect": mock_uselect}),
+            patch.object(_sys, "stdin", mock_stdin),
+        ):
+            import uselect
+
+            poller = uselect.poll()
+            poller.register(_sys.stdin, uselect.POLLIN)
+            for _ in range(256):
+                if not list(poller.ipoll(0)):
+                    break
+                _sys.stdin.read(1)
+
+        assert len(reads) == 3
 
     def test_drain_graceful_when_module_missing(self):
         """When uselect is not available, drain is silently skipped."""

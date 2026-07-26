@@ -11,6 +11,7 @@ py_library(
         "queue.py",
         "rns_di.py",
         "rns_init.py",
+        "server_identity.py",
         "storage.py",
     ],
     visibility = ["//visibility:public"],

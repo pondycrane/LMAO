@@ -150,11 +150,14 @@ Listening for LXMF messages...
 
 **Before flashing**, edit `cardputer_client/config.py`:
 - Set `WIFI_SSID` and `WIFI_PASS` to match your local network (required for UDP interface)
-- Optionally set `DEST_HASH` to the server's Reticulum identity hex (32 hex chars).
-  Leave as `None` (default) to skip sending. The E2E test injects this
-  automatically — you only need to set it for manual testing without the
-  automated flash+test workflow. Obtain the server identity from its startup
-  log (`Node identity: ...`).
+- `DEST_HASH` is injected **automatically** by `bazel run //tools:install_all`
+  (and by the E2E test): the tool loads or creates the server's persisted
+  identity at `~/.local/share/lmao_server/lxmf/identity`, derives the
+  `lxmf.delivery` destination hash, and uploads a patched `config.py` to the
+  device — the source tree is never modified. You only need to set it by
+  hand for fully manual flashing without the automated workflow. Obtain the
+  hash from the server startup log (`Delivery destination (client DEST_HASH): ...`).
+  Leave as `None` (default) to skip sending.
 - Optionally adjust `NODE_NAME` and `DEBUG` level
 - Optionally adjust `INTERVAL_SECONDS` (how often the Cardputer sends sensor data).
   Default 60s = 1 reading per minute. Minimum 10s (clamped automatically) to
@@ -241,7 +244,17 @@ bazel run //tools:install_all -- --include-services --skip-iot-ingest
 # Set up local Docker registry (see §13)
 bazel run //tools:install_all -- --setup-registry
 bazel run //tools:install_all -- --setup-registry --include-services
+
+# Skip DEST_HASH injection (e.g. server runs on a different host)
+bazel run //tools:install_all -- --skip-dest-hash
 ```
+
+The Cardputer flash automatically injects the server's `DEST_HASH`
+(destination hash of the server's persisted identity) into the on-device
+`config.py`, and the Pi server deploy bind-mounts
+`~/.local/share/lmao_server` into the container so the identity persists
+across redeploys — flashed clients keep working after server restarts
+(issue #70).
 
 Output shows a per-device summary table with OK/FAIL/SKIP status:
 

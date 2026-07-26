@@ -19,6 +19,7 @@ py_library(
         "//lma_core",
         "//tests:e2e_helpers_lib",
         "@lmao_pip//pyserial",
+        "@lmao_pip//rns",
     ],
 )
 

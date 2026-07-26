@@ -253,10 +253,19 @@ class Server:
         envelope = LMAOEnvelope()
         envelope.command.CopyFrom(cmd)
 
-        # Resolve target identity
+        # Resolve target identity.  Reticulum can only encrypt to a peer
+        # whose public keys were previously learned (via an announce), so
+        # look the identity up in the local cache with Identity.recall().
         if target_identity_hex:
             try:
-                dest_identity = RNS.Identity.from_hex(target_identity_hex)
+                dest_identity = RNS.Identity.recall(bytes.fromhex(target_identity_hex))
+                if dest_identity is None:
+                    logger.error(
+                        "send_command: unknown target identity %s — "
+                        "no announce received from this node since server start",
+                        target_identity_hex[:16],
+                    )
+                    return False
                 dest = _identity_to_destination(dest_identity)
             except (ValueError, TypeError, KeyError) as e:
                 logger.error(
@@ -420,10 +429,18 @@ if GRPC_AVAILABLE:
             except (DecodeError, ValueError) as e:
                 await context.abort(grpc.StatusCode.INVALID_ARGUMENT, f"Bad envelope: {e}")
 
-            # Resolve destination identity from the request hash
-            dest_hash = request.destination_hash
+            # Resolve destination identity from the envelope payload.
+            # SendRequest carries only the serialized envelope, so the
+            # destination must come from the payload itself — currently
+            # only CommandRequest.target carries a destination identity.
+            # Reticulum can only encrypt to a peer whose public keys were
+            # previously learned (via an announce), so look the identity
+            # up in the local cache with Identity.recall().
+            dest_hash = ""
+            if envelope.HasField("command"):
+                dest_hash = envelope.command.target
             try:
-                dest = RNS.Identity.from_hex(dest_hash) if dest_hash else None
+                dest = RNS.Identity.recall(bytes.fromhex(dest_hash)) if dest_hash else None
             except (ValueError, TypeError, KeyError):
                 dest = None
             if not dest:
