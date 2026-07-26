@@ -441,9 +441,9 @@ class TestSendCommand:
 
         server = server_with_mocks
 
-        # Mock RNS.Identity.from_hex to return a valid identity
+        # Mock RNS.Identity.recall to return a valid identity
         mock_identity = MagicMock()
-        _sys.modules["RNS"].Identity.from_hex.return_value = mock_identity
+        _sys.modules["RNS"].Identity.recall.return_value = mock_identity
 
         # Mock server_identity.hash for hex conversion
         server.server_identity.hash = b"\x03" * 16
@@ -466,7 +466,7 @@ class TestSendCommand:
 
         server = server_with_mocks
         mock_identity = MagicMock()
-        _sys.modules["RNS"].Identity.from_hex.return_value = mock_identity
+        _sys.modules["RNS"].Identity.recall.return_value = mock_identity
         server.server_identity.hash = b"\x04" * 16
 
         result1 = server.send_command(target_identity_hex="aabb", action="reboot")
@@ -481,7 +481,7 @@ class TestSendCommand:
         import sys as _sys
 
         server = server_with_mocks
-        _sys.modules["RNS"].Identity.from_hex.side_effect = ValueError("bad hex")
+        _sys.modules["RNS"].Identity.recall.side_effect = ValueError("bad hex")
         server.server_identity.hash = b"\x05" * 16
 
         result = server.send_command(
@@ -510,7 +510,7 @@ class TestSendCommand:
 
         server = server_with_mocks
         mock_identity = MagicMock()
-        _sys.modules["RNS"].Identity.from_hex.return_value = mock_identity
+        _sys.modules["RNS"].Identity.recall.return_value = mock_identity
         server.server_identity.hash = b"\x06" * 16
 
         result = server.send_command(

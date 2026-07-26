@@ -31,7 +31,9 @@ Prerequisites:
 
 import argparse
 import os
+import re
 import sys
+import tempfile
 import time
 
 try:
@@ -61,6 +63,10 @@ from cardputer_client.flash import (
 # RNode firmware helpers (manual flash only — see rnode_firmware/README.md).
 # The Heltec RNode must be flashed manually via the web tool.
 # (No import needed — probe is done via the RNode serial protocol directly.)
+
+# Server identity helpers — load-or-create the persisted server identity
+# and derive the lxmf.delivery destination hash clients use as DEST_HASH.
+from lma_core.server_identity import ensure_delivery_destination_hash
 
 # Server-service install helpers (from tools/install_services.py).
 from tools.install_services import (
@@ -101,7 +107,77 @@ class DeviceResult:
 # ---- Cardputer operations ----
 
 
-def _flash_cardputer_client(port: str, client_root: str, result: DeviceResult) -> None:
+def _inject_dest_hash(ser, client_root: str) -> str:
+    """Patch DEST_HASH in the Cardputer's config.py to the server's hash.
+
+    Loads (or creates) the persisted server identity on the host and
+    derives its ``lxmf.delivery`` destination hash — the value the
+    Cardputer needs to reach the server.  The source ``config.py`` is
+    patched in memory (the source tree is never modified) and uploaded
+    over the copy already on the device, then verified with a fresh
+    import so a cached ``config`` module cannot mask a failed write.
+
+    Returns the injected destination hash hex string.
+
+    Raises on any failure — DEST_HASH is mandatory for the LoRa mesh to
+    function; silently skipping it would leave a Cardputer that sends
+    into the void.
+    """
+    dest_hash = ensure_delivery_destination_hash()
+
+    config_path = os.path.join(client_root, "config.py")
+    with open(config_path) as f:
+        original_config = f.read()
+
+    patched_config, n_subs = re.subn(
+        r'DEST_HASH\s*=\s*(?:"[^"]*"|None)',
+        f'DEST_HASH = "{dest_hash}"',
+        original_config,
+    )
+    if n_subs != 1:
+        raise RuntimeError(
+            "Could not patch DEST_HASH in config.py — expected exactly one "
+            "DEST_HASH assignment (string or None)."
+        )
+
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as tmp:
+            tmp.write(patched_config)
+            tmp_path = tmp.name
+        uploaded = upload_file(ser, tmp_path, "config.py")
+        if not uploaded:
+            raise RuntimeError("Failed to upload patched config.py")
+    finally:
+        if tmp_path is not None:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+    # Verify the hash landed on the device (bypass the sys.modules cache
+    # in case main.py already imported the stale config).
+    from cardputer_client.flash import exec_raw
+
+    ok, out = exec_raw(
+        ser,
+        "import sys\n"
+        "if 'config' in sys.modules:\n"
+        "    del sys.modules['config']\n"
+        "import config\n"
+        "print(config.DEST_HASH)\n",
+    )
+    if not ok or dest_hash not in out:
+        raise RuntimeError(
+            f"DEST_HASH verification failed — device config does not report "
+            f"{dest_hash}: {out[:200]}"
+        )
+
+    return dest_hash
+
+
+def _flash_cardputer_client(port: str, client_root: str, result: DeviceResult,
+                            inject_dest_hash: bool = True) -> None:
     """Flash the LMAO MicroPython client to a Cardputer on *port*.
 
     Opens the serial connection, enters raw REPL, verifies the device,
@@ -201,6 +277,21 @@ def _flash_cardputer_client(port: str, client_root: str, result: DeviceResult) -
             result.fail(f"{failed} of {total} file(s) failed to upload")
             print(f"  FAIL: {failed}/{total} files failed")
             return
+
+        # Inject the server's delivery destination hash so the Cardputer
+        # knows where to send (issue #70).  The identity is loaded from /
+        # created at ~/.local/share/lmao_server/lxmf/identity — the same
+        # file the server container loads via its volume mount, so both
+        # sides are guaranteed to agree.
+        if inject_dest_hash:
+            print("  Injecting server DEST_HASH into config.py ...")
+            try:
+                dest_hash = _inject_dest_hash(ser, client_root)
+                print(f"    DEST_HASH = {dest_hash}")
+            except Exception as exc:
+                result.fail(f"DEST_HASH injection failed: {exc}")
+                print(f"  FAIL: DEST_HASH injection failed — {exc}")
+                return
 
         # Install MicroPython dependencies (lora driver, contextlib).
         print("  Installing MicroPython dependencies ...")
@@ -417,6 +508,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Skip IoT Ingest Consumer deploy (only meaningful with --include-services).",
     )
+    parser.add_argument(
+        "--skip-dest-hash",
+        action="store_true",
+        help="Skip injecting the server DEST_HASH into the Cardputer config "
+        "(e.g. when the server runs on a different host).",
+    )
     return parser.parse_args(argv)
 
 
@@ -457,7 +554,10 @@ def main(argv: list[str] | None = None) -> None:
                 cp_result.skip("No Cardputer detected on USB")
                 print("Cardputer: SKIP — not detected on USB")
             else:
-                _flash_cardputer_client(port, client_root, cp_result)
+                _flash_cardputer_client(
+                    port, client_root, cp_result,
+                    inject_dest_hash=not args.skip_dest_hash,
+                )
 
     # ── RNode ──
     rn_result = DeviceResult("RNode (Heltec)")
