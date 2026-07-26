@@ -61,6 +61,23 @@ py_test(
 )
 
 py_test(
+    name = "test_server_grpc",
+    srcs = [
+        "test_server_grpc.py",
+        # conftest.py required in srcs for Bazel sandbox; pytest auto-discovery
+        # does not work because Bazel only exposes files explicitly listed.
+        "conftest.py",
+    ],
+    imports = ["."],
+    deps = [
+        "//lmao_server:server_lib",
+        "@lmao_pip//protobuf",
+        "@lmao_pip//pytest",
+        "@lmao_pip//pytest_asyncio",
+    ],
+)
+
+py_test(
     name = "test_e2e_helpers",
     srcs = [
         "e2e/test_e2e_helpers.py",
@@ -156,6 +173,15 @@ py_test(
     deps = [
         "//cardputer_client:flash_lib",
         "@lmao_pip//pyserial",
+        "@lmao_pip//pytest",
+    ],
+)
+
+py_test(
+    name = "test_server_identity",
+    srcs = ["test_server_identity.py"],
+    deps = [
+        "//lma_core",
         "@lmao_pip//pytest",
     ],
 )

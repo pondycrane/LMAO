@@ -45,6 +45,13 @@ from typing import TYPE_CHECKING
 # Default NATS server for the LMAO server container (overridable via env).
 _DEFAULT_NATS_SERVER = "nats://localhost:4222"
 
+# Server identity persistence (issue #70): the host directory is bind-mounted
+# into the container so the Reticulum/LXMF identity survives redeploys.
+# The container-side path must match lmao_server.server's default
+# identity_storage_path (~/.local/share/lmao_server with ~ = /root).
+_SERVER_IDENTITY_HOST_DIR = "~/.local/share/lmao_server"
+_SERVER_IDENTITY_CONTAINER_DIR = "/root/.local/share/lmao_server"
+
 if TYPE_CHECKING:
     from tools.install_all import DeviceResult
 
@@ -1277,6 +1284,18 @@ def run_pi_server(result: DeviceResult, repo_root: str | None = None) -> None:
             except subprocess.SubprocessError:
                 print("  WARNING: force-remove also failed; container name may conflict")
 
+    # ── Persist the server identity across container restarts ──
+    # Without this mount the container gets a fresh Reticulum identity on
+    # every (re)start and the DEST_HASH baked into Cardputer clients
+    # silently stops matching (issue #70).  The host directory is created
+    # up-front so the install pipeline can load/derive the identity for
+    # Cardputer DEST_HASH injection before the container starts.
+    identity_dir = os.path.expanduser(_SERVER_IDENTITY_HOST_DIR)
+    try:
+        os.makedirs(identity_dir, exist_ok=True)
+    except OSError as exc:
+        print(f"  WARNING: cannot create identity dir {identity_dir} — {exc}")
+
     # ── Build ExecStart args (shared by docker run and systemd) ──
     exec_args = [
         "docker",
@@ -1292,6 +1311,8 @@ def run_pi_server(result: DeviceResult, repo_root: str | None = None) -> None:
         f"NATS_SERVER={nats_server}",
         "-e",
         f"LMAO_RNODE_PORT={rnode_port}",
+        "-v",
+        f"{identity_dir}:{_SERVER_IDENTITY_CONTAINER_DIR}",
     ]
     if rdevice_exists:
         exec_args.extend(["--device", f"{rnode_port}:{rnode_port}"])
