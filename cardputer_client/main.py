@@ -302,6 +302,10 @@ def log(msg, tft=None, status_lines=None):
 # (see flash.py disarm_watchdog), so flashing is never interrupted.
 WDT_TIMEOUT_MS = 120000  # 2 minutes without a feed -> hardware reset
 
+# Max stdin bytes drained per send cycle (issue #78).  Bounded so a
+# perpetually-readable stdin can never starve the event loop.
+_STDIN_DRAIN_MAX_BYTES = 256
+
 
 def _start_watchdog(timeout_ms=WDT_TIMEOUT_MS):
     """Arm the ESP32 hardware watchdog.
@@ -766,12 +770,21 @@ async def _periodic_send(tft, status_lines, router, identity_hex,
             # Drain USB-CDC stdin to prevent ring-buffer overflow (issue #78).
             # Non-blocking: polls with zero timeout so it never stalls the
             # event loop.  Silently skipped when uselect is unavailable.
+            #
+            # GOTCHA: MicroPython's poll.ipoll() returns a GENERATOR, which
+            # is always truthy — ``while poller.ipoll(0):`` never exits and
+            # the following read() blocks forever whenever the host holds
+            # the port open with no input pending (observed in production as
+            # silent 120s watchdog boot-loops with zero send-cycle output).
+            # Materialise with list() and bound the drain per cycle.
             try:
                 import uselect
 
                 poller = uselect.poll()
                 poller.register(sys.stdin, uselect.POLLIN)
-                while poller.ipoll(0):
+                for _ in range(_STDIN_DRAIN_MAX_BYTES):
+                    if not list(poller.ipoll(0)):
+                        break
                     sys.stdin.read(1)
             except Exception:
                 pass

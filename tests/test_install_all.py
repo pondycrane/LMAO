@@ -64,6 +64,9 @@ def _patch_imports():
         "verify_device": patch.object(
             install_all, "verify_device", return_value=(True, "ESP32 detected")
         ),
+        "inject_dest_hash": patch.object(
+            install_all, "_inject_dest_hash", return_value="a" * 32
+        ),
         "os_path_getsize": patch("os.path.getsize", return_value=100),
         "detect_serial_devices": patch.object(
             install_all, "detect_serial_devices", return_value=(None, None)
@@ -243,6 +246,16 @@ class TestParseArgs:
         args = install_all._parse_args(["--setup-registry"])
         assert args.setup_registry is True
 
+    def test_skip_dest_hash_default_false(self):
+        """--skip-dest-hash defaults to False (injection enabled)."""
+        args = install_all._parse_args([])
+        assert args.skip_dest_hash is False
+
+    def test_skip_dest_hash_flag(self):
+        """--skip-dest-hash sets the flag to True."""
+        args = install_all._parse_args(["--skip-dest-hash"])
+        assert args.skip_dest_hash is True
+
 
 # ── Summary output ───────────────────────────────────────────────────
 
@@ -364,6 +377,9 @@ class TestFlashCardputerClient:
                 install_all, "auto_discover_lib_files", return_value=[]
             ),
             "mip_install": patch.object(install_all, "_mip_install", return_value=None),
+            "inject_dest_hash": patch.object(
+                install_all, "_inject_dest_hash", return_value="a" * 32
+            ),
             "os.path.getsize": patch("os.path.getsize", return_value=100),
         }
         self._all_patches = patches
@@ -530,6 +546,33 @@ class TestFlashCardputerClient:
         # Should still succeed because verification is a warning, not a blocker
         assert result.status == "OK"
         self.mock_ser.close.assert_called_once()
+
+    # ── DEST_HASH injection ──
+
+    def test_dest_hash_injected_on_success(self):
+        """DEST_HASH injection runs during a normal flash."""
+        result = self._make_result()
+        install_all._flash_cardputer_client("/dev/ttyACM0", "/fake/root", result)
+        self.mocks["inject_dest_hash"].assert_called_once_with(self.mock_ser, "/fake/root")
+        assert result.status == "OK"
+
+    def test_dest_hash_injection_failure_sets_fail(self):
+        """A DEST_HASH injection error fails the flash."""
+        self.mocks["inject_dest_hash"].side_effect = RuntimeError("no identity")
+        result = self._make_result()
+        install_all._flash_cardputer_client("/dev/ttyACM0", "/fake/root", result)
+        assert result.status == "FAIL"
+        assert "DEST_HASH" in result.detail
+        self.mock_ser.close.assert_called_once()
+
+    def test_dest_hash_injection_skipped(self):
+        """inject_dest_hash=False skips the injection step entirely."""
+        result = self._make_result()
+        install_all._flash_cardputer_client(
+            "/dev/ttyACM0", "/fake/root", result, inject_dest_hash=False
+        )
+        self.mocks["inject_dest_hash"].assert_not_called()
+        assert result.status == "OK"
 
 
 # ── Main pipeline integration ────────────────────────────────────────
@@ -2473,6 +2516,51 @@ class TestRunPiServer:
             ]
             assert any(
                 "192.168.0.36:5000/lmao-server:latest" in str(c) for c in run_calls
+            )
+
+    def test_identity_volume_mounted(self):
+        """docker run must bind-mount the identity dir so the server
+        identity persists across redeploys (issue #70)."""
+        mock_ok = MagicMock()
+        mock_ok.returncode = 0
+        mock_verify = MagicMock()
+        mock_verify.stdout = "abc123def456 Up 2 seconds\n"
+
+        # Capture the systemd unit content written via os.fdopen
+        written: list[str] = []
+        mock_file = MagicMock()
+        mock_file.write.side_effect = written.append
+        mock_fdopen = MagicMock()
+        mock_fdopen.return_value.__enter__.return_value = mock_file
+
+        with (
+            patch("shutil.which", return_value="/usr/bin/docker"),
+            patch.object(install_services, "_resolve_nats_address", return_value=None),
+            patch.object(install_services, "_docker_psql", return_value=None),
+            patch("os.path.exists", return_value=True),
+            patch("subprocess.run") as mock_run,
+            patch("tempfile.mkstemp", return_value=(3, "/tmp/lmao-server-xxx.service")),
+            patch("os.fdopen", mock_fdopen),
+            patch("os.unlink"),
+        ):
+            mock_run.side_effect = [
+                mock_ok,  # docker pull
+                mock_ok,  # sudo systemctl stop (best-effort)
+                mock_ok,  # sudo mv
+                mock_ok,  # sudo systemctl daemon-reload
+                mock_ok,  # sudo systemctl enable
+                mock_ok,  # sudo systemctl start lmao-server
+                mock_verify,  # docker ps --filter --format
+            ]
+            result = self._make_result()
+            install_services.run_pi_server(result)
+            assert result.status == "OK"
+
+            expected_host = os.path.expanduser("~/.local/share/lmao_server")
+            expected_mount = f"{expected_host}:/root/.local/share/lmao_server"
+            unit_content = "".join(written)
+            assert expected_mount in unit_content, (
+                f"identity volume mount missing from systemd unit: {unit_content}"
             )
 
     def test_fails_when_docker_pull_fails(self):
