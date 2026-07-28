@@ -25,8 +25,10 @@ NODE_NAME = "LMAO_Cardputer"
 # the client prints radio diagnostics every few seconds; when no host
 # reads the USB-CDC port the TX FIFO fills up and the MicroPython VM
 # blocks inside print(), freezing the device (REPL lockout — recovery
-# requires a physical reset).  The LoRa E2E test patches this to 2 on
-# the device because the host drains the serial port during the test.
+# requires a physical reset).  Draining the serial port from the host
+# does NOT make level 2 safe — the device can produce diagnostic output
+# faster than the host drains it (see issue #81).  The LoRa E2E test
+# therefore keeps DEBUG at 1 on the device; do NOT patch it to 2.
 DEBUG = 1
 
 # Destination hash of the server's lxmf.delivery destination (hex string
