@@ -471,15 +471,14 @@ class TestCardputerLoRaE2E:
                 "INTERVAL_SECONDS = 60",
                 "INTERVAL_SECONDS = 15",
             )
-            # Verbose radio diagnostics during the E2E (the host drains the
-            # serial port continuously, so the USB-CDC TX FIFO cannot fill
-            # up and block the VM).  Must NOT be the committed default —
-            # see config.py's DEBUG comment.
-            assert "DEBUG = 1" in patched_config, "DEBUG patch target missing"
-            patched_config = patched_config.replace(
-                "DEBUG = 1",
-                "DEBUG = 2",
-            )
+            # NOTE: DEBUG is kept at 1 (the default).  Do NOT patch DEBUG=2
+            # on the device — the ESP32-S3 USB-Serial-JTAG TX FIFO overflows
+            # under continuous radio diagnostic output, which blocks print()
+            # in the MicroPython VM, starves the event loop, triggers a
+            # watchdog reset, and disconnects the USB.  The cleanup cannot
+            # restore the config when the USB is unresponsive, leaving the
+            # device wedged with DEBUG=2 on the next unattended boot.
+            # See issue #81.
             _e2e_sensor_type = os.environ.get("E2E_SENSOR_TYPE", "None")
             if _e2e_sensor_type not in ("None", ""):
                 patched_config = patched_config.replace(
@@ -698,36 +697,137 @@ class TestCardputerLoRaE2E:
                 print(f"   Messages received by server: {len(received_messages)}")
 
             finally:
-                # Restore the production-quiet config on the device.  The
-                # E2E config is deliberately chatty (DEBUG=2, 15s interval);
-                # left running unattended it can fill the USB-CDC TX FIFO
-                # and freeze the VM (REPL lockout).  Best-effort — the
-                # device may already be gone.
-                if cardputer_ser is not None:
+                # Restore the production config on the device.  The E2E
+                # changes INTERVAL_SECONDS (15s) and optionally SENSOR_TYPE
+                # for the test duration.  These must be restored to defaults
+                # (60s, None) so unattended operation is not affected.
+                # DEBUG stays at 1 throughout the test — see NOTE above.
+                #
+                # If the USB-Serial-JTAG interface was wedged (e.g. from
+                # a previous DEBUG=2 run), reopen the port — the device
+                # may have recovered by the time we get
+                # here (e.g. after a watchdog reset).
+                _cleanup_ser = cardputer_ser
+                if _cleanup_ser is not None:
                     try:
-                        if cardputer_flash.enter_raw_repl(cardputer_ser, max_attempts=2):
-                            cardputer_flash.disarm_watchdog(cardputer_ser)
-                            import tempfile as _tf
-
-                            with _tf.NamedTemporaryFile(
-                                mode="w", suffix=".py", delete=False
-                            ) as _tmp:
-                                _tmp.write(original_config)
-                                _tmp_path = _tmp.name
+                        # Check if the port is still alive; reconnect if dead.
+                        # NOTE: is_open/fd are NOT valid liveness signals —
+                        # pyserial only clears them in close(), so a stale fd
+                        # from a disconnected / re-enumerated device still
+                        # looks "open".  Probe with a real ioctl instead:
+                        # in_waiting raises OSError(EIO) on a dead tty.
+                        try:
+                            _ = _cleanup_ser.in_waiting
+                            _alive = True
+                        except Exception:
+                            _alive = False
+                        if not _alive:
+                            # Try to reconnect — the device may have rebooted
+                            # after a watchdog reset and re-enumerated USB.
                             try:
-                                cardputer_flash.upload_file(
-                                    cardputer_ser, _tmp_path, "config.py"
+                                _cleanup_ser.close()
+                            except Exception:
+                                pass
+                            _logger.info(
+                                "Serial port disconnected — attempting to "
+                                "reopen %s for config restore...",
+                                _CARDCOMPUTER_PORT,
+                            )
+                            try:
+                                _cleanup_ser = serial.Serial(
+                                    _CARDCOMPUTER_PORT,
+                                    115200,
+                                    timeout=3,
+                                    write_timeout=10,
                                 )
-                            finally:
-                                with contextlib.suppress(OSError):
-                                    os.unlink(_tmp_path)
-                            cardputer_flash.exit_raw_repl(cardputer_ser)
-                            cardputer_ser.write(b"\x04")  # soft reset
+                                time.sleep(1.0)
+                            except Exception as _exc:
+                                _logger.warning(
+                                    "Cannot reopen %s: %s — device may need "
+                                    "a physical RESET",
+                                    _CARDCOMPUTER_PORT,
+                                    _exc,
+                                )
+                                _cleanup_ser = None
+
+                        if _cleanup_ser is not None:
+                            # Build a safe config ensuring three critical
+                            # settings are always restored to defaults,
+                            # regardless of what the host config.py says.
+                            safe_config = original_config
+                            safe_config = _re.sub(
+                                r'^DEBUG\s*=\s*\d+',
+                                'DEBUG = 1',
+                                safe_config,
+                                flags=_re.MULTILINE,
+                            )
+                            safe_config = _re.sub(
+                                r'^INTERVAL_SECONDS\s*=\s*\d+',
+                                'INTERVAL_SECONDS = 60',
+                                safe_config,
+                                flags=_re.MULTILINE,
+                            )
+                            safe_config = _re.sub(
+                                r"^SENSOR_TYPE\s*=\s*(\"[^\"]*\"|'[^']*'|\w+)",
+                                'SENSOR_TYPE = None',
+                                safe_config,
+                                flags=_re.MULTILINE,
+                            )
+
+                            if cardputer_flash.enter_raw_repl(
+                                _cleanup_ser, max_attempts=5
+                            ):
+                                cardputer_flash.disarm_watchdog(_cleanup_ser)
+                                import tempfile as _tf
+
+                                with _tf.NamedTemporaryFile(
+                                    mode="w", suffix=".py", delete=False
+                                ) as _tmp:
+                                    _tmp.write(safe_config)
+                                    _tmp_path = _tmp.name
+                                try:
+                                    cardputer_flash.upload_file(
+                                        _cleanup_ser, _tmp_path, "config.py"
+                                    )
+                                finally:
+                                    with contextlib.suppress(OSError):
+                                        os.unlink(_tmp_path)
+
+                                # Verify the restore — read back key settings
+                                ok, out = cardputer_flash.exec_raw(
+                                    _cleanup_ser,
+                                    "import sys\n"
+                                    "if 'config' in sys.modules:\n"
+                                    "    del sys.modules['config']\n"
+                                    "import config\n"
+                                    "print('DEBUG=' + str(config.DEBUG) + '|' +\n"
+                                    "      'INTERVAL=' + str(config.INTERVAL_SECONDS) + '|' +\n"
+                                    "      'SENSOR_TYPE=' + str(config.SENSOR_TYPE))\n",
+                                    timeout=10,
+                                )
+                                if ok:
+                                    print(f"[E2E restore verify] {out.strip()}")
+                                else:
+                                    _logger.warning(
+                                        "Config restore verification failed: %s",
+                                        out[:200],
+                                    )
+
+                                cardputer_flash.exit_raw_repl(_cleanup_ser)
+                                _cleanup_ser.write(b"\x04")  # soft reset
+                            else:
+                                _logger.warning(
+                                    "Cannot enter raw REPL on %s — config "
+                                    "NOT restored (device may be wedged; "
+                                    "INTERVAL_SECONDS/SENSOR_TYPE may still "
+                                    "hold test values)",
+                                    _CARDCOMPUTER_PORT,
+                                )
                     except Exception:
                         _logger.warning("Config restore failed", exc_info=True)
                     finally:
                         try:
-                            cardputer_ser.close()
+                            _cleanup_ser.close()
                         except Exception:
                             _logger.warning("Serial close failed", exc_info=True)
 
