@@ -710,13 +710,15 @@ class TestCardputerLoRaE2E:
                 _cleanup_ser = cardputer_ser
                 if _cleanup_ser is not None:
                     try:
-                        # Check if the port is still alive; reconnect if dead
+                        # Check if the port is still alive; reconnect if dead.
+                        # NOTE: is_open/fd are NOT valid liveness signals —
+                        # pyserial only clears them in close(), so a stale fd
+                        # from a disconnected / re-enumerated device still
+                        # looks "open".  Probe with a real ioctl instead:
+                        # in_waiting raises OSError(EIO) on a dead tty.
                         try:
-                            _alive = (
-                                _cleanup_ser.is_open
-                                and hasattr(_cleanup_ser, 'fd')
-                                and _cleanup_ser.fd is not None
-                            )
+                            _ = _cleanup_ser.in_waiting
+                            _alive = True
                         except Exception:
                             _alive = False
                         if not _alive:
@@ -766,7 +768,7 @@ class TestCardputerLoRaE2E:
                                 flags=_re.MULTILINE,
                             )
                             safe_config = _re.sub(
-                                r"^SENSOR_TYPE\s*=\s*[\"'\w]+",
+                                r"^SENSOR_TYPE\s*=\s*(\"[^\"]*\"|'[^']*'|\w+)",
                                 'SENSOR_TYPE = None',
                                 safe_config,
                                 flags=_re.MULTILINE,
@@ -813,6 +815,14 @@ class TestCardputerLoRaE2E:
 
                                 cardputer_flash.exit_raw_repl(_cleanup_ser)
                                 _cleanup_ser.write(b"\x04")  # soft reset
+                            else:
+                                _logger.warning(
+                                    "Cannot enter raw REPL on %s — config "
+                                    "NOT restored (device may be wedged; "
+                                    "INTERVAL_SECONDS/SENSOR_TYPE may still "
+                                    "hold test values)",
+                                    _CARDCOMPUTER_PORT,
+                                )
                     except Exception:
                         _logger.warning("Config restore failed", exc_info=True)
                     finally:
