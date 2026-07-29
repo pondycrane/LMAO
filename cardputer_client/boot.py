@@ -8,6 +8,7 @@ SAFE MODE: Hold the G0/BtnA button (top-left, labelled "G0") during
 boot to skip main.py and drop to the MicroPython REPL.  The serial
 console prints a countdown so you know the check is in progress.
 """
+
 import sys
 import time
 
@@ -63,25 +64,30 @@ if "/flash" not in sys.path:
 # the device will sit in raw REPL indefinitely (the WDT is disarmed during
 # flashing).  This guard provides a self-healing mechanism: if we detect
 # that we are in raw REPL (no host has sent Ctrl+D to execute the flash
-# script within ~60s), we hard-reset to boot into the app.
+# script within ~120s), we hard-reset to boot into the app.
 #
 # This only activates when boot.py runs *during* an open raw-REPL session
 # (e.g. after a Ctrl+C interrupt).  On a normal cold boot the REPL is
 # friendly, not raw, and this code exits immediately.
 try:
-    import machine
     import time as _time
 
-    # Check if we are in raw REPL by looking for the ``raw REPL`` echo
-    # on stdin.  MicroPython in raw mode echoes back ``raw REPL; CTRL-B
-    # to exit`` at connection — this does NOT appear again on re-entry,
-    # so instead check for the absence of a typed character within a
-    # short window.  If no host input arrives within IDLE_REPL_TIMEOUT_S,
-    # assume the host session is dead and reboot.
+    import machine
+
+    # Re-arm the watchdog with a long timeout so the polling loop below
+    # is not interrupted by a watchdog armed by a prior app session
+    # (the LMAO client arms WDT at ~8s).
+    try:
+        _wdt = machine.WDT(timeout=300_000)  # 5 minutes
+    except Exception:
+        pass  # no WDT support or already disarmed; proceed anyway
+
     IDLE_REPL_TIMEOUT_S = 120  # 2 minutes with no host input → reboot
     _deadline = _time.ticks_ms() + IDLE_REPL_TIMEOUT_S * 1000
 
-    # poll stdin non-blockingly
+    # Poll stdin non-blockingly.  If no host input arrives within
+    # IDLE_REPL_TIMEOUT_S, the host session is assumed dead and the
+    # device is hard-reset to boot the app.
     import select as _select
 
     _poller = _select.poll()
@@ -102,11 +108,15 @@ try:
         _time.sleep_ms(100)
         print("\nIDLE REPL TIMEOUT — rebooting into app...")
         machine.reset()
-except Exception:
-    pass  # guard is best-effort; never block normal boot
+except Exception as _guard_err:
+    import sys as _sys
+
+    _sys.print_exception(_guard_err)
+    # guard is best-effort; never block normal boot
 
 M5.begin()
 
 # Run the LMAO client
 import main
+
 main.main()

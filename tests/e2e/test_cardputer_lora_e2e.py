@@ -222,8 +222,6 @@ class TestHardwareDetection:
             assert os.path.isfile(full), f"Missing client file: {full}"
 
 
-
-
 class TestCardputerLoRaE2E:
     """Tests that require Cardputer + Heltec RNode hardware."""
 
@@ -310,6 +308,8 @@ class TestCardputerLoRaE2E:
         from lma_core.config_utils import dict_to_ini
         from lma_core.storage import DuckDbStore
 
+        import google.protobuf.message
+
         # ── Setup: prepare server config ──
         cfg_dict = get_config_dict()
         rnode_port = cfg_dict["interfaces"]["RNode LoRa"]["port"]
@@ -372,14 +372,16 @@ class TestCardputerLoRaE2E:
                 try:
                     envelope = LMAOEnvelope()
                     envelope.ParseFromString(content_bytes)
-                except Exception as exc:
-                    import traceback
-
-                    print(
-                        f"WARNING: capture_delivery: envelope parse failed: {exc}",
-                        file=sys.stderr,
+                except google.protobuf.message.DecodeError:
+                    display_text = (
+                        content_bytes.decode("utf-8", errors="replace")
+                        if isinstance(content_bytes, bytes)
+                        else str(content_bytes)
                     )
-                    traceback.print_exc(file=sys.stderr)
+                except Exception as exc:
+                    _logger.warning(
+                        "Unexpected envelope parse error", exc_info=True
+                    )
                     display_text = (
                         content_bytes.decode("utf-8", errors="replace")
                         if isinstance(content_bytes, bytes)
@@ -489,7 +491,9 @@ class TestCardputerLoRaE2E:
             cardputer_ser = None
             try:
                 # Flash the Cardputer with client files
-                cardputer_ser = serial.Serial(_CARDCOMPUTER_PORT, 115200, timeout=1, write_timeout=10)
+                cardputer_ser = serial.Serial(
+                    _CARDCOMPUTER_PORT, 115200, timeout=1, write_timeout=10
+                )
                 time.sleep(0.6)
 
                 ok = cardputer_flash.enter_raw_repl(cardputer_ser)
@@ -503,30 +507,37 @@ class TestCardputerLoRaE2E:
                 # Wedge-recovery helper: mirrors the catch→recover→retry
                 # pattern proven in flash.py and install_all.py.  Each upload
                 # gets one automatic recovery attempt before failing.
+                # Returns (uploaded, ser) where ser may be a new serial object
+                # if wedge recovery was triggered, or the original ser otherwise.
                 def _upload_with_recovery(ser, local_path, remote_path):
-                    """Upload one file with one automatic wedge recovery attempt."""
+                    """Upload one file with one automatic wedge recovery attempt.
+
+                    Returns (result, ser) where *ser* may be a new serial object
+                    if wedge recovery was triggered, or the original *ser* otherwise.
+                    """
                     try:
-                        return cardputer_flash.upload_file(
-                            ser, local_path, remote_path, skip_if_unchanged=True
+                        return (
+                            cardputer_flash.upload_file(
+                                ser, local_path, remote_path, skip_if_unchanged=True
+                            ),
+                            ser,
                         )
                     except cardputer_flash.DeviceStalledError:
                         _logger.info("Device stalled during upload — attempting recovery...")
                         new_ser = cardputer_flash.recover_wedged_device(ser, _CARDCOMPUTER_PORT)
                         if new_ser is None:
                             raise  # recovery failed, propagate
-                        ser = new_ser
-                        cardputer_flash.disarm_watchdog(ser)
-                        return cardputer_flash.upload_file(
-                            ser, local_path, remote_path, skip_if_unchanged=True
+                        cardputer_flash.disarm_watchdog(new_ser)
+                        result = cardputer_flash.upload_file(
+                            new_ser, local_path, remote_path, skip_if_unchanged=True
                         )
+                        return result, new_ser
 
                 for rel in cardputer_flash.FILES_TO_UPLOAD:
                     local_path = os.path.join(root, rel)
                     remote_path = rel
                     assert os.path.isfile(local_path), f"Missing source: {local_path}"
-                    uploaded = _upload_with_recovery(
-                        cardputer_ser, local_path, remote_path
-                    )
+                    uploaded, cardputer_ser = _upload_with_recovery(cardputer_ser, local_path, remote_path)
                     assert uploaded, f"Failed to upload {rel}"
 
                 # Upload all library files (auto-discovered, like the flash tool does).
@@ -537,9 +548,7 @@ class TestCardputerLoRaE2E:
                     if not os.path.isfile(local_path):
                         continue
                     remote_path = rel
-                    uploaded = _upload_with_recovery(
-                        cardputer_ser, local_path, remote_path
-                    )
+                    uploaded, cardputer_ser = _upload_with_recovery(cardputer_ser, local_path, remote_path)
                     assert uploaded, f"Failed to upload lib/{rel}"
 
                 # Overwrite /config.py on the device with the patched version
@@ -553,7 +562,7 @@ class TestCardputerLoRaE2E:
                     tmp.write(patched_config)
                     tmp_path = tmp.name
                 try:
-                    uploaded = _upload_with_recovery(cardputer_ser, tmp_path, "config.py")
+                    uploaded, cardputer_ser = _upload_with_recovery(cardputer_ser, tmp_path, "config.py")
                     assert uploaded, "Failed to upload patched config.py"
                 finally:
                     with contextlib.suppress(OSError):
@@ -602,9 +611,7 @@ class TestCardputerLoRaE2E:
 
                     try:
                         if cardputer_ser.in_waiting:
-                            cardputer_output += cardputer_ser.read(
-                                cardputer_ser.in_waiting
-                            )
+                            cardputer_output += cardputer_ser.read(cardputer_ser.in_waiting)
                     except OSError:
                         # The Cardputer may hard-reset itself mid-test
                         # (heap self-recovery from #77, watchdog, USB-CDC
@@ -614,17 +621,12 @@ class TestCardputerLoRaE2E:
                         # flashed config, re-prints the banner, and resumes
                         # sending.  The server-side capture (RNS thread)
                         # is unaffected by the serial dropout.
-                        _logger.info(
-                            "Cardputer serial lost — waiting for "
-                            "re-enumeration..."
-                        )
+                        _logger.info("Cardputer serial lost — waiting for re-enumeration...")
                         with contextlib.suppress(Exception):
                             cardputer_ser.close()
                         cardputer_ser = None
                         # Give the device time to reboot and resume sending.
-                        serial_deadline = max(
-                            serial_deadline, time.time() + 90
-                        )
+                        serial_deadline = max(serial_deadline, time.time() + 90)
                         while time.time() < serial_deadline:
                             if os.path.exists(_CARDCOMPUTER_PORT):
                                 try:
@@ -803,8 +805,7 @@ class TestCardputerLoRaE2E:
                                 time.sleep(1.0)
                             except Exception as _exc:
                                 _logger.warning(
-                                    "Cannot reopen %s: %s — device may need "
-                                    "a physical RESET",
+                                    "Cannot reopen %s: %s — device may need a physical RESET",
                                     _CARDCOMPUTER_PORT,
                                     _exc,
                                 )
@@ -816,20 +817,20 @@ class TestCardputerLoRaE2E:
                             # regardless of what the host config.py says.
                             safe_config = original_config
                             safe_config = _re.sub(
-                                r'^DEBUG\s*=\s*\d+',
-                                'DEBUG = 1',
+                                r"^DEBUG\s*=\s*\d+",
+                                "DEBUG = 1",
                                 safe_config,
                                 flags=_re.MULTILINE,
                             )
                             safe_config = _re.sub(
-                                r'^INTERVAL_SECONDS\s*=\s*\d+',
-                                'INTERVAL_SECONDS = 60',
+                                r"^INTERVAL_SECONDS\s*=\s*\d+",
+                                "INTERVAL_SECONDS = 60",
                                 safe_config,
                                 flags=_re.MULTILINE,
                             )
                             safe_config = _re.sub(
                                 r"^SENSOR_TYPE\s*=\s*(\"[^\"]*\"|'[^']*'|\w+)",
-                                'SENSOR_TYPE = None',
+                                "SENSOR_TYPE = None",
                                 safe_config,
                                 flags=_re.MULTILINE,
                             )
@@ -848,9 +849,7 @@ class TestCardputerLoRaE2E:
                                     ensure_delivery_destination_hash,
                                 )
 
-                                _prod_dest_hash = (
-                                    ensure_delivery_destination_hash()
-                                )
+                                _prod_dest_hash = ensure_delivery_destination_hash()
                                 safe_config, _n_dh = _re.subn(
                                     r'DEST_HASH\s*=\s*(?:"[^"]*"|None)',
                                     f'DEST_HASH = "{_prod_dest_hash}"',
@@ -873,9 +872,7 @@ class TestCardputerLoRaE2E:
                                     exc_info=True,
                                 )
 
-                            if cardputer_flash.enter_raw_repl(
-                                _cleanup_ser, max_attempts=5
-                            ):
+                            if cardputer_flash.enter_raw_repl(_cleanup_ser, max_attempts=5):
                                 cardputer_flash.disarm_watchdog(_cleanup_ser)
                                 import tempfile as _tf
 
@@ -905,6 +902,16 @@ class TestCardputerLoRaE2E:
                                             cardputer_flash.upload_file(
                                                 _cleanup_ser, _tmp_path, "config.py"
                                             )
+                                        else:
+                                            _logger.warning(
+                                                "Could not re-enter raw REPL after recovery "
+                                                "— config NOT restored"
+                                            )
+                                    else:
+                                        _logger.warning(
+                                            "Wedge recovery failed during teardown "
+                                            "— config NOT restored"
+                                        )
                                 finally:
                                     with contextlib.suppress(OSError):
                                         os.unlink(_tmp_path)
@@ -933,48 +940,74 @@ class TestCardputerLoRaE2E:
                                 cardputer_flash.exit_raw_repl(_cleanup_ser)
                                 _cleanup_ser.write(b"\x04")  # soft reset
 
-                            # ── Post-teardown health check ──
-                            # Wait for the device to boot and verify it
-                            # produces the LMAO banner (indicating the app
-                            # starts successfully with restored config).
-                            _health_ser = _cleanup_ser
-                            _health_output = b""
-                            _health_deadline = time.time() + 20
-                            _found_banner = False
-                            while time.time() < _health_deadline:
-                                try:
-                                    if _health_ser.in_waiting:
-                                        _health_output += _health_ser.read(
-                                            _health_ser.in_waiting
+                                # ── Post-teardown health check ──
+                                # The soft reset disconnects USB-Serial-JTAG.
+                                # Wait for the port to re-enumerate (same pattern
+                                # as the main test body), then monitor for the
+                                # LMAO banner.
+                                _cleanup_ser.close()
+                                _health_ser = None
+                                _health_deadline = time.time() + 25
+                                while time.time() < _health_deadline:
+                                    if os.path.exists(_CARDCOMPUTER_PORT):
+                                        try:
+                                            _health_ser = serial.Serial(
+                                                _CARDCOMPUTER_PORT,
+                                                115200,
+                                                timeout=1,
+                                                write_timeout=10,
+                                            )
+                                            break
+                                        except Exception:
+                                            pass
+                                    time.sleep(0.5)
+
+                                if _health_ser is not None:
+                                    _health_output = b""
+                                    _banner_deadline = time.time() + 20
+                                    _found_banner = False
+                                    while time.time() < _banner_deadline:
+                                        try:
+                                            if _health_ser.in_waiting:
+                                                _health_output += _health_ser.read(
+                                                    _health_ser.in_waiting
+                                                )
+                                        except OSError:
+                                            pass  # transient serial dropout
+                                        except Exception:
+                                            _logger.warning(
+                                                "Health check serial read failed",
+                                                exc_info=True,
+                                            )
+                                        if (
+                                            b"LMAO" in _health_output
+                                            or b"POC Ready" in _health_output
+                                        ):
+                                            _found_banner = True
+                                            break
+                                        time.sleep(0.25)
+                                    if _found_banner:
+                                        print(
+                                            "[E2E restore health] Device booted OK "
+                                            f"({len(_health_output)} bytes)"
                                         )
-                                except Exception:
-                                    pass
-                                if b"LMAO" in _health_output or b"POC Ready" in _health_output:
-                                    _found_banner = True
-                                    break
-                                time.sleep(0.25)
-                            if _found_banner:
-                                print(
-                                    "[E2E restore health] Device booted OK "
-                                    f"({len(_health_output)} bytes)"
-                                )
-                            else:
-                                _logger.warning(
-                                    "Post-teardown health check: device did not show "
-                                    "LMAO banner after config restore "
-                                    "(captured %d bytes). "
-                                    "Production DEST_HASH was written, but the "
-                                    "device may require a physical RESET.",
-                                    len(_health_output),
-                                )
-                            else:
-                                _logger.warning(
-                                    "Cannot enter raw REPL on %s — config "
-                                    "NOT restored (device may be wedged; "
-                                    "INTERVAL_SECONDS/SENSOR_TYPE may still "
-                                    "hold test values)",
-                                    _CARDCOMPUTER_PORT,
-                                )
+                                    else:
+                                        _logger.warning(
+                                            "Post-teardown health check: device did not show "
+                                            "LMAO banner after config restore "
+                                            "(captured %d bytes). "
+                                            "Production DEST_HASH was written, but the "
+                                            "device may require a physical RESET.",
+                                            len(_health_output),
+                                        )
+                        else:
+                            _logger.warning(
+                                "Cannot enter raw REPL on %s — config "
+                                "NOT restored (device may be wedged; "
+                                "INTERVAL_SECONDS/SENSOR_TYPE may still "
+                                "hold test values)",
+                                _CARDCOMPUTER_PORT,
+                            )
                     except Exception:
                         _logger.warning("Config restore failed", exc_info=True)
                     finally:
