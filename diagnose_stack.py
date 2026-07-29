@@ -321,7 +321,6 @@ try:
         env_a.ParseFromString(encoded2)  # protobuf library → protobuf library
         env_b = LMAOEnvelope()
         env_b.ParseFromString(mp_encoded)  # Cardputer encoder → protobuf library
-        cardputer_can_read_host = decode_envelope(encoded2) is not None
         semantic_match = (
             env_a.sensor.node_id == env_b.sensor.node_id
             and env_a.sensor.seq == env_b.sensor.seq
