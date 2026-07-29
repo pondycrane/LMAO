@@ -429,6 +429,111 @@ class TestSubscriberManagement:
         loop.close()
 
 
+# ── NATS reconnect supervisor (issue #85) ────────────────────────
+
+
+class TestNatsReconnectSupervisor:
+    """A permanently closed NATS client must be recreated and the publish
+    retried — publishing must resume after arbitrarily long outages without
+    a server restart (issue #85)."""
+
+    @pytest.mark.asyncio
+    async def test_closed_client_triggers_reconnect_and_retry(self, server_with_mocks):
+        """Closed/dead client → connect() + ensure_stream() + publish retried."""
+        from lmao_server import server as server_module
+
+        server = server_with_mocks
+        mock_queue = AsyncMock()
+        mock_ack = MagicMock()
+        mock_ack.seq = 7
+        # First publish fails (client died during the outage); the retry
+        # after reconnect succeeds.
+        mock_queue.publish = AsyncMock(side_effect=[OSError("client is closed"), mock_ack])
+        mock_queue.is_closed = True
+        mock_queue.is_connected = False
+        server._nats_queue = mock_queue
+
+        await server._publish_to_nats("aabbccdd", b"test data")
+
+        mock_queue.connect.assert_awaited_once_with(servers=server_module._NATS_SERVER)
+        mock_queue.ensure_stream.assert_awaited_once_with(
+            server_module._NATS_STREAM,
+            server_module._NATS_STREAM_SUBJECTS,
+        )
+        assert mock_queue.publish.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_failed_reconnect_backs_off(self, server_with_mocks):
+        """A failed reconnect must not be retried on every message (backoff)."""
+        server = server_with_mocks
+        mock_queue = AsyncMock()
+        mock_queue.publish = AsyncMock(side_effect=OSError("client is closed"))
+        mock_queue.is_closed = True
+        mock_queue.is_connected = False
+        mock_queue.connect = AsyncMock(side_effect=OSError("NATS still down"))
+        server._nats_queue = mock_queue
+
+        await server._publish_to_nats("aabbccdd", b"one")
+        await server._publish_to_nats("aabbccdd", b"two")
+
+        # The second message arrives inside the backoff window → no new attempt
+        assert mock_queue.connect.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_reconnecting_client_is_left_alone(self, server_with_mocks):
+        """While nats-py is reconnecting in the background (not closed), the
+        supervisor must not interfere — the failed publish is just dropped."""
+        server = server_with_mocks
+        mock_queue = AsyncMock()
+        mock_queue.publish = AsyncMock(side_effect=OSError("connection reconnecting"))
+        mock_queue.is_closed = False
+        mock_queue.is_connected = False
+        server._nats_queue = mock_queue
+
+        await server._publish_to_nats("aabbccdd", b"test data")
+
+        mock_queue.connect.assert_not_called()
+        assert mock_queue.publish.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_publish_never_raises_when_reconnect_fails(self, server_with_mocks, caplog):
+        """No publish attempt may crash the handler — failures are logged
+        with reconnect progress."""
+        server = server_with_mocks
+        mock_queue = AsyncMock()
+        mock_queue.publish = AsyncMock(side_effect=OSError("client is closed"))
+        mock_queue.is_closed = True
+        mock_queue.is_connected = False
+        mock_queue.connect = AsyncMock(side_effect=OSError("NATS still down"))
+        server._nats_queue = mock_queue
+
+        with caplog.at_level(logging.WARNING):
+            await server._publish_to_nats("aabbccdd", b"test data")  # must not raise
+
+        assert "NATS publish failed" in caplog.text
+        assert "reconnect" in caplog.text.lower()
+
+    @pytest.mark.asyncio
+    async def test_successful_reconnect_resets_backoff(self, server_with_mocks):
+        """After a successful reconnect, failure counters reset so a later
+        outage starts with the base backoff again."""
+        server = server_with_mocks
+        server._nats_reconnect_failures = 4
+        server._nats_next_reconnect_at = 0.0
+
+        mock_queue = AsyncMock()
+        mock_queue.publish = AsyncMock(side_effect=OSError("client is closed"))
+        mock_queue.is_closed = True
+        mock_queue.is_connected = False
+        server._nats_queue = mock_queue
+
+        await server._publish_to_nats("aabbccdd", b"test data")
+
+        assert mock_queue.connect.await_count == 1
+        assert server._nats_reconnect_failures == 0
+        assert server._nats_next_reconnect_at == 0.0
+
+
 # ── send_command (issue #78) ─────────────────────────────────────
 
 
