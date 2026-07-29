@@ -56,6 +56,13 @@ when `HEAD` is unchanged; any new commit forces the full chain again —
 including reflashing the hardware. This is the direct fix for "the simplify
 phase regressed the e2e test and nothing re-ran it".
 
+**Run-tree discipline**: every gate command starts with a mandatory
+"locate the run tree" phase — agents must `cd` into the run worktree
+(`~/.archon/workspaces/*/worktrees/archon/task-*`) before any git/bazel
+command, and the marker always compares `git -C "$WT" rev-parse HEAD`.
+Without this, agents run `git rev-parse HEAD` in the main checkout and the
+marker logic silently misfires (found by the issue-#91 live test).
+
 ## Hardware safety rules (injected into every implementation/validation prompt)
 
 - **NEVER run esptool on the Cardputer** — flash only via

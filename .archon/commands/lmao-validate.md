@@ -34,9 +34,38 @@ This is a focused step: run checks, fix issues, repeat until green.
 
 ---
 
+## Phase -1: LOCATE THE RUN TREE (MANDATORY — do this before anything else)
+
+Your shell's default directory is the ORIGINAL project checkout, which may be
+on a different branch than this run. Every git and bazel command in this
+document — including the `.gate-head` marker comparison — MUST run in the
+tree that holds this run's branch:
+
+```bash
+git worktree list --porcelain | grep -E "^(worktree|branch)"
+```
+
+- If a worktree exists for this run's branch (typically under
+  `~/.archon/workspaces/*/worktrees/archon/task-*`), use it.
+- Otherwise (a `--no-worktree` run), use the current checkout.
+
+Set it once and stick to it for the whole command:
+
+```bash
+WT=/absolute/path/to/run-tree
+cd "$WT"
+```
+
+NEVER mix trees: a `git rev-parse HEAD` in the wrong checkout silently
+corrupts the fast-pass marker logic (observed in the issue-#91 live test —
+final gates compared the marker against the main checkout's HEAD).
+
+---
+
 ## Phase 0: FAST-PASS — Skip If Nothing Changed
 
 ```bash
+cd "$WT"
 if [ -f "$ARTIFACTS_DIR/.gate-head" ] && [ "$(cat "$ARTIFACTS_DIR/.gate-head")" = "$(git rev-parse HEAD)" ]; then
   echo "FAST-PASS"
 fi
@@ -55,6 +84,8 @@ If not, continue — and know that review/simplify phases that landed commits in
 ---
 
 ## Phase 1: SCOPE — Changed Python Files
+
+Run inside `"$WT"`:
 
 ```bash
 CHANGED_PY=$( { git diff --name-only "$BASE_BRANCH"...HEAD -- '*.py'; git ls-files --others --exclude-standard -- '*.py'; } | sort -u | grep -v '^bazel-' || true )
