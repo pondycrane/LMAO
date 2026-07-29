@@ -58,11 +58,11 @@ except ImportError:
 # ── helpers ─────────────────────────────────────────────────────────
 
 
-# Ensure e2e_helpers is importable when running the script directly
-# (Bazel already adds the e2e/ directory to sys.path).
-sys.path.insert(0, os.path.dirname(__file__))
 import contextlib
 
+
+# Ensure e2e_helpers is importable when running the script directly
+# (Bazel already adds the e2e/ directory to sys.path).
 from e2e_helpers import (  # noqa: E402
     case_insensitive_contains,
     find_rnode_port,
@@ -364,6 +364,12 @@ class TestCardputerLoRaE2E:
             store = DuckDbStore()
             store.initialize(db_path)
 
+            def _decode_content(bytes_or_str):
+                """Decode bytes to string, passing strings through."""
+                if isinstance(bytes_or_str, bytes):
+                    return bytes_or_str.decode("utf-8", errors="replace")
+                return str(bytes_or_str)
+
             def capture_delivery(message):
                 """Record received messages for the test to inspect."""
                 source = message.get_source()
@@ -373,25 +379,14 @@ class TestCardputerLoRaE2E:
                     envelope = LMAOEnvelope()
                     envelope.ParseFromString(content_bytes)
                 except google.protobuf.message.DecodeError:
-                    display_text = (
-                        content_bytes.decode("utf-8", errors="replace")
-                        if isinstance(content_bytes, bytes)
-                        else str(content_bytes)
-                    )
-                except Exception as exc:
-                    _logger.warning(
-                        "Unexpected envelope parse error", exc_info=True
-                    )
-                    display_text = (
-                        content_bytes.decode("utf-8", errors="replace")
-                        if isinstance(content_bytes, bytes)
-                        else str(content_bytes)
-                    )
+                    display_text = _decode_content(content_bytes)
+                except Exception:
+                    _logger.warning("Unexpected envelope parse error", exc_info=True)
+                    display_text = _decode_content(content_bytes)
                 else:
                     if envelope.HasField("text"):
                         display_text = envelope.text.content
                     elif envelope.HasField("sensor"):
-                        # ── Store SensorReport in DuckDB ──
                         display_text = (
                             f"SensorReport(seq={envelope.sensor.seq}, "
                             f"readings={len(envelope.sensor.readings)})"
@@ -465,14 +460,11 @@ class TestCardputerLoRaE2E:
 
             # Set a shorter interval for E2E tests (avoids exceeding the 30s serial deadline)
             # and enable the external sensor if one is configured via env var.
-            assert "INTERVAL_SECONDS = 15" in patched_config.replace(
-                "INTERVAL_SECONDS = 60",
-                "INTERVAL_SECONDS = 15",
-            ), "INTERVAL_SECONDS patch failed"
             patched_config = patched_config.replace(
                 "INTERVAL_SECONDS = 60",
                 "INTERVAL_SECONDS = 15",
             )
+            assert "INTERVAL_SECONDS = 15" in patched_config, "INTERVAL_SECONDS patch failed"
             # NOTE: DEBUG is kept at 1 (the default).  Do NOT patch DEBUG=2
             # on the device — the ESP32-S3 USB-Serial-JTAG TX FIFO overflows
             # under continuous radio diagnostic output, which blocks print()
@@ -504,11 +496,6 @@ class TestCardputerLoRaE2E:
                 # skip_if_unchanged: files already identical on the device are
                 # skipped (SHA-256 compare) — faster and gentler on the device.
 
-                # Wedge-recovery helper: mirrors the catch→recover→retry
-                # pattern proven in flash.py and install_all.py.  Each upload
-                # gets one automatic recovery attempt before failing.
-                # Returns (uploaded, ser) where ser may be a new serial object
-                # if wedge recovery was triggered, or the original ser otherwise.
                 def _upload_with_recovery(ser, local_path, remote_path):
                     """Upload one file with one automatic wedge recovery attempt.
 
@@ -517,21 +504,16 @@ class TestCardputerLoRaE2E:
                     """
                     try:
                         return (
-                            cardputer_flash.upload_file(
-                                ser, local_path, remote_path, skip_if_unchanged=True
-                            ),
+                            cardputer_flash.upload_file(ser, local_path, remote_path, skip_if_unchanged=True),
                             ser,
                         )
                     except cardputer_flash.DeviceStalledError:
                         _logger.info("Device stalled during upload — attempting recovery...")
                         new_ser = cardputer_flash.recover_wedged_device(ser, _CARDCOMPUTER_PORT)
                         if new_ser is None:
-                            raise  # recovery failed, propagate
+                            raise
                         cardputer_flash.disarm_watchdog(new_ser)
-                        result = cardputer_flash.upload_file(
-                            new_ser, local_path, remote_path, skip_if_unchanged=True
-                        )
-                        return result, new_ser
+                        return cardputer_flash.upload_file(new_ser, local_path, remote_path, skip_if_unchanged=True), new_ser
 
                 for rel in cardputer_flash.FILES_TO_UPLOAD:
                     local_path = os.path.join(root, rel)

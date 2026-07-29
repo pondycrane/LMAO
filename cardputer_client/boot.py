@@ -93,18 +93,14 @@ try:
     _poller = _select.poll()
     _poller.register(0, _select.POLLIN)  # 0 = stdin
     while _time.ticks_ms() < _deadline:
-        _events = _poller.poll(0)
-        if _events:
+        if _poller.poll(0):
             # Host sent something — raw REPL session is alive.
-            # Drain the input (don't leave it in the buffer) and exit
-            # the guard immediately.
-            _ = sys.stdin.read(1)  # might block if nothing, but poll said there is
+            # Drain the input and exit the guard immediately.
+            _ = sys.stdin.read(1)
             break
         _time.sleep_ms(250)
     else:
         # Timeout — no host traffic.  Hard-reset to boot the app.
-        # This recovers the device from an interrupted flash session
-        # without requiring physical access.
         _time.sleep_ms(100)
         print("\nIDLE REPL TIMEOUT — rebooting into app...")
         machine.reset()
