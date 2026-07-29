@@ -178,6 +178,14 @@ py_test(
 )
 
 py_test(
+    name = "test_boot",
+    srcs = ["test_boot.py"],
+    deps = [
+        "@lmao_pip//pytest",
+    ],
+)
+
+py_test(
     name = "test_server_identity",
     srcs = ["test_server_identity.py"],
     deps = [
