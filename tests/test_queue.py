@@ -215,11 +215,11 @@ class TestNatsQueueConnect:
         await nq.connect(servers="nats://test:4222", token="s3kr1t")
 
         nats_mod, _, _ = mock_nats_modules
-        nats_mod.connect.assert_called_once_with(
-            servers="nats://test:4222",
-            name="test-kwargs",
-            token="s3kr1t",
-        )
+        nats_mod.connect.assert_called_once()
+        call_kwargs = nats_mod.connect.call_args.kwargs
+        assert call_kwargs["servers"] == "nats://test:4222"
+        assert call_kwargs["name"] == "test-kwargs"
+        assert call_kwargs["token"] == "s3kr1t"
         await nq.close()
 
     @pytest.mark.asyncio
@@ -278,6 +278,91 @@ class TestNatsQueueConnect:
 
         with pytest.raises(RuntimeError, match="Not connected"):
             await nq.subscribe("subj", "dur", lambda m: None)
+
+
+class TestNatsQueueReconnectHardening:
+    """Reconnect-hardening defaults and connection-state properties (issue #85)."""
+
+    @pytest.mark.asyncio
+    async def test_connect_enables_infinite_reconnect_by_default(self, mock_nats_modules):
+        """connect() must default to max_reconnect_attempts=-1 so the client
+        survives arbitrarily long NATS outages (nats-py's default of 60
+        attempts x 2s gives up after ~2 minutes)."""
+        from lma_core.queue import NatsQueue
+
+        nq = NatsQueue(name="test-hardening")
+        await nq.connect(servers="nats://test:4222")
+
+        nats_mod, _, _ = mock_nats_modules
+        call_kwargs = nats_mod.connect.call_args.kwargs
+        assert call_kwargs["max_reconnect_attempts"] == -1
+        assert call_kwargs["reconnect_time_wait"] > 0
+        # Outage-visibility callbacks must be wired up
+        for cb in ("disconnected_cb", "reconnected_cb", "error_cb", "closed_cb"):
+            assert callable(call_kwargs[cb]), f"{cb} must be set"
+        await nq.close()
+
+    @pytest.mark.asyncio
+    async def test_connect_kwargs_override_reconnect_defaults(self, mock_nats_modules):
+        """Caller-supplied kwargs must take precedence over the hardening defaults."""
+        from lma_core.queue import NatsQueue
+
+        nq = NatsQueue(name="test-override")
+        await nq.connect(
+            servers="nats://test:4222",
+            max_reconnect_attempts=3,
+            reconnect_time_wait=1,
+        )
+
+        nats_mod, _, _ = mock_nats_modules
+        call_kwargs = nats_mod.connect.call_args.kwargs
+        assert call_kwargs["max_reconnect_attempts"] == 3
+        assert call_kwargs["reconnect_time_wait"] == 1
+        await nq.close()
+
+    @pytest.mark.asyncio
+    async def test_reconnect_callbacks_log_without_raising(self, mock_nats_modules, caplog):
+        """The default lifecycle callbacks must be safe for nats-py to await."""
+        import logging
+
+        from lma_core.queue import NatsQueue
+
+        nq = NatsQueue(name="test-callbacks")
+        await nq.connect(servers="nats://test:4222")
+
+        with caplog.at_level(logging.INFO, logger="lma_core.queue"):
+            await nq._on_disconnected()
+            await nq._on_reconnected()
+            await nq._on_error(OSError("boom"))
+            await nq._on_closed()
+
+        assert "connection lost" in caplog.text
+        assert "reconnected" in caplog.text
+        assert "boom" in caplog.text
+        assert "permanently closed" in caplog.text
+        await nq.close()
+
+    @pytest.mark.asyncio
+    async def test_is_connected_and_is_closed_properties(self, mock_nats_modules):
+        """is_connected / is_closed must reflect the underlying client state."""
+        from lma_core.queue import NatsQueue
+
+        nq = NatsQueue(name="test-props")
+        # Never connected — neither connected nor closed
+        assert nq.is_connected is False
+        assert nq.is_closed is False
+
+        await nq.connect(servers="nats://test:4222")
+        nq._nc.is_connected = True
+        nq._nc.is_closed = False
+        assert nq.is_connected is True
+        assert nq.is_closed is False
+
+        # Permanently closed client (gave up reconnecting)
+        nq._nc.is_connected = False
+        nq._nc.is_closed = True
+        assert nq.is_connected is False
+        assert nq.is_closed is True
 
 
 class TestNatsQueueStream:
