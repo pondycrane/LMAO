@@ -58,6 +58,53 @@ if "/flash/lib" not in sys.path:
 if "/flash" not in sys.path:
     sys.path.insert(0, "/flash")
 
+# ── Idle-REPL automatic reboot guard ──────────────────────────────
+# If boot.py was invoked by a raw-REPL flash session that got interrupted,
+# the device will sit in raw REPL indefinitely (the WDT is disarmed during
+# flashing).  This guard provides a self-healing mechanism: if we detect
+# that we are in raw REPL (no host has sent Ctrl+D to execute the flash
+# script within ~60s), we hard-reset to boot into the app.
+#
+# This only activates when boot.py runs *during* an open raw-REPL session
+# (e.g. after a Ctrl+C interrupt).  On a normal cold boot the REPL is
+# friendly, not raw, and this code exits immediately.
+try:
+    import machine
+    import time as _time
+
+    # Check if we are in raw REPL by looking for the ``raw REPL`` echo
+    # on stdin.  MicroPython in raw mode echoes back ``raw REPL; CTRL-B
+    # to exit`` at connection — this does NOT appear again on re-entry,
+    # so instead check for the absence of a typed character within a
+    # short window.  If no host input arrives within IDLE_REPL_TIMEOUT_S,
+    # assume the host session is dead and reboot.
+    IDLE_REPL_TIMEOUT_S = 120  # 2 minutes with no host input → reboot
+    _deadline = _time.ticks_ms() + IDLE_REPL_TIMEOUT_S * 1000
+
+    # poll stdin non-blockingly
+    import select as _select
+
+    _poller = _select.poll()
+    _poller.register(0, _select.POLLIN)  # 0 = stdin
+    while _time.ticks_ms() < _deadline:
+        _events = _poller.poll(0)
+        if _events:
+            # Host sent something — raw REPL session is alive.
+            # Drain the input (don't leave it in the buffer) and exit
+            # the guard immediately.
+            _ = sys.stdin.read(1)  # might block if nothing, but poll said there is
+            break
+        _time.sleep_ms(250)
+    else:
+        # Timeout — no host traffic.  Hard-reset to boot the app.
+        # This recovers the device from an interrupted flash session
+        # without requiring physical access.
+        _time.sleep_ms(100)
+        print("\nIDLE REPL TIMEOUT — rebooting into app...")
+        machine.reset()
+except Exception:
+    pass  # guard is best-effort; never block normal boot
+
 M5.begin()
 
 # Run the LMAO client

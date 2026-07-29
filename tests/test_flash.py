@@ -1164,16 +1164,23 @@ class TestUploadFileChunked:
 
     def test_upload_fails_on_chunk_error_closes_handle(self):
         """upload_file retries a failed chunk, then raises DeviceStalledError
-        after _STALL_LIMIT consecutive failures and closes the dangling handle."""
+        after _STALL_LIMIT consecutive failures and closes the dangling handle.
+
+        Adaptive chunk size: the first two failures shrink chunk_size
+        (1024→512, 512→256) before counting toward _STALL_LIMIT, so the
+        test must provide enough failure responses."""
         mock_ser = self._make_ser()
 
         responses = [
             (True, "RM_OK"),
             (True, "OPEN_OK"),
-            # Every chunk attempt fails — after _STALL_LIMIT the upload aborts
-            (False, "CHUNK_ERR"),
-            (False, "CHUNK_ERR"),
-            (False, "CHUNK_ERR"),
+            # Adaptive shrink phase (retried, not counted toward _STALL_LIMIT)
+            (False, "CHUNK_ERR"),  # 1024→512
+            (False, "CHUNK_ERR"),  # 512→256
+            # 256-byte minimum — consecutive_failures now counts
+            (False, "CHUNK_ERR"),  # fail 1
+            (False, "CHUNK_ERR"),  # fail 2
+            (False, "CHUNK_ERR"),  # fail 3 → DeviceStalledError
         ]
         response_iter = iter(responses)
 

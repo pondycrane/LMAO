@@ -499,12 +499,33 @@ class TestCardputerLoRaE2E:
                 # Upload all client files (config.py uploaded with DEST_HASH = None).
                 # skip_if_unchanged: files already identical on the device are
                 # skipped (SHA-256 compare) — faster and gentler on the device.
+
+                # Wedge-recovery helper: mirrors the catch→recover→retry
+                # pattern proven in flash.py and install_all.py.  Each upload
+                # gets one automatic recovery attempt before failing.
+                def _upload_with_recovery(ser, local_path, remote_path):
+                    """Upload one file with one automatic wedge recovery attempt."""
+                    try:
+                        return cardputer_flash.upload_file(
+                            ser, local_path, remote_path, skip_if_unchanged=True
+                        )
+                    except cardputer_flash.DeviceStalledError:
+                        _logger.info("Device stalled during upload — attempting recovery...")
+                        new_ser = cardputer_flash.recover_wedged_device(ser, _CARDCOMPUTER_PORT)
+                        if new_ser is None:
+                            raise  # recovery failed, propagate
+                        ser = new_ser
+                        cardputer_flash.disarm_watchdog(ser)
+                        return cardputer_flash.upload_file(
+                            ser, local_path, remote_path, skip_if_unchanged=True
+                        )
+
                 for rel in cardputer_flash.FILES_TO_UPLOAD:
                     local_path = os.path.join(root, rel)
                     remote_path = rel
                     assert os.path.isfile(local_path), f"Missing source: {local_path}"
-                    uploaded = cardputer_flash.upload_file(
-                        cardputer_ser, local_path, remote_path, skip_if_unchanged=True
+                    uploaded = _upload_with_recovery(
+                        cardputer_ser, local_path, remote_path
                     )
                     assert uploaded, f"Failed to upload {rel}"
 
@@ -516,8 +537,8 @@ class TestCardputerLoRaE2E:
                     if not os.path.isfile(local_path):
                         continue
                     remote_path = rel
-                    uploaded = cardputer_flash.upload_file(
-                        cardputer_ser, local_path, remote_path, skip_if_unchanged=True
+                    uploaded = _upload_with_recovery(
+                        cardputer_ser, local_path, remote_path
                     )
                     assert uploaded, f"Failed to upload lib/{rel}"
 
@@ -532,7 +553,7 @@ class TestCardputerLoRaE2E:
                     tmp.write(patched_config)
                     tmp_path = tmp.name
                 try:
-                    uploaded = cardputer_flash.upload_file(cardputer_ser, tmp_path, "config.py")
+                    uploaded = _upload_with_recovery(cardputer_ser, tmp_path, "config.py")
                     assert uploaded, "Failed to upload patched config.py"
                 finally:
                     with contextlib.suppress(OSError):
@@ -867,6 +888,23 @@ class TestCardputerLoRaE2E:
                                     cardputer_flash.upload_file(
                                         _cleanup_ser, _tmp_path, "config.py"
                                     )
+                                except cardputer_flash.DeviceStalledError:
+                                    _logger.info(
+                                        "Device stalled during teardown restore — "
+                                        "attempting recovery..."
+                                    )
+                                    new_ser = cardputer_flash.recover_wedged_device(
+                                        _cleanup_ser, _CARDCOMPUTER_PORT
+                                    )
+                                    if new_ser is not None:
+                                        _cleanup_ser = new_ser
+                                        if cardputer_flash.enter_raw_repl(
+                                            _cleanup_ser, max_attempts=5
+                                        ):
+                                            cardputer_flash.disarm_watchdog(_cleanup_ser)
+                                            cardputer_flash.upload_file(
+                                                _cleanup_ser, _tmp_path, "config.py"
+                                            )
                                 finally:
                                     with contextlib.suppress(OSError):
                                         os.unlink(_tmp_path)
@@ -894,6 +932,41 @@ class TestCardputerLoRaE2E:
 
                                 cardputer_flash.exit_raw_repl(_cleanup_ser)
                                 _cleanup_ser.write(b"\x04")  # soft reset
+
+                            # ── Post-teardown health check ──
+                            # Wait for the device to boot and verify it
+                            # produces the LMAO banner (indicating the app
+                            # starts successfully with restored config).
+                            _health_ser = _cleanup_ser
+                            _health_output = b""
+                            _health_deadline = time.time() + 20
+                            _found_banner = False
+                            while time.time() < _health_deadline:
+                                try:
+                                    if _health_ser.in_waiting:
+                                        _health_output += _health_ser.read(
+                                            _health_ser.in_waiting
+                                        )
+                                except Exception:
+                                    pass
+                                if b"LMAO" in _health_output or b"POC Ready" in _health_output:
+                                    _found_banner = True
+                                    break
+                                time.sleep(0.25)
+                            if _found_banner:
+                                print(
+                                    "[E2E restore health] Device booted OK "
+                                    f"({len(_health_output)} bytes)"
+                                )
+                            else:
+                                _logger.warning(
+                                    "Post-teardown health check: device did not show "
+                                    "LMAO banner after config restore "
+                                    "(captured %d bytes). "
+                                    "Production DEST_HASH was written, but the "
+                                    "device may require a physical RESET.",
+                                    len(_health_output),
+                                )
                             else:
                                 _logger.warning(
                                     "Cannot enter raw REPL on %s — config "
