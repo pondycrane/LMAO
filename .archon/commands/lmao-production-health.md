@@ -22,9 +22,36 @@ This node also writes the `$ARTIFACTS_DIR/.gate-head` marker that lets later gat
 
 ---
 
+## Phase -1: LOCATE THE RUN TREE (MANDATORY — do this before anything else)
+
+Your shell's default directory is the ORIGINAL project checkout, which may be
+on a different branch than this run. The `.gate-head` marker comparison and
+write MUST use this run's HEAD, not the main checkout's:
+
+```bash
+git worktree list --porcelain | grep -E "^(worktree|branch)"
+```
+
+- If a worktree exists for this run's branch (typically under
+  `~/.archon/workspaces/*/worktrees/archon/task-*`), use it.
+- Otherwise (a `--no-worktree` run), use the current checkout.
+
+Set it once and stick to it for the whole command:
+
+```bash
+WT=/absolute/path/to/run-tree
+cd "$WT"
+```
+
+NEVER mix trees: a `git rev-parse HEAD` in the wrong checkout silently
+corrupts the fast-pass marker logic (observed in the issue-#91 live test).
+
+---
+
 ## Phase 0: FAST-PASS — Skip If Nothing Changed
 
 ```bash
+cd "$WT"
 if [ -f "$ARTIFACTS_DIR/.gate-head" ] && [ "$(cat "$ARTIFACTS_DIR/.gate-head")" = "$(git rev-parse HEAD)" ]; then
   echo "FAST-PASS"
 fi
@@ -48,7 +75,7 @@ grep -l "SKIPPED — HARDWARE NOT DETECTED" "$ARTIFACTS_DIR/hardware-e2e.md" 2>/
 
 If the E2E gate skipped (no hardware attached), there is nothing to health-check:
 
-1. Write the marker: `git rev-parse HEAD > "$ARTIFACTS_DIR/.gate-head"` (the gate chain is complete for this HEAD).
+1. Write the marker **from `"$WT"`**: `git -C "$WT" rev-parse HEAD > "$ARTIFACTS_DIR/.gate-head"` (the gate chain is complete for this HEAD).
 2. Write `$ARTIFACTS_DIR/production-health.md` with `Status: ⏭ SKIPPED (no hardware)`.
 3. Output the skip note and STOP (success).
 
@@ -62,7 +89,7 @@ systemctl is-active lmao-server 2>&1
 
 If the unit is not found or not active, the Cardputer's messages cannot be observed from this host (the server may run elsewhere, or be down):
 
-1. Write the marker: `git rev-parse HEAD > "$ARTIFACTS_DIR/.gate-head"`.
+1. Write the marker **from `"$WT"`**: `git -C "$WT" rev-parse HEAD > "$ARTIFACTS_DIR/.gate-head`".
 2. Write `$ARTIFACTS_DIR/production-health.md` with `Status: ⚠️ UNVERIFIABLE (lmao-server not active on this host)` and the `systemctl` output.
 3. Output a **loud** warning that production health could not be verified, and STOP (success — do not fail workflows on hosts without the service, but never stay silent about it).
 
@@ -102,7 +129,7 @@ Fresh `Hello from Cardputer` observed in the lmao-server journal.
 Last seen: {journal timestamp}
 ```
 
-2. Write the marker: `git rev-parse HEAD > "$ARTIFACTS_DIR/.gate-head"`.
+2. Write the marker **from `"$WT"`**: `git -C "$WT" rev-parse HEAD > "$ARTIFACTS_DIR/.gate-head"`.
 3. Output:
 
 ```markdown
