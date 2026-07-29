@@ -712,6 +712,13 @@ before force-killing.
 
 - **No changes to gRPC**: The LMAO server and gRPC API are unchanged. NATS is
   additive and independent.
+- **Publish-side auto-recovery**: The server's NATS client is configured with
+  infinite reconnect attempts (nats-py otherwise gives up after ~2 min), so
+  publishing resumes by itself after arbitrarily long NATS outages. If the
+  client ever closes permanently, the server's publish path recreates the
+  connection (with exponential backoff + jitter) instead of requiring a
+  restart (issue #85). Messages received during an outage are still dropped
+  — JetStream durability only helps consumers, not publishers.
 - **No authentication (MVP)**: NATS runs without auth inside the cluster.
   Token auth is a 2-line ConfigMap change.
 - **Single-node**: One NATS replica is deployed. For production, a 3-node
