@@ -7,15 +7,17 @@ Reticulum is initialized once in Layer 1 and reused in Layer 2,
 avoiding the "already registered destination" error from reinit.
 """
 
+import contextlib
 import os
+import shutil
 import sys
 import time
-import shutil
 
 
 def _identity_to_destination(identity):
     """Wrap an RNS.Identity in an RNS.Destination for LXMF."""
     from lma_core.rns_di import RNS
+
     return RNS.Destination(
         identity,
         RNS.Destination.OUT,
@@ -37,6 +39,7 @@ for port in serial_ports:
     if os.path.exists(port):
         try:
             import serial
+
             s = serial.Serial(port, 115200, timeout=2)
             time.sleep(0.3)
             # Send RNode probe (0x00)
@@ -48,7 +51,7 @@ for port in serial_ports:
                 print(f"  ✅ {port} — responds ({len(data)} bytes)")
                 # Try to identify RNode protocol frames
                 if data[0:1] == b"\xc0":
-                    print(f"     → RNode protocol frame detected")
+                    print("     → RNode protocol frame detected")
                 else:
                     print(f"     → Raw data: {data[:40].hex()}")
             else:
@@ -63,8 +66,8 @@ for port in serial_ports:
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from lma_core.config_utils import RnsConfig
-from lma_core.rns_di import RNS, LXMF
+from lma_core.config_utils import RnsConfig  # noqa: E402
+from lma_core.rns_di import LXMF, RNS  # noqa: E402
 
 # Reticulum artifacts — cleaned up at the very end
 _rns_configdir = None
@@ -76,20 +79,16 @@ _lxmf_configdir = None
 def _cleanup():
     """Final teardown of Reticulum / LXMF state."""
     if _lxmf_router is not None:
-        try:
+        with contextlib.suppress(Exception):
             _lxmf_router.shutdown()
-        except Exception:
-            pass
     if _lxmf_configdir is not None:
         shutil.rmtree(_lxmf_configdir, ignore_errors=True)
-    try:
+    with contextlib.suppress(Exception):
         RNS.Reticulum.get_instance().teardown()
-    except Exception:
-        pass
     if _rns_configdir is not None:
         shutil.rmtree(_rns_configdir, ignore_errors=True)
     # Reset Reticulum singleton so subsequent runs are clean
-    if hasattr(RNS.Reticulum, '_Reticulum__instance'):
+    if hasattr(RNS.Reticulum, "_Reticulum__instance"):
         RNS.Reticulum._Reticulum__instance = None
 
 
@@ -118,34 +117,31 @@ try:
 
         # Initialize Reticulum
         rns_instance = RNS.Reticulum(configdir=_rns_configdir)
-        print(f"  ✅ Reticulum initialized successfully")
+        print("  ✅ Reticulum initialized successfully")
 
         # Check interfaces
         rns_inst = RNS.Reticulum.get_instance()
         ifaces = []
-        for attr_name in ['interfaces', '__interfaces', '_Reticulum__interfaces']:
+        for attr_name in ["interfaces", "__interfaces", "_Reticulum__interfaces"]:
             if hasattr(rns_inst, attr_name):
                 raw = getattr(rns_inst, attr_name)
                 if isinstance(raw, (list, tuple, dict)):
-                    if isinstance(raw, dict):
-                        ifaces = list(raw.values())
-                    else:
-                        ifaces = list(raw)
+                    ifaces = list(raw.values()) if isinstance(raw, dict) else list(raw)
                     break
 
         if ifaces:
             print(f"  ✅ Active interfaces ({len(ifaces)}):")
             for iface in ifaces:
-                name = getattr(iface, 'name', iface.__class__.__name__)
-                connected = getattr(iface, 'is_connected', None) or getattr(iface, 'online', False)
+                name = getattr(iface, "name", iface.__class__.__name__)
+                connected = getattr(iface, "is_connected", None) or getattr(iface, "online", False)
                 status = "✅" if connected else "⚠️"
                 print(f"     {status} {iface.__class__.__name__}: {name}")
-                if hasattr(iface, 'port'):
+                if hasattr(iface, "port"):
                     print(f"        Port: {iface.port}")
-                if hasattr(iface, 'frequency'):
+                if hasattr(iface, "frequency"):
                     print(f"        Freq: {iface.frequency} Hz")
-                if hasattr(iface, 'signal_strength'):
-                    ss = getattr(iface, 'signal_strength', None)
+                if hasattr(iface, "signal_strength"):
+                    ss = getattr(iface, "signal_strength", None)
                     print(f"        RSSI: {ss} dBm" if ss is not None else "        RSSI: N/A")
         else:
             print("  ⚠️  No interfaces found")
@@ -161,6 +157,7 @@ except ImportError as e:
 except Exception as e:
     print(f"  ❌ Reticulum init failed: {e}")
     import traceback
+
     traceback.print_exc()
     _cleanup()
     sys.exit(1)
@@ -186,19 +183,19 @@ try:
         )
         # Register delivery identity (required for receiving messages)
         _lxmf_router.register_delivery_identity(_rns_identity, display_name="lmao-diag")
-        print(f"  ✅ LXMF router created")
+        print("  ✅ LXMF router created")
         print(f"  ✅ Identity: {RNS.hexrep(_rns_identity.hash, delimit=False)}")
 
         # Test sending a message to self (loopback)
-        print(f"\n  → Testing message loopback...")
+        print("\n  → Testing message loopback...")
         received = []
 
         def test_callback(message):
             received.append(message)
             source = message.get_source()
             source_hash = RNS.hexrep(source.hash, delimit=False) if source else "?"
-            content = getattr(message, 'content', b'')[:50]
-            print(f"     ✅ Message received!")
+            content = getattr(message, "content", b"")[:50]
+            print("     ✅ Message received!")
             print(f"        From: {source_hash}")
             print(f"        Content: {content}")
 
@@ -213,7 +210,7 @@ try:
             desired_method=LXMF.LXMessage.OPPORTUNISTIC,
         )
         _lxmf_router.handle_outbound(test_msg)
-        print(f"  ✅ Test message sent to self")
+        print("  ✅ Test message sent to self")
 
         # Give it a moment to be delivered
         time.sleep(1)
@@ -221,11 +218,14 @@ try:
         if received:
             print(f"  ✅ Loopback working — {len(received)} message(s) received")
         else:
-            print(f"  ⚠️  No loopback received (expected for opportunistic delivery without announce)")
+            print(
+                "  ⚠️  No loopback received (expected for opportunistic delivery without announce)"
+            )
 
 except Exception as e:
     print(f"  ❌ LXMF test failed: {e}")
     import traceback
+
     traceback.print_exc()
 
 
@@ -236,9 +236,8 @@ print("LAYER 3: Protobuf Application Layer")
 print("=" * 60)
 
 try:
-    from lma_core import LMAOEnvelope, SensorReport, SensorReading, TextMessage
+    from lma_core import LMAOEnvelope
     from lma_core.message_utils import decode_lmao_message
-    from google.protobuf.message import DecodeError
 
     print("  ✅ Protobuf stubs imported successfully")
 
@@ -254,7 +253,7 @@ try:
 
     # Test 2: Decode it back
     decoded = decode_lmao_message(encoded)
-    print(f"  ✅ TextMessage decoded: \"{decoded}\"")
+    print(f'  ✅ TextMessage decoded: "{decoded}"')
 
     # Test 3: Encode a SensorReport
     envelope2 = LMAOEnvelope()
@@ -270,13 +269,15 @@ try:
 
     encoded2 = envelope2.SerializeToString()
     print(f"  ✅ SensorReport encoded: {len(encoded2)} bytes (would fit in LoRa packet)")
-    print(f"     Readings: temp={envelope2.sensor.readings[0].value}°C, "
-          f"humidity={envelope2.sensor.readings[1].value}%")
+    print(
+        f"     Readings: temp={envelope2.sensor.readings[0].value}°C, "
+        f"humidity={envelope2.sensor.readings[1].value}%"
+    )
     print(f"     Wire size: {len(encoded2)} bytes (vs ~71 B with msgpack)")
 
     # Test 4: Decode SensorReport via decode_lmao_message (should fall through)
     result = decode_lmao_message(encoded2)
-    print(f"  ✅ SensorReport decode result: \"{result}\"")
+    print(f'  ✅ SensorReport decode result: "{result}"')
     # Note: decode_lmao_message falls back to raw text for non-text envelopes
 
     # Test 5: Cross-validate with the Cardputer encoder
@@ -294,7 +295,6 @@ try:
         from proto.lma_encoder import (
             decode_envelope,
             encode_sensor_envelope,
-            encode_sensor_report,
             make_poc_message,
             parse_poc_message,
         )
@@ -321,21 +321,31 @@ try:
         env_a.ParseFromString(encoded2)  # protobuf library → protobuf library
         env_b = LMAOEnvelope()
         env_b.ParseFromString(mp_encoded)  # Cardputer encoder → protobuf library
-        cardputer_can_read_host = decode_envelope(encoded2) is not None
         semantic_match = (
             env_a.sensor.node_id == env_b.sensor.node_id
             and env_a.sensor.seq == env_b.sensor.seq
             and abs(env_a.sensor.readings[0].value - env_b.sensor.readings[0].value) < 0.01
         )
         if semantic_match:
-            print(f"  ✅ Encoder cross-validation: semantic MATCH")
+            print("  ✅ Encoder cross-validation: semantic MATCH")
             if len(encoded2) != len(mp_encoded):
-                print(f"     (wire sizes differ: host={len(encoded2)}B vs cardputer={len(mp_encoded)}B —")
-                print(f"      protobuf library omits default values; Cardputer encoder includes them)")
+                print(
+                    f"     (wire sizes differ: host={len(encoded2)}B vs "
+                    f"cardputer={len(mp_encoded)}B —"
+                )
+                print(
+                    "      protobuf library omits default values; Cardputer encoder includes them)"
+                )
         else:
-            print(f"  ❌ Encoder cross-validation: semantic MISMATCH")
-            print(f"     Host: node_id={env_a.sensor.node_id} seq={env_a.sensor.seq} temp={env_a.sensor.readings[0].value}")
-            print(f"     Cardputer: node_id={env_b.sensor.node_id} seq={env_b.sensor.seq} temp={env_b.sensor.readings[0].value}")
+            print("  ❌ Encoder cross-validation: semantic MISMATCH")
+            print(
+                f"     Host: node_id={env_a.sensor.node_id} seq={env_a.sensor.seq} "
+                f"temp={env_a.sensor.readings[0].value}"
+            )
+            print(
+                f"     Cardputer: node_id={env_b.sensor.node_id} seq={env_b.sensor.seq} "
+                f"temp={env_b.sensor.readings[0].value}"
+            )
 
     except ImportError as e:
         print(f"  ⚠️  Cardputer encoder test skipped: {e}")
@@ -344,7 +354,7 @@ try:
 
     # ── Test 6: Full Loop — Cardputer → Server → Cardputer ────────────────
     print(f"\n  {'─' * 50}")
-    print(f"  → Full Loop: Cardputer → Server → Cardputer...")
+    print("  → Full Loop: Cardputer → Server → Cardputer...")
     try:
         # Re-import Cardputer encoder (already loaded above; re-path if needed)
         for _mod in list(sys.modules):
@@ -370,7 +380,7 @@ try:
                 {"sensor_id": 2, "value": 55.0, "unit": "%", "timestamp_ms": 0},
             ],
         )
-        print(f"  \n  Step 1 — Cardputer encodes SensorReport:")
+        print("  \n  Step 1 — Cardputer encodes SensorReport:")
         print(f"     ✅ {len(cardputer_sensor_bytes)} bytes (ready for LXMF Content)")
 
         # Step 2: Server receives and decodes the SensorReport
@@ -380,34 +390,36 @@ try:
             f"sensor_id={r.sensor_id}, value={r.value}{r.unit}"
             for r in server_envelope.sensor.readings
         ]
-        print(f"  Step 2 — Server decodes SensorReport:")
+        print("  Step 2 — Server decodes SensorReport:")
         print(f"     ✅ node_id={server_envelope.sensor.node_id}")
         print(f"        seq={server_envelope.sensor.seq}")
         print(f"        battery={server_envelope.sensor.battery}V")
         print(f"        readings: {', '.join(sensor_fields)}")
 
         # Step 3: Server builds and sends a protobuf ACK TextMessage reply
-        ack_text = f"ACK from LMAO Server — received SensorReport ({len(cardputer_sensor_bytes)} bytes)"
+        ack_text = (
+            f"ACK from LMAO Server — received SensorReport ({len(cardputer_sensor_bytes)} bytes)"
+        )
         reply_envelope = LMAOEnvelope()
         reply_envelope.text.node_id = "lmao-server"
         reply_envelope.text.content = ack_text
         reply_envelope.text.timestamp = int(time.time() * 1000)
         server_ack_bytes = reply_envelope.SerializeToString()
-        print(f"  Step 3 — Server builds ACK TextMessage:")
+        print("  Step 3 — Server builds ACK TextMessage:")
         print(f"     ✅ ACK: {ack_text!r}")
         print(f"     ✅ {len(server_ack_bytes)} bytes protobuf-encoded")
 
         # Step 4: Cardputer receives and decodes the ACK
         cardputer_decoded = parse_poc_message(server_ack_bytes)
-        print(f"  Step 4 — Cardputer decodes ACK:")
+        print("  Step 4 — Cardputer decodes ACK:")
         if cardputer_decoded:
             print(f"     ✅ Decoded: {cardputer_decoded!r}")
             if cardputer_decoded == ack_text:
-                print(f"     ✅ Round-trip MATCH — text intact through encode→send→decode")
+                print("     ✅ Round-trip MATCH — text intact through encode→send→decode")
             else:
                 print(f"     ❌ Round-trip MISMATCH — expected: {ack_text!r}")
         else:
-            print(f"     ❌ parse_poc_message returned None — ACK not decodable")
+            print("     ❌ parse_poc_message returned None — ACK not decodable")
 
         # Step 5: Cardputer also sends TextMessage (POC hello), verify server decodes it
         # First, restore host proto path (remove Cardputer path, re-import host proto)
@@ -422,28 +434,30 @@ try:
         hello_text = "Hello from Cardputer — seq 1"
         cardputer_hello_bytes = make_poc_message(cardputer_node_id, hello_text)
         server_hello = decode_lmao_message(cardputer_hello_bytes)
-        print(f"  \n  Step 5 — Cardputer TextMessage loop:")
+        print("  \n  Step 5 — Cardputer TextMessage loop:")
         print(f"     Sent: {hello_text!r}")
         print(f"     Server decoded: {server_hello!r}")
         if server_hello == hello_text:
-            print(f"     ✅ TextMessage round-trip MATCH")
+            print("     ✅ TextMessage round-trip MATCH")
         else:
-            print(f"     ❌ TextMessage round-trip MISMATCH")
+            print("     ❌ TextMessage round-trip MISMATCH")
 
-        print(f"  \n  {'✅' if cardputer_decoded == ack_text and server_hello == hello_text else '❌'} Full loop: COMPLETE")
+        status = "✅" if cardputer_decoded == ack_text and server_hello == hello_text else "❌"
+        print(f"  \n  {status} Full loop: COMPLETE")
 
     except ImportError as e:
         print(f"  ⚠️  Full loop test skipped: {e}")
     except Exception as e:
         print(f"  ⚠️  Full loop test error: {e}")
         import traceback
+
         traceback.print_exc()
 
     # Re-import proto module for the host (cleared for Cardputer above)
     for _mod in list(sys.modules):
         if _mod == "proto" or _mod.startswith("proto."):
             del sys.modules[_mod]
-    from lma_core import LMAOEnvelope, SensorReport, SensorReading, TextMessage
+    from lma_core import LMAOEnvelope
 
     print()  # spacing before summary
 
@@ -452,6 +466,7 @@ except ImportError as e:
 except Exception as e:
     print(f"  ❌ Protobuf test failed: {e}")
     import traceback
+
     traceback.print_exc()
 
 
@@ -475,23 +490,23 @@ for port in ["/dev/ttyUSB0", "/dev/ttyUSB1"]:
 if cardputer_port:
     print(f"  Cardputer: {cardputer_port} — connected")
 else:
-    print(f"  Cardputer: not found")
+    print("  Cardputer: not found")
 
 if rnode_port:
     print(f"  RNode:     {rnode_port} — connected")
 else:
-    print(f"  RNode:     not found")
+    print("  RNode:     not found")
 
 if cardputer_port and rnode_port:
-    print(f"\n  ✅ Both devices detected — ready for LoRa communication")
-    print(f"\n  To run the full E2E test:")
-    print(f"    bazel test //tests:test_cardputer_lora_e2e --test_output=all")
+    print("\n  ✅ Both devices detected — ready for LoRa communication")
+    print("\n  To run the full E2E test:")
+    print("    bazel test //tests:test_cardputer_lora_e2e --test_output=all")
 elif cardputer_port:
-    print(f"\n  ⚠️  RNode not detected — Cardputer can run in WiFi-only mode")
+    print("\n  ⚠️  RNode not detected — Cardputer can run in WiFi-only mode")
 elif rnode_port:
-    print(f"\n  ⚠️  Cardputer not detected — verify USB connection")
+    print("\n  ⚠️  Cardputer not detected — verify USB connection")
 else:
-    print(f"\n  ❌ Neither device detected")
+    print("\n  ❌ Neither device detected")
 
 
 # ── Cleanup ──────────────────────────────────────────────────────────
