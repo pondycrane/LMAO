@@ -654,19 +654,13 @@ def upload_file(ser, local_path, remote_path, chunk_size=1024, skip_if_unchanged
         if ok and "CHUNK_OK" in _out:
             consecutive_failures = 0
             offset += current_chunk_size
-            # Grow chunk size back toward the original on success
             current_chunk_size = min(chunk_size, current_chunk_size + 256)
-            continue
-
-        # Chunk failed — shrink it and retry (adaptive pacing).
-        # A smaller chunk means less base64 data for the VM to drain,
-        # which helps when the USB-CDC RX ring buffer is near capacity.
-        if current_chunk_size > 256:
+        elif current_chunk_size > 256:
+            # Chunk failed — shrink and retry.
             current_chunk_size = max(256, current_chunk_size // 2)
             consecutive_failures = 0
-            continue
-
-        consecutive_failures += 1
+        else:
+            consecutive_failures += 1
         if consecutive_failures >= _STALL_LIMIT:
             # Device appears wedged — close the dangling handle and bail out.
             try:

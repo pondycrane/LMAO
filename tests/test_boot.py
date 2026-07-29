@@ -10,8 +10,6 @@ Run with::
 
 from unittest.mock import MagicMock
 
-import pytest
-
 # ── Idle-REPL guard tests ──────────────────────────────────────────
 
 
@@ -99,8 +97,7 @@ class TestIdleReplGuard:
         mock_poller.poll.return_value = [(0, MagicMock())]  # POLLIN event
         mock_stdin = MagicMock()
 
-        # ticks_ms called for deadline calc + while check + break
-        ns = self._run_guard(
+        self._run_guard(
             machine=mock_machine,
             poller=mock_poller,
             stdin=mock_stdin,
@@ -122,7 +119,7 @@ class TestIdleReplGuard:
         mock_poller = MagicMock()
         mock_poller.poll.return_value = []  # no events
 
-        ns = self._run_guard(
+        self._run_guard(
             machine=mock_machine,
             poller=mock_poller,
             ticks_values=[0, 130000],  # 1st=deadline calc, 2nd=past deadline
@@ -135,12 +132,10 @@ class TestIdleReplGuard:
         """The guard's exception handler must not crash on import errors."""
         mock_machine = MagicMock()
 
-        # Simulate ImportError when calling poll() — should be caught
-        # by the guard's outer try/except.
         mock_poller = MagicMock()
         mock_poller.poll.side_effect = ImportError("no select")
 
-        ns = self._run_guard(
+        self._run_guard(
             machine=mock_machine,
             poller=mock_poller,
             ticks_values=[1000],
@@ -150,24 +145,14 @@ class TestIdleReplGuard:
         mock_machine.reset.assert_not_called()
 
     def test_polls_250ms_between_iterations(self):
-        """Guard sleeps 250ms between stdin polling iterations.
-
-        ticks_ms values:
-          1st call (deadline): 0 → deadline = 120000
-          2nd call (while):    0 (< 120000) → enter loop, poll, sleep(250)
-          3rd call (while):    250 (< 120000) → poll, sleep(250)
-          4th call (while):    500 (< 120000) → poll, sleep(250)
-          5th call (while):    750 (< 120000) → poll, sleep(250)
-          6th call (while):    1000 (< 120000) → poll, sleep(250)
-          7th call (while):    130000 (> 120000) → exit, else
-        """
+        """Guard sleeps 250ms between stdin polling iterations."""
         mock_machine = MagicMock()
         mock_poller = MagicMock()
         mock_poller.poll.return_value = []  # no events
 
         sleep_ms = MagicMock()
 
-        ns = self._run_guard(
+        self._run_guard(
             machine=mock_machine,
             poller=mock_poller,
             ticks_values=[0, 0, 250, 500, 750, 1000, 130000],
@@ -175,7 +160,6 @@ class TestIdleReplGuard:
         )
 
         mock_machine.reset.assert_called_once()
-        # Should have slept at least 5 times (250ms each)
         assert sleep_ms.call_count >= 5, (
             f"Guard should sleep 250ms between polls, got {sleep_ms.call_count}"
         )
@@ -186,10 +170,9 @@ class TestIdleReplGuard:
         mock_poller = MagicMock()
         mock_stdin = MagicMock()
 
-        # First poll returns an event
         mock_poller.poll.return_value = [(0, MagicMock())]
 
-        ns = self._run_guard(
+        self._run_guard(
             machine=mock_machine,
             poller=mock_poller,
             stdin=mock_stdin,
@@ -201,19 +184,14 @@ class TestIdleReplGuard:
         mock_stdin.read.assert_called_once_with(1)
 
     def test_sleeps_100ms_before_reset(self):
-        """Guard sleeps 100ms before calling reset (data loss prevention).
-
-        ticks_ms:
-          1st (deadline): 0 → deadline = 120000
-          2nd (while):    130000 (> 120000) → exit, else, sleep(100), reset
-        """
+        """Guard sleeps 100ms before calling reset (data loss prevention)."""
         mock_machine = MagicMock()
         mock_poller = MagicMock()
         mock_poller.poll.return_value = []
 
         sleep_ms = MagicMock()
 
-        ns = self._run_guard(
+        self._run_guard(
             machine=mock_machine,
             poller=mock_poller,
             ticks_values=[0, 130000],
@@ -226,13 +204,12 @@ class TestIdleReplGuard:
     def test_re_arms_watchdog_on_entry(self):
         """Guard re-arms WDT with 5-minute timeout on entry."""
         mock_machine = MagicMock()
-        mock_wdt = MagicMock()
-        mock_machine.WDT.return_value = mock_wdt
+        mock_machine.WDT.return_value = MagicMock()
 
         mock_poller = MagicMock()
-        mock_poller.poll.return_value = [(0, MagicMock())]  # exit immediately
+        mock_poller.poll.return_value = [(0, MagicMock())]
 
-        ns = self._run_guard(
+        self._run_guard(
             machine=mock_machine,
             poller=mock_poller,
             ticks_values=[1000, 1001],
@@ -247,16 +224,15 @@ class TestIdleReplGuard:
         mock_machine.WDT.side_effect = AttributeError("no WDT on this build")
 
         mock_poller = MagicMock()
-        mock_poller.poll.return_value = [(0, MagicMock())]  # exit immediately
+        mock_poller.poll.return_value = [(0, MagicMock())]
 
-        ns = self._run_guard(
+        self._run_guard(
             machine=mock_machine,
             poller=mock_poller,
             ticks_values=[1000, 1001],
             sleep_ms=MagicMock(),
         )
 
-        # Should not crash — the WDT failure is caught and guard continues
         mock_machine.reset.assert_not_called()
 
 
