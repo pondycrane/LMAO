@@ -60,9 +60,10 @@ except ImportError:
 
 import contextlib
 
+# Ensure e2e_helpers is importable — under Bazel runfiles the e2e/ directory
+# is NOT on sys.path, so add this file's directory explicitly.
+sys.path.insert(0, os.path.dirname(__file__))
 
-# Ensure e2e_helpers is importable when running the script directly
-# (Bazel already adds the e2e/ directory to sys.path).
 from e2e_helpers import (  # noqa: E402
     case_insensitive_contains,
     find_rnode_port,
@@ -504,7 +505,9 @@ class TestCardputerLoRaE2E:
                     """
                     try:
                         return (
-                            cardputer_flash.upload_file(ser, local_path, remote_path, skip_if_unchanged=True),
+                            cardputer_flash.upload_file(
+                                ser, local_path, remote_path, skip_if_unchanged=True
+                            ),
                             ser,
                         )
                     except cardputer_flash.DeviceStalledError:
@@ -513,13 +516,17 @@ class TestCardputerLoRaE2E:
                         if new_ser is None:
                             raise
                         cardputer_flash.disarm_watchdog(new_ser)
-                        return cardputer_flash.upload_file(new_ser, local_path, remote_path, skip_if_unchanged=True), new_ser
+                        return cardputer_flash.upload_file(
+                            new_ser, local_path, remote_path, skip_if_unchanged=True
+                        ), new_ser
 
                 for rel in cardputer_flash.FILES_TO_UPLOAD:
                     local_path = os.path.join(root, rel)
                     remote_path = rel
                     assert os.path.isfile(local_path), f"Missing source: {local_path}"
-                    uploaded, cardputer_ser = _upload_with_recovery(cardputer_ser, local_path, remote_path)
+                    uploaded, cardputer_ser = _upload_with_recovery(
+                        cardputer_ser, local_path, remote_path
+                    )
                     assert uploaded, f"Failed to upload {rel}"
 
                 # Upload all library files (auto-discovered, like the flash tool does).
@@ -530,7 +537,9 @@ class TestCardputerLoRaE2E:
                     if not os.path.isfile(local_path):
                         continue
                     remote_path = rel
-                    uploaded, cardputer_ser = _upload_with_recovery(cardputer_ser, local_path, remote_path)
+                    uploaded, cardputer_ser = _upload_with_recovery(
+                        cardputer_ser, local_path, remote_path
+                    )
                     assert uploaded, f"Failed to upload lib/{rel}"
 
                 # Overwrite /config.py on the device with the patched version
@@ -544,7 +553,9 @@ class TestCardputerLoRaE2E:
                     tmp.write(patched_config)
                     tmp_path = tmp.name
                 try:
-                    uploaded, cardputer_ser = _upload_with_recovery(cardputer_ser, tmp_path, "config.py")
+                    uploaded, cardputer_ser = _upload_with_recovery(
+                        cardputer_ser, tmp_path, "config.py"
+                    )
                     assert uploaded, "Failed to upload patched config.py"
                 finally:
                     with contextlib.suppress(OSError):
