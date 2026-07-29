@@ -641,8 +641,9 @@ def upload_file(ser, local_path, remote_path, chunk_size=1024, skip_if_unchanged
     # when it acknowledges with CHUNK_OK, so retries cannot corrupt).
     offset = 0
     consecutive_failures = 0
+    current_chunk_size = chunk_size
     while offset < file_size:
-        chunk = content[offset : offset + chunk_size]
+        chunk = content[offset : offset + current_chunk_size]
         encoded = base64.b64encode(chunk).decode("ascii")
         chunk_script = (
             b"import ubinascii as _b64\n"
@@ -652,10 +653,14 @@ def upload_file(ser, local_path, remote_path, chunk_size=1024, skip_if_unchanged
         ok, _out = exec_raw(ser, chunk_script)
         if ok and "CHUNK_OK" in _out:
             consecutive_failures = 0
-            offset += chunk_size
-            continue
-
-        consecutive_failures += 1
+            offset += current_chunk_size
+            current_chunk_size = min(chunk_size, current_chunk_size + 256)
+        elif current_chunk_size > 256:
+            # Chunk failed — shrink and retry.
+            current_chunk_size = max(256, current_chunk_size // 2)
+            consecutive_failures = 0
+        else:
+            consecutive_failures += 1
         if consecutive_failures >= _STALL_LIMIT:
             # Device appears wedged — close the dangling handle and bail out.
             try:
