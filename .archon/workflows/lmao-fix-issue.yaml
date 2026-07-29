@@ -1,0 +1,446 @@
+name: lmao-fix-issue
+description: |
+  Use when: User wants to FIX, RESOLVE, or IMPLEMENT a solution for a GitHub issue
+  in the LMAO repo (LoRa mesh, Cardputer, RNode, Bazel).
+  Triggers: "fix this issue", "implement issue #123", "resolve this bug", "fix it",
+            "fix issue", "resolve issue", "fix #123" — in the LMAO project.
+  NOT for: Comprehensive multi-agent reviews (use archon-issue-review-full),
+           questions about issues, CI failures, PR reviews, general exploration.
+
+  LMAO-adapted DAG workflow (hardware-aware, Bazel-native, E2E-mandatory):
+  1. Classifies the issue (bug/feature/enhancement/etc)
+  2. Researches context (web research + codebase exploration via investigate/plan)
+  3. Routes to investigate (bugs) or plan (features) based on classification
+  4. Implements the fix with LMAO safety rules (esptool bans, BUILD completeness)
+  5. LMAO validation gate (BUILD completeness + bazel build + ruff/mypy + unit tests)
+  6. MANDATORY hardware E2E gate (Cardputer flash + LoRa tests when attached,
+     loud skip when not) + production health check
+  7. Creates a draft PR that includes the hardware E2E evidence
+  8. Runs smart review (always code review + AGENTS.md check, conditional agents)
+  9. Aggressively self-fixes all findings, simplifies changed code
+  10. RE-RUNS the full gate chain after any review/simplify commits
+      (fast-pass only when HEAD is unchanged — the #87 regression guard)
+  11. Reports results back to the GitHub issue with follow-up suggestions
+
+  Models: deepseek-v4-pro for investigate/plan/implement/fix/simplify,
+          deepseek-v4-flash for everything else. No Claude anywhere.
+
+nodes:
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 1: FETCH & CLASSIFY
+  # ═══════════════════════════════════════════════════════════════════
+
+  - id: extract-issue-number
+    model: deepseek/deepseek-v4-flash
+    prompt: |
+      Find the GitHub issue number for this request.
+
+      Request: $ARGUMENTS
+
+      Rules:
+      - If the message contains an explicit issue number (e.g., "#709", "issue 709", "709"), extract that number.
+      - If the message is ambiguous (e.g., "fix the SQLite timestamp bug"), use \`gh issue list\` to search for matching issues and pick the best match.
+
+      CRITICAL: Your final output must be ONLY the bare number with no quotes, no markdown, no explanation. Example correct output: 709
+
+  # NOTE: implemented as a prompt node (not bash) on purpose — embedding raw
+  # AI output into a bash script via $extract-issue-number.output breaks the
+  # script whenever the model emits quotes/newlines/backticks (observed with
+  # pi/deepseek streaming reasoning into the node output). An LLM parses the
+  # number out of messy text reliably; bash cannot. Every node that consumes
+  # AI output in this workflow is a prompt node for the same reason.
+  - id: fetch-issue
+    model: deepseek/deepseek-v4-flash
+    prompt: |
+      Fetch the GitHub issue for this request.
+
+      Request: $ARGUMENTS
+      Extractor output (may contain the issue number amid other text): $extract-issue-number.output
+
+      Rules:
+      - Determine the issue number from the request or the extractor output (e.g. "#709", "issue 709", "709").
+      - If ambiguous, use \`gh issue list\` to search for matching issues and pick the best match.
+      - Fetch the issue by running: gh issue view <number> --json title,body,labels,comments,state,url,author
+
+      CRITICAL: Your final output must be ONLY the raw JSON returned by gh issue view — no markdown fences, no commentary, no explanation.
+    depends_on: [extract-issue-number]
+
+  - id: classify
+    model: deepseek/deepseek-v4-flash
+    prompt: |
+      You are an issue classifier. Analyze the GitHub issue below and determine its type.
+
+      ## Issue Content
+
+      $fetch-issue.output
+
+      ## Classification Rules
+
+      | Type | Indicators |
+      |------|------------|
+      | bug | "broken", "error", "crash", "doesn't work", stack traces, regression |
+      | feature | "add", "new", "support", "would be nice", net-new capability |
+      | enhancement | "improve", "better", "update existing", "extend", incremental improvement |
+      | refactor | "clean up", "simplify", "reorganize", "restructure" |
+      | chore | "update deps", "upgrade", "maintenance", "CI/CD" |
+      | documentation | "docs", "readme", "clarify", "examples" |
+
+      Provide reasoning for your classification.
+    depends_on: [fetch-issue]
+    allowed_tools: []
+    output_format:
+      type: object
+      properties:
+        issue_type:
+          type: string
+          enum: ["bug", "feature", "enhancement", "refactor", "chore", "documentation"]
+        title:
+          type: string
+        reasoning:
+          type: string
+      required: [issue_type, title, reasoning]
+
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 2: RESEARCH
+  # ═══════════════════════════════════════════════════════════════════
+
+  - id: web-research
+    command: archon-web-research
+    depends_on: [classify]
+    context: fresh
+    model: deepseek/deepseek-v4-flash
+
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 3: INVESTIGATE (bugs) / PLAN (features)
+  # ═══════════════════════════════════════════════════════════════════
+
+  - id: investigate
+    command: lmao-investigate-issue
+    depends_on: [classify, web-research]
+    when: "$classify.output.issue_type == 'bug'"
+    context: fresh
+    model: deepseek/deepseek-v4-pro
+
+  - id: plan
+    command: lmao-create-plan
+    depends_on: [classify, web-research]
+    when: "$classify.output.issue_type != 'bug'"
+    context: fresh
+    model: deepseek/deepseek-v4-pro
+    effort: high
+
+  # Bridge: ensure investigation.md exists for the implement step.
+  # Pure bash on files — no AI output is substituted here, so this is safe.
+  - id: bridge-artifacts
+    bash: |
+      if [ -f "$ARTIFACTS_DIR/plan.md" ] && [ ! -f "$ARTIFACTS_DIR/investigation.md" ]; then
+        cp "$ARTIFACTS_DIR/plan.md" "$ARTIFACTS_DIR/investigation.md"
+        echo "Bridged plan.md to investigation.md for implement step"
+      elif [ -f "$ARTIFACTS_DIR/investigation.md" ]; then
+        echo "investigation.md exists from investigate step"
+      else
+        echo "WARNING: No investigation.md or plan.md found — implement may fail"
+      fi
+    depends_on: [investigate, plan]
+    trigger_rule: one_success
+
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 4: IMPLEMENT (LMAO safety rules + Bazel)
+  # ═══════════════════════════════════════════════════════════════════
+
+  - id: implement
+    command: lmao-fix-issue
+    depends_on: [bridge-artifacts]
+    context: fresh
+    model: deepseek/deepseek-v4-pro
+    effort: max
+
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 5: LMAO GATE CHAIN — validate → hardware E2E → health
+  # The hardware E2E gate is MANDATORY before PR creation (AGENTS.md).
+  # ═══════════════════════════════════════════════════════════════════
+
+  - id: validate
+    command: lmao-validate
+    depends_on: [implement]
+    context: fresh
+    model: deepseek/deepseek-v4-flash
+
+  - id: hardware-e2e
+    command: lmao-hardware-e2e
+    depends_on: [validate]
+    context: fresh
+    model: deepseek/deepseek-v4-flash
+
+  - id: production-health
+    command: lmao-production-health
+    depends_on: [hardware-e2e]
+    context: fresh
+    model: deepseek/deepseek-v4-flash
+
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 6: CREATE DRAFT PR (with hardware E2E evidence)
+  # ═══════════════════════════════════════════════════════════════════
+
+  - id: create-pr
+    model: deepseek/deepseek-v4-flash
+    prompt: |
+      Create a draft pull request for the current branch.
+
+      ## Context
+
+      - **Issue**: $ARGUMENTS
+      - **Classification**: $classify.output
+      - **Issue title**: $classify.output.title
+
+      ## Instructions
+
+      1. Check git status. If uncommitted changes exist, stage and commit ONLY source files that are part of the fix:
+         - List them by name with \`git add <path1> <path2> ...\` — never \`git add -A\`, \`git add .\`, or \`git add -u\`
+         - **Never commit** scratch / review / PR-body artifacts, even if they appear in \`git status\`:
+           - \`.pr-body.md\`, \`pr-body.md\`, \`*.scratch.md\`, \`*.tmp.md\` at any path
+           - \`review/\`, \`*-report.md\` at the repo root
+           - Anything under \`$ARTIFACTS_DIR\`
+         - Verify with \`git status --porcelain\` that nothing scratch is staged before committing
+         - If files you don't recognize as part of the fix appear modified or untracked, leave them alone
+      2. Push the branch: \`git push -u origin HEAD\`
+      3. Read implementation artifacts from \`$ARTIFACTS_DIR/\` for context:
+         - \`$ARTIFACTS_DIR/investigation.md\` or \`$ARTIFACTS_DIR/plan.md\`
+         - \`$ARTIFACTS_DIR/implementation.md\`
+         - \`$ARTIFACTS_DIR/validation.md\`
+         - \`$ARTIFACTS_DIR/hardware-e2e.md\`  ← REQUIRED (see step 6)
+      4. Check if a PR already exists for this branch: \`gh pr list --head $(git branch --show-current)\`
+         - If PR exists, skip creation and capture its number
+      5. Look for the project's PR template at \`.github/pull_request_template.md\`, \`.github/PULL_REQUEST_TEMPLATE.md\`, or \`docs/PULL_REQUEST_TEMPLATE.md\`. Read whichever one exists. (LMAO currently has none — use the default body format below.)
+      6. Create a DRAFT PR: \`gh pr create --draft --base $BASE_BRANCH\`
+         - Title: concise, imperative mood, under 70 chars
+         - Body: if a PR template was found, fill in **every section** with details from the artifacts. If no template, write a body with: summary, changes, validation evidence (from validation.md), **a \`## Hardware E2E\` section**, and \`Fixes #...\`.
+         - **Hardware E2E section (MANDATORY per AGENTS.md)**: copy the devices + results table from \`$ARTIFACTS_DIR/hardware-e2e.md\` verbatim. If it reports \`SKIPPED — HARDWARE NOT DETECTED\`, include that warning verbatim and prominently instead — never omit the section and never claim hardware results that don't exist.
+         - **PR body file location**: if you write the body to a file (e.g. for \`--body-file\`), the file MUST live at \`$ARTIFACTS_DIR/pr-body.md\` or under \`/tmp/\` — NEVER inside the worktree. Files like \`.pr-body.md\` at the repo root will be picked up by later commits.
+         - Link to issue: include \`Fixes #...\` or \`Closes #...\`
+      7. Capture PR identifiers:
+         \`\`\`bash
+         HEAD_BRANCH=$(git branch --show-current)
+         PR_NUMBER=$(gh pr list --head "$HEAD_BRANCH" --state open --json number -q '.[0].number')
+         if [ -z "$PR_NUMBER" ]; then
+           echo "No open PR found for branch $HEAD_BRANCH — PR creation failed" >&2
+           exit 1
+         fi
+         echo "$PR_NUMBER" > "$ARTIFACTS_DIR/.pr-number"
+         PR_URL=$(gh pr view "$PR_NUMBER" --json url -q '.url')
+         echo "$PR_URL" > "$ARTIFACTS_DIR/.pr-url"
+         \`\`\`
+    depends_on: [production-health]
+    context: fresh
+
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 7: REVIEW
+  # ═══════════════════════════════════════════════════════════════════
+
+  - id: verify-pr-base
+    bash: |
+      set -euo pipefail
+      HEAD_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+      PR_NUMBER=$(gh pr list --head "$HEAD_BRANCH" --state open --json number -q '.[0].number')
+      if [ -z "$PR_NUMBER" ]; then
+        echo "No open PR found for branch $HEAD_BRANCH" >&2
+        exit 1
+      fi
+      EXPECTED="$BASE_BRANCH"
+      ACTUAL=$(gh pr view "$PR_NUMBER" --json baseRefName -q '.baseRefName')
+      if [ "$ACTUAL" != "$EXPECTED" ]; then
+        echo "Base mismatch on PR #$PR_NUMBER: expected=$EXPECTED actual=$ACTUAL — re-targeting" >&2
+        gh pr edit "$PR_NUMBER" --base "$EXPECTED"
+      else
+        echo "PR base verified: $EXPECTED"
+      fi
+    depends_on: [create-pr]
+
+  - id: review-scope
+    command: archon-pr-review-scope
+    depends_on: [verify-pr-base]
+    context: fresh
+    model: deepseek/deepseek-v4-flash
+
+  - id: review-classify
+    model: deepseek/deepseek-v4-flash
+    prompt: |
+      You are a PR review classifier. Analyze the PR scope and determine
+      which review agents should run.
+
+      ## PR Scope
+
+      $review-scope.output
+
+      ## Rules
+
+      - **Code review**: ALWAYS run. This is mandatory for every PR. It also checks
+        the PR against AGENTS.md rules (hardware safety, Bazel conventions) and
+        project conventions.
+      - **Error handling**: Run if the diff touches code with try/catch, error handling,
+        async/await, or adds new failure paths.
+      - **Test coverage**: Run if the diff touches source code (not just tests, docs, or config).
+      - **Comment quality**: Run if the diff adds or modifies comments, docstrings, JSDoc,
+        or significant documentation within code files.
+      - **Docs impact**: Run if the diff adds/removes/renames public APIs, commands, CLI flags,
+        environment variables, or user-facing features.
+
+      Provide your reasoning for each decision.
+    depends_on: [review-scope]
+    allowed_tools: []
+    context: fresh
+    output_format:
+      type: object
+      properties:
+        run_code_review:
+          type: string
+          enum: ["true", "false"]
+        run_error_handling:
+          type: string
+          enum: ["true", "false"]
+        run_test_coverage:
+          type: string
+          enum: ["true", "false"]
+        run_comment_quality:
+          type: string
+          enum: ["true", "false"]
+        run_docs_impact:
+          type: string
+          enum: ["true", "false"]
+        reasoning:
+          type: string
+      required:
+        - run_code_review
+        - run_error_handling
+        - run_test_coverage
+        - run_comment_quality
+        - run_docs_impact
+        - reasoning
+
+  # Code review always runs — mandatory
+  - id: code-review
+    command: archon-code-review-agent
+    depends_on: [review-classify]
+    context: fresh
+    model: deepseek/deepseek-v4-flash
+
+  - id: error-handling
+    command: archon-error-handling-agent
+    depends_on: [review-classify]
+    when: "$review-classify.output.run_error_handling == 'true'"
+    context: fresh
+    model: deepseek/deepseek-v4-flash
+
+  - id: test-coverage
+    command: archon-test-coverage-agent
+    depends_on: [review-classify]
+    when: "$review-classify.output.run_test_coverage == 'true'"
+    context: fresh
+    model: deepseek/deepseek-v4-flash
+
+  - id: comment-quality
+    command: archon-comment-quality-agent
+    depends_on: [review-classify]
+    when: "$review-classify.output.run_comment_quality == 'true'"
+    context: fresh
+    model: deepseek/deepseek-v4-flash
+
+  - id: docs-impact
+    command: archon-docs-impact-agent
+    depends_on: [review-classify]
+    when: "$review-classify.output.run_docs_impact == 'true'"
+    context: fresh
+    model: deepseek/deepseek-v4-flash
+
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 8: SYNTHESIZE + SELF-FIX + SIMPLIFY (all LMAO-adapted)
+  # ═══════════════════════════════════════════════════════════════════
+
+  - id: synthesize
+    command: archon-synthesize-review
+    depends_on: [code-review, error-handling, test-coverage, comment-quality, docs-impact]
+    trigger_rule: one_success
+    context: fresh
+    model: deepseek/deepseek-v4-flash
+
+  - id: self-fix
+    command: lmao-self-fix-all
+    depends_on: [synthesize]
+    context: fresh
+    model: deepseek/deepseek-v4-pro
+    effort: max
+
+  - id: simplify
+    command: lmao-simplify-changes
+    depends_on: [self-fix]
+    context: fresh
+    model: deepseek/deepseek-v4-pro
+
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 9: FINAL GATE CHAIN — re-run after review/simplify commits.
+  # The #87 regression slipped through because nothing re-ran after the
+  # simplify phase. These nodes fast-pass ONLY when HEAD is unchanged
+  # since the first gate chain (.gate-head marker); any new commit
+  # forces the FULL chain: BUILD completeness + unit tests + hardware
+  # E2E + production health.
+  # ═══════════════════════════════════════════════════════════════════
+
+  - id: final-validate
+    command: lmao-validate
+    depends_on: [simplify]
+    context: fresh
+    model: deepseek/deepseek-v4-flash
+
+  - id: final-hardware-e2e
+    command: lmao-hardware-e2e
+    depends_on: [final-validate]
+    context: fresh
+    model: deepseek/deepseek-v4-flash
+
+  - id: final-production-health
+    command: lmao-production-health
+    depends_on: [final-hardware-e2e]
+    context: fresh
+    model: deepseek/deepseek-v4-flash
+
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 10: REPORT
+  # ═══════════════════════════════════════════════════════════════════
+
+  - id: report
+    command: archon-issue-completion-report
+    depends_on: [final-production-health]
+    context: fresh
+    model: deepseek/deepseek-v4-flash
+
+  # ─── Push notification via ntfy (bash + curl) ─────────────────
+  # Sends notifications on start, success, and failure.
+  # Requires: curl and NTFY_TOPIC env var (set in .archon/mcp/ntfy.json or env)
+
+  - id: ntfy-start
+    bash: |
+      if [ ! -f .archon/mcp/ntfy.json ]; then exit 0; fi
+      NTFY_TOPIC="${NTFY_TOPIC:-$(grep -oP '"NTFY_TOPIC":\s*"\K[^"]+' .archon/mcp/ntfy.json 2>/dev/null)}"
+      [ -z "$NTFY_TOPIC" ] && exit 0
+      curl -sf -H "Title: 🐛 Fix Issue Started" -H "Priority: 3" -H "Tags: arrow_forward" \
+        -d "Workflow started for: $ARGUMENTS" \
+        "https://ntfy.sh/$NTFY_TOPIC" > /dev/null 2>&1
+
+  - id: ntfy-result
+    bash: |
+      if [ ! -f .archon/mcp/ntfy.json ]; then exit 0; fi
+      NTFY_TOPIC="${NTFY_TOPIC:-$(grep -oP '"NTFY_TOPIC":\s*"\K[^"]+' .archon/mcp/ntfy.json 2>/dev/null)}"
+      [ -z "$NTFY_TOPIC" ] && exit 0
+      if [ -f "$ARTIFACTS_DIR/completion-report.md" ]; then
+        TITLE="✅ Fix Issue Complete"
+        TAGS="white_check_mark"
+        BODY="Workflow completed successfully for: $ARGUMENTS"
+      else
+        TITLE="❌ Fix Issue Failed"
+        TAGS="x"
+        BODY="Workflow failed for: $ARGUMENTS"
+      fi
+      curl -sf -H "Title: $TITLE" -H "Priority: 4" -H "Tags: $TAGS" \
+        -d "$BODY" "https://ntfy.sh/$NTFY_TOPIC" > /dev/null 2>&1
+    depends_on: [report]
+    trigger_rule: all_done
