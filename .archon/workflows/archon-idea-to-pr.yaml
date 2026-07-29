@@ -1,5 +1,10 @@
 name: archon-idea-to-pr
 description: |
+  ⚠️ LMAO REPO: prefer `lmao-feature-dev` instead — it adds the mandatory
+  hardware E2E gate, Bazel BUILD completeness check, and production health
+  check required by AGENTS.md. This generic workflow remains as a fallback
+  for ad-hoc use only; do NOT select it for normal feature development in this repo.
+
   Use when: You have a feature idea or description and want end-to-end development.
   Input: Feature description in natural language, or path to a PRD file
   Output: PR ready for merge with comprehensive review completed
