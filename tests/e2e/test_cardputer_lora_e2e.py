@@ -579,8 +579,47 @@ class TestCardputerLoRaE2E:
                             pass
                         last_announce = time.time()
 
-                    if cardputer_ser.in_waiting:
-                        cardputer_output += cardputer_ser.read(cardputer_ser.in_waiting)
+                    try:
+                        if cardputer_ser.in_waiting:
+                            cardputer_output += cardputer_ser.read(
+                                cardputer_ser.in_waiting
+                            )
+                    except OSError:
+                        # The Cardputer may hard-reset itself mid-test
+                        # (heap self-recovery from #77, watchdog, USB-CDC
+                        # wedge) — the USB-Serial-JTAG interface dies and
+                        # re-enumerates within seconds.  Reopen and keep
+                        # monitoring: the device reboots into the same
+                        # flashed config, re-prints the banner, and resumes
+                        # sending.  The server-side capture (RNS thread)
+                        # is unaffected by the serial dropout.
+                        _logger.info(
+                            "Cardputer serial lost — waiting for "
+                            "re-enumeration..."
+                        )
+                        with contextlib.suppress(Exception):
+                            cardputer_ser.close()
+                        cardputer_ser = None
+                        # Give the device time to reboot and resume sending.
+                        serial_deadline = max(
+                            serial_deadline, time.time() + 90
+                        )
+                        while time.time() < serial_deadline:
+                            if os.path.exists(_CARDCOMPUTER_PORT):
+                                try:
+                                    cardputer_ser = serial.Serial(
+                                        _CARDCOMPUTER_PORT,
+                                        115200,
+                                        timeout=1,
+                                        write_timeout=10,
+                                    )
+                                    break
+                                except Exception:
+                                    pass
+                            time.sleep(1.0)
+                        if cardputer_ser is None:
+                            raise  # never re-enumerated — fail the test
+                        _logger.info("Cardputer serial reopened.")
 
                     if b"LMAO" in cardputer_output or b"POC Ready" in cardputer_output:
                         found_banner = True
@@ -774,6 +813,45 @@ class TestCardputerLoRaE2E:
                                 flags=_re.MULTILINE,
                             )
 
+                            # Re-inject the production server's DEST_HASH.
+                            # original_config comes from the source tree,
+                            # where DEST_HASH = None — leaving it unset
+                            # silently stops the device from sending to the
+                            # production server after every E2E run
+                            # (issue #71).  Derive the hash from the
+                            # persisted server identity, exactly as
+                            # install_all does at flash time, so the device
+                            # is production-ready after the test.
+                            try:
+                                from lma_core.server_identity import (
+                                    ensure_delivery_destination_hash,
+                                )
+
+                                _prod_dest_hash = (
+                                    ensure_delivery_destination_hash()
+                                )
+                                safe_config, _n_dh = _re.subn(
+                                    r'DEST_HASH\s*=\s*(?:"[^"]*"|None)',
+                                    f'DEST_HASH = "{_prod_dest_hash}"',
+                                    safe_config,
+                                )
+                                if _n_dh != 1:
+                                    _logger.warning(
+                                        "DEST_HASH patch matched %d "
+                                        "assignments — leaving restored "
+                                        "config unchanged",
+                                        _n_dh,
+                                    )
+                            except Exception:
+                                _logger.warning(
+                                    "Could not derive the production "
+                                    "DEST_HASH — restored config keeps "
+                                    "DEST_HASH = None (device will not "
+                                    "send until re-flashed with "
+                                    "install_all)",
+                                    exc_info=True,
+                                )
+
                             if cardputer_flash.enter_raw_repl(
                                 _cleanup_ser, max_attempts=5
                             ):
@@ -802,7 +880,8 @@ class TestCardputerLoRaE2E:
                                     "import config\n"
                                     "print('DEBUG=' + str(config.DEBUG) + '|' +\n"
                                     "      'INTERVAL=' + str(config.INTERVAL_SECONDS) + '|' +\n"
-                                    "      'SENSOR_TYPE=' + str(config.SENSOR_TYPE))\n",
+                                    "      'SENSOR_TYPE=' + str(config.SENSOR_TYPE) + '|' +\n"
+                                    "      'DEST_HASH_SET=' + str(config.DEST_HASH is not None))\n",
                                     timeout=10,
                                 )
                                 if ok:
