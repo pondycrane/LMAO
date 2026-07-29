@@ -60,6 +60,24 @@ The Cardputer runs MicroPython (M5Stack Cardputer ADV firmware), not native firm
 
 **First-time setup:** Erase + flash MicroPython firmware, then `bazel run //cardputer_client:flash` to upload client files.
 
+## Archon workflows (LMAO-specific)
+
+Use the dedicated, versioned workflows in `.archon/workflows/` — not the
+generic bundled ones — for feature-to-PR work in this repo:
+
+```bash
+# Fix a GitHub issue end-to-end (gates: BUILD completeness + unit tests +
+# mandatory hardware E2E + production health, re-run after every fix phase)
+archon workflow run lmao-fix-issue "Fix issue #N"
+
+# Feature idea to reviewed PR with the same gates
+archon workflow run lmao-feature-dev "description of feature"
+```
+
+These workflows encode the rules on this page (esptool bans, Bazel BUILD
+completeness, hardware E2E evidence in the PR body, production Cardputer
+left running). See `docs/archon-workflows.md` for the full reference.
+
 ## Archon GitHub Webhook Relay
 
 A local polling relay lets Archon respond to `@archon` mentions on GitHub

@@ -1,0 +1,238 @@
+name: lmao-feature-dev
+description: |
+  Use when: You have a feature idea or description and want end-to-end development
+  in the LMAO repo (LoRa mesh, Cardputer, RNode, Bazel).
+  Input: Feature description in natural language, or path to a PRD file
+  Output: PR ready for merge with comprehensive review + hardware E2E evidence
+
+  LMAO-adapted workflow (hardware-aware, Bazel-native, E2E-mandatory):
+  1. Create comprehensive implementation plan (LMAO rules baked in)
+  2. Setup branch and extract scope limits
+  3. Verify plan research is still valid
+  4. Implement all tasks with Bazel build-checking (BUILD targets for new files)
+  5. LMAO validation gate (BUILD completeness + bazel build + ruff/mypy + unit tests)
+  6. MANDATORY hardware E2E gate (Cardputer flash + LoRa tests when attached,
+     loud skip when not) + production health check
+  7. Create PR with template + hardware E2E evidence, mark ready
+  8. Comprehensive code review (5 parallel agents with scope limit awareness)
+  9. Synthesize and fix review findings
+  10. RE-RUNS the full gate chain after any fix commits (fast-pass only when
+      HEAD is unchanged — the #87 regression guard)
+  11. Final summary with decision matrix -> GitHub comment + follow-up recommendations
+
+  NOT for: Executing existing plans (use archon-plan-to-pr), quick fixes, standalone reviews.
+
+  Models: deepseek-v4-pro for planning/implementation/fixes,
+          deepseek-v4-flash for the rest. No Claude anywhere.
+
+nodes:
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 0: CREATE PLAN (LMAO rules baked in)
+  # ═══════════════════════════════════════════════════════════════════
+
+  - id: create-plan
+    command: lmao-create-plan
+    context: fresh
+    model: deepseek/deepseek-v4-pro
+    effort: high
+
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 1: SETUP
+  # ═══════════════════════════════════════════════════════════════════
+
+  - id: plan-setup
+    command: lmao-plan-setup
+    depends_on: [create-plan]
+    context: fresh
+    model: deepseek/deepseek-v4-flash
+
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 2: CONFIRM PLAN
+  # ═══════════════════════════════════════════════════════════════════
+
+  - id: confirm-plan
+    command: lmao-confirm-plan
+    depends_on: [plan-setup]
+    context: fresh
+    model: deepseek/deepseek-v4-flash
+
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 3: IMPLEMENT (LMAO safety rules + Bazel)
+  # ═══════════════════════════════════════════════════════════════════
+
+  - id: implement-tasks
+    command: lmao-implement-tasks
+    depends_on: [confirm-plan]
+    context: fresh
+    model: deepseek/deepseek-v4-pro
+    effort: max
+
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 4: LMAO GATE CHAIN — validate → hardware E2E → health
+  # The hardware E2E gate is MANDATORY before PR creation (AGENTS.md).
+  # ═══════════════════════════════════════════════════════════════════
+
+  - id: validate
+    command: lmao-validate
+    depends_on: [implement-tasks]
+    context: fresh
+    model: deepseek/deepseek-v4-flash
+
+  - id: hardware-e2e
+    command: lmao-hardware-e2e
+    depends_on: [validate]
+    context: fresh
+    model: deepseek/deepseek-v4-flash
+
+  - id: production-health
+    command: lmao-production-health
+    depends_on: [hardware-e2e]
+    context: fresh
+    model: deepseek/deepseek-v4-flash
+
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 5: FINALIZE PR (includes hardware E2E evidence)
+  # ═══════════════════════════════════════════════════════════════════
+
+  - id: finalize-pr
+    command: lmao-finalize-pr
+    depends_on: [production-health]
+    context: fresh
+    model: deepseek/deepseek-v4-flash
+
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 6: CODE REVIEW
+  # ═══════════════════════════════════════════════════════════════════
+
+  - id: verify-pr-base
+    bash: |
+      set -euo pipefail
+      EXPECTED="$BASE_BRANCH"
+      ACTUAL=$(gh pr view --json baseRefName -q '.baseRefName')
+      if [ "$ACTUAL" != "$EXPECTED" ]; then
+        PR_NUMBER=$(gh pr view --json number -q '.number')
+        echo "Base mismatch on PR #$PR_NUMBER: expected=$EXPECTED actual=$ACTUAL — re-targeting" >&2
+        gh pr edit "$PR_NUMBER" --base "$EXPECTED"
+      else
+        echo "PR base verified: $EXPECTED"
+      fi
+    depends_on: [finalize-pr]
+
+  - id: review-scope
+    command: archon-pr-review-scope
+    depends_on: [verify-pr-base]
+    context: fresh
+    model: deepseek/deepseek-v4-flash
+
+  - id: sync
+    command: lmao-sync-pr-with-main
+    depends_on: [review-scope]
+    context: fresh
+    model: deepseek/deepseek-v4-flash
+
+  - id: code-review
+    command: archon-code-review-agent
+    depends_on: [sync]
+    context: fresh
+    model: deepseek/deepseek-v4-flash
+
+  - id: error-handling
+    command: archon-error-handling-agent
+    depends_on: [sync]
+    context: fresh
+    model: deepseek/deepseek-v4-flash
+
+  - id: test-coverage
+    command: archon-test-coverage-agent
+    depends_on: [sync]
+    context: fresh
+    model: deepseek/deepseek-v4-flash
+
+  - id: comment-quality
+    command: archon-comment-quality-agent
+    depends_on: [sync]
+    context: fresh
+    model: deepseek/deepseek-v4-flash
+
+  - id: docs-impact
+    command: archon-docs-impact-agent
+    depends_on: [sync]
+    context: fresh
+    model: deepseek/deepseek-v4-flash
+
+  - id: synthesize
+    command: archon-synthesize-review
+    depends_on: [code-review, error-handling, test-coverage, comment-quality, docs-impact]
+    trigger_rule: one_success
+    context: fresh
+    model: deepseek/deepseek-v4-flash
+
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 7: FIX REVIEW ISSUES (LMAO-adapted)
+  # ═══════════════════════════════════════════════════════════════════
+
+  - id: implement-fixes
+    command: lmao-implement-review-fixes
+    depends_on: [synthesize]
+    context: fresh
+    model: deepseek/deepseek-v4-pro
+    effort: max
+
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 8: FINAL GATE CHAIN — re-run after review-fix commits.
+  # Fast-pass ONLY when HEAD is unchanged since the first gate chain
+  # (.gate-head marker); any new commit (review fixes, sync rebase)
+  # forces the FULL chain: BUILD completeness + unit tests + hardware
+  # E2E + production health. The #87 regression guard.
+  # ═══════════════════════════════════════════════════════════════════
+
+  - id: final-validate
+    command: lmao-validate
+    depends_on: [implement-fixes]
+    context: fresh
+    model: deepseek/deepseek-v4-flash
+
+  - id: final-hardware-e2e
+    command: lmao-hardware-e2e
+    depends_on: [final-validate]
+    context: fresh
+    model: deepseek/deepseek-v4-flash
+
+  - id: final-production-health
+    command: lmao-production-health
+    depends_on: [final-hardware-e2e]
+    context: fresh
+    model: deepseek/deepseek-v4-flash
+
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 9: FINAL SUMMARY & FOLLOW-UP
+  # ═══════════════════════════════════════════════════════════════════
+
+  - id: workflow-summary
+    command: archon-workflow-summary
+    depends_on: [final-production-health]
+    context: fresh
+    model: deepseek/deepseek-v4-flash
+
+  # ─── Push notification via ntfy (bash + curl) ─────────────────
+  # To enable, create .archon/mcp/ntfy.json with {"NTFY_TOPIC": "..."}
+  # in the project root. No-op when the file is absent.
+
+  - id: ntfy-result
+    bash: |
+      if [ ! -f .archon/mcp/ntfy.json ]; then exit 0; fi
+      NTFY_TOPIC="${NTFY_TOPIC:-$(grep -oP '"NTFY_TOPIC":\s*"\K[^"]+' .archon/mcp/ntfy.json 2>/dev/null)}"
+      [ -z "$NTFY_TOPIC" ] && exit 0
+      if [ -f "$ARTIFACTS_DIR/workflow-summary.md" ]; then
+        TITLE="✅ Feature-Dev Complete"
+        TAGS="white_check_mark"
+        BODY="Workflow completed successfully for: $ARGUMENTS"
+      else
+        TITLE="❌ Feature-Dev Failed"
+        TAGS="x"
+        BODY="Workflow failed for: $ARGUMENTS"
+      fi
+      curl -sf -H "Title: $TITLE" -H "Priority: 4" -H "Tags: $TAGS" \
+        -d "$BODY" "https://ntfy.sh/$NTFY_TOPIC" > /dev/null 2>&1
+    depends_on: [workflow-summary]
+    trigger_rule: all_done
