@@ -20,6 +20,7 @@ degradation — the server starts and operates without them.
 import asyncio
 import logging
 import os
+import random
 import time
 
 from google.protobuf.message import DecodeError
@@ -143,6 +144,14 @@ def _print_startup_banner(identity_hex, rnode_port, grpc_available, nats_connect
 
 
 _NATS_SUBJECT = "lmao.messages.env"
+_NATS_STREAM = "LMAO_MESSAGES"
+_NATS_STREAM_SUBJECTS = ["lmao.messages.>"]
+
+# Supervisor backoff for recreating a permanently closed NATS client
+# (issue #85).  Exponential backoff with jitter, capped, so a burst of
+# incoming messages during an outage doesn't trigger a reconnect storm.
+_NATS_RECONNECT_BACKOFF_BASE = 5.0  # seconds
+_NATS_RECONNECT_BACKOFF_MAX = 300.0  # seconds
 
 
 def _identity_to_destination(identity):
@@ -174,6 +183,10 @@ class Server:
         # NATS JetStream publisher (injected by async_main)
         self._nats_queue = None
         self._loop = None
+        # NATS reconnect supervisor state (issue #85)
+        self._nats_reconnect_lock = None  # created lazily on the server loop
+        self._nats_reconnect_failures = 0
+        self._nats_next_reconnect_at = 0.0
 
     def register_grpc_subscriber(self, queue):
         """Register an asyncio.Queue for gRPC Subscribe streaming."""
@@ -387,6 +400,12 @@ class Server:
         Called fire-and-forget from the sync ``handle_lxmf_delivery``
         callback via ``asyncio.run_coroutine_threadsafe``.
 
+        If the publish fails and the NATS client is permanently closed
+        (reconnect attempts exhausted), the connection is recreated via
+        the supervisor (:meth:`_ensure_nats_connected`) and the publish is
+        retried once.  No failure path raises — a dead NATS must never
+        crash the LXMF delivery handler (issue #85).
+
         Args:
             source_hash: Hex identity of the sending node.
             content_bytes: Raw content bytes from the LXMF message.
@@ -401,11 +420,101 @@ class Server:
                 source_hash,
                 ack.seq,
             )
+            return
         except asyncio.CancelledError:
             logger.debug("NATS publish cancelled during shutdown — skipping")
             raise
         except Exception:
             logger.warning("NATS publish failed", exc_info=True)
+
+        # Supervisor: recreate a permanently closed client (belt-and-braces
+        # on top of NatsQueue's infinite background reconnect) and retry
+        # the publish once.
+        try:
+            reconnected = await self._ensure_nats_connected()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning("NATS reconnect attempt failed", exc_info=True)
+            reconnected = False
+        if not reconnected:
+            return
+        try:
+            ack = await self._nats_queue.publish(_NATS_SUBJECT, content_bytes)
+            logger.info(
+                "Published %d bytes from %s to NATS after reconnect (seq=%s)",
+                len(content_bytes),
+                source_hash,
+                ack.seq,
+            )
+        except asyncio.CancelledError:
+            logger.debug("NATS publish cancelled during shutdown — skipping")
+            raise
+        except Exception:
+            logger.warning("NATS publish failed again after reconnect", exc_info=True)
+
+    async def _ensure_nats_connected(self) -> bool:
+        """Recreate the NATS connection if the client is permanently closed.
+
+        ``NatsQueue.connect()`` is configured with infinite reconnect
+        attempts, so nats-py normally recovers outages on its own in the
+        background.  This supervisor is the fallback for when the client
+        has fully given up (``is_closed``) — it rebuilds the connection
+        and re-ensures the JetStream stream, with exponential backoff +
+        jitter so a burst of messages during an outage doesn't cause a
+        reconnect storm (issue #85).
+
+        Returns:
+            True if the queue is connected and ready to publish.
+        """
+        queue = self._nats_queue
+        if queue is None:
+            return False
+        if not queue.is_closed:
+            # Connected, or nats-py is reconnecting in the background —
+            # leave it alone; publishing resumes by itself once reconnected.
+            return queue.is_connected
+        if self._nats_reconnect_lock is None:
+            self._nats_reconnect_lock = asyncio.Lock()
+        async with self._nats_reconnect_lock:
+            # Re-check under the lock — another publish task may have
+            # reconnected while we were waiting.
+            if not queue.is_closed:
+                return queue.is_connected
+            now = time.monotonic()
+            if now < self._nats_next_reconnect_at:
+                logger.debug(
+                    "NATS reconnect backoff active (%.1fs remaining) — skipping attempt",
+                    self._nats_next_reconnect_at - now,
+                )
+                return False
+            logger.warning(
+                "NATS client permanently closed — recreating connection to %s",
+                _NATS_SERVER,
+            )
+            try:
+                await queue.connect(servers=_NATS_SERVER)
+                await queue.ensure_stream(_NATS_STREAM, _NATS_STREAM_SUBJECTS)
+            except Exception:
+                self._nats_reconnect_failures += 1
+                backoff = min(
+                    _NATS_RECONNECT_BACKOFF_BASE * (2 ** (self._nats_reconnect_failures - 1)),
+                    _NATS_RECONNECT_BACKOFF_MAX,
+                )
+                # Up to 25% jitter to avoid lock-step reconnect storms
+                backoff += random.uniform(0, backoff * 0.25)
+                self._nats_next_reconnect_at = now + backoff
+                logger.warning(
+                    "NATS reconnect failed (attempt %d) — next attempt in %.1fs",
+                    self._nats_reconnect_failures,
+                    backoff,
+                    exc_info=True,
+                )
+                return False
+            logger.info("NATS connection re-established — publishing resumed")
+            self._nats_reconnect_failures = 0
+            self._nats_next_reconnect_at = 0.0
+            return True
 
 
 # ──────────────────────────────────────────────────────────────
@@ -577,7 +686,7 @@ async def async_main():
         try:
             nats_queue = NatsQueue(name="lmao-server")
             await nats_queue.connect(servers=_NATS_SERVER)
-            await nats_queue.ensure_stream("LMAO_MESSAGES", ["lmao.messages.>"])
+            await nats_queue.ensure_stream(_NATS_STREAM, _NATS_STREAM_SUBJECTS)
             logger.info("NATS JetStream connected: %s", _NATS_SERVER)
 
             # Inject into the server instance for publishing from callbacks

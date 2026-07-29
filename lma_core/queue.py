@@ -103,6 +103,15 @@ class NatsQueue:
     _MAX_MSG_SIZE = 1_048_576  # 1 MiB
     _REPLICAS = 1
 
+    # Reconnect-hardening defaults (issue #85).  nats-py's own defaults
+    # (max_reconnect_attempts=60, reconnect_time_wait=2s) give up after
+    # ~2 minutes and permanently close the client — any longer NATS outage
+    # then silently kills publishing until the process is restarted.
+    # Infinite attempts keep the client reconnecting in the background
+    # forever, so publishing resumes by itself when NATS comes back.
+    _MAX_RECONNECT_ATTEMPTS = -1  # never give up
+    _RECONNECT_TIME_WAIT = 5  # seconds between reconnect attempts per server
+
     def __init__(
         self,
         name: str = "lmao-queue",
@@ -145,12 +154,25 @@ class NatsQueue:
             if self._nc is not None:
                 await self.close()
 
+            # Reconnect-hardening defaults (overridable via **kwargs).
+            # Infinite reconnect attempts + visibility callbacks — see
+            # the class constants above for rationale (issue #85).
+            options = {
+                "max_reconnect_attempts": self._MAX_RECONNECT_ATTEMPTS,
+                "reconnect_time_wait": self._RECONNECT_TIME_WAIT,
+                "disconnected_cb": self._on_disconnected,
+                "reconnected_cb": self._on_reconnected,
+                "error_cb": self._on_error,
+                "closed_cb": self._on_closed,
+            }
+            options.update(kwargs)
+
             _logger.info("Connecting to NATS at %s ...", servers)
             try:
                 self._nc = await nats.connect(
                     servers=servers,
                     name=self._name,
-                    **kwargs,
+                    **options,
                 )
                 self._js = self._nc.jetstream()
             except Exception:
@@ -170,6 +192,43 @@ class NatsQueue:
                 self._nc = None
                 self._js = None
                 _logger.info("NATS connection closed.")
+
+    # ------------------------------------------------------------------
+    # Connection state
+    # ------------------------------------------------------------------
+
+    @property
+    def is_connected(self) -> bool:
+        """True when the underlying client has a live connection to a server."""
+        return self._nc is not None and self._nc.is_connected
+
+    @property
+    def is_closed(self) -> bool:
+        """True when the underlying client is permanently closed.
+
+        A closed client will never reconnect on its own (reconnect attempts
+        exhausted or explicitly closed) — replace it via ``connect()``.
+        """
+        return self._nc is not None and self._nc.is_closed
+
+    # ------------------------------------------------------------------
+    # nats-py lifecycle callbacks (awaited by the client — must be async)
+    # ------------------------------------------------------------------
+
+    async def _on_disconnected(self) -> None:
+        _logger.warning("NATS connection lost — reconnecting in the background ...")
+
+    async def _on_reconnected(self) -> None:
+        _logger.info("NATS reconnected — publishing resumed")
+
+    async def _on_error(self, exc: Exception) -> None:
+        _logger.warning("NATS error: %s", exc)
+
+    async def _on_closed(self) -> None:
+        _logger.error(
+            "NATS connection permanently closed — "
+            "publishing suspended until the connection is re-established"
+        )
 
     # ------------------------------------------------------------------
     # Stream management
