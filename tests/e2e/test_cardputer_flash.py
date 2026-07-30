@@ -301,6 +301,72 @@ except:
             uploaded = cardputer_flash.upload_file(serial_conn, local_path, remote_path)
             assert uploaded, f"Failed to upload lib/{rel}"
 
+        # ── Restore production DEST_HASH ──
+        # The stock config.py just uploaded has DEST_HASH = None, which
+        # would leave the device unable to reach the production server
+        # ("No destination configured — not sending").  Re-inject the
+        # server's delivery hash when an identity is available — a local
+        # identity file, or one synced from the in-cluster server (issue
+        # #93).  Never mint a fresh identity here: that would bake a hash
+        # no running server matches (#70).
+        dest_hash = None
+        try:
+            from lma_core import server_identity
+
+            if os.path.isfile(
+                server_identity.identity_file_path()
+            ) or server_identity.sync_identity_from_cluster() is not None:
+                dest_hash = server_identity.ensure_delivery_destination_hash()
+        except Exception as exc:  # RNS unavailable, cluster unreachable, ...
+            print(f"\nDEST_HASH restore skipped ({exc}) — device keeps DEST_HASH = None")
+
+        if dest_hash:
+            import re as _re
+
+            config_path = os.path.join(root, "config.py")
+            with open(config_path) as f:
+                src = f.read()
+            patched, n_subs = _re.subn(
+                r'DEST_HASH\s*=\s*(?:"[^"]*"|None)',
+                f'DEST_HASH = "{dest_hash}"',
+                src,
+            )
+            assert n_subs == 1, "expected exactly one DEST_HASH assignment in config.py"
+
+            import tempfile
+
+            tmp_path = None
+            try:
+                with tempfile.NamedTemporaryFile(
+                    mode="w", suffix=".py", delete=False
+                ) as tmp:
+                    tmp.write(patched)
+                    tmp_path = tmp.name
+                uploaded = cardputer_flash.upload_file(serial_conn, tmp_path, "config.py")
+                assert uploaded, "Failed to upload DEST_HASH-patched config.py"
+            finally:
+                if tmp_path is not None:
+                    try:
+                        os.unlink(tmp_path)
+                    except OSError:
+                        pass
+
+            # Verify on-device (del sys.modules entry so a stale cached
+            # config module cannot mask a failed write).
+            ok, out = cardputer_flash.exec_raw(
+                serial_conn,
+                "import sys\n"
+                "if 'config' in sys.modules:\n"
+                "    del sys.modules['config']\n"
+                "import config\n"
+                "print(config.DEST_HASH)\n",
+            )
+            assert ok and dest_hash in out, (
+                f"DEST_HASH verification failed — device does not report "
+                f"{dest_hash}: {out[:200]}"
+            )
+            print(f"\nDEST_HASH restored on device: {dest_hash}")
+
         # Exit raw REPL and soft-reset
         cardputer_flash.exit_raw_repl(serial_conn)
         serial_conn.write(b"\x04")  # Ctrl+D soft reset in friendly REPL

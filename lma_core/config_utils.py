@@ -55,20 +55,24 @@ def dict_to_ini(sections, interfaces):
     Returns:
         str: INI-formatted config string with trailing newline.
     """
+    def _render(value):
+        if isinstance(value, bool):
+            return "yes" if value else "no"
+        if isinstance(value, (list, tuple)):
+            # configobj as_list() parses comma-separated values
+            return ", ".join(str(v) for v in value)
+        return value
+
     lines = []
     for section, settings in sections.items():
         lines.append(f"[{section}]")
         for key, value in settings.items():
-            if isinstance(value, bool):
-                value = "yes" if value else "no"
-            lines.append(f"{key} = {value}")
+            lines.append(f"{key} = {_render(value)}")
     lines.append("[interfaces]")
     for name, settings in interfaces.items():
         lines.append(f"[[{name}]]")
         for key, value in settings.items():
-            if isinstance(value, bool):
-                value = "yes" if value else "no"
-            lines.append(f"{key} = {value}")
+            lines.append(f"{key} = {_render(value)}")
     return "\n".join(lines) + "\n"
 
 
@@ -86,15 +90,31 @@ class RnsConfig:
         CONFIG_CONTENT = _cfg.CONFIG_CONTENT
     """
 
-    def __init__(self, transport_path, tempdir_prefix="lmao_rns_"):
+    def __init__(self, transport_path, tempdir_prefix="lmao_rns_", persist_state=False):
         self._transport_path = transport_path
         self._tempdir_prefix = tempdir_prefix
+        self._persist_state = persist_state
         self._rnode_port = resolve_rnode_port()
 
         self._sections = {
             "logging": {"loglevel": 4},
             "transport": {"path": transport_path},
         }
+        # AutoInterface normally binds every multicast-capable interface.
+        # On K8s nodes that includes flannel/veth CNI interfaces, producing
+        # "No multicast echoes" errors and leaking announces into the pod
+        # network.  LMAO_AUTOIFACE_DEVICES (comma-separated) pins it to the
+        # physical LAN interface(s) — e.g. "wlan0" on the RK1 nodes.
+        wifi_interface = {
+            "type": "AutoInterface",
+            "enabled": True,
+        }
+        autoiface_devices = os.environ.get("LMAO_AUTOIFACE_DEVICES", "").strip()
+        if autoiface_devices:
+            wifi_interface["devices"] = [
+                d.strip() for d in autoiface_devices.split(",") if d.strip()
+            ]
+
         self._interfaces = {
             "RNode LoRa": {
                 "type": "RNodeInterface",
@@ -106,23 +126,40 @@ class RnsConfig:
                 "txpower": 17,
                 "enabled": True,
             },
-            "WiFi": {
-                "type": "AutoInterface",
-                "enabled": True,
-            },
+            "WiFi": wifi_interface,
         }
         self.CONFIG_CONTENT = dict_to_ini(self._sections, self._interfaces)
 
     def get_configdir(self):
-        """Create a temporary config directory for Reticulum.
+        """Create a config directory for Reticulum.
 
-        Returns the path to the directory. Caller is responsible for cleanup.
+        When ``persist_state`` is enabled (via ``LMAO_RNS_TRANSPORT_PATH``),
+        the transport path itself is used as the Reticulum configdir, so
+        RNS state (known destinations/identities under ``<dir>/storage``)
+        survives restarts — without this, every server restart loses peer
+        identities until their next announce and replies fail with "no
+        source destination" (issue #93).  Callers must NOT delete the
+        returned directory in that case.
+
+        Otherwise a temporary directory is created; the caller is
+        responsible for its cleanup.
+
+        Returns the path to the directory.
         """
-        configdir = tempfile.mkdtemp(prefix=self._tempdir_prefix)
+        if self._persist_state:
+            configdir = self._transport_path
+            os.makedirs(configdir, exist_ok=True)
+        else:
+            configdir = tempfile.mkdtemp(prefix=self._tempdir_prefix)
         config_path = os.path.join(configdir, "config")
         with open(config_path, "w") as f:
             f.write(self.CONFIG_CONTENT)
         return configdir
+
+    @property
+    def persist_state(self):
+        """Whether the configdir (and RNS state) should persist on disk."""
+        return self._persist_state
 
     def get_config_dict(self):
         """Return the config as a dict for introspection."""

@@ -140,8 +140,10 @@ py_test(
     ],
     deps = [
         "//cardputer_client:flash_lib",
+        "//lma_core:lma_core",
         "@lmao_pip//pyserial",
         "@lmao_pip//pytest",
+        "@lmao_pip//rns",
     ],
     # E2E test requires physical Cardputer hardware connected via USB.
     # The test auto-skips when hardware is not detected.
