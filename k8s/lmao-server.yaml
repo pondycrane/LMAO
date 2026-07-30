@@ -1,0 +1,146 @@
+# LMAO Server — in-cluster Deployment (issue #93)
+#
+# The LMAO server runs INSIDE the K8s cluster as a single-replica
+# Deployment pinned to the node where the LoRa RNode is physically
+# attached (tp4 — Turing Pi 2 slot 3, rear USB-A port).
+#
+# Key properties:
+#   - hostNetwork: Reticulum's AutoInterface needs UDP multicast on the
+#     LAN (human_client discovery), so the pod shares the node network.
+#   - privileged + hostPath /dev/ttyUSB0: K8s has no native USB serial
+#     support; this is the simplest passthrough. A device plugin (e.g.
+#     generic-device-plugin) would avoid privileged mode if ever needed.
+#   - Identity PVC: the LXMF identity lives at /data/lxmf (see
+#     LMAO_SERVER_IDENTITY_PATH). It MUST be pre-populated from the old
+#     Pi server before first start — otherwise the server generates a
+#     fresh identity and every Cardputer's baked DEST_HASH silently
+#     stops matching (issue #70). Local backup: ~/lmao-identity-backup-*.
+#   - Recreate strategy: the PVC is RWO and the USB device is exclusive.
+#
+# Note: /dev/ttyUSB0 is stable here (only one USB-serial device on tp4),
+# but after a node reboot/replug the pod may need a restart if the
+# device re-enumerates:
+#   kubectl rollout restart deployment/lmao-server
+#
+# Apply:
+#   kubectl apply -f k8s/lmao-server.yaml
+#
+# Pods (and LAN hosts) reach the gRPC API via:
+#   lmao-server.default.svc.cluster.local:50051   (in-cluster)
+#   192.168.0.44:50051                            (hostNetwork, tp4)
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: lmao-server-identity
+  namespace: default
+  labels:
+    app: lmao-server
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 1Gi
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lmao-server
+  namespace: default
+  labels:
+    app: lmao-server
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate  # RWO PVC + exclusive USB device — never run two pods
+  selector:
+    matchLabels:
+      app: lmao-server
+  template:
+    metadata:
+      labels:
+        app: lmao-server
+    spec:
+      # RNode is physically plugged into tp4 (Turing Pi 2 slot 3 USB).
+      nodeSelector:
+        kubernetes.io/hostname: tp4
+      # Reticulum AutoInterface requires UDP multicast on the host LAN.
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      containers:
+        - name: lmao-server
+          image: 192.168.0.36:5000/lmao-server:latest
+          imagePullPolicy: Always
+          securityContext:
+            privileged: true  # required for host USB serial device access
+          env:
+            - name: PYTHONUNBUFFERED
+              value: "1"
+            - name: NATS_SERVER
+              value: "nats://nats-server.default.svc.cluster.local:4222"
+            - name: LMAO_RNODE_PORT
+              value: "/dev/ttyUSB0"
+            - name: LMAO_SERVER_IDENTITY_PATH
+              value: "/data/lxmf"
+            # Persist Reticulum transport state (known destinations) on the
+            # PVC so replies keep working across pod restarts.
+            - name: LMAO_RNS_TRANSPORT_PATH
+              value: "/data/transport"
+            # tp4's LAN is wlan0 — keep AutoInterface off the flannel/veth
+            # CNI interfaces (multicast-echo errors, useless announces).
+            - name: LMAO_AUTOIFACE_DEVICES
+              value: "wlan0"
+          ports:
+            - name: grpc
+              containerPort: 50051
+              protocol: TCP
+          volumeMounts:
+            - name: rnode
+              mountPath: /dev/ttyUSB0
+            - name: identity
+              mountPath: /data
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          livenessProbe:
+            tcpSocket:
+              port: grpc
+            initialDelaySeconds: 20
+            periodSeconds: 30
+          readinessProbe:
+            tcpSocket:
+              port: grpc
+            initialDelaySeconds: 10
+            periodSeconds: 10
+      volumes:
+        - name: rnode
+          hostPath:
+            path: /dev/ttyUSB0
+        - name: identity
+          persistentVolumeClaim:
+            claimName: lmao-server-identity
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: lmao-server
+  namespace: default
+  labels:
+    app: lmao-server
+spec:
+  type: ClusterIP
+  selector:
+    app: lmao-server
+  ports:
+    - port: 50051
+      targetPort: 50051
+      protocol: TCP
+      name: grpc

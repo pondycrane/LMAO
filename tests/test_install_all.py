@@ -866,7 +866,7 @@ class TestMainWithServicesSkipped:
         patches["install_iot_ingest_consumer"] = patch.object(
             install_all, "install_iot_ingest_consumer"
         )
-        patches["run_pi_server"] = patch.object(install_all, "run_pi_server")
+        patches["deploy_lmao_server"] = patch.object(install_all, "deploy_lmao_server")
         self.mocks, self._patches = _start_patches(patches)
         self.mocks["find_cardputer_port"].return_value = None
         yield
@@ -900,7 +900,7 @@ class TestMainWithServices:
         patches["install_iot_ingest_consumer"] = patch.object(
             install_all, "install_iot_ingest_consumer"
         )
-        patches["run_pi_server"] = patch.object(install_all, "run_pi_server")
+        patches["deploy_lmao_server"] = patch.object(install_all, "deploy_lmao_server")
         self.mocks, self._patches = _start_patches(patches)
         self.mocks["find_cardputer_port"].return_value = None
         yield
@@ -948,12 +948,12 @@ class TestMainWithServices:
         assert "K8s Services" in captured
         assert "IoT Ingest Consumer" in captured
 
-    def test_run_pi_server_called_after_successful_release(self):
-        """run_pi_server should deploy the container when the build/push OK."""
+    def test_deploy_lmao_server_called_after_successful_release(self):
+        """deploy_lmao_server should deploy to K8s when the build/push OK."""
         self.mocks["install_pi_server"].side_effect = lambda result: result.ok("released")
         with pytest.raises(SystemExit):
             install_all.main(["--include-services"])
-        self.mocks["run_pi_server"].assert_called_once()
+        self.mocks["deploy_lmao_server"].assert_called_once()
 
     def test_stops_server_container_before_hardware_stages(self):
         """--include-services should stop a running lmao-server container
@@ -968,13 +968,13 @@ class TestMainWithServices:
             install_all.main(["--include-services", "--skip-server"])
         self.mocks["stop_pi_server_container"].assert_not_called()
 
-    def test_run_pi_server_skipped_when_release_fails(self):
-        """run_pi_server must NOT run when the image build/push failed —
+    def test_deploy_lmao_server_skipped_when_release_fails(self):
+        """deploy_lmao_server must NOT run when the image build/push failed —
         the stage stays [FAIL] and the summary exits non-zero."""
         self.mocks["install_pi_server"].side_effect = lambda result: result.fail("push failed")
         with pytest.raises(SystemExit) as exc_info:
             install_all.main(["--include-services"])
-        self.mocks["run_pi_server"].assert_not_called()
+        self.mocks["deploy_lmao_server"].assert_not_called()
         assert exc_info.value.code == 1
 
 
@@ -1300,7 +1300,7 @@ class TestInstallK8sServices:
             assert "Manifest not found" in result.detail
 
     def test_applies_manifests_when_kubectl_found(self):
-        """Result should be OK when both manifests are applied successfully."""
+        """Result should be OK when the manifests are applied successfully."""
         mock_proc = MagicMock()
         mock_proc.returncode = 0
         with (
@@ -1312,7 +1312,6 @@ class TestInstallK8sServices:
             install_services.install_k8s_services(result, "/fake/repo")
             assert result.status == "OK"
             assert "Applied" in result.detail
-            assert "lmao-service.yaml" in result.detail
             assert "nats-server.yaml" in result.detail
 
     def test_fails_when_first_manifest_apply_fails(self):
@@ -1978,7 +1977,7 @@ class TestMainWithRegistryAndServices:
         patches["install_iot_ingest_consumer"] = patch.object(
             install_all, "install_iot_ingest_consumer"
         )
-        patches["run_pi_server"] = patch.object(install_all, "run_pi_server")
+        patches["deploy_lmao_server"] = patch.object(install_all, "deploy_lmao_server")
         self.mocks, self._patches = _start_patches(patches)
         self.mocks["find_cardputer_port"].return_value = None
         yield
@@ -2449,250 +2448,114 @@ class TestResolveNatsAddress:
             assert install_services._resolve_nats_address() is None
 
 
-class TestRunPiServer:
-    """Unit tests for install_services.run_pi_server()."""
+class TestDeployLmaoServer:
+    """Unit tests for install_services.deploy_lmao_server() (issue #93)."""
 
     def _make_result(self):
         return install_all.DeviceResult("Pi Server")
 
-    def test_skips_when_docker_not_found(self):
-        """Result should be SKIP when docker is not on PATH."""
+    @staticmethod
+    def _mock_proc(returncode=0, stdout="", stderr=""):
+        proc = MagicMock()
+        proc.returncode = returncode
+        proc.stdout = stdout
+        proc.stderr = stderr
+        return proc
+
+    def test_skips_when_kubectl_not_found(self):
+        """Result should be SKIP when kubectl is not on PATH."""
         with patch("shutil.which", return_value=None):
             result = self._make_result()
-            install_services.run_pi_server(result)
+            install_services.deploy_lmao_server(result, repo_root="/repo")
             assert result.status == "SKIP"
-            assert "Docker" in result.detail
+            assert "kubectl" in result.detail
 
-    def test_stops_existing_container_and_starts_new(self):
-        """Should stop existing container, run new one, and install systemd."""
-        mock_docker_stop = MagicMock()
-        mock_docker_stop.returncode = 0
-        mock_docker_rm = MagicMock()
-        mock_docker_rm.returncode = 0
-        mock_systemctl_start = MagicMock()
-        mock_systemctl_start.returncode = 0
-        mock_docker_verify = MagicMock()
-        mock_docker_verify.stdout = "abc123def456 Up 10 seconds\n"
-        mock_sudo_mv = MagicMock()
-        mock_sudo_mv.returncode = 0
-        mock_sudo_reload = MagicMock()
-        mock_sudo_reload.returncode = 0
-        mock_sudo_enable = MagicMock()
-        mock_sudo_enable.returncode = 0
-
-        with (
-            patch("shutil.which", return_value="/usr/bin/docker"),
-            patch.object(install_services, "_resolve_nats_address", return_value=None),
-            patch.object(install_services, "_docker_psql", return_value="old-container"),
-            patch("os.path.exists", return_value=True),
-            patch("subprocess.run") as mock_run,
-            patch("tempfile.mkstemp", return_value=(3, "/tmp/lmao-server-xxx.service")),
-            patch("os.fdopen"),
-            patch("os.unlink"),
-        ):
-            # Flow: pull from registry, stop, rm, systemd install (mv,
-            # reload, enable), systemctl start, then verify
-            mock_docker_pull = MagicMock()
-            mock_docker_pull.returncode = 0
-            mock_run.side_effect = [
-                mock_docker_pull,  # docker pull (registry release image)
-                mock_sudo_mv,  # sudo systemctl stop (best-effort)
-                mock_docker_stop,  # docker stop
-                mock_docker_rm,  # docker rm
-                mock_sudo_mv,  # sudo mv
-                mock_sudo_reload,  # sudo systemctl daemon-reload
-                mock_sudo_enable,  # sudo systemctl enable
-                mock_systemctl_start,  # sudo systemctl start lmao-server
-                mock_docker_verify,  # docker ps --filter --format
-            ]
+    def test_fails_when_manifest_missing(self):
+        with patch("shutil.which", return_value="/usr/bin/kubectl"):
             result = self._make_result()
-            install_services.run_pi_server(result)
-            assert result.status == "OK"
-            assert "running" in result.detail.lower()
-            # The container must run the registry release image — check the
-            # systemd unit content (written via tempfile) or the run args
-            run_calls = [
-                c for c in mock_run.call_args_list if "docker" in str(c[0][0])
-            ]
-            assert any(
-                "192.168.0.36:5000/lmao-server:latest" in str(c) for c in run_calls
-            )
-
-    def test_identity_volume_mounted(self):
-        """docker run must bind-mount the identity dir so the server
-        identity persists across redeploys (issue #70)."""
-        mock_ok = MagicMock()
-        mock_ok.returncode = 0
-        mock_verify = MagicMock()
-        mock_verify.stdout = "abc123def456 Up 2 seconds\n"
-
-        # Capture the systemd unit content written via os.fdopen
-        written: list[str] = []
-        mock_file = MagicMock()
-        mock_file.write.side_effect = written.append
-        mock_fdopen = MagicMock()
-        mock_fdopen.return_value.__enter__.return_value = mock_file
-
-        with (
-            patch("shutil.which", return_value="/usr/bin/docker"),
-            patch.object(install_services, "_resolve_nats_address", return_value=None),
-            patch.object(install_services, "_docker_psql", return_value=None),
-            patch("os.path.exists", return_value=True),
-            patch("subprocess.run") as mock_run,
-            patch("tempfile.mkstemp", return_value=(3, "/tmp/lmao-server-xxx.service")),
-            patch("os.fdopen", mock_fdopen),
-            patch("os.unlink"),
-        ):
-            mock_run.side_effect = [
-                mock_ok,  # docker pull
-                mock_ok,  # sudo systemctl stop (best-effort)
-                mock_ok,  # sudo mv
-                mock_ok,  # sudo systemctl daemon-reload
-                mock_ok,  # sudo systemctl enable
-                mock_ok,  # sudo systemctl start lmao-server
-                mock_verify,  # docker ps --filter --format
-            ]
-            result = self._make_result()
-            install_services.run_pi_server(result)
-            assert result.status == "OK"
-
-            expected_host = os.path.expanduser("~/.local/share/lmao_server")
-            expected_mount = f"{expected_host}:/root/.local/share/lmao_server"
-            unit_content = "".join(written)
-            assert expected_mount in unit_content, (
-                f"identity volume mount missing from systemd unit: {unit_content}"
-            )
-
-    def test_fails_when_docker_pull_fails(self):
-        """Result should be FAIL when the registry image cannot be pulled."""
-        mock_pull_fail = MagicMock()
-        mock_pull_fail.returncode = 1
-        mock_pull_fail.stderr = "Error response from daemon: manifest unknown\n"
-        with (
-            patch("shutil.which", return_value="/usr/bin/docker"),
-            patch("subprocess.run", return_value=mock_pull_fail),
-        ):
-            result = self._make_result()
-            install_services.run_pi_server(result)
+            install_services.deploy_lmao_server(result, repo_root="/nonexistent")
             assert result.status == "FAIL"
-            assert "docker pull" in result.detail
+            assert "Manifest" in result.detail
 
-    def test_graceful_degradation_when_docker_run_fails(self):
-        """Result should not be FAIL when docker run fails; systemd is already installed."""
-        mock_docker_run = MagicMock()
-        mock_docker_run.returncode = 1
-        mock_docker_run.stderr = "Error: port in use\n"
-        # Make sudo commands succeed (return mock with returncode=0)
-        mock_sudo = MagicMock()
-        mock_sudo.returncode = 0
-
+    def test_fails_when_apply_fails(self):
+        mock_fail = self._mock_proc(returncode=1, stderr="connection refused")
         with (
-            patch("shutil.which", return_value="/usr/bin/docker"),
-            patch.object(install_services, "_resolve_nats_address", return_value=None),
-            patch.object(install_services, "_docker_psql", return_value=None),
-            patch("os.path.exists", return_value=True),
-            patch("subprocess.run") as mock_run,
-            patch("tempfile.mkstemp", return_value=(3, "/tmp/lmao-server-xxx.service")),
-            patch("os.fdopen"),
-            patch("os.unlink"),
+            patch("shutil.which", return_value="/usr/bin/kubectl"),
+            patch("os.path.isfile", return_value=True),
+            patch("subprocess.run", return_value=mock_fail),
         ):
-            # pull ok; sudo mv, reload, enable succeed; systemctl start
-            # fails; fallback docker run also fails
-            mock_systemctl_start = MagicMock()
-            mock_systemctl_start.returncode = 1
-            mock_systemctl_start.stderr = "Failed to start lmao-server.service\n"
-            mock_run.side_effect = [
-                mock_sudo,  # docker pull
-                mock_sudo,  # sudo systemctl stop (best-effort)
-                mock_sudo,  # sudo mv
-                mock_sudo,  # sudo daemon-reload
-                mock_sudo,  # sudo enable
-                mock_systemctl_start,  # sudo systemctl start (fails)
-                mock_docker_run,  # docker run fallback (fails)
-            ]
             result = self._make_result()
-            install_services.run_pi_server(result)
-            # Container didn't start but systemd is installed
-            assert result.status == "OK"
-            assert "Systemd service installed" in result.detail
+            install_services.deploy_lmao_server(result, repo_root="/repo")
+            assert result.status == "FAIL"
+            assert "apply" in result.detail
 
-    def test_graceful_degradation_when_docker_psql_raises(self):
-        """Result should not be FAIL when _docker_psql raises; graceful degradation."""
-        mock_sudo = MagicMock()
-        mock_sudo.returncode = 0
-
+    def test_fails_when_rollout_fails(self):
+        mock_ok = self._mock_proc(stdout="deployment.apps/lmao-server configured")
+        mock_fail = self._mock_proc(returncode=1, stderr="timed out waiting")
         with (
-            patch("shutil.which", return_value="/usr/bin/docker"),
-            patch.object(install_services, "_resolve_nats_address", return_value=None),
-            patch.object(
-                install_services,
-                "_docker_psql",
-                side_effect=subprocess.TimeoutExpired(["docker", "ps", "-q"], 15),
+            patch("shutil.which", return_value="/usr/bin/kubectl"),
+            patch("os.path.isfile", return_value=True),
+            patch("subprocess.run", side_effect=[mock_ok, mock_fail]),
+        ):
+            result = self._make_result()
+            install_services.deploy_lmao_server(result, repo_root="/repo")
+            assert result.status == "FAIL"
+            assert "rollout" in result.detail
+
+    def test_ok_with_dest_hash_verified(self):
+        """Rollout + matching pod/local DEST_HASH -> OK, legacy teardown called."""
+        mock_ok = self._mock_proc(stdout="deployment.apps/lmao-server configured")
+        with (
+            patch("shutil.which", return_value="/usr/bin/kubectl"),
+            patch("os.path.isfile", return_value=True),
+            patch("subprocess.run", return_value=mock_ok),
+            patch.object(install_services, "_stop_legacy_pi_server") as mock_stop,
+            patch.object(install_services, "_pod_dest_hash", return_value="a" * 32),
+            patch(
+                "lma_core.server_identity.ensure_delivery_destination_hash",
+                return_value="a" * 32,
             ),
-            patch("os.path.exists", return_value=True),
-            patch("subprocess.run", return_value=mock_sudo),
-            patch("tempfile.mkstemp", return_value=(3, "/tmp/lmao-server-xxx.service")),
-            patch("os.fdopen"),
-            patch("os.unlink"),
         ):
             result = self._make_result()
-            install_services.run_pi_server(result)
-            # Graceful degradation: warning printed, container still starts
-            # Since docker run also uses mock_sudo (success), container starts
+            install_services.deploy_lmao_server(result, repo_root="/repo")
             assert result.status == "OK"
+            assert "verified" in result.detail
+            mock_stop.assert_called_once()
 
-    def test_uses_nats_server_env_var_when_set(self):
-        """NATS_SERVER env var should be used directly, skipping auto-discovery."""
-        mock_sudo = MagicMock()
-        mock_sudo.returncode = 0
-
+    def test_fails_on_dest_hash_mismatch(self):
+        """A pod DEST_HASH that differs from the local one means the pod came
+        up with a fresh identity — flashed Cardputers would break (#70)."""
+        mock_ok = self._mock_proc(stdout="deployment.apps/lmao-server configured")
         with (
-            patch.dict(os.environ, {"NATS_SERVER": "nats://custom:4222"}, clear=True),
-            patch("shutil.which", return_value="/usr/bin/docker"),
-            patch.object(install_services, "_resolve_nats_address") as mock_resolve,
-            patch.object(install_services, "_docker_psql", return_value=None),
-            patch("os.path.exists", return_value=True),
-            patch("subprocess.run", return_value=mock_sudo),
-            patch("tempfile.mkstemp", return_value=(3, "/tmp/lmao-server-xxx.service")),
-            patch("os.fdopen"),
-            patch("os.unlink"),
+            patch("shutil.which", return_value="/usr/bin/kubectl"),
+            patch("os.path.isfile", return_value=True),
+            patch("subprocess.run", return_value=mock_ok),
+            patch.object(install_services, "_stop_legacy_pi_server"),
+            patch.object(install_services, "_pod_dest_hash", return_value="b" * 32),
+            patch(
+                "lma_core.server_identity.ensure_delivery_destination_hash",
+                return_value="a" * 32,
+            ),
         ):
             result = self._make_result()
-            install_services.run_pi_server(result)
-            # _resolve_nats_address should NOT be called when env var is set
-            mock_resolve.assert_not_called()
+            install_services.deploy_lmao_server(result, repo_root="/repo")
+            assert result.status == "FAIL"
+            assert "mismatch" in result.detail
+
+    def test_ok_with_warning_when_dest_hash_unavailable(self):
+        """Missing DEST_HASH in pod logs is a warning, not a failure."""
+        mock_ok = self._mock_proc(stdout="deployment.apps/lmao-server configured")
+        with (
+            patch("shutil.which", return_value="/usr/bin/kubectl"),
+            patch("os.path.isfile", return_value=True),
+            patch("subprocess.run", return_value=mock_ok),
+            patch.object(install_services, "_stop_legacy_pi_server"),
+            patch.object(install_services, "_pod_dest_hash", return_value=None),
+        ):
+            result = self._make_result()
+            install_services.deploy_lmao_server(result, repo_root="/repo")
             assert result.status == "OK"
-
-    def test_handles_bytes_stderr(self):
-        """str/bytes decode guard: CalledProcessError with bytes stderr should not crash."""
-        bytes_error = subprocess.CalledProcessError(
-            returncode=1,
-            cmd=["sudo", "mv", "..."],
-            output=b"",
-            stderr=b"Error: port in use\n",
-        )
-        mock_pull = MagicMock()
-        mock_pull.returncode = 0
-        with (
-            patch("shutil.which", return_value="/usr/bin/docker"),
-            patch.object(install_services, "_resolve_nats_address", return_value=None),
-            patch.object(install_services, "_docker_psql", return_value=None),
-            patch("os.path.exists", return_value=True),
-            # docker pull succeeds; the sudo/systemd step raises with bytes stderr
-            patch("subprocess.run", side_effect=[mock_pull, bytes_error] * 4),
-            patch("tempfile.mkstemp", return_value=(3, "/tmp/lmao-server-xxx.service")),
-            patch("os.fdopen"),
-            patch("os.unlink"),
-        ):
-            result = self._make_result()
-            # Should not crash — the .decode() guard handles bytes stderr
-            try:
-                install_services.run_pi_server(result)
-            except Exception:
-                pytest.fail("run_pi_server raised unexpectedly with bytes stderr")
-            # Both systemd and docker run fail, so result is FAIL — but the
-            # key assertion is that no AttributeError was raised by .decode()
-            assert result.status in ("OK", "FAIL")
+            assert "not verified" in result.detail
 
 
 if __name__ == "__main__":

@@ -107,7 +107,7 @@ The cluster runs a sensor data pipeline as part of the LMAO project (`/home/pond
 
 **ConfigMaps:** `iot-ingest-config` (NATS_SERVER, DUCKDB_PATH, CONSUMER_NAME), `iot-ingest-code` (inline Python consumer), `nats-server-config` (JetStream nats.conf), `lma-core` (shared protobuf wrapper)
 
-The LMAO gRPC server itself runs on a **separate physical RPi** with LoRa RNode hardware (not in-cluster). A headless Service + Endpoints manifest resolves `lmao-server.default.svc.cluster.local:50051` to the RPi's LAN IP (currently set to `192.168.1.100` in `k8s/lmao-service.yaml` — update to actual IP).
+The LMAO server runs **in-cluster** as `deployment/lmao-server` (issue #93), pinned to **tp4** where the Heltec ESP32 RNode is attached via USB (`/dev/ttyUSB0`, hostPath + privileged, hostNetwork). The LXMF identity and Reticulum transport state live on the `lmao-server-identity` PVC (`/data/lxmf`, `/data/transport`). A ClusterIP Service resolves `lmao-server.default.svc.cluster.local:50051` to the pod; gRPC is also reachable on the node IP `192.168.0.44:50051`. After an RNode replug or tp4 reboot: `kubectl rollout restart deployment/lmao-server`.
 
 ---
 
@@ -136,7 +136,7 @@ All in `k8s/`:
 |------|---------|
 | `k8s/nats-server.yaml` | NATS JetStream Deployment + PVC + Service + ConfigMap |
 | `k8s/iot-ingest.yaml` | IoT ingest consumer Deployment + PVC + ConfigMap |
-| `k8s/lmao-service.yaml` | Headless Service + Endpoints for external LMAO RPi server |
+| `k8s/lmao-server.yaml` | In-cluster LMAO server: identity PVC + Deployment (tp4, RNode USB) + ClusterIP Service |
 
 ---
 
