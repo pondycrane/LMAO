@@ -61,7 +61,10 @@ class TestEnsureServerIdentity:
         sentinel = MagicMock(name="identity")
         mock_rns.Identity.return_value = sentinel
 
-        identity, path = server_identity.ensure_server_identity(str(tmp_path / "sub"))
+        with patch.object(
+            server_identity, "sync_identity_from_cluster", return_value=None
+        ):
+            identity, path = server_identity.ensure_server_identity(str(tmp_path / "sub"))
 
         assert identity is sentinel
         assert os.path.dirname(path) == str(tmp_path / "sub")
@@ -74,10 +77,36 @@ class TestEnsureServerIdentity:
         sentinel = MagicMock(name="identity")
         mock_rns.Identity.return_value = sentinel
 
-        identity, _ = server_identity.ensure_server_identity(str(tmp_path))
+        with patch.object(
+            server_identity, "sync_identity_from_cluster", return_value=None
+        ):
+            identity, _ = server_identity.ensure_server_identity(str(tmp_path))
 
         assert identity is sentinel
         sentinel.to_file.assert_called_once()
+
+    def test_syncs_from_cluster_when_missing_locally(self, tmp_path, mock_rns):
+        """No local identity + in-cluster server (issue #93): the identity is
+        pulled from the pod instead of minting a mismatched one (#70)."""
+        identity_file = tmp_path / "identity"
+
+        def _fake_sync(identity_dir=None, **kwargs):
+            identity_file.write_bytes(b"\x02" * 64)
+            return str(identity_file)
+
+        sentinel = MagicMock(name="identity")
+        mock_rns.Identity.from_file.return_value = sentinel
+
+        with patch.object(
+            server_identity, "sync_identity_from_cluster", side_effect=_fake_sync
+        ) as mock_sync:
+            identity, path = server_identity.ensure_server_identity(str(tmp_path))
+
+        mock_sync.assert_called_once()
+        assert identity is sentinel
+        assert path == str(identity_file)
+        # No new identity created — the cluster one is authoritative
+        mock_rns.Identity.assert_not_called()
 
 
 class TestDeliveryDestinationHash:
@@ -112,9 +141,69 @@ class TestEnsureDeliveryDestinationHash:
         dest.hash = bytes.fromhex("cd" * 16)
         mock_rns.Destination.return_value = dest
 
-        result = server_identity.ensure_delivery_destination_hash(str(tmp_path))
+        with patch.object(
+            server_identity, "sync_identity_from_cluster", return_value=None
+        ):
+            result = server_identity.ensure_delivery_destination_hash(str(tmp_path))
 
         assert result == "cd" * 16
+
+
+class TestSyncIdentityFromCluster:
+    """Best-effort identity fetch from the in-cluster lmao-server pod (#93)."""
+
+    @staticmethod
+    def _proc(returncode=0, stdout=b"", text_stdout=""):
+        proc = MagicMock()
+        proc.returncode = returncode
+        proc.stdout = stdout
+        return proc
+
+    def test_returns_none_without_kubectl(self, tmp_path):
+        with patch("shutil.which", return_value=None):
+            assert server_identity.sync_identity_from_cluster(str(tmp_path)) is None
+
+    def test_returns_none_when_no_pod(self, tmp_path):
+        with (
+            patch("shutil.which", return_value="/usr/bin/kubectl"),
+            patch("subprocess.run", return_value=self._proc(stdout=b"")),
+        ):
+            # jsonpath returns empty string when no pods match
+            with patch("subprocess.run", return_value=self._proc()) as mock_run:
+                mock_run.return_value.stdout = ""
+                assert server_identity.sync_identity_from_cluster(str(tmp_path)) is None
+
+    def test_returns_none_when_cat_fails(self, tmp_path):
+        pod_proc = self._proc()
+        pod_proc.stdout = "lmao-server-abc"
+        cat_proc = self._proc(returncode=1, stdout=b"")
+        with (
+            patch("shutil.which", return_value="/usr/bin/kubectl"),
+            patch("subprocess.run", side_effect=[pod_proc, cat_proc]),
+        ):
+            assert server_identity.sync_identity_from_cluster(str(tmp_path)) is None
+
+    def test_writes_identity_bytes(self, tmp_path):
+        pod_proc = self._proc()
+        pod_proc.stdout = "lmao-server-abc"
+        cat_proc = self._proc(stdout=b"\x7f" * 64)
+        with (
+            patch("shutil.which", return_value="/usr/bin/kubectl"),
+            patch("subprocess.run", side_effect=[pod_proc, cat_proc]),
+        ):
+            result = server_identity.sync_identity_from_cluster(str(tmp_path))
+
+        assert result == str(tmp_path / "identity")
+        assert (tmp_path / "identity").read_bytes() == b"\x7f" * 64
+
+    def test_never_raises_on_kubectl_timeout(self, tmp_path):
+        import subprocess as sp
+
+        with (
+            patch("shutil.which", return_value="/usr/bin/kubectl"),
+            patch("subprocess.run", side_effect=sp.TimeoutExpired("kubectl", 20)),
+        ):
+            assert server_identity.sync_identity_from_cluster(str(tmp_path)) is None
 
 
 if __name__ == "__main__":

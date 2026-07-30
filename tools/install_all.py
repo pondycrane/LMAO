@@ -71,11 +71,11 @@ from lma_core.server_identity import ensure_delivery_destination_hash
 # Server-service install helpers (from tools/install_services.py).
 from tools.install_services import (
     _docker_psql,
+    deploy_lmao_server,
     detect_serial_devices,
     install_iot_ingest_consumer,
     install_k8s_services,
     install_pi_server,
-    run_pi_server,
     setup_registry,
     stop_pi_server_container,
 )
@@ -620,9 +620,9 @@ def main(argv: list[str] | None = None) -> None:
             else:
                 install_pi_server(pi_result)
                 if pi_result.status == "OK":
-                    run_pi_server(pi_result)
+                    deploy_lmao_server(pi_result)
                 else:
-                    print("  Skipping container deploy — image build/release did not succeed")
+                    print("  Skipping K8s deploy — image build/release did not succeed")
 
             if args.skip_k8s:
                 k8s_result.skip("--skip-k8s")

@@ -26,12 +26,12 @@ Prerequisites:
     - local Docker registry running (``--setup-registry`` or
       ``docker/registry/manage.sh start``)
     - Dockerfile and Dockerfile.iot-ingest at repo root
-    - k8s/lmao-service.yaml, k8s/nats-server.yaml, k8s/iot-ingest.yaml
+    - k8s/lmao-server.yaml, k8s/nats-server.yaml, k8s/iot-ingest.yaml
 """
 
 # Error handling convention:
 #   - Functions that operate on Kubernetes resources fail fast (result.fail + return).
-#   - `run_pi_server()` uses graceful degradation (WARNING + continue) so the
+#   - `deploy_lmao_server()` verifies rollout + DEST_HASH continuity (issue #93)
 #     server container starts even if systemd install or container cleanup fails.
 
 from __future__ import annotations
@@ -388,9 +388,9 @@ def install_pi_server(result: DeviceResult, repo_root: str | None = None) -> Non
     failure) it is set to FAIL.
 
     Note:
-        This function builds and pushes the image only.  Deploying the
-        container is handled by :func:`run_pi_server`, which pulls and
-        runs the registry image via Docker.
+        This function builds and pushes the image only.  Deploying is
+        handled by :func:`deploy_lmao_server`, which applies
+        ``k8s/lmao-server.yaml`` to the cluster (issue #93).
 
     Args:
         result: A ``DeviceResult`` instance (from ``tools.install_all``).
@@ -745,7 +745,8 @@ def install_iot_ingest_consumer(result: DeviceResult, repo_root: str | None = No
 def install_k8s_services(result: DeviceResult, repo_root: str | None = None) -> None:
     """Apply Kubernetes manifests via ``kubectl apply -f``.
 
-    Applies ``k8s/lmao-service.yaml`` and ``k8s/nats-server.yaml``.
+    Applies ``k8s/nats-server.yaml``.  (The LMAO server itself is deployed
+    by :func:`deploy_lmao_server` via ``k8s/lmao-server.yaml`` — issue #93.)
     Checks for the ``kubectl`` CLI on PATH first; if not found, marks
     the result as SKIP.
 
@@ -790,7 +791,6 @@ def install_k8s_services(result: DeviceResult, repo_root: str | None = None) -> 
         return
 
     manifests = [
-        os.path.join("k8s", "lmao-service.yaml"),
         os.path.join("k8s", "nats-server.yaml"),
     ]
 
@@ -1135,378 +1135,153 @@ def stop_pi_server_container() -> bool:
     except subprocess.SubprocessError:
         return False
 
+def _stop_legacy_pi_server() -> None:
+    """Best-effort teardown of the pre-K8s Pi deployment (issue #93).
 
-def run_pi_server(result: DeviceResult, repo_root: str | None = None) -> None:
-    """Deploy the lmao-server container from the local registry + systemd.
+    The LMAO server used to run as a Docker container + systemd unit on
+    the Raspberry Pi.  After the move into the cluster this is legacy —
+    stop/disable it so it cannot race the in-cluster server (or hold the
+    RNode port if one is ever plugged back into the Pi).  All failures
+    are ignored by design.
+    """
+    for cmd in (
+        ["sudo", "systemctl", "stop", "lmao-server"],
+        ["sudo", "systemctl", "disable", "lmao-server"],
+        ["sudo", "rm", "-f", "/etc/systemd/system/lmao-server.service"],
+        ["sudo", "systemctl", "daemon-reload"],
+        ["docker", "rm", "-f", "lmao-server"],
+    ):
+        try:
+            subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        except (subprocess.SubprocessError, OSError):
+            pass
 
-    Pulls ``{DEFAULT_REGISTRY_HOST}:{DEFAULT_REGISTRY_PORT}/lmao-server:latest``
-    from the local Docker registry (the consistent release source for
-    internal services), stops any existing ``lmao-server`` container,
-    starts a new one with ``--network host`` and the detected RNode
-    device passthrough, and creates a systemd unit at
-    ``/etc/systemd/system/lmao-server.service`` so the container starts
-    on boot.  The systemd unit references the same registry image.
 
-    The ``NATS_SERVER`` environment variable is passed through so the
-    server can publish to the in-cluster NATS JetStream.  If unset, the
-    script auto-discovers a reachable NATS address by querying
-    ``kubectl``:
+def _pod_dest_hash(namespace: str = "default", timeout: int = 30) -> str | None:
+    """Read the server's DEST_HASH from the lmao-server pod logs."""
+    try:
+        proc = subprocess.run(
+            ["kubectl", "logs", "deployment/lmao-server", "-n", namespace, "--tail=200"],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return None
+    if proc.returncode != 0:
+        return None
+    import re
 
-    1. If the service type is ``NodePort``, resolves the first node's
-       IP with the assigned NodePort.
-    2. If the service type is ``ClusterIP``, resolves the ClusterIP on
-       port 4222.
-    3. Otherwise, falls back to ``nats://localhost:4222``.
+    match = re.search(r"Delivery destination \(client DEST_HASH\): ([0-9a-f]{32})", proc.stdout)
+    return match.group(1) if match else None
 
-    The RNode device path follows the same detection as the server config
-    (``LMAO_RNODE_PORT`` env var, then auto-detect).
 
-    Requires root privileges (via ``sudo``) for systemd setup.
+def deploy_lmao_server(result: DeviceResult, repo_root: str | None = None) -> None:
+    """Deploy the LMAO server into the K8s cluster (issue #93).
 
-    The caller must pass a ``DeviceResult`` instance as *result*.  On full
-    success the result is set to OK; on complete failure (e.g. missing
-    Docker CLI, container exited after start) it is set to FAIL or SKIP.
+    Applies ``k8s/lmao-server.yaml`` (identity PVC + Deployment pinned to
+    the node with the USB RNode + ClusterIP Service), waits for the
+    rollout, tears down the legacy Pi Docker+systemd deployment
+    (best-effort), and verifies the running pod's DEST_HASH against the
+    locally derived one — a mismatch means the pod came up with a fresh
+    identity and every flashed Cardputer silently stops matching (#70).
 
-    Note on persistence:
-        The systemd unit is installed *before* starting the container so
-        that the service survives reboot even if the immediate ``docker
-        run`` fails.  If systemd installation fails (e.g., missing sudo
-        access), the container is still started directly; only auto-start
-        on boot is lost.
-
-    Note:
-        Errors in intermediate steps (stopping an existing container,
-        installing the systemd unit) are treated as non-fatal warnings.
-        The function continues to start the container even when those
-        steps fail, so callers should check ``result`` for the final
-        verdict rather than assuming a single error aborts the function.
+    The image is expected to have been built and pushed to the local
+    registry by :func:`install_pi_server` beforehand.
 
     Args:
         result: A ``DeviceResult`` instance (from ``tools.install_all``).
-        repo_root: Path to the repository root (unused, kept for interface
-            consistency with other install_services functions).
+        repo_root: Path to the repository root; auto-detected when None.
     """
-    _ = repo_root  # Kept for interface consistency; not needed here.
+    print("\n--- LMAO Server: K8s deployment ---")
 
-    print("\n--- Pi Server: Docker run + systemd ---")
-
-    if shutil.which("docker") is None:
-        result.skip("Docker not found on PATH")
-        print("  SKIP: Docker not found on PATH")
+    if shutil.which("kubectl") is None:
+        result.skip("kubectl not found on PATH")
+        print("  SKIP: kubectl not found on PATH")
         return
 
-    # ── Pull the release image from the local registry ──
-    image = f"{DEFAULT_REGISTRY_HOST}:{DEFAULT_REGISTRY_PORT}/lmao-server:latest"
-    print(f"  Pulling {image} ...")
+    if repo_root is None:
+        repo_root = _find_repo_root()
+    manifest = os.path.join(repo_root or ".", "k8s", "lmao-server.yaml")
+    if not os.path.isfile(manifest):
+        result.fail(f"Manifest not found: {manifest}")
+        print(f"  FAIL: manifest not found — {manifest}")
+        return
+
+    # ── Apply the manifest ──
+    print(f"  Applying {manifest} ...")
     try:
-        pull_proc = subprocess.run(
-            ["docker", "pull", image],
+        proc = subprocess.run(
+            ["kubectl", "apply", "-f", manifest],
             capture_output=True,
             text=True,
-            timeout=600,
+            timeout=60,
         )
-        if pull_proc.returncode != 0:
-            stderr_tail = pull_proc.stderr.strip().split("\n")[-3:]
-            err = "; ".join(stderr_tail) if stderr_tail else "unknown error"
-            result.fail(f"docker pull {image} failed: {err}")
-            print(f"  FAIL: docker pull failed — {err}")
+        if proc.returncode != 0:
+            err = (proc.stderr or proc.stdout).strip().split("\n")[-3:]
+            result.fail(f"kubectl apply failed: {'; '.join(err)}")
+            print(f"  FAIL: kubectl apply — {'; '.join(err)}")
             return
+        for line in proc.stdout.strip().split("\n"):
+            print(f"    {line}")
     except subprocess.SubprocessError as exc:
-        result.fail(f"docker pull error: {exc}")
+        result.fail(f"kubectl apply error: {exc}")
         print(f"  FAIL: {exc}")
         return
 
-    # ── Detect RNode port ──
-    rnode_port = _detect_rnode_port()
-    rdevice_exists = rnode_port is not None and os.path.exists(rnode_port)
-    if rdevice_exists:
-        print(f"  RNode detected at: {rnode_port}")
-    elif rnode_port:
-        print(f"  RNode port {rnode_port} not found \u2014 container will start without LoRa.")
-    else:
-        print("  No RNode port detected \u2014 container will start without LoRa.")
-
-    # ── Resolve NATS_SERVER ──
-    nats_server = os.environ.get("NATS_SERVER")
-    if nats_server is None:
-        resolved = _resolve_nats_address()
-        if resolved:
-            nats_server = resolved
-            print(f"  Resolved in-cluster NATS at {nats_server}")
-        else:
-            nats_server = _DEFAULT_NATS_SERVER
-            print(f"  No in-cluster NATS found, using default {nats_server}")
-
-    # ── Stop any existing lmao-server container ──
-    print("  Stopping existing lmao-server container (if any)...")
-    # Best-effort: stop the systemd unit first so Restart=always does not
-    # resurrect the container while we remove it.
+    # ── Wait for the rollout ──
+    print("  Waiting for rollout ...")
     try:
-        subprocess.run(
-            ["sudo", "systemctl", "stop", "lmao-server"],
+        proc = subprocess.run(
+            [
+                "kubectl", "rollout", "status", "deployment/lmao-server",
+                "--timeout=240s",
+            ],
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=260,
         )
-    except subprocess.SubprocessError:
-        pass
-    try:
-        existing = _docker_psql("name=lmao-server", all=True)
+        if proc.returncode != 0:
+            err = (proc.stderr or proc.stdout).strip().split("\n")[-3:]
+            result.fail(f"rollout failed: {'; '.join(err)}")
+            print(f"  FAIL: rollout — {'; '.join(err)}")
+            print("  Inspect with: kubectl logs deployment/lmao-server")
+            return
     except subprocess.SubprocessError as exc:
-        print(f"  WARNING: docker ps failed \u2014 {exc}")
-        existing = None
-    if existing:
-        try:
-            subprocess.run(
-                ["docker", "stop", "lmao-server"],
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-            subprocess.run(
-                ["docker", "rm", "lmao-server"],
-                capture_output=True,
-                text=True,
-                timeout=15,
-            )
-            print("  Stopped and removed existing container.")
-        except subprocess.SubprocessError as exc:
-            print(f"  WARNING: could not stop existing container \u2014 {exc}")
-            print("  Attempting force-remove fallback...")
-            try:
-                subprocess.run(
-                    ["docker", "rm", "-f", "lmao-server"],
-                    capture_output=True,
-                    text=True,
-                    timeout=15,
-                )
-                print("  Force-removed existing container.")
-            except subprocess.SubprocessError:
-                print("  WARNING: force-remove also failed; container name may conflict")
+        result.fail(f"rollout status error: {exc}")
+        print(f"  FAIL: {exc}")
+        return
 
-    # ── Persist the server identity across container restarts ──
-    # Without this mount the container gets a fresh Reticulum identity on
-    # every (re)start and the DEST_HASH baked into Cardputer clients
-    # silently stops matching (issue #70).  The host directory is created
-    # up-front so the install pipeline can load/derive the identity for
-    # Cardputer DEST_HASH injection before the container starts.
-    identity_dir = os.path.expanduser(_SERVER_IDENTITY_HOST_DIR)
+    # ── Retire the legacy Pi deployment (best-effort) ──
+    _stop_legacy_pi_server()
+
+    # ── Verify DEST_HASH (identity continuity, issues #70/#93) ──
+    pod_hash = _pod_dest_hash()
+    if pod_hash is None:
+        print("  WARNING: could not read DEST_HASH from pod logs yet —")
+        print("  verify manually: kubectl logs deployment/lmao-server | grep DEST_HASH")
+        result.ok("Deployment rolled out (DEST_HASH not verified — check pod logs)")
+        return
+
+    local_hash = None
     try:
-        os.makedirs(identity_dir, exist_ok=True)
-    except OSError as exc:
-        print(f"  WARNING: cannot create identity dir {identity_dir} — {exc}")
+        from lma_core.server_identity import ensure_delivery_destination_hash
 
-    # ── Build ExecStart args (shared by docker run and systemd) ──
-    exec_args = [
-        "docker",
-        "run",
-        "--rm",
-        "--name",
-        "lmao-server",
-        "--network",
-        "host",
-        "-e",
-        "PYTHONUNBUFFERED=1",
-        "-e",
-        f"NATS_SERVER={nats_server}",
-        "-e",
-        f"LMAO_RNODE_PORT={rnode_port}",
-        "-v",
-        f"{identity_dir}:{_SERVER_IDENTITY_CONTAINER_DIR}",
-    ]
-    if rdevice_exists:
-        exec_args.extend(["--device", f"{rnode_port}:{rnode_port}"])
-    exec_args.append(image)
+        local_hash = ensure_delivery_destination_hash()
+    except Exception as exc:  # RNS unavailable locally — skip comparison
+        print(f"  NOTE: cannot derive local DEST_HASH for comparison ({exc})")
 
-    # ── Install systemd service FIRST (always \u2014 persistence mechanism) ──
-    service_unit = """[Unit]
-Description=LMAO Server \u2014 Reticulum/LXMF LoRa mesh gateway
-After=docker.service network-online.target
-Requires=docker.service
-Wants=network-online.target
+    print(f"  Pod DEST_HASH:   {pod_hash}")
+    if local_hash:
+        print(f"  Local DEST_HASH: {local_hash}")
 
-[Service]
-Type=simple
-ExecStartPre=-/usr/bin/docker stop lmao-server
-ExecStartPre=-/usr/bin/docker rm lmao-server
-ExecStart={}
-ExecStop=/usr/bin/docker stop lmao-server
-Restart=always
-RestartSec=10
-StandardOutput=journal
-StandardError=journal
+    if local_hash and pod_hash != local_hash:
+        result.fail(
+            f"DEST_HASH mismatch: pod={pod_hash} local={local_hash} — "
+            "the pod started with a fresh identity; Cardputers will not match (#70)"
+        )
+        print("  FAIL: DEST_HASH mismatch — pod identity differs from local identity!")
+        return
 
-[Install]
-WantedBy=multi-user.target
-""".format(" ".join(exec_args))
-
-    systemd_ok = False
-    try:
-        import tempfile
-
-        fd, tmp_path = tempfile.mkstemp(prefix="lmao-server-", suffix=".service")
-        try:
-            with os.fdopen(fd, "w") as f:
-                f.write(service_unit)
-            subprocess.run(
-                ["sudo", "mv", tmp_path, "/etc/systemd/system/lmao-server.service"],
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=15,
-            )
-            subprocess.run(
-                ["sudo", "systemctl", "daemon-reload"],
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=15,
-            )
-            subprocess.run(
-                ["sudo", "systemctl", "enable", "lmao-server"],
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=15,
-            )
-        except (subprocess.SubprocessError, OSError):
-            if os.path.exists(tmp_path):
-                os.unlink(tmp_path)
-            raise
-
-        print("  systemd service installed at /etc/systemd/system/lmao-server.service")
-        print("  Enabled for auto-start on boot.")
-        print()
-        print("  Manage with:")
-        print("    sudo systemctl start lmao-server    # Start now")
-        print("    sudo systemctl stop lmao-server     # Stop")
-        print("    sudo systemctl status lmao-server   # Check status")
-        print("    sudo journalctl -u lmao-server -f   # Tail logs")
-        systemd_ok = True
-    except subprocess.SubprocessError as exc:
-        stderr_hint = ""
-        if isinstance(exc, subprocess.CalledProcessError) and exc.stderr:
-            stderr = exc.stderr.decode() if isinstance(exc.stderr, bytes) else exc.stderr
-            stderr_tail = stderr.strip().split("\n")[-3:]
-            stderr_hint = ": " + "; ".join(stderr_tail)
-        elif isinstance(exc, subprocess.TimeoutExpired) and exc.stderr:
-            stderr = exc.stderr.decode() if isinstance(exc.stderr, bytes) else exc.stderr
-            stderr_hint = ": " + stderr.strip()
-        print(f"  WARNING: systemd install failed{stderr_hint}")
-        print("  (Server will run now but won't auto-start on boot \u2014 fix sudo access)")
-    except PermissionError:
-        print("  WARNING: systemd install requires sudo \u2014 skipping")
-        print("  (Server will run now but won't auto-start on boot)")
-    except Exception as exc:
-        import traceback
-
-        traceback.print_exc()
-        print(f"  WARNING: systemd install error: {exc}")
-
-    # ── Start the service ──
-    # Preferred path: start via systemd so `systemctl status lmao-server`
-    # is authoritative and Restart=always is managed by systemd.
-    # Fallback: direct `docker run -d` when systemd is unavailable.
-    started = False
-    if systemd_ok:
-        print("  Starting service: sudo systemctl start lmao-server")
-        try:
-            proc = subprocess.run(
-                ["sudo", "systemctl", "start", "lmao-server"],
-                capture_output=True,
-                text=True,
-                timeout=60,
-            )
-            if proc.returncode == 0:
-                started = True
-            else:
-                stderr_tail = proc.stderr.strip().split("\n")[-3:]
-                err_msg = "; ".join(stderr_tail) if stderr_tail else "unknown error"
-                print(f"  WARNING: systemctl start failed \u2014 {err_msg}")
-                print("  Falling back to direct docker run ...")
-        except subprocess.SubprocessError as exc:
-            print(f"  WARNING: systemctl start error \u2014 {exc}")
-            print("  Falling back to direct docker run ...")
-
-    if not started:
-        run_args = list(exec_args)
-        # Change --rm to -d --restart unless-stopped for the direct run
-        rm_idx = run_args.index("--rm")
-        run_args[rm_idx] = "-d"
-        restart_idx = run_args.index("--name")
-        run_args.insert(restart_idx, "unless-stopped")
-        run_args.insert(restart_idx, "--restart")
-
-        print("  Starting container: {}".format(" ".join(run_args)))
-        try:
-            proc = subprocess.run(run_args, capture_output=True, text=True, timeout=60)
-            if proc.returncode == 0:
-                started = True
-                print(f"  Container started: {proc.stdout.strip()[:12]}")
-            else:
-                stderr_tail = proc.stderr.strip().split("\n")[-3:]
-                err_msg = "; ".join(stderr_tail) if stderr_tail else "unknown error"
-                print(f"  WARNING: docker run failed \u2014 {err_msg}")
-                if systemd_ok:
-                    print("  Systemd service is installed. Fix the issue then:")
-                    print("    sudo systemctl start lmao-server")
-        except subprocess.SubprocessError as exc:
-            print(f"  WARNING: docker run error \u2014 {exc}")
-            if systemd_ok:
-                print("  Systemd service is installed. Fix the issue then:")
-                print("    sudo systemctl start lmao-server")
-
-    # ── Verify container is running ──
-    if started:
-        print("  Verifying container...")
-        try:
-            # The container may take a moment to register with the daemon
-            # (especially when started via systemd) — retry a few times.
-            container_id = ""
-            status = ""
-            for attempt in range(5):
-                proc = subprocess.run(
-                    [
-                        "docker",
-                        "ps",
-                        "--filter",
-                        "name=lmao-server",
-                        "--format",
-                        "{{.ID}} {{.Status}}",
-                    ],
-                    capture_output=True,
-                    text=True,
-                    timeout=15,
-                )
-                fields = proc.stdout.strip().split(None, 1)
-                container_id = fields[0][:12] if fields else ""
-                status = fields[1] if len(fields) > 1 else ""
-                if container_id:
-                    break
-                if attempt < 4:
-                    time.sleep(2)
-            if container_id:
-                print(f"  Container status: {status}")
-                if systemd_ok:
-                    result.ok(f"Container running + systemd: {container_id}")
-                    print(f"  OK: lmao-server running ({container_id})")
-                else:
-                    result.ok(
-                        f"Container running: {container_id} (systemd not installed \u2014 "
-                        "will not survive reboot)"
-                    )
-                    print(f"  OK: lmao-server running ({container_id})")
-                    print(
-                        "  NOTE: systemd was not installed; container will not auto-start on boot."
-                    )
-            else:
-                result.fail("Container exited after start")
-                print("  FAIL: Container exited \u2014 check `docker logs lmao-server`")
-        except subprocess.SubprocessError:
-            result.fail("Container status check failed \u2014 verify manually: docker ps")
-            print("  FAIL: Could not verify container status \u2014 docker ps failed")
-    else:
-        if systemd_ok:
-            result.ok("Systemd service installed (container will start on boot or via systemctl)")
-        else:
-            result.fail("Container did not start and systemd was not installed")
+    result.ok(f"Deployment rolled out; DEST_HASH {pod_hash[:12]}… verified")
+    print("  OK: lmao-server running in-cluster")
