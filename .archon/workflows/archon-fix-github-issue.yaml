@@ -1,5 +1,10 @@
 name: archon-fix-github-issue
 description: |
+  ⚠️ LMAO REPO: prefer `lmao-fix-issue` instead — it adds the mandatory
+  hardware E2E gate, Bazel BUILD completeness check, and production health
+  check required by AGENTS.md. This generic workflow remains as a fallback
+  for ad-hoc use only; do NOT select it for normal issue fixing in this repo.
+
   Use when: User wants to FIX, RESOLVE, or IMPLEMENT a solution for a GitHub issue.
   Triggers: "fix this issue", "implement issue #123", "resolve this bug", "fix it",
             "fix issue", "resolve issue", "fix #123".

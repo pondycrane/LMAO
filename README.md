@@ -10,35 +10,37 @@ server and an M5Stack Cardputer ADV client using the
 ## Architecture
 
 ```
-┌──────────────────────────────────────────────────────────────────────────────┐
-│                              LoRa RF (868/915 MHz)                           │
-│  ┌───────────────┐  ┌──────────────────┐         ┌──────────────────────┐   │
-│  │  Laptop/Desktop│  │  Raspberry Pi    │         │  M5Stack Cardputer   │   │
-│  │  Human Client  │  │  ┌────────────┐  │         │  ADV                 │   │
-│  │  (Python CLI)  │  │  │ LMAO Server│  │         │  ┌────────────────┐  │   │
-│  │  WiFi/AutoIFace│──┤  │RNS+LXMF+   │──┤◄──LoRa─┼──┤ µReticulum     │  │   │
-│  │                │  │  │ gRPC +     │  │         │  │ client         │  │   │
-│  └────────────────┘  │  │ NATS pub   │  │         │  └──────┬─────────┘  │   │
-│                      │  └─────┬──────┘  │         │         │ SPI         │   │
-│  ┌──────────────┐    │        │ USB      │         │  ┌──────┴─────────┐  │   │
-│  │ K8s Pod      │    │  ┌─────┴──────┐  │         │  │ SX1262 LoRa    │  │   │
-│  │ (gRPC client)│──┐ │  │ ESP32 RNode│  │         │  │ radio + ant    │  │   │
-│  └──────────────┘  │ │  │ (LoRa br.) │──┼────LoRa─┼──┘                │  │   │
-│                    │ │  └────────────┘  │         │  └────────────────┘  │   │
-│  ┌─────────────────┴─┴──────────────┐   │         └──────────────────────┘   │
-│  │  K8s Cluster                     │   │                                     │
-│  │                                  │   │ (Pi publishes sensor data           │
-│  │  ┌──────────────────────────┐    │   │  to NATS NodePort)                  │
-│  │  │  NATS JetStream ◄──NodePort───┘                                       │
-│  │  │  lmao.messages.env       │                                            │
-│  │  └────────┬───────────────┬──┘                                            │
-│  │           │               │                                               │
-│  │  ┌────────┴──────────┐  ┌─┴─────────────┐                                │
-│  │  │ IoT Ingest Pod    │  │ Command Dispatch│                               │
-│  │  │ (NATS subscribe)  │  │ (gRPC+NATS)    │                               │
-│  │  └───────────────────┘  └───────────────┘                                │
-│  └──────────────────────────────────────────────────────────────────┘       │
-└──────────────────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────┐
+│                        LoRa RF (868/915 MHz)                        │
+│  ┌───────────────┐                          ┌──────────────────────┐│
+│  │ Laptop/Desktop│                          │ M5Stack Cardputer    ││
+│  │ Human Client  │  WiFi/AutoIface          │ ADV                  ││
+│  │ (Python CLI)  │──┐                       │ ┌────────────────┐   ││
+│  └───────────────┘  │                       │ │ µReticulum     │   ││
+│                     │                       │ │ client         │   ││
+│  ┌──────────────────┴────────────────────┐  │ └──────┬─────────┘   ││
+│  │  K8s Cluster (Turing Pi 2)            │  │        │ SPI          ││
+│  │                                      │  │ ┌──────┴─────────┐   ││
+│  │  ┌────────────────────────┐          │  │ │ SX1262 LoRa    │   ││
+│  │  │ lmao-server Deployment │          │  │ │ radio + ant    │   ││
+│  │  │ (tp4, hostNetwork)     │◄──LoRa───┼──┼─┘                │   ││
+│  │  │ RNS+LXMF+gRPC+NATS pub │    ▲     │  └──────────────────────┘│
+│  │  └───────────┬────────────┘    │ USB │                          │
+│  │              │          ┌──────┴───┐ │                          │
+│  │              │          │ESP32     │ │                          │
+│  │              │          │RNode     │ │                          │
+│  │              │          │(tp4 USB) │ │                          │
+│  │              │          └──────────┘ │                          │
+│  │  ┌───────────┴─────────┐            │                          │
+│  │  │ NATS JetStream      │            │                          │
+│  │  │ lmao.messages.env   │            │                          │
+│  │  └───────────┬─────────┘            │                          │
+│  │  ┌───────────┴─────────┐            │                          │
+│  │  │ IoT Ingest Pod      │            │                          │
+│  │  │ (NATS → DuckDB)     │            │                          │
+│  │  └─────────────────────┘            │                          │
+│  └─────────────────────────────────────┘                          │
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
 ## Quickstart
@@ -251,10 +253,11 @@ bazel run //tools:install_all -- --skip-dest-hash
 
 The Cardputer flash automatically injects the server's `DEST_HASH`
 (destination hash of the server's persisted identity) into the on-device
-`config.py`, and the Pi server deploy bind-mounts
-`~/.local/share/lmao_server` into the container so the identity persists
-across redeploys — flashed clients keep working after server restarts
-(issue #70).
+`config.py`. The identity is read from the local
+`~/.local/share/lmao_server/lxmf/identity` when present, or synced from
+the in-cluster server's PVC via `kubectl exec` when the server runs in
+Kubernetes (issue #93) — flashed clients keep working across server
+restarts and redeploys (issue #70).
 
 Output shows a per-device summary table with OK/FAIL/SKIP status:
 
@@ -388,116 +391,71 @@ print(f"Server: {identity.identity_hex}")
 
 See [`k8s-app/iot_ingest.py`](k8s-app/iot_ingest.py) for a complete example.
 
-### 8. Docker Deployment
+### 8. Docker Image
 
-A Docker image is available for containerized deployment of the server
-(on the Raspberry Pi or any Linux host with an RNode).
-
-> **Release flow:** internal services (Pi server, IoT ingest consumer) are
-> always released through the [local Docker registry](#13-local-docker-registry)
-> (`192.168.0.36:5000`) and deployed via Docker from the registry image.
-> `bazel run //tools:install_all -- --include-services` performs the full
-> build → push → deploy cycle automatically.
+The server Docker image is the release artifact for the in-cluster
+Deployment (§9). Internal services are always released through the
+[local Docker registry](#13-local-docker-registry) (`192.168.0.36:5000`);
+`bazel run //tools:install_all -- --include-services` performs the full
+build → push → `kubectl apply` cycle automatically.
 
 ```bash
 # Build the image
 docker build -t lmao-server .
 
-# Run (requires --network host for Reticulum and RNode USB passthrough)
-docker run --network host --device /dev/ttyUSB0:/dev/ttyUSB0 lmao-server
+# Push to the local registry
+docker tag lmao-server 192.168.0.36:5000/lmao-server:latest
+docker push 192.168.0.36:5000/lmao-server:latest
 ```
 
-**Important**:
-- `--network host` is **required** — Reticulum uses UDP multicast for
-  AutoInterface discovery and must run on the host network stack.
-- Pass your RNode device with `--device` (adjust path as needed).
-- Mount the identity directory (`-v ~/.local/share/lmao_server:/root/.local/share/lmao_server`)
-  so the LXMF identity persists across container restarts — otherwise the
-  server gets a fresh identity on every start and the `DEST_HASH` baked into
-  Cardputer clients silently stops matching (issue #70).
-- Set `NATS_SERVER` to enable JetStream publishing to the **in-cluster NATS**
-  (deployed via `kubectl apply -f k8s/nats-server.yaml`):
-  ```bash
-  docker run --network host --device /dev/ttyACM0:/dev/ttyACM0 \
-    -e NATS_SERVER=nats://192.168.0.43:30146 \
-    -e LMAO_RNODE_PORT=/dev/ttyACM0 lmao-server
-  ```
-- The gRPC API on port 50051 is accessible on the host.
-
-#### 8.1 Systemd Auto-Start (Production)
-
-For production deployments, install the container as a systemd service
-so it starts automatically on boot and restarts on failure:
+Running the container standalone (e.g. on a laptop for development) still
+works — `--network host` is required for Reticulum AutoInterface multicast,
+and `--device` passes the RNode through:
 
 ```bash
-# Run the full server install (Docker build + systemd service)
-bazel run //tools:install_all -- --include-services
-```
-
-Or install the systemd service manually:
-
-```bash
-sudo tee /etc/systemd/system/lmao-server.service << 'EOF'
-[Unit]
-Description=LMAO Server — Reticulum/LXMF LoRa mesh gateway
-After=docker.service network-online.target
-Requires=docker.service
-Wants=network-online.target
-
-[Service]
-Type=simple
-ExecStartPre=-/usr/bin/docker stop lmao-server
-ExecStartPre=-/usr/bin/docker rm lmao-server
-ExecStart=/usr/bin/docker run --rm --name lmao-server --network host \
+docker run --network host --device /dev/ttyUSB0:/dev/ttyUSB0 \
   -e NATS_SERVER=nats://192.168.0.43:30146 \
   -e LMAO_RNODE_PORT=/dev/ttyUSB0 \
-  --device /dev/ttyUSB0:/dev/ttyUSB0 \
-  -v /home/pondycrane/.local/share/lmao_server:/root/.local/share/lmao_server \
-  192.168.0.36:5000/lmao-server:latest
-ExecStop=/usr/bin/docker stop lmao-server
-Restart=always
-RestartSec=10
-StandardOutput=journal
-StandardError=journal
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-sudo systemctl daemon-reload
-sudo systemctl enable lmao-server
-sudo systemctl start lmao-server
+  -v ~/.local/share/lmao_server:/root/.local/share/lmao_server \
+  lmao-server
 ```
 
-**Manage the service:**
+> **Legacy:** the server used to run in production as a Docker container +
+> systemd unit on the Raspberry Pi. That deployment was retired when the
+> server moved into the K8s cluster (issue #93); the install tooling now
+> tears it down best-effort during deploys.
+
+### 9. Kubernetes Deployment (Production)
+
+The LMAO server runs **inside the K8s cluster** as a single-replica
+Deployment on the node where the LoRa RNode is physically attached
+(issue #93). Manifest: [`k8s/lmao-server.yaml`](k8s/lmao-server.yaml).
 
 ```bash
-sudo systemctl start lmao-server      # Start the container
-sudo systemctl stop lmao-server       # Stop the container
-sudo systemctl status lmao-server     # Check status
-sudo journalctl -u lmao-server -f     # Tail logs
-sudo systemctl disable lmao-server    # Disable auto-start on boot
+# Deploy / update (image must be pushed to the registry first — §8)
+kubectl apply -f k8s/lmao-server.yaml
+kubectl rollout status deployment/lmao-server
+
+# Logs (look for "Delivery destination (client DEST_HASH): ...")
+kubectl logs -f deployment/lmao-server
 ```
 
-### 9. Kubernetes Deployment
+**Design:**
 
-Pods in a K8s cluster can reach the external LMAO server (running on a
-physical Raspberry Pi) via a headless Service with manually managed Endpoints.
-
-```bash
-# 1. Edit the RPi IP in k8s/lmao-service.yaml (default: 192.168.1.100)
-# 2. Apply the manifest
-kubectl apply -f k8s/lmao-service.yaml
-
-# 3. Pods connect via the stable DNS name
-#    lmao-server.default.svc.cluster.local:50051
-```
+| Aspect | Choice | Why |
+|--------|--------|-----|
+| Node placement | `nodeSelector: kubernetes.io/hostname=tp4` | The RNode is plugged into tp4's USB. No HA failover is possible — USB radio is inherently node-bound. |
+| USB passthrough | `hostPath: /dev/ttyUSB0` + `privileged: true` | K8s has no native USB serial support. A device plugin (e.g. generic-device-plugin) would avoid privileged mode if ever needed. After an RNode replug/node reboot, restart the pod: `kubectl rollout restart deployment/lmao-server`. |
+| Networking | `hostNetwork: true` | Reticulum AutoInterface needs UDP multicast on the LAN (human_client discovery). `LMAO_AUTOIFACE_DEVICES=wlan0` keeps it off the flannel/veth CNI interfaces. gRPC is also reachable on the node IP `192.168.0.44:50051`. |
+| Identity | PVC `lmao-server-identity` mounted at `/data`, `LMAO_SERVER_IDENTITY_PATH=/data/lxmf` | The LXMF identity must survive pod restarts or every Cardputer's baked DEST_HASH silently stops matching (issue #70). **The PVC was pre-populated from the old Pi server during migration**; local backup: `~/lmao-identity-backup-*`. |
+| RNS state | `LMAO_RNS_TRANSPORT_PATH=/data/transport` (same PVC) | Persists known destinations/identities so ACK replies keep working across pod restarts without waiting for client re-announces. |
+| NATS | `NATS_SERVER=nats://nats-server.default.svc.cluster.local:4222` | In-cluster ClusterIP (no NodePort hop). |
+| gRPC discovery | ClusterIP Service `lmao-server` | Pods connect via `lmao-server.default.svc.cluster.local:50051` — same DNS name as before. |
 
 The example K8s app at [`k8s-app/iot_ingest.py`](k8s-app/iot_ingest.py)
 can be used from any pod to interact with the server:
 
 ```bash
-# Set LMAO_SERVER env var (defaults to localhost:50051 for local dev)
 export LMAO_SERVER=lmao-server.default.svc.cluster.local:50051
 python k8s-app/iot_ingest.py --send --get-identity
 ```
@@ -508,12 +466,15 @@ python k8s-app/iot_ingest.py --send --get-identity
 #### Environment Variables
 
 The server respects the following environment variables (also configurable
-when running in Docker or systemd):
+when running in Docker):
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `NATS_SERVER` | `nats://192.168.0.43:30146` | In-cluster NATS JetStream NodePort URL (K8s worker `tp2`) |
+| `NATS_SERVER` | `nats://nats-server.default.svc.cluster.local:4222` (K8s manifest) / `nats://localhost:4222` (code) | NATS JetStream URL |
 | `LMAO_RNODE_PORT` | auto-detect | Serial port for RNode LoRa interface |
+| `LMAO_SERVER_IDENTITY_PATH` | `~/.local/share/lmao_server/lxmf` | LXMF identity storage dir (PVC: `/data/lxmf`) |
+| `LMAO_RNS_TRANSPORT_PATH` | unset (temp dir) | Reticulum state dir; set = persistent configdir (PVC: `/data/transport`) |
+| `LMAO_AUTOIFACE_DEVICES` | unset (all interfaces) | Comma-separated interface allowlist for AutoInterface (e.g. `wlan0`) |
 | `LMAO_MQTT_HOST` | `localhost` | MQTT broker hostname (IoT ingest) |
 | `LMAO_MQTT_PORT` | `1883` | MQTT broker port |
 | `LMAO_INGEST_DUCKDB_PATH` | `/data/sensors.db` | DuckDB file path (IoT ingest) |
@@ -529,20 +490,20 @@ at-least-once message delivery for the IoT sensor pipeline.
 |-----------|---------------|------|
 | **NATS Server** | K8s pod (`deployment/nats-server`) | Message broker with disk persistence (1Gi PVC) |
 | **IoT Ingest** | K8s pod (`deployment/iot-ingest-consumer`) | Subscribes to sensor data, persists to DuckDB at `/data/sensors.db` |
-| **LMAO Server** | Physical Raspberry Pi (outside cluster) | Publishes incoming sensor data to NATS via NodePort |
+| **LMAO Server** | K8s pod (`deployment/lmao-server`, on tp4) | Publishes incoming sensor data to NATS via ClusterIP |
 
 **Data flow:**
 
 ```
-Cardputer ──LoRa──→ RNode ──USB──→ LMAO Server (Pi 192.168.0.36)
-                                        │
-                                   publishes to
-                                        ▼
-                              ┌─────────────────────┐
-                              │  K8s Cluster        │
-                              │  NATS JetStream     │
-                              │  lmao.messages.env  │
-                              └──────────┬──────────┘
+Cardputer ──LoRa──→ RNode ──USB──→ tp4 ──pod──→ LMAO Server (in-cluster)
+                                                     │
+                                                publishes to
+                                                     ▼
+                              ┌─────────────────────────────────┐
+                              │  K8s Cluster                    │
+                              │  NATS JetStream                 │
+                              │  lmao.messages.env              │
+                              └──────────┬──────────────────────┘
                                          │ subscribes
                                          ▼
                               ┌─────────────────────┐
@@ -562,27 +523,26 @@ kubectl get pods -l app=nats-server
 kubectl logs deployment/nats-server
 ```
 
-#### Connect from the Pi (outside the cluster)
-
-The LMAO Server runs on a separate physical Raspberry Pi and connects to the
-in-cluster NATS via a **NodePort** exposed on the K8s worker node:
-
-```bash
-# Set on the Pi — replaces the old default nats://localhost:4222
-export NATS_SERVER=nats://192.168.0.43:30146
-```
-
-The NodePort (`30146`) is defined in `k8s/nats-server.yaml`.  Adjust the IP
-to your worker node's LAN address.  The same value should be used in the
-Docker `-e NATS_SERVER=...` flag and the systemd unit file.
-
 #### Connect from inside the cluster
 
-Pods inside the cluster connect via the ClusterIP DNS name:
+Pods inside the cluster (including the LMAO server Deployment) connect via
+the ClusterIP DNS name:
 
 ```
 nats://nats-server.default.svc.cluster.local:4222
 ```
+
+#### Connect from outside the cluster
+
+External hosts (e.g. a laptop running tools) can reach the in-cluster NATS
+via the **NodePort** exposed on the K8s worker node:
+
+```bash
+export NATS_SERVER=nats://192.168.0.43:30146
+```
+
+The NodePort (`30146`) is defined in `k8s/nats-server.yaml`.  Adjust the IP
+to your worker node's LAN address.
 
 #### Deploy IoT Ingest Consumer
 
@@ -936,7 +896,7 @@ The registry is configured via environment variables:
 │   └── client.py                      # Interactive REPL for human messaging
 │
 ├── k8s/                               # Kubernetes manifests
-│   ├── lmao-service.yaml              # Headless Service + Endpoints for external RPi
+│   ├── lmao-server.yaml               # In-cluster server: Deployment + identity PVC + Service
 │   ├── nats-server.yaml               # NATS Deployment + Service + ConfigMap (JetStream)
 │   └── iot-ingest.yaml                # Persistent IoT Ingest Consumer (NATS→DuckDB)
 │
@@ -1047,6 +1007,9 @@ For the full system design, see [`ARCHITECTURE.md`](ARCHITECTURE.md).
 | Problem | Check |
 |---------|-------|
 | Server can't find RNode | Is ESP32 plugged in? Set `LMAO_RNODE_PORT` or check auto-detected port |
+| In-cluster pod can't find RNode after node reboot/replug | Device may have re-enumerated — `kubectl rollout restart deployment/lmao-server`; verify `/dev/ttyUSB0` exists on tp4 |
+| Server logs "Could not send reply (no source destination)" after a restart | The client identity cache was empty; the client re-announces on its next reboot. Persisted via `LMAO_RNS_TRANSPORT_PATH` on the PVC since issue #93 |
+| `test_cardputer_lora_e2e` skips | The test needs a **locally attached** RNode + Cardputer. With the server running in K8s (RNode on tp4), it auto-skips on other hosts — run it on a machine with both devices plugged in |
 | Server hangs with no output | RNode port not found — the server now warns and starts in WiFi-only mode. Check `LMAO_RNODE_PORT`. |
 | No LoRa packets despite devices on same frequency | Check **all** radio parameters match: SF, BW, CR, and TXP (not just frequency) |
 | Cardputer has µReticulum firmware, not MicroPython | That's expected with rsCardputer firmware — it's a valid LXMF client. Use Option B above. |

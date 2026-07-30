@@ -19,7 +19,10 @@ bazel test //tests:test_cardputer_e2e --test_output=all
 bazel test //tests:test_cardputer_lora_e2e --test_output=all
 ```
 
-Tests auto-skip when the required hardware is not detected.
+Tests auto-skip when the required hardware is not detected. Note: since
+issue #93 the RNode lives on the K8s node tp4, so the LoRa E2E skips on the
+dev machine — production LoRa traffic (Cardputer → pod → NATS → DuckDB)
+serves as the live verification instead.
 
 ### Humidity Sensor E2E Validation
 
@@ -37,7 +40,7 @@ mode (die temperature only), which is the normal configuration.
 
 ## RNode
 
-The RNode (Heltec ESP32 LoRa on `/dev/ttyUSB0`) is the server's LoRa radio bridge. It was flashed once via the web tool at https://flasher.rnode.network/ and works reliably.
+The RNode (Heltec ESP32 LoRa) is the server's LoRa radio bridge. Since issue #93 it is plugged into the **K8s node tp4** (`/dev/ttyUSB0` there) and consumed by the in-cluster `lmao-server` Deployment — it is no longer on the dev machine. It was flashed once via the web tool at https://flasher.rnode.network/ and works reliably.
 
 **Do NOT flash the RNode via esptool or any other method.** The web flasher is the only supported flashing method. Using esptool (especially interrupting a flash) bricks the device and requires physical USB reconnection + reflashing via the web tool to recover.
 

@@ -13,10 +13,22 @@ import logging
 import os
 import shutil
 import sys
+import tempfile
 
 from lma_core.rns_di import LXMF, RNS
 
 logger = logging.getLogger(__name__)
+
+
+def _is_temp_configdir(configdir):
+    """True when *configdir* is a throwaway dir under the system temp root.
+
+    Persistent Reticulum state dirs (e.g. ``/data/transport`` on the K8s
+    PVC, via ``LMAO_RNS_TRANSPORT_PATH``) live elsewhere and must NOT be
+    deleted at exit (issue #93).
+    """
+    temp_root = os.path.realpath(tempfile.gettempdir())
+    return os.path.realpath(configdir).startswith(temp_root + os.sep)
 
 
 def _fatal(msg, *, extra=None):
@@ -70,10 +82,15 @@ def init_rns_and_lxmf(
     print("Initializing Reticulum...")
     try:
         configdir = configdir_factory()
-        if atexit_register is not None:
-            atexit_register(lambda: shutil.rmtree(configdir, ignore_errors=True))
-        else:
-            atexit.register(lambda: shutil.rmtree(configdir, ignore_errors=True))
+        if _is_temp_configdir(configdir):
+            # Only auto-delete throwaway temp configdirs.  A persistent
+            # configdir (LMAO_RNS_TRANSPORT_PATH, e.g. /data/transport on
+            # the K8s PVC) holds RNS state that must survive restarts
+            # (issue #93).
+            if atexit_register is not None:
+                atexit_register(lambda: shutil.rmtree(configdir, ignore_errors=True))
+            else:
+                atexit.register(lambda: shutil.rmtree(configdir, ignore_errors=True))
         RNS.Reticulum(configdir=configdir)
     except (OSError, PermissionError) as e:
         _fatal(
