@@ -171,19 +171,28 @@ else
   if ! kubectl cluster-info >/dev/null 2>&1; then
     echo "LORA_PROD=UNVERIFIABLE (cluster unreachable)"
   else
-    # Look for fresh "Message received" from a Cardputer in server logs.
+    # Look for fresh "Message received" in server logs (any node; the
+    # Cardputer's 60s Hello is the dominant traffic and the practical
+    # signal being verified).
     # Poll loop: 6 iterations × 30s sleep = 3 min, catches ≥2 Cardputer
     # intervals (default 60s each).
     LORA_SEEN=""
+    LOGS_EVER_OK=0
     for i in $(seq 1 6); do
-      if kubectl logs deployment/lmao-server --since=3m 2>/dev/null | grep -qi "message received"; then
-        LORA_SEEN="yes"
-        break
+      LOGS_OUT=$(kubectl logs deployment/lmao-server --since=3m 2>&1)
+      if [ $? -eq 0 ]; then
+        LOGS_EVER_OK=1
+        if printf '%s' "$LOGS_OUT" | grep -qi "message received"; then
+          LORA_SEEN="yes"
+          break
+        fi
       fi
       sleep 30
     done
     if [ -n "$LORA_SEEN" ]; then
       echo "LORA_PROD=PASS"
+    elif [ "$LOGS_EVER_OK" = "0" ]; then
+      echo "LORA_PROD=UNVERIFIABLE (kubectl logs failed on every attempt)"
     else
       echo "LORA_PROD=FAIL (no messages in server logs)"
     fi
@@ -196,30 +205,47 @@ fi
 ### Phase 4b: JetStream Consumer Health Check
 
 ```bash
-if kubectl cluster-info >/dev/null 2>&1; then
+# Mirror the same kubectl-availability + cluster-reachability guards as 4a.
+if ! command -v kubectl >/dev/null 2>&1; then
+  echo "JETSTREAM=UNVERIFIABLE (kubectl not found)"
+elif ! kubectl cluster-info >/dev/null 2>&1; then
+  echo "JETSTREAM=UNVERIFIABLE (cluster unreachable)"
+else
   # The iot-ingest-consumer pod already has nats-py and runs on the cluster
   # network. Use a single kubectl exec to query stream + consumer info.
+  # The Python emits a JSON object with a "status" key (ok | conn_error |
+  # stream_error | consumer_error) so the bash can branch deterministically.
   JS_SCRIPT='
 import asyncio, json, sys
 
 async def main():
-    import nats
-    nc = await nats.connect("nats://nats-server.default.svc.cluster.local:4222")
-    js = nc.jetstream()
+    result = {"status": "ok"}
+    try:
+        import nats
+        nc = await nats.connect("nats://nats-server.default.svc.cluster.local:4222")
+    except Exception as e:
+        result = {"status": "conn_error", "error": str(e)}
+        print(json.dumps(result))
+        return
 
-    result = {}
+    js = nc.jetstream()
     try:
         info = await js.stream_info("LMAO_MESSAGES")
         result["last_seq"] = info.state.last_seq
     except Exception as e:
+        result["status"] = "stream_error"
         result["stream_error"] = str(e)
 
     try:
         cinfo = await js.consumer_info("LMAO_MESSAGES", "iot-ingest")
         result["consumer_ack_floor"] = cinfo.ack_floor.stream_seq if cinfo.ack_floor else 0
-        result["consumer_num_pending"] = cinfo.num_pending
-        result["consumer_num_ack_pending"] = cinfo.num_ack_pending
+        # Coerce Optional[int] → 0: nats-py returns None when nothing is
+        # in-flight, and JSON null breaks the strict PASS check below.
+        result["consumer_num_pending"] = cinfo.num_pending or 0
+        result["consumer_num_ack_pending"] = cinfo.num_ack_pending or 0
     except Exception as e:
+        if result.get("status") == "ok":
+            result["status"] = "consumer_error"
         result["consumer_error"] = str(e)
 
     await nc.close()
@@ -229,20 +255,40 @@ asyncio.run(main())
 '
   JS_INFO=$(kubectl exec deployment/iot-ingest-consumer -- python3 -c "$JS_SCRIPT" 2>/dev/null || echo "")
   if [ -n "$JS_INFO" ]; then
-    LAST_SEQ=$(echo "$JS_INFO" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('last_seq',0))" 2>/dev/null)
-    CONSUMER_ACK=$(echo "$JS_INFO" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('consumer_ack_floor',0))" 2>/dev/null)
-    NUM_PENDING=$(echo "$JS_INFO" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('consumer_num_pending',-1))" 2>/dev/null)
-    NUM_ACK_PENDING=$(echo "$JS_INFO" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('consumer_num_ack_pending',-1))" 2>/dev/null)
-    echo "JS_LAST_SEQ=$LAST_SEQ"
-    echo "JS_CONSUMER_ACK=$CONSUMER_ACK"
-    echo "JS_NUM_PENDING=$NUM_PENDING"
-    echo "JS_NUM_ACK_PENDING=$NUM_ACK_PENDING"
-    if [ "$LAST_SEQ" != "0" ] && [ "$CONSUMER_ACK" != "0" ] && [ "$LAST_SEQ" = "$CONSUMER_ACK" ] && [ "$NUM_PENDING" = "0" ] && [ "$NUM_ACK_PENDING" = "0" ]; then
-      echo "JETSTREAM=PASS (last_seq=$LAST_SEQ, consumer_ack=$CONSUMER_ACK, pending=0)"
-    elif [ "$LAST_SEQ" != "0" ] && [ "$CONSUMER_ACK" != "0" ]; then
-      echo "JETSTREAM=WARN (last_seq=$LAST_SEQ, consumer_ack=$CONSUMER_ACK, pending=$NUM_PENDING, ack_pending=$NUM_ACK_PENDING)"
+    # Validate that $JS_INFO is parseable JSON before extracting fields.
+    if echo "$JS_INFO" | python3 -c "import sys,json; json.load(sys.stdin)" 2>/dev/null; then
+      JS_STATUS=$(echo "$JS_INFO" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('status','ok'))" 2>/dev/null)
+      LAST_SEQ=$(echo "$JS_INFO" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('last_seq',0))" 2>/dev/null)
+      CONSUMER_ACK=$(echo "$JS_INFO" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('consumer_ack_floor',0))" 2>/dev/null)
+      NUM_PENDING=$(echo "$JS_INFO" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('consumer_num_pending',-1))" 2>/dev/null)
+      NUM_ACK_PENDING=$(echo "$JS_INFO" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('consumer_num_ack_pending',-1))" 2>/dev/null)
+      echo "JS_LAST_SEQ=$LAST_SEQ"
+      echo "JS_CONSUMER_ACK=$CONSUMER_ACK"
+      echo "JS_NUM_PENDING=$NUM_PENDING"
+      echo "JS_NUM_ACK_PENDING=$NUM_ACK_PENDING"
+
+      case "$JS_STATUS" in
+        conn_error)
+          echo "JETSTREAM=FAIL (NATS unreachable: $(echo "$JS_INFO" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('error','unknown'))" 2>/dev/null))"
+          ;;
+        stream_error)
+          echo "JETSTREAM=UNVERIFIABLE (stream query error: $(echo "$JS_INFO" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('stream_error','unknown'))" 2>/dev/null))"
+          ;;
+        consumer_error)
+          echo "JETSTREAM=UNVERIFIABLE (consumer query error: $(echo "$JS_INFO" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('consumer_error','unknown'))" 2>/dev/null))"
+          ;;
+        *)
+          if [ "$LAST_SEQ" != "0" ] && [ "$CONSUMER_ACK" != "0" ] && [ "$LAST_SEQ" = "$CONSUMER_ACK" ] && [ "$NUM_PENDING" = "0" ] && [ "$NUM_ACK_PENDING" = "0" ]; then
+            echo "JETSTREAM=PASS (last_seq=$LAST_SEQ, consumer_ack=$CONSUMER_ACK, pending=0)"
+          elif [ "$LAST_SEQ" != "0" ] && [ "$CONSUMER_ACK" != "0" ]; then
+            echo "JETSTREAM=WARN (last_seq=$LAST_SEQ, consumer_ack=$CONSUMER_ACK, pending=$NUM_PENDING, ack_pending=$NUM_ACK_PENDING)"
+          else
+            echo "JETSTREAM=FAIL (no JetStream consumer progress)"
+          fi
+          ;;
+      esac
     else
-      echo "JETSTREAM=FAIL (no JetStream consumer progress)"
+      echo "JETSTREAM=UNVERIFIABLE (exec produced malformed output)"
     fi
   else
     echo "JETSTREAM=UNVERIFIABLE (iot-ingest exec failed)"
@@ -254,14 +300,35 @@ fi
 
 ### Phase 4c: Aggregate LoRa Result
 
-Combine the results from Phase 4a (production server logs) and Phase 4b (JetStream health):
+Combine the results from Phase 4a (production server logs) and Phase 4b (JetStream health).
 
-- If `LORA_PROD=PASS` AND `JETSTREAM=PASS` → **✅ PASS**
-- If `LORA_PROD=PASS` AND `JETSTREAM=WARN` → **✅ PASS with warning** (traffic flowing, consumer catching up)
-- If `LORA_PROD=FAIL` OR `JETSTREAM=FAIL` → **❌ FAIL** (loud — stop the workflow)
-- If both `UNVERIFIABLE` → **⚠️ UNVERIFIABLE** (loud skip — cluster unreachable or kubectl missing)
+> **Note**: Phase 4a and Phase 4b are independent pipeline-liveness proxies.
+> 4a confirms an uplink reached the server; 4b confirms JetStream retention
+> and consumer catch-up. They do not prove the *same* message traversed every
+> hop; taken together they establish pipeline liveness.
 
-Record the aggregated result. FAIL must stop the workflow — the same "no PR may be created with a red hardware gate" rule from Phase 3 applies.
+Aggregation precedence (highest first — every input pair maps to exactly one outcome):
+
+1. If `LORA_PROD=FAIL` OR `JETSTREAM=FAIL` → **❌ FAIL** (loud — stop the workflow)
+2. Else if `LORA_PROD=UNVERIFIABLE` OR `JETSTREAM=UNVERIFIABLE` → **⚠️ UNVERIFIABLE** (partial evidence — no red gate, but visible loud skip)
+3. Else if `LORA_PROD=PASS` AND `JETSTREAM=WARN` → **✅ PASS with warning** (traffic flowing, consumer catching up)
+4. Else if `LORA_PROD=PASS` AND `JETSTREAM=PASS` → **✅ PASS**
+5. (Defensive default for any unforeseen combination) → **⚠️ UNVERIFIABLE**
+
+Emit the aggregate as a machine-readable line and record it:
+
+```bash
+case "${LORA_PROD%% *}:${JETSTREAM%% *}" in
+  FAIL:*|*:FAIL)               LORA_FINAL=FAIL ;;
+  UNVERIFIABLE:*|*:UNVERIFIABLE) LORA_FINAL=UNVERIFIABLE ;;
+  PASS:WARN)                    LORA_FINAL=PASS ;;
+  PASS:PASS)                    LORA_FINAL=PASS ;;
+  *)                            LORA_FINAL=UNVERIFIABLE ;;
+esac
+echo "LORA_FINAL=$LORA_FINAL"
+```
+
+FAIL must stop the workflow — the same "no PR may be created with a red hardware gate" rule from Phase 3 applies.
 
 ---
 

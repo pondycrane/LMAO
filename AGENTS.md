@@ -19,10 +19,12 @@ bazel test //tests:test_cardputer_e2e --test_output=all
 bazel test //tests:test_cardputer_lora_e2e --test_output=all
 ```
 
-Tests auto-skip when the required hardware is not detected. Note: since
-issue #93 the RNode lives on the K8s node tp4, so the LoRa E2E skips on the
-dev machine — production LoRa traffic (Cardputer → pod → NATS → DuckDB)
-serves as the live verification instead.
+Tests auto-skip only when no hardware is detected. Since issue #93 the RNode
+lives on the K8s node tp4, so on a dev machine with only the Cardputer
+attached the gate does NOT skip: it actively verifies the production LoRa path
+(Cardputer → pod → NATS → DuckDB) via the server log and the JetStream
+`iot-ingest` consumer health, recording PASS / FAIL / UNVERIFIABLE. See
+`.archon/commands/lmao-hardware-e2e.md` (Phases 4a-4c) for the exact checks.
 
 ### Humidity Sensor E2E Validation
 
