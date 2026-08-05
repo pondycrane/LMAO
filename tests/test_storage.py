@@ -122,8 +122,8 @@ class TestDuckDbStoreInit:
         assert store._conn is not None
         assert store._db_path == "/tmp/test.db"
 
-        # Should have executed CREATE TABLE
-        assert mock_conn.execute.call_count >= 1
+        # Should have executed CREATE TABLE for all 3 registered tables
+        assert mock_conn.execute.call_count >= 3
 
     def test_initialize_idempotent_same_path(self, mock_duckdb_module):
         """Calling initialize() twice with the same path should be a no-op."""
@@ -245,6 +245,7 @@ class TestDuckDbStoreWrite:
 
         # Build a mock LMAOEnvelope with sensor data
         mock_envelope = MagicMock()
+        mock_envelope.WhichOneof = MagicMock(return_value="sensor")
         mock_envelope.sensor.node_id = "node-7"
         mock_envelope.sensor.seq = 42
         mock_envelope.sensor.battery = 3.7
@@ -298,6 +299,7 @@ class TestDuckDbStoreWrite:
 
         # Make ParseFromString raise
         mock_envelope = MagicMock()
+        mock_envelope.WhichOneof = MagicMock(return_value="sensor")
         mock_envelope.ParseFromString.side_effect = Exception("invalid protobuf")
 
         with patch("lma_core.LMAOEnvelope", return_value=mock_envelope):
@@ -310,6 +312,7 @@ class TestDuckDbStoreWrite:
         store, (duckdb_mod, mock_conn) = initialized_store
 
         mock_envelope = MagicMock()
+        mock_envelope.WhichOneof = MagicMock(return_value="sensor")
         mock_envelope.sensor.node_id = "empty-node"
         mock_envelope.sensor.seq = 1
         mock_envelope.sensor.battery = 4.0
@@ -372,3 +375,249 @@ class TestDuckDbStoreQuery:
         store = DuckDbStore(name="test-no-init-query")
         with pytest.raises(RuntimeError, match="not initialized"):
             await store.query("SELECT 1")
+
+
+class TestSchemaRegistry:
+    """Schema registry and multi-table DDL tests."""
+
+    def test_all_registry_tables_created(self, mock_duckdb_module):
+        """initialize() should execute DDL for all three registry entries."""
+        from lma_core.storage import DuckDbStore
+
+        _, mock_conn = mock_duckdb_module
+        store = DuckDbStore(name="test-registry")
+        store.initialize("/tmp/test.db")
+
+        # execute() is called for each registry entry DDL
+        # (3 tables: sensor_readings, text_messages, command_acks)
+        assert mock_conn.execute.call_count >= 3
+
+        # Verify each CREATE TABLE was called with "IF NOT EXISTS"
+        all_calls = [args[0][0] for args in mock_conn.execute.call_args_list]
+        assert any("sensor_readings" in c for c in all_calls)
+        assert any("text_messages" in c for c in all_calls)
+        assert any("command_acks" in c for c in all_calls)
+
+    def test_initialize_creates_text_messages_table(self, mock_duckdb_module):
+        """initialize() should create the text_messages table."""
+        from lma_core.storage import DuckDbStore
+
+        _, mock_conn = mock_duckdb_module
+        store = DuckDbStore(name="test-text-ddl")
+        store.initialize("/tmp/test.db")
+
+        all_calls = [args[0][0] for args in mock_conn.execute.call_args_list]
+        text_ddl = next(c for c in all_calls if "text_messages" in c)
+        assert "CREATE TABLE IF NOT EXISTS" in text_ddl
+        assert "node_id" in text_ddl
+        assert "content" in text_ddl
+        assert "timestamp_ms" in text_ddl
+
+    def test_initialize_creates_command_acks_table(self, mock_duckdb_module):
+        """initialize() should create the command_acks table."""
+        from lma_core.storage import DuckDbStore
+
+        _, mock_conn = mock_duckdb_module
+        store = DuckDbStore(name="test-ack-ddl")
+        store.initialize("/tmp/test.db")
+
+        all_calls = [args[0][0] for args in mock_conn.execute.call_args_list]
+        ack_ddl = next(c for c in all_calls if "command_acks" in c)
+        assert "CREATE TABLE IF NOT EXISTS" in ack_ddl
+        assert "cmd_id" in ack_ddl
+        assert "node_id" in ack_ddl
+        assert "success" in ack_ddl
+        assert "msg" in ack_ddl
+
+
+class TestStoreEnvelope:
+    """store_envelope dispatch tests."""
+
+    @pytest.mark.asyncio
+    async def test_store_envelope_dispatches_sensor(self, initialized_store):
+        """store_envelope() with sensor payload should insert into sensor_readings."""
+        store, (duckdb_mod, mock_conn) = initialized_store
+
+        mock_envelope = MagicMock()
+        mock_envelope.WhichOneof = MagicMock(return_value="sensor")
+        mock_envelope.sensor.node_id = "node-7"
+        mock_envelope.sensor.seq = 42
+        mock_envelope.sensor.battery = 3.7
+
+        reading = MagicMock()
+        reading.sensor_id = 1
+        reading.value = 22.5
+        reading.unit = "C"
+        reading.timestamp_ms = 1700000000000
+        mock_envelope.sensor.readings = [reading]
+
+        mock_conn.executemany.reset_mock()
+
+        with patch("lma_core.LMAOEnvelope", return_value=mock_envelope):
+            await store.store_envelope(b"valid_bytes")
+
+        mock_conn.executemany.assert_called_once()
+        sql, rows = mock_conn.executemany.call_args[0]
+        assert "INSERT INTO sensor_readings" in sql
+        assert len(rows) == 1
+        assert rows[0][0] == "node-7"
+        assert rows[0][1] == 42
+        assert rows[0][3] == 1
+        assert rows[0][4] == 22.5
+        assert rows[0][5] == "C"
+
+    @pytest.mark.asyncio
+    async def test_store_envelope_dispatches_text(self, initialized_store):
+        """store_envelope() with text payload should insert into text_messages."""
+        store, (duckdb_mod, mock_conn) = initialized_store
+
+        mock_envelope = MagicMock()
+        mock_envelope.WhichOneof = MagicMock(return_value="text")
+        mock_envelope.text.node_id = "node-a"
+        mock_envelope.text.content = "Hello world"
+        mock_envelope.text.timestamp = 1700000000500  # proto field name
+
+        mock_conn.executemany.reset_mock()
+
+        with patch("lma_core.LMAOEnvelope", return_value=mock_envelope):
+            await store.store_envelope(b"valid_bytes")
+
+        mock_conn.executemany.assert_called_once()
+        sql, rows = mock_conn.executemany.call_args[0]
+        assert "INSERT INTO text_messages" in sql
+        assert len(rows) == 1
+        assert rows[0][0] == "node-a"
+        assert rows[0][1] == "Hello world"
+        assert rows[0][2] == 1700000000500  # stored as timestamp_ms
+
+    @pytest.mark.asyncio
+    async def test_store_envelope_dispatches_ack(self, initialized_store):
+        """store_envelope() with ack payload should insert into command_acks."""
+        store, (duckdb_mod, mock_conn) = initialized_store
+
+        mock_envelope = MagicMock()
+        mock_envelope.WhichOneof = MagicMock(return_value="ack")
+        mock_envelope.ack.cmd_id = "cmd-123"
+        mock_envelope.ack.node_id = "node-b"
+        mock_envelope.ack.success = True
+        mock_envelope.ack.message = "All good"  # proto field name
+
+        mock_conn.executemany.reset_mock()
+
+        with patch("lma_core.LMAOEnvelope", return_value=mock_envelope):
+            await store.store_envelope(b"valid_bytes")
+
+        mock_conn.executemany.assert_called_once()
+        sql, rows = mock_conn.executemany.call_args[0]
+        assert "INSERT INTO command_acks" in sql
+        assert len(rows) == 1
+        assert rows[0][0] == "cmd-123"
+        assert rows[0][1] == "node-b"
+        assert rows[0][2] is True
+        assert rows[0][3] == "All good"  # stored as msg
+
+    @pytest.mark.asyncio
+    async def test_store_envelope_unknown_oneof_noop(self, initialized_store):
+        """store_envelope() with an unknown oneof type should be a silent no-op."""
+        store, (duckdb_mod, mock_conn) = initialized_store
+
+        mock_envelope = MagicMock()
+        mock_envelope.WhichOneof = MagicMock(return_value="audio")
+        mock_conn.executemany.reset_mock()
+
+        with patch("lma_core.LMAOEnvelope", return_value=mock_envelope):
+            await store.store_envelope(b"valid_bytes")
+
+        # Should NOT have called executemany for an unregistered type
+        mock_conn.executemany.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_store_envelope_none_payload_noop(self, initialized_store):
+        """store_envelope() with no payload set should be a silent no-op."""
+        store, (duckdb_mod, mock_conn) = initialized_store
+
+        mock_envelope = MagicMock()
+        mock_envelope.WhichOneof = MagicMock(return_value=None)
+        mock_conn.executemany.reset_mock()
+
+        with patch("lma_core.LMAOEnvelope", return_value=mock_envelope):
+            await store.store_envelope(b"valid_bytes")
+
+        mock_conn.executemany.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_store_envelope_before_init_raises(self, mock_duckdb_module):
+        """store_envelope() before initialize() should raise RuntimeError."""
+        from lma_core.storage import DuckDbStore
+
+        store = DuckDbStore(name="test-no-init-env")
+        with pytest.raises(RuntimeError, match="not initialized"):
+            await store.store_envelope(b"fake")
+
+    @pytest.mark.asyncio
+    async def test_store_envelope_handles_parse_error(self, initialized_store):
+        """store_envelope() should log a warning and raise on parse failure."""
+        store, _ = initialized_store
+
+        mock_envelope = MagicMock()
+        mock_envelope.ParseFromString.side_effect = Exception("invalid protobuf")
+
+        with patch("lma_core.LMAOEnvelope", return_value=mock_envelope):
+            with pytest.raises(Exception, match="invalid protobuf"):
+                await store.store_envelope(b"garbage")
+
+
+class TestBackwardCompat:
+    """Backward-compatibility tests for store_sensor_report."""
+
+    @pytest.mark.asyncio
+    async def test_store_sensor_report_delegates_to_store_envelope(self, initialized_store):
+        """store_sensor_report() should delegate to store_envelope()."""
+        store, (duckdb_mod, mock_conn) = initialized_store
+
+        mock_envelope = MagicMock()
+        mock_envelope.WhichOneof = MagicMock(return_value="sensor")
+        mock_envelope.sensor.node_id = "node-legacy"
+        mock_envelope.sensor.seq = 1
+        mock_envelope.sensor.battery = 4.0
+
+        reading = MagicMock()
+        reading.sensor_id = 1
+        reading.value = 20.0
+        reading.unit = "C"
+        reading.timestamp_ms = 1700000000000
+        mock_envelope.sensor.readings = [reading]
+
+        mock_conn.executemany.reset_mock()
+
+        with patch("lma_core.LMAOEnvelope", return_value=mock_envelope):
+            await store.store_sensor_report(b"legacy_bytes")
+
+        mock_conn.executemany.assert_called_once()
+        sql, rows = mock_conn.executemany.call_args[0]
+        assert "INSERT INTO sensor_readings" in sql
+        assert len(rows) == 1
+        assert rows[0][0] == "node-legacy"
+
+
+class TestGetConnection:
+    """get_connection() tests."""
+
+    def test_get_connection_returns_conn(self, mock_duckdb_module):
+        """get_connection() should return the raw DuckDB connection."""
+        from lma_core.storage import DuckDbStore
+
+        _, mock_conn = mock_duckdb_module
+        store = DuckDbStore(name="test-getconn")
+        store.initialize("/tmp/test.db")
+
+        conn = store.get_connection()
+        assert conn is mock_conn
+
+    def test_get_connection_before_init_raises(self, mock_duckdb_module):
+        """get_connection() before initialize() should raise RuntimeError."""
+        from lma_core.storage import DuckDbStore
+
+        store = DuckDbStore(name="test-getconn-noinit")
+        with pytest.raises(RuntimeError, match="not initialized"):
+            store.get_connection()

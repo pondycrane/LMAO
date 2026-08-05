@@ -890,19 +890,19 @@ class TestConsumerStoreAndAck:
     """Tests for _store_and_ack callback."""
 
     @pytest.mark.asyncio
-    async def test_store_and_ack_calls_store_sensor_report(self):
-        """_store_and_ack should call store.store_sensor_report with message data."""
+    async def test_store_and_ack_calls_store_envelope(self):
+        """_store_and_ack should call store.store_envelope with message data."""
         consumer = _load_iot_ingest_consumer()
 
         mock_store = MagicMock()
-        mock_store.store_sensor_report = AsyncMock()
+        mock_store.store_envelope = AsyncMock()
 
         mock_msg = MagicMock()
         mock_msg.data = b"test_payload"
 
         await consumer._store_and_ack(mock_msg, mock_store)
 
-        mock_store.store_sensor_report.assert_called_once_with(b"test_payload")
+        mock_store.store_envelope.assert_called_once_with(b"test_payload")
 
     @pytest.mark.asyncio
     async def test_store_and_ack_raises_on_failure(self):
@@ -910,7 +910,7 @@ class TestConsumerStoreAndAck:
         consumer = _load_iot_ingest_consumer()
 
         mock_store = MagicMock()
-        mock_store.store_sensor_report = AsyncMock(side_effect=RuntimeError("store failed"))
+        mock_store.store_envelope = AsyncMock(side_effect=RuntimeError("store failed"))
 
         mock_msg = MagicMock()
         mock_msg.data = b"bad_data"

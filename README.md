@@ -478,6 +478,9 @@ when running in Docker):
 | `LMAO_MQTT_HOST` | `localhost` | MQTT broker hostname (IoT ingest) |
 | `LMAO_MQTT_PORT` | `1883` | MQTT broker port |
 | `LMAO_INGEST_DUCKDB_PATH` | `/data/sensors.db` | DuckDB file path (IoT ingest) |
+| `QUERY_PORT` | `8080` | HTTP query API listen port (in-cluster) |
+| `QUERY_MAX_ROWS` | `1000` | Max rows returned by `POST /query` |
+| `QUERY_TIMEOUT` | `10` | Per-query statement timeout in seconds |
 
 ### 10. NATS JetStream — In-Cluster Durable Queueing
 
@@ -667,6 +670,62 @@ before force-killing.
 > ```bash
 > bazel run //tools:install_all -- --include-services --skip-iot-ingest
 > ```
+
+## Querying stored data
+
+The `iot-ingest-consumer` pod exposes an HTTP query API on port 8080.
+Access it via `kubectl port-forward`:
+
+```bash
+kubectl port-forward svc/iot-query 8080:8080
+```
+
+### Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/query` | Execute a read-only SQL query (SELECT/WITH/EXPLAIN/SHOW/DESCRIBE only) |
+| `GET`  | `/tables` | List all tables with row counts |
+| `GET`  | `/schema/<table>` | List columns (name, type) for a table |
+| `GET`  | `/healthz` | Health check for K8s probes |
+
+### Examples
+
+```bash
+# Query recent sensor readings
+curl -s -X POST localhost:8080/query \
+  -H "Content-Type: application/json" \
+  -d '{"sql": "SELECT node_id, value, unit, timestamp_ms FROM sensor_readings ORDER BY timestamp_ms DESC LIMIT 5"}' | python -m json.tool
+
+# See response format:
+# {
+#   "columns": ["node_id", "value", "unit", "timestamp_ms"],
+#   "rows": [["a1b2c3...", 22.5, "C", 1700000000000], ...],
+#   "row_count": 5
+# }
+
+# List all tables
+curl -s localhost:8080/tables | python -m json.tool
+
+# Get schema for a table
+curl -s localhost:8080/schema/text_messages | python -m json.tool
+```
+
+### Registered tables
+
+| Table | Message Type | Proto Field | Description |
+|-------|-------------|-------------|-------------|
+| `sensor_readings` | SensorReport | sensor (10) | Temperature, humidity, and other sensor readings |
+| `text_messages` | TextMessage | text (20) | Human-to-human LoRa text messages |
+| `command_acks` | CommandAck | ack (12) | Command acknowledgment status |
+
+### Caveats
+
+- **Read-only only**: INSERT, UPDATE, DELETE, DROP, ATTACH, COPY, EXPORT, INSTALL, LOAD, and multi-statement queries are rejected.
+- **No authentication**: In-cluster only, same trust model as the NATS server. Do not expose port 8080 outside the cluster.
+- **Row cap**: Default 1000 rows per query (configurable via `QUERY_MAX_ROWS` env var).
+- **Statement timeout**: 10s default (configurable via `QUERY_TIMEOUT`), enforced at the HTTP request level.
+- **DuckDB cursors**: Each query creates a fresh cursor from the shared connection — reads do not block writes.
 
 #### Architecture notes
 
@@ -877,6 +936,7 @@ The registry is configured via environment variables:
 │   ├── __init__.py                    # Re-exports generated protobuf stubs
 │   ├── config_utils.py                # RNode port resolution + INI generation helpers
 │   ├── message_utils.py               # Shared LXMF message decoding (decode_lmao_message)
+│   ├── query_api.py                   # Embedded HTTP query API (aiohttp) + SQL guard
 │   ├── queue.py                       # Async NATS JetStream wrapper (NatsQueue)
 │   ├── storage.py                     # Async DuckDB persistent store (DuckDbStore)
 │   └── rns_di.py                      # RNS/LXMF dependency-injection wrapper for testability
@@ -921,6 +981,7 @@ The registry is configured via environment variables:
 │   ├── test_lma_core.py               # lma_core import error handling + exports
 │   ├── test_lma_encoder.py            # Encoder round-trip + cross-validation tests
 │   ├── test_queue.py                  # NatsQueue unit tests (mocked nats-py)
+│   ├── test_query_api.py              # SQL guard + query API endpoint tests
 │   ├── test_storage.py               # DuckDbStore unit tests (mocked duckdb)
 │   ├── test_server_handler.py         # Server handler unit tests (mocked RNS/LXMF)
 │   ├── test_server_startup.py         # Server startup lifecycle + async entry point tests
