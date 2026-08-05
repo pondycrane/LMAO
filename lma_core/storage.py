@@ -59,7 +59,7 @@ except ImportError as exc:
 
 
 # ---------------------------------------------------------------------------
-# Schema
+# Schema registry — maps protobuf oneof field number to table metadata
 # ---------------------------------------------------------------------------
 
 _CREATE_SENSOR_READINGS_TABLE = """
@@ -75,6 +75,69 @@ CREATE TABLE IF NOT EXISTS sensor_readings (
 );
 """
 
+_CREATE_TEXT_MESSAGES_TABLE = """
+CREATE TABLE IF NOT EXISTS text_messages (
+    node_id TEXT NOT NULL,
+    content TEXT,
+    timestamp_ms BIGINT,
+    ingested_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+"""
+
+_CREATE_COMMAND_ACKS_TABLE = """
+CREATE TABLE IF NOT EXISTS command_acks (
+    cmd_id TEXT NOT NULL,
+    node_id TEXT NOT NULL,
+    success BOOLEAN,
+    msg TEXT,
+    ingested_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+"""
+
+_INSERT_SENSOR_READINGS = (
+    "INSERT INTO sensor_readings "
+    "(node_id, seq, battery, sensor_id, value, unit, timestamp_ms) "
+    "VALUES (?, ?, ?, ?, ?, ?, ?)"
+)
+
+_INSERT_TEXT_MESSAGES = (
+    "INSERT INTO text_messages (node_id, content, timestamp_ms) VALUES (?, ?, ?)"
+)
+
+_INSERT_COMMAND_ACKS = (
+    "INSERT INTO command_acks (cmd_id, node_id, success, msg) VALUES (?, ?, ?, ?)"
+)
+
+# Registry keyed by protobuf field number (matches envelope.WhichOneof results via
+# reverse lookup in _ONEOF_NAME_TO_FIELD).
+_SCHEMA_REGISTRY: dict[int, dict[str, Any]] = {
+    10: {  # sensor
+        "table": "sensor_readings",
+        "ddl": _CREATE_SENSOR_READINGS_TABLE,
+        "insert_sql": _INSERT_SENSOR_READINGS,
+        "extract": "_extract_sensor_rows",
+    },
+    20: {  # text
+        "table": "text_messages",
+        "ddl": _CREATE_TEXT_MESSAGES_TABLE,
+        "insert_sql": _INSERT_TEXT_MESSAGES,
+        "extract": "_extract_text_rows",
+    },
+    12: {  # ack
+        "table": "command_acks",
+        "ddl": _CREATE_COMMAND_ACKS_TABLE,
+        "insert_sql": _INSERT_COMMAND_ACKS,
+        "extract": "_extract_ack_rows",
+    },
+}
+
+# Reverse mapping from WhichOneof("payload") string to field number.
+_ONEOF_NAME_TO_FIELD: dict[str, int] = {
+    "sensor": 10,
+    "text": 20,
+    "ack": 12,
+}
+
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -82,18 +145,23 @@ CREATE TABLE IF NOT EXISTS sensor_readings (
 
 
 class DuckDbStore:
-    """Async-safe DuckDB persistent store for IoT sensor readings.
+    """Async-safe DuckDB persistent store for IoT messages.
 
     Encapsulates a DuckDB database connection with idempotent
     initialization and close.  All database operations are delegated to a
     thread-pool executor so the asyncio event loop is never
     blocked by synchronous DuckDB I/O.
 
+    The store dispatches incoming ``LMAOEnvelope`` messages to
+    multiple tables via ``store_envelope()``.  The schema registry
+    maps protobuf oneof field numbers (10=sensor, 20=text, 12=ack)
+    to registered tables.
+
     Typical usage::
 
         store = DuckDbStore()
         store.initialize("/data/sensors.db")
-        await store.store_sensor_report(envelope_bytes)
+        await store.store_envelope(envelope_bytes)
         rows = await store.query("SELECT count(*) FROM sensor_readings")
         store.close()
 
@@ -160,9 +228,11 @@ class DuckDbStore:
             _logger.critical("Failed to open DuckDB database at %s", db_path, exc_info=True)
             raise
 
-        # Ensure schema exists
+        # Ensure schema exists — iterate the registry so every
+        # registered table is created (CREATE TABLE IF NOT EXISTS).
         try:
-            self._conn.execute(_CREATE_SENSOR_READINGS_TABLE)
+            for entry in _SCHEMA_REGISTRY.values():
+                self._conn.execute(entry["ddl"])
         except Exception:
             _logger.critical(
                 "Failed to create schema in DuckDB database at %s",
@@ -190,14 +260,40 @@ class DuckDbStore:
                 _logger.info("DuckDB store '%s' closed.", self._name)
 
     # ------------------------------------------------------------------
+    # Connection access (for query API)
+    # ------------------------------------------------------------------
+
+    def get_connection(self) -> Any:
+        """Return the raw DuckDB connection.
+
+        Callers should create their own cursors via
+        ``conn.cursor()`` rather than using ``conn.execute()``
+        directly — this avoids serialising on the writer's
+        default cursor.  DuckDB connections and cursors are
+        thread-safe within a single process.
+
+        Returns
+        -------
+            The ``duckdb.DuckDBPyConnection`` instance.
+
+        Raises
+        ------
+        RuntimeError:
+            If ``initialize()`` has not been called.
+        """
+        self._check_initialized()
+        return self._conn
+
+    # ------------------------------------------------------------------
     # Write
     # ------------------------------------------------------------------
 
-    async def store_sensor_report(self, envelope_bytes: bytes) -> None:
-        """Parse a serialized LMAOEnvelope and insert each sensor reading.
+    async def store_envelope(self, envelope_bytes: bytes) -> None:
+        """Parse a serialized LMAOEnvelope and dispatch to the correct table.
 
-        The protobuf parse happens on the calling thread; only the
-        DuckDB INSERT is delegated to the executor.
+        Uses the schema registry to map the protobuf oneof type
+        to a target table.  Unknown or unset oneof types are
+        silently skipped (logged at DEBUG level).
 
         Parameters
         ----------
@@ -229,11 +325,66 @@ class DuckDbStore:
             )
             raise
 
-        sensor = envelope.sensor
-        rows_to_insert: list[tuple] = []
+        oneof_name = envelope.WhichOneof("payload")
+        if oneof_name is None:
+            _logger.debug("Envelope has no payload set — nothing to store")
+            return
 
+        field_num = _ONEOF_NAME_TO_FIELD.get(oneof_name)
+        if field_num is None:
+            _logger.debug("Unknown oneof type '%s' — skipping", oneof_name)
+            return
+
+        entry = _SCHEMA_REGISTRY[field_num]
+        extract_method = getattr(self, entry["extract"])
+        rows_to_insert: list[tuple] = extract_method(envelope)
+
+        if not rows_to_insert:
+            _logger.debug(
+                "No rows to insert for %s envelope — nothing to store",
+                entry["table"],
+            )
+            return
+
+        # ── Execute INSERT in a thread pool ─────────────────────
+        loop = asyncio.get_event_loop()
+
+        def _insert() -> None:
+            self._conn.executemany(entry["insert_sql"], rows_to_insert)
+
+        await loop.run_in_executor(None, _insert)
+
+        _logger.debug(
+            "Stored %d row(s) into %s",
+            len(rows_to_insert),
+            entry["table"],
+        )
+
+    async def store_sensor_report(self, envelope_bytes: bytes) -> None:
+        """Backward-compatible wrapper — delegates to :meth:`store_envelope`.
+
+        Existing callers that only pass SensorReport envelopes do
+        not need to change; the schema registry dispatches to the
+        ``sensor_readings`` table as before.
+
+        Parameters
+        ----------
+        envelope_bytes:
+            Raw protobuf bytes from ``LMAOEnvelope.SerializeToString()``.
+        """
+        await self.store_envelope(envelope_bytes)
+
+    # ------------------------------------------------------------------
+    # Private — row extractors (one per registered message type)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _extract_sensor_rows(envelope: Any) -> list[tuple]:
+        """Extract sensor reading rows from a ``SensorReport`` envelope."""
+        sensor = envelope.sensor
+        rows: list[tuple] = []
         for reading in sensor.readings:
-            rows_to_insert.append(
+            rows.append(
                 (
                     sensor.node_id,
                     sensor.seq,
@@ -244,33 +395,40 @@ class DuckDbStore:
                     reading.timestamp_ms,
                 )
             )
+        return rows
 
-        if not rows_to_insert:
-            _logger.debug(
-                "SensorReport from node '%s' has no readings — nothing to store",
-                sensor.node_id,
+    @staticmethod
+    def _extract_text_rows(envelope: Any) -> list[tuple]:
+        """Extract a text message row from a ``TextMessage`` envelope.
+
+        The proto field is ``timestamp``; we store it as
+        ``timestamp_ms`` in the DB column.
+        """
+        text = envelope.text
+        return [
+            (
+                text.node_id,
+                text.content,
+                text.timestamp,  # proto field → DB column timestamp_ms
             )
-            return
+        ]
 
-        # ── Execute INSERT in a thread pool ─────────────────────
-        loop = asyncio.get_event_loop()
+    @staticmethod
+    def _extract_ack_rows(envelope: Any) -> list[tuple]:
+        """Extract a command-ack row from a ``CommandAck`` envelope.
 
-        def _insert() -> None:
-            self._conn.executemany(
-                "INSERT INTO sensor_readings "
-                "(node_id, seq, battery, sensor_id, value, unit, timestamp_ms) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                rows_to_insert,
+        The proto field is ``message``; we store it as ``msg``
+        in the DB column.
+        """
+        ack = envelope.ack
+        return [
+            (
+                ack.cmd_id,
+                ack.node_id,
+                ack.success,
+                ack.message,  # proto field → DB column msg
             )
-
-        await loop.run_in_executor(None, _insert)
-
-        _logger.debug(
-            "Stored %d reading(s) from node '%s' (seq=%d)",
-            len(rows_to_insert),
-            sensor.node_id,
-            sensor.seq,
-        )
+        ]
 
     # ------------------------------------------------------------------
     # Read
