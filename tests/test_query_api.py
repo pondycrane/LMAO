@@ -276,17 +276,16 @@ class TestQueryEndpoints:
             assert "error" in data
 
     async def test_query_row_cap(self, mock_store):
-        """POST /query should enforce row cap via appended LIMIT."""
+        """POST /query should enforce server-side row cap with truncation."""
         from lma_core.query_api import create_app
         from aiohttp.test_utils import TestClient, TestServer
 
         store, mock_cursor = mock_store
         mock_cursor.description = [("x",)]
-        # Simulate more rows than max_rows — the cap is applied via SQL,
-        # not post-filtering.  We just verify the LIMIT was appended.
-        mock_cursor.fetchall.return_value = [(i,) for i in range(10)]
+        # Simulate more rows than max_rows — the server fetches max_rows+1
+        # then truncates to max_rows.
+        mock_cursor.fetchall.return_value = [(i,) for i in range(6)]  # max_rows=5, so 6 rows
 
-        # Use a small max_rows
         app = create_app(store, max_rows=5)
         async with TestClient(TestServer(app)) as cli:
             resp = await cli.post(
@@ -294,12 +293,13 @@ class TestQueryEndpoints:
                 json={"sql": "SELECT x FROM t"},
             )
             assert resp.status == 200
-            # Verify that the cursor was called with LIMIT 5 appended
-            call_sql = mock_cursor.execute.call_args[0][0]
-            assert "LIMIT 5" in call_sql
+            data = await resp.json()
+            # Result should be truncated to 5 rows
+            assert data["row_count"] == 5
+            assert data["truncated"] is True
 
-    async def test_query_preserves_user_limit(self, mock_store):
-        """POST /query should NOT append LIMIT if user already supplied one."""
+    async def test_query_within_cap_not_truncated(self, mock_store):
+        """POST /query should NOT set truncated when rows <= max_rows."""
         from lma_core.query_api import create_app
         from aiohttp.test_utils import TestClient, TestServer
 
@@ -311,12 +311,11 @@ class TestQueryEndpoints:
         async with TestClient(TestServer(app)) as cli:
             resp = await cli.post(
                 "/query",
-                json={"sql": "SELECT x FROM t LIMIT 3"},
+                json={"sql": "SELECT x FROM t"},
             )
             assert resp.status == 200
-            call_sql = mock_cursor.execute.call_args[0][0]
-            # Should have exactly one LIMIT (user's), not two
-            assert call_sql.count("LIMIT") == 1
+            data = await resp.json()
+            assert data["truncated"] is False
 
     async def test_tables_endpoint(self, mock_store):
         """GET /tables should return list of tables with row counts."""
@@ -345,16 +344,14 @@ class TestQueryEndpoints:
         from aiohttp.test_utils import TestClient, TestServer
 
         store, mock_cursor = mock_store
-        # First query: table existence check
-        # Second query: column list
+        # First query: table existence check (fetchone)
+        # Second query: column list (fetchall) — the only fetchall call in _describe_table
         mock_cursor.fetchone.side_effect = [
             ("sensor_readings",),  # table exists
-            None,  # columns query uses fetchall
+            None,  # columns query uses fetchall, not fetchone
         ]
-        mock_cursor.fetchall.side_effect = [
-            [],  # table list (not used in this test)
-            [("node_id", "VARCHAR"), ("value", "FLOAT")],
-            [],
+        mock_cursor.fetchall.return_value = [
+            ("node_id", "VARCHAR"), ("value", "FLOAT"),
         ]
 
         app = create_app(store)

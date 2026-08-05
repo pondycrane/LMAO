@@ -33,7 +33,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
 from typing import Any
 
 _logger = logging.getLogger(__name__)
@@ -74,8 +73,11 @@ except ImportError as exc:
 # ---------------------------------------------------------------------------
 
 # Statement types accepted by the read-only guard.
+# UNKNOWN is included because sqlparse (0.5.3) returns UNKNOWN for
+# EXPLAIN / SHOW / DESCRIBE / DESC — we accept them only when the
+# token-level blacklist pass (below) confirms no DML/DDL keywords.
 _ACCEPTED_STATEMENT_TYPES: frozenset[str] = frozenset(
-    {"SELECT", "WITH", "EXPLAIN", "SHOW", "DESCRIBE", "DESC"}
+    {"SELECT", "WITH", "EXPLAIN", "SHOW", "DESCRIBE", "DESC", "UNKNOWN"}
 )
 
 # Keywords rejected by the defense-in-depth blacklist scan.
@@ -100,16 +102,6 @@ _BLOCKED_KEYWORDS: list[str] = [
     "REVOKE",
     "PRAGMA",
 ]
-
-# Build a single compiled regex once.
-_BLOCKED_RE = re.compile(
-    r"\b(?:" + "|".join(_BLOCKED_KEYWORDS) + r")\b",
-    re.IGNORECASE,
-)
-
-# Keyword used by DuckDB's own LIMIT clause — we skip appending LIMIT
-# when the user already supplied one.
-_LIMIT_RE = re.compile(r"\bLIMIT\b", re.IGNORECASE)
 
 
 # ---------------------------------------------------------------------------
@@ -138,6 +130,7 @@ def _validate_readonly_sql(sql: str) -> None:
 
     # Parse with sqlparse — handles comments, quoted strings, etc.
     import sqlparse
+    from sqlparse.tokens import Comment, Token
 
     parsed = sqlparse.parse(sql)
     # Filter out empty / whitespace-only statements.
@@ -155,13 +148,24 @@ def _validate_readonly_sql(sql: str) -> None:
     if stmt_type not in _ACCEPTED_STATEMENT_TYPES:
         raise ValueError(f"Statement type '{stmt_type}' is not allowed (read-only only).")
 
-    # Defense-in-depth: scan the normalised (upper) SQL for blocked keywords.
-    # sqlparse's type detection is based on the first keyword; a clever
-    # CTE like ``WITH x AS (UPDATE ...) SELECT * FROM x`` could bypass
-    # that, so we also blacklist dangerous keywords anywhere in the SQL.
-    upper_sql = stripped.upper()
-    if _BLOCKED_RE.search(upper_sql):
-        raise ValueError("Query contains disallowed keywords (INSERT/DROP/CREATE/...).")
+    # Defense-in-depth: scan tokens (not raw text) for blocked DML/DDL
+    # keywords.  Walking the flattened token stream lets us skip keywords
+    # that appear inside comments or string literals — the raw-text regex
+    # scan used previously would over-reject legitimate SELECTs whose
+    # literals merely mention a blocked word.
+    blocked_set: frozenset[str] = frozenset(k.upper() for k in _BLOCKED_KEYWORDS)
+    _string_types = (Token.Literal.String, Token.Literal.String.Single)
+    for token in stmt.flatten():
+        ttype = token.ttype
+        # Skip tokens inside comments and string literals.
+        if ttype is Comment or ttype in _string_types:
+            continue
+        word = token.value.upper().strip()
+        if word in blocked_set:
+            raise ValueError(
+                "Query contains disallowed keywords"
+                " (INSERT/DROP/CREATE/...)."
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -230,10 +234,9 @@ def create_app(
         except RuntimeError as exc:
             return aiohttp.web.json_response({"error": str(exc)}, status=500)
 
-        # Append LIMIT if user didn't supply one
-        sql_final = sql_raw
-        if not _LIMIT_RE.search(sql_raw):
-            sql_final = f"{sql_raw.rstrip(';').rstrip()} LIMIT {max_rows}"
+        # Strip trailing semicolons / whitespace so the appended LIMIT
+        # clause is valid syntax.
+        sql_stripped = sql_raw.rstrip("; \t\r\n")
 
         # Run query in executor with its own cursor
         loop = asyncio.get_event_loop()
@@ -242,13 +245,21 @@ def create_app(
             conn = store.get_connection()
             cursor = conn.cursor()
             try:
-                cursor.execute(sql_final)
+                # Server-side authoritative row cap: always bound the DB
+                # work with LIMIT max_rows+1 so we can detect over-cap and
+                # truncate in application code.  This closes the bypass
+                # where a user-supplied LIMIT larger than max_rows was
+                # silently honored.
+                cursor.execute(f"{sql_stripped} LIMIT {max_rows + 1}")
                 rows = cursor.fetchall()
+                over_cap = len(rows) > max_rows
+                rows = rows[:max_rows]
                 cols = [desc[0] for desc in (cursor.description or [])]
                 return {
                     "columns": cols,
                     "rows": [list(row) for row in rows],
                     "row_count": len(rows),
+                    "truncated": over_cap,
                 }
             finally:
                 cursor.close()
@@ -258,12 +269,33 @@ def create_app(
                 loop.run_in_executor(None, _run_query),
                 timeout=query_timeout,
             )
-            return aiohttp.web.json_response(result)
+            try:
+                return aiohttp.web.json_response(result)
+            except (TypeError, ValueError) as exc:
+                _logger.warning("Query result not JSON-serializable: %s", exc, exc_info=True)
+                return aiohttp.web.json_response(
+                    {"error": "Query produced a non-JSON-serializable result."}, status=500
+                )
         except asyncio.TimeoutError:
+            # NOTE (POC): the executor thread may still be running the query
+            # on the shared connection.  Keep query_timeout low and cap rows
+            # so abandoned work is bounded.
+            _logger.warning("Query timed out after %.1fs: %s", query_timeout, sql_stripped)
             return aiohttp.web.json_response({"error": "Query timed out."}, status=504)
         except Exception as exc:
-            _logger.warning("Query failed: %s", exc)
-            return aiohttp.web.json_response({"error": str(exc)}, status=400)
+            # Distinguish user SQL errors (400) from infrastructure failures (500).
+            # duckdb.Error covers syntax, type errors, missing tables etc.
+            # ValueError covers guard rejections (re-raised from _run_query).
+            try:
+                import duckdb
+
+                if isinstance(exc, duckdb.Error):
+                    _logger.info("User SQL rejected: %s", exc)
+                    return aiohttp.web.json_response({"error": "Invalid SQL query."}, status=400)
+            except ImportError:
+                pass
+            _logger.exception("Internal query failure")
+            return aiohttp.web.json_response({"error": "Internal query error."}, status=500)
 
     # ------------------------------------------------------------------
     # GET /tables

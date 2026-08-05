@@ -124,13 +124,18 @@ async def main(shutdown_event: asyncio.Event | None = None) -> None:
         # Start HTTP query API server alongside the NATS subscribe loop.
         # This is non-fatal: if aiohttp is missing or startup fails we
         # log a warning and continue without the query API.
+        #
+        # QUERY_* env vars are parsed before the fail-soft block so a
+        # config typo (e.g. QUERY_PORT=notanumber) produces a loud,
+        # actionable error instead of a swallowed warning that leaves
+        # the pod NotReady.
         query_runner = None
+        query_port = int(os.environ.get("QUERY_PORT", "8080"))
+        query_max_rows = int(os.environ.get("QUERY_MAX_ROWS", "1000"))
+        query_timeout = float(os.environ.get("QUERY_TIMEOUT", "10.0"))
         try:
             from lma_core.query_api import start_query_server
 
-            query_port = int(os.environ.get("QUERY_PORT", "8080"))
-            query_max_rows = int(os.environ.get("QUERY_MAX_ROWS", "1000"))
-            query_timeout = float(os.environ.get("QUERY_TIMEOUT", "10.0"))
             query_runner = await start_query_server(
                 store,
                 port=query_port,
@@ -139,8 +144,10 @@ async def main(shutdown_event: asyncio.Event | None = None) -> None:
             )
         except ImportError as exc:
             _logger.warning("Query API not available (missing dependency?): %s", exc)
+        except OSError as exc:
+            _logger.error("Query API port not bindable on %s: %s", query_port, exc)
         except Exception as exc:
-            _logger.warning("Query API failed to start: %s", exc)
+            _logger.error("Query API failed to start, pod will be NotReady: %s", exc, exc_info=True)
 
         # Wait for shutdown signal
         await shutdown_event.wait()

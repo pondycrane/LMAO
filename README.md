@@ -478,6 +478,9 @@ when running in Docker):
 | `LMAO_MQTT_HOST` | `localhost` | MQTT broker hostname (IoT ingest) |
 | `LMAO_MQTT_PORT` | `1883` | MQTT broker port |
 | `LMAO_INGEST_DUCKDB_PATH` | `/data/sensors.db` | DuckDB file path (IoT ingest) |
+| `QUERY_PORT` | `8080` | HTTP query API listen port (in-cluster) |
+| `QUERY_MAX_ROWS` | `1000` | Max rows returned by `POST /query` |
+| `QUERY_TIMEOUT` | `10` | Per-query statement timeout in seconds |
 
 ### 10. NATS JetStream — In-Cluster Durable Queueing
 
