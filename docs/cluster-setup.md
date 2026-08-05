@@ -103,11 +103,21 @@ mirrors:
 The cluster runs a sensor data pipeline as part of the LMAO project (`/home/pondycrane/LMAO`):
 
 1. **NATS JetStream** — Message broker, single node, 1Gi PVC at `/data`, max 1GB file store / 256MB memory store
-2. **iot-ingest-consumer** — Python consumer subscribing to NATS JetStream, persists sensor readings to DuckDB at `/data/sensors.db` on a 1Gi PVC
+2. **iot-ingest-consumer** — Python consumer subscribing to NATS JetStream,
+   persists sensor readings, text messages, and command acknowledgements to
+   DuckDB (`/data/sensors.db`) on a 1Gi PVC; exposes an in-cluster HTTP query
+   API on port 8080 (Service `iot-query`, ClusterIP)
 
-**ConfigMaps:** `iot-ingest-config` (NATS_SERVER, DUCKDB_PATH, CONSUMER_NAME), `iot-ingest-code` (inline Python consumer), `nats-server-config` (JetStream nats.conf), `lma-core` (shared protobuf wrapper)
+**ConfigMaps:** `iot-ingest-config` (NATS_SERVER, DUCKDB_PATH, CONSUMER_NAME,
+QUERY_PORT=8080, QUERY_MAX_ROWS=1000, QUERY_TIMEOUT=10), `iot-ingest-code`
+(inline Python consumer), `nats-server-config` (JetStream nats.conf),
+`lma-core` (shared protobuf wrapper)
 
 The LMAO server runs **in-cluster** as `deployment/lmao-server` (issue #93), pinned to **tp4** where the Heltec ESP32 RNode is attached via USB (`/dev/ttyUSB0`, hostPath + privileged, hostNetwork). The LXMF identity and Reticulum transport state live on the `lmao-server-identity` PVC (`/data/lxmf`, `/data/transport`). A ClusterIP Service resolves `lmao-server.default.svc.cluster.local:50051` to the pod; gRPC is also reachable on the node IP `192.168.0.44:50051`. After an RNode replug or tp4 reboot: `kubectl rollout restart deployment/lmao-server`.
+
+**Querying stored data:** `kubectl port-forward svc/iot-query 8080:8080` then
+use `POST /query`, `GET /tables`, `GET /schema/<table>` (see README
+§"Querying stored data"). Readiness probe is HTTP `GET /healthz` on 8080.
 
 ---
 
@@ -135,7 +145,7 @@ All in `k8s/`:
 | File | Purpose |
 |------|---------|
 | `k8s/nats-server.yaml` | NATS JetStream Deployment + PVC + Service + ConfigMap |
-| `k8s/iot-ingest.yaml` | IoT ingest consumer Deployment + PVC + ConfigMap |
+| `k8s/iot-ingest.yaml` | IoT ingest consumer Deployment + PVC + ConfigMap + HTTP query API (`iot-query` Service, ClusterIP, port 8080) |
 | `k8s/lmao-server.yaml` | In-cluster LMAO server: identity PVC + Deployment (tp4, RNode USB) + ClusterIP Service |
 
 ---

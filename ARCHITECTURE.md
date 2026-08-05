@@ -58,7 +58,9 @@ Interfaces    │  LoRa (RNode) · WiFi (AutoInterface) · TCP/UDP · Serial
 1. Sensor wakes, reads peripherals, builds LXMF message addressed to server's 16-byte hash
 2. Sends over LoRa (or WiFi if available)
 3. Listens 2-15 s for incoming commands, then deep sleeps
-4. Server receives → parses → stores (DuckDB via `DuckDbStore`) → evaluates rules → sends commands if triggered
+4. Server receives → parses → stores (DuckDB via `DuckDbStore`: sensor_readings,
+   text_messages, command_acks) → evaluates rules → sends commands if triggered.
+   The ingest pod also exposes a read-only HTTP query API (port 8080, `Service/iot-query`).
 5. Propagated commands wait on the server's Propagation Node until the target node wakes and collects
 
 **External I2C sensors** (e.g., DHT20 Grove module) are supported via an extensible
