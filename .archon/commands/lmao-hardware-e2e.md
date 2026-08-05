@@ -205,16 +205,11 @@ fi
 ### Phase 4b: JetStream Consumer Health Check
 
 ```bash
-# Mirror the same kubectl-availability + cluster-reachability guards as 4a.
 if ! command -v kubectl >/dev/null 2>&1; then
   echo "JETSTREAM=UNVERIFIABLE (kubectl not found)"
 elif ! kubectl cluster-info >/dev/null 2>&1; then
   echo "JETSTREAM=UNVERIFIABLE (cluster unreachable)"
 else
-  # The iot-ingest-consumer pod already has nats-py and runs on the cluster
-  # network. Use a single kubectl exec to query stream + consumer info.
-  # The Python emits a JSON object with a "status" key (ok | conn_error |
-  # stream_error | consumer_error) so the bash can branch deterministically.
   JS_SCRIPT='
 import asyncio, json, sys
 
@@ -255,27 +250,30 @@ asyncio.run(main())
 '
   JS_INFO=$(kubectl exec deployment/iot-ingest-consumer -- python3 -c "$JS_SCRIPT" 2>/dev/null || echo "")
   if [ -n "$JS_INFO" ]; then
-    # Validate that $JS_INFO is parseable JSON before extracting fields.
-    if echo "$JS_INFO" | python3 -c "import sys,json; json.load(sys.stdin)" 2>/dev/null; then
-      JS_STATUS=$(echo "$JS_INFO" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('status','ok'))" 2>/dev/null)
-      LAST_SEQ=$(echo "$JS_INFO" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('last_seq',0))" 2>/dev/null)
-      CONSUMER_ACK=$(echo "$JS_INFO" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('consumer_ack_floor',0))" 2>/dev/null)
-      NUM_PENDING=$(echo "$JS_INFO" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('consumer_num_pending',-1))" 2>/dev/null)
-      NUM_ACK_PENDING=$(echo "$JS_INFO" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('consumer_num_ack_pending',-1))" 2>/dev/null)
-      echo "JS_LAST_SEQ=$LAST_SEQ"
-      echo "JS_CONSUMER_ACK=$CONSUMER_ACK"
-      echo "JS_NUM_PENDING=$NUM_PENDING"
-      echo "JS_NUM_ACK_PENDING=$NUM_ACK_PENDING"
+    PARSE_SCRIPT='
+import sys, json
+d = json.load(sys.stdin)
+status = d.get("status", "ok")
+print(f"export JS_STATUS={status}")
+print(f"export LAST_SEQ={d.get("last_seq", 0)}")
+print(f"export CONSUMER_ACK={d.get("consumer_ack_floor", 0)}")
+print(f"export NUM_PENDING={d.get("consumer_num_pending", -1)}")
+print(f"export NUM_ACK_PENDING={d.get("consumer_num_ack_pending", -1)}")
+err = d.get("error") or d.get("stream_error") or d.get("consumer_error") or ""
+print(f"export JS_ERROR={err}")
+'
+    if JS_ENV=$(echo "$JS_INFO" | python3 -c "$PARSE_SCRIPT" 2>/dev/null); then
+      eval "$JS_ENV"
 
       case "$JS_STATUS" in
         conn_error)
-          echo "JETSTREAM=FAIL (NATS unreachable: $(echo "$JS_INFO" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('error','unknown'))" 2>/dev/null))"
+          echo "JETSTREAM=FAIL (NATS unreachable: $JS_ERROR)"
           ;;
         stream_error)
-          echo "JETSTREAM=UNVERIFIABLE (stream query error: $(echo "$JS_INFO" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('stream_error','unknown'))" 2>/dev/null))"
+          echo "JETSTREAM=UNVERIFIABLE (stream query error: $JS_ERROR)"
           ;;
         consumer_error)
-          echo "JETSTREAM=UNVERIFIABLE (consumer query error: $(echo "$JS_INFO" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('consumer_error','unknown'))" 2>/dev/null))"
+          echo "JETSTREAM=UNVERIFIABLE (consumer query error: $JS_ERROR)"
           ;;
         *)
           if [ "$LAST_SEQ" != "0" ] && [ "$CONSUMER_ACK" != "0" ] && [ "$LAST_SEQ" = "$CONSUMER_ACK" ] && [ "$NUM_PENDING" = "0" ] && [ "$NUM_ACK_PENDING" = "0" ]; then
