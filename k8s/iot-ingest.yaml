@@ -51,7 +51,26 @@ data:
   NATS_SERVER: "nats://nats-server.default.svc.cluster.local:4222"
   DUCKDB_PATH: "/data/sensors.db"
   CONSUMER_NAME: "iot-ingest"
+  QUERY_PORT: "8080"
+  QUERY_MAX_ROWS: "1000"
+  QUERY_TIMEOUT: "10"
 
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: iot-query
+  namespace: default
+  labels:
+    app: iot-ingest-consumer
+spec:
+  type: ClusterIP
+  selector:
+    app: iot-ingest-consumer
+  ports:
+    - name: query
+      port: 8080
+      targetPort: 8080
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -80,6 +99,8 @@ spec:
         - name: consumer
           image: 192.168.0.36:5000/lmao-iot-ingest:latest
           imagePullPolicy: Always
+          ports:
+            - containerPort: 8080
           envFrom:
             - configMapRef:
                 name: iot-ingest-config
@@ -92,7 +113,7 @@ spec:
               memory: 64Mi
             limits:
               cpu: 200m
-              memory: 256Mi
+              memory: 384Mi
           livenessProbe:
             exec:
               command:
@@ -102,16 +123,12 @@ spec:
             initialDelaySeconds: 15
             periodSeconds: 30
           readinessProbe:
-            exec:
-              command:
-                - python3
-                - -c
-                - "import lma_core.queue, lma_core.storage; print('ready')"
-            initialDelaySeconds: 5
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 10
             periodSeconds: 10
-            # Importing duckdb takes ~4s on ARM — 2s times out every probe
-            # and the rollout never completes.
-            timeoutSeconds: 10
+            timeoutSeconds: 5
       volumes:
         - name: duckdb-data
           persistentVolumeClaim:

@@ -8,6 +8,7 @@ py_library(
         "device_detect.py",
         "grpc_types.py",
         "message_utils.py",
+        "query_api.py",
         "queue.py",
         "rns_di.py",
         "rns_init.py",
@@ -15,7 +16,11 @@ py_library(
         "storage.py",
     ],
     visibility = ["//visibility:public"],
-    deps = ["//proto:lma_messages_py_proto"],
+    deps = [
+        "//proto:lma_messages_py_proto",
+        "@lmao_pip//aiohttp",
+        "@lmao_pip//sqlparse",
+    ],
 )
 
 

@@ -6,9 +6,12 @@ It accepts configuration via environment variables and handles
 SIGTERM/SIGINT for graceful shutdown.
 
 Configuration (environment variables):
-    NATS_SERVER    NATS server URL (default: nats://localhost:4222)
-    DUCKDB_PATH    Path to DuckDB database file (default: /data/sensors.db)
-    CONSUMER_NAME  Durable consumer name (default: iot-ingest)
+    NATS_SERVER     NATS server URL (default: nats://localhost:4222)
+    DUCKDB_PATH     Path to DuckDB database file (default: /data/sensors.db)
+    CONSUMER_NAME   Durable consumer name (default: iot-ingest)
+    QUERY_PORT      HTTP query API port (default: 8080)
+    QUERY_MAX_ROWS  Max rows per query (default: 1000)
+    QUERY_TIMEOUT   Query timeout in seconds (default: 10.0)
 
 Usage::
 
@@ -46,7 +49,7 @@ async def _store_and_ack(msg, store):
     On failure, raises to trigger NAK in the subscribe loop so the
     message is redelivered.
     """
-    await store.store_sensor_report(bytes(msg.data))
+    await store.store_envelope(bytes(msg.data))
 
 
 async def main(shutdown_event: asyncio.Event | None = None) -> None:
@@ -118,6 +121,27 @@ async def main(shutdown_event: asyncio.Event | None = None) -> None:
             nq.subscribe("lmao.messages.>", consumer_name, _callback)
         )
 
+        # Start HTTP query API server alongside the NATS subscribe loop.
+        # This is non-fatal: if aiohttp is missing or startup fails we
+        # log a warning and continue without the query API.
+        query_runner = None
+        try:
+            from lma_core.query_api import start_query_server
+
+            query_port = int(os.environ.get("QUERY_PORT", "8080"))
+            query_max_rows = int(os.environ.get("QUERY_MAX_ROWS", "1000"))
+            query_timeout = float(os.environ.get("QUERY_TIMEOUT", "10.0"))
+            query_runner = await start_query_server(
+                store,
+                port=query_port,
+                max_rows=query_max_rows,
+                query_timeout=query_timeout,
+            )
+        except ImportError as exc:
+            _logger.warning("Query API not available (missing dependency?): %s", exc)
+        except Exception as exc:
+            _logger.warning("Query API failed to start: %s", exc)
+
         # Wait for shutdown signal
         await shutdown_event.wait()
 
@@ -125,6 +149,12 @@ async def main(shutdown_event: asyncio.Event | None = None) -> None:
         subscribe_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await subscribe_task
+
+        # Clean up query server before closing the store so in-flight
+        # requests are drained.
+        if query_runner is not None:
+            _logger.info("Shutting down query API...")
+            await query_runner.cleanup()
 
         _logger.info("IoT Ingest Consumer shutting down...")
 
