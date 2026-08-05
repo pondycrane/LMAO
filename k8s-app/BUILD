@@ -9,5 +9,7 @@ py_library(
     deps = [
         "//lma_core",
         "//proto:lma_grpc_py_proto",
+        "@lmao_pip//aiohttp",
+        "@lmao_pip//sqlparse",
     ],
 )

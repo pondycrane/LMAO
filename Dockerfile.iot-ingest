@@ -32,7 +32,9 @@ COPY k8s-app/ k8s-app/
 RUN pip install --no-cache-dir \
     nats-py \
     duckdb \
-    protobuf
+    protobuf \
+    aiohttp \
+    sqlparse
 
 # Set PYTHONPATH so that lma_core and proto are importable
 ENV PYTHONPATH="/app:${PYTHONPATH}"

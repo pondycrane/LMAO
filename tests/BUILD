@@ -390,6 +390,18 @@ py_test(
 )
 
 py_test(
+    name = "test_query_api",
+    srcs = ["test_query_api.py"],
+    deps = [
+        "//lma_core",
+        "@lmao_pip//aiohttp",
+        "@lmao_pip//pytest",
+        "@lmao_pip//pytest_asyncio",
+        "@lmao_pip//sqlparse",
+    ],
+)
+
+py_test(
     name = "test_human_client_config",
     srcs = ["test_human_client_config.py"],
     deps = [
