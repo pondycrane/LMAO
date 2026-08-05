@@ -45,7 +45,9 @@ lmao-validate  →  lmao-hardware-e2e  →  lmao-production-health
      and `//tests:test_cardputer_lora_e2e` (both devices) — never cached results.
    - Results table → `$ARTIFACTS_DIR/hardware-e2e.md` → **included in the PR body**.
    - Hardware absent → **loud skip** written into the artifact and the PR, never
-     a silent pass.
+     a silent pass. When only the Cardputer is attached (RNode on K8s, issue #93),
+     the gate instead actively verifies the production LoRa path (server log +
+     JetStream consumer health) — no skip.
 3. **`lmao-production-health`** — confirms the production Cardputer resumed
    sending `Hello from Cardputer` (via the `lmao-server` journal) before the
    workflow may declare success.
