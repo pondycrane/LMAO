@@ -238,6 +238,19 @@ py_test(
 )
 
 py_test(
+    name = "test_pipeline_monitor",
+    srcs = ["test_pipeline_monitor.py"],
+    data = [
+        "//k8s-app:pipeline_monitor.py",
+    ],
+    deps = [
+        "//lma_core",
+        "@lmao_pip//pytest",
+        "@lmao_pip//pytest_asyncio",
+    ],
+)
+
+py_test(
     name = "test_urns_packet",
     srcs = ["test_urns_packet.py"],
     data = ["//cardputer_client:lib_files"],

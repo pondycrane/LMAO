@@ -234,6 +234,16 @@ class NatsQueue:
     # Stream management
     # ------------------------------------------------------------------
 
+    async def stream_info(self, name: str) -> Any:
+        """Return the JetStream StreamInfo for *name*.
+
+        Used by health monitors to read stream state (e.g. the
+        timestamp of the last published message,
+        ``StreamInfo.state.last_ts``).
+        """
+        self._check_connected()
+        return await self._js.stream_info(name)
+
     async def ensure_stream(
         self,
         name: str,
