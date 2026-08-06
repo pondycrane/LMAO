@@ -4,8 +4,9 @@ the last N hours.
 
 Designed to run as a K8s CronJob.  If the pipeline has been silent
 longer than the configured threshold, the script logs an ERROR and
-exits with code 1 (failing the CronJob).  Optionally publishes an
-alert to a dedicated NATS subject.
+exits with code 1 (failing the CronJob).  It also publishes an alert
+to a dedicated NATS subject (best-effort — delivery failures are
+logged and do not affect the exit code).
 
 This catches the "Cardputer wedged → RNode TX wedged" failure mode
 that caused a 4.5-day unnoticed outage (issue #96).
@@ -98,7 +99,17 @@ async def main() -> None:
 
         # Query stream state — stream_info() returns a StreamInfo whose
         # .state dataclass has last_ts (datetime | None, UTC).
-        stream_info = await nq._js.stream_info(_STREAM_NAME)
+        try:
+            stream_info = await nq.stream_info(_STREAM_NAME)
+        except Exception as exc:
+            _logger.critical(
+                "Could not query stream '%s' on '%s' — "
+                "verify it exists and that iot-ingest has run once: %s",
+                _STREAM_NAME,
+                nats_server,
+                exc,
+            )
+            sys.exit(1)
         last_ts = stream_info.state.last_ts
 
         if last_ts is None:
@@ -116,6 +127,14 @@ async def main() -> None:
             last_ts = last_ts.replace(tzinfo=timezone.utc)
 
         gap = now - last_ts
+        if gap.total_seconds() < 0:
+            _logger.warning(
+                "Monitor clock appears %s seconds behind NATS server time "
+                "(last_ts=%s, now=%s) — gap may be unreliable; check clock sync",
+                abs(gap.total_seconds()),
+                last_ts.isoformat(),
+                now.isoformat(),
+            )
         gap_hours = gap.total_seconds() / 3600.0
 
         if gap_hours > silence_hours:
@@ -178,8 +197,10 @@ async def _maybe_alert(
         await nq.publish(alert_subject, payload)
         _logger.info("Alert published to '%s'", alert_subject)
     except Exception:
-        _logger.warning(
-            "Failed to publish alert to '%s' — alert may not be delivered",
+        _logger.error(
+            "Alert delivery FAILED for subject '%s' — "
+            "silence reported but not published. "
+            "Relying on CronJob exit status for visibility.",
             alert_subject,
             exc_info=True,
         )
