@@ -56,10 +56,15 @@ lmao-validate  →  lmao-hardware-e2e  →  lmao-production-health
 when the full gate chain completes successfully. No other gate node may write
 this marker — doing so causes downstream hardware gates to fast-pass without
 executing (issue #100). Fast-pass in hardware-e2e and production-health also
-requires the gate's own artifact to exist (defense-in-depth). Re-runs after review/simplify phases skip the full chain *only*
-when `HEAD` is unchanged; any new commit forces the full chain again —
+requires the gate's own artifact to exist (defense-in-depth). Re-runs after review/simplify phases skip the full chain *only* when
+`HEAD` is unchanged; any new commit forces the full chain again —
 including reflashing the hardware. This is the direct fix for "the simplify
 phase regressed the e2e test and nothing re-ran it".
+
+PR creation (`lmao-fix-issue.yaml` create-pr node and the `lmao-finalize-pr`
+command it delegates to; also used by `lmao-feature-dev`) requires
+`$ARTIFACTS_DIR/hardware-e2e.md` to exist and aborts before any `git add`
+if it is missing — a hard block against creating a PR with no hardware evidence.
 
 **Run-tree discipline**: every gate command starts with a mandatory
 "locate the run tree" phase — agents must `cd` into the run worktree
@@ -104,7 +109,7 @@ mechanism, so the safety preamble is repeated deliberately):
 | `lmao-self-fix-all` | `archon-self-fix-all` | Bazel validation; runfiles-workaround preservation |
 | `lmao-simplify-changes` | `archon-simplify-changes` | Full unit gate after changes; explicit list of "never simplify away" patterns |
 | `lmao-implement-review-fixes` | `archon-implement-review-fixes` | Bazel validation |
-| `lmao-finalize-pr` | `archon-finalize-pr` | PR body must include the hardware E2E table |
+| `lmao-finalize-pr` | `archon-finalize-pr` | PR body must include the hardware E2E table; blocks PR creation unless `$ARTIFACTS_DIR/hardware-e2e.md` exists |
 | `lmao-sync-pr-with-main` | `archon-sync-pr-with-main` | Bazel validation after rebase |
 
 Also in `.archon/workflows/`: the pi-adapted overrides

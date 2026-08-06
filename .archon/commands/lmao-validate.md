@@ -70,7 +70,8 @@ final gates compared the marker against the main checkout's HEAD).
 
 ```bash
 cd "$WT"
-if [ -f "$ARTIFACTS_DIR/.gate-head" ] && [ "$(cat "$ARTIFACTS_DIR/.gate-head")" = "$(git rev-parse HEAD)" ]; then
+if [ -f "$ARTIFACTS_DIR/.gate-head" ] && [ "$(cat "$ARTIFACTS_DIR/.gate-head")" = "$(git rev-parse HEAD)" ] \
+   && [ -f "$ARTIFACTS_DIR/validation.md" ]; then
   echo "FAST-PASS"
 fi
 ```

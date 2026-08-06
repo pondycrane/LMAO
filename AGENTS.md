@@ -83,6 +83,13 @@ These workflows encode the rules on this page (esptool bans, Bazel BUILD
 completeness, hardware E2E evidence in the PR body, production Cardputer
 left running). See `docs/archon-workflows.md` for the full reference.
 
+**Gate-chain contract**: `$ARTIFACTS_DIR/.gate-head` is written **only** by
+`lmao-production-health` when the full chain completes. No other gate node
+may write it — doing so causes downstream hardware gates to fast-pass
+without running (regression guards: #87, #100). PR creation is blocked
+unless the mandatory `$ARTIFACTS_DIR/hardware-e2e.md` artifact exists.
+Detail in `docs/archon-workflows.md`.
+
 ## Archon GitHub Webhook Relay
 
 A local polling relay lets Archon respond to `@archon` mentions on GitHub

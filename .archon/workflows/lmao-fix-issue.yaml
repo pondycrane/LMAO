@@ -195,7 +195,8 @@ nodes:
 
       ## Instructions
 
-      0. **HARDWARE E2E GATE (MANDATORY — do this before anything else)**:
+      0. <!-- Mirror of the gate in .archon/commands/lmao-finalize-pr.md; update both -->
+         **HARDWARE E2E GATE (MANDATORY — do this before anything else)**:
          ```bash
          if [ ! -f "$ARTIFACTS_DIR/hardware-e2e.md" ]; then
            echo "FATAL: $ARTIFACTS_DIR/hardware-e2e.md does not exist —"

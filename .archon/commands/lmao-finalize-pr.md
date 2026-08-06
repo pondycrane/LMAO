@@ -28,6 +28,8 @@ Finalize the implementation and create the PR:
 
 ## Phase 0: HARDWARE E2E GATE (MANDATORY — do this before anything else)
 
+<!-- Mirror of the create-pr gate in .archon/workflows/lmao-fix-issue.yaml; update both -->
+
 ```bash
 if [ ! -f "$ARTIFACTS_DIR/hardware-e2e.md" ]; then
   echo "FATAL: $ARTIFACTS_DIR/hardware-e2e.md does not exist —"
