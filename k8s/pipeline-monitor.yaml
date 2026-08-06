@@ -1,0 +1,71 @@
+# Pipeline Silence Monitor — K8s CronJob
+#
+# Periodically checks whether the LMAO_MESSAGES JetStream stream has
+# received new messages within the configured silence threshold.
+# Reuses the lmao-iot-ingest Docker image (which already bundles nats-py).
+#
+# If the pipeline has been silent longer than the threshold, the job
+# logs an ERROR and exits with code 1 (failing the CronJob).  Operators
+# can see the alert via `kubectl logs job/pipeline-monitor-<ts>`.
+#
+# Prerequisites:
+#   - NATS server running in the cluster (k8s/nats-server.yaml)
+#   - lmao-iot-ingest Docker image pushed to local registry:
+#       ./docker/registry/manage.sh push-ingest
+#   - K3s nodes configured to pull from the local registry
+#
+# Usage:
+#   kubectl apply -f k8s/pipeline-monitor.yaml
+#
+# Configuration env vars (via ConfigMap pipeline-monitor-config):
+#   NATS_SERVER              NATS server URL
+#   SILENCE_THRESHOLD_HOURS  Max gap in hours before alerting (default: 3)
+#   ALERT_SUBJECT            NATS subject for optional alert publication
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pipeline-monitor-config
+  namespace: default
+  labels:
+    app: pipeline-monitor
+data:
+  NATS_SERVER: "nats://nats-server.default.svc.cluster.local:4222"
+  SILENCE_THRESHOLD_HOURS: "3"
+  ALERT_SUBJECT: "lmao.alerts.silence"
+
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: pipeline-monitor
+  namespace: default
+  labels:
+    app: pipeline-monitor
+spec:
+  schedule: "0 * * * *"
+  concurrencyPolicy: Forbid
+  failedJobsHistoryLimit: 5
+  successfulJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 3
+      template:
+        spec:
+          containers:
+            - name: monitor
+              image: 192.168.0.36:5000/lmao-iot-ingest:latest
+              imagePullPolicy: Always
+              command: ["python", "k8s-app/pipeline_monitor.py"]
+              envFrom:
+                - configMapRef:
+                    name: pipeline-monitor-config
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 32Mi
+                limits:
+                  cpu: 50m
+                  memory: 64Mi
+          restartPolicy: Never
