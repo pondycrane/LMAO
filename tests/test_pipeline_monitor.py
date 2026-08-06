@@ -138,7 +138,9 @@ class TestPipelineMonitor:
         assert exc_info.value.code == 0
 
     @pytest.mark.asyncio
-    async def test_silence_detected_when_last_ts_too_old(self, mock_nats_modules, monkeypatch, caplog):
+    async def test_silence_detected_when_last_ts_too_old(
+        self, mock_nats_modules, monkeypatch, caplog
+    ):
         """Exit 1 + ERROR log when last message is older than threshold."""
         import logging
 
