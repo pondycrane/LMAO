@@ -26,6 +26,23 @@ Finalize the implementation and create the PR:
 
 ---
 
+## Phase 0: HARDWARE E2E GATE (MANDATORY — do this before anything else)
+
+```bash
+if [ ! -f "$ARTIFACTS_DIR/hardware-e2e.md" ]; then
+  echo "FATAL: $ARTIFACTS_DIR/hardware-e2e.md does not exist —"
+  echo "the mandatory AGENTS.md hardware E2E gate did not produce results."
+  echo "PR creation is blocked. Re-run the gate chain manually:"
+  echo "  bazel test //tests:test_cardputer_e2e //tests:test_cardputer_lora_e2e --test_output=all"
+  exit 1
+fi
+```
+
+This check MUST run before any git add, commit, or push. If it fails,
+output the error prominently and STOP — do not proceed to Phase 1.
+
+---
+
 ## Phase 1: LOAD - Gather Context
 
 ### 1.1 Load Workflow Artifacts

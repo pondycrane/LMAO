@@ -24,6 +24,10 @@ argument-hint: (no arguments - validates current branch changes vs $BASE_BRANCH)
 - Unit gate: `bazel test //tests:all --test_tag_filters=-requires_hardware` must pass.
 - Hardware E2E is NOT part of this command — `lmao-hardware-e2e` runs it next in the workflow.
 
+**Gate-chain safety — violating these can silently skip mandatory tests:**
+
+- **NEVER write `$ARTIFACTS_DIR/.gate-head`** — only `lmao-production-health` owns that marker. Writing it from any other gate node causes downstream hardware E2E to fast-pass without executing (issue #100).
+
 ---
 
 ## Your Mission
@@ -80,6 +84,13 @@ If `FAST-PASS` printed: HEAD is unchanged since the last full gate chain complet
 and STOP. Do not run any further phases.
 
 If not, continue — and know that review/simplify phases that landed commits invalidate the marker, so the full gate below is mandatory now.
+
+**🚫 DO NOT WRITE `.gate-head`**: This node MUST NOT write or update
+`$ARTIFACTS_DIR/.gate-head` under any circumstances. The `.gate-head`
+marker is owned EXCLUSIVELY by `lmao-production-health` — it is the
+signal that the entire gate chain completed, not just validation.
+Writing it prematurely from validate causes downstream hardware gates
+to fast-pass without executing (issue #100 regression guard failure).
 
 ---
 

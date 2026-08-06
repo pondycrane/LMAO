@@ -195,6 +195,19 @@ nodes:
 
       ## Instructions
 
+      0. **HARDWARE E2E GATE (MANDATORY — do this before anything else)**:
+         ```bash
+         if [ ! -f "$ARTIFACTS_DIR/hardware-e2e.md" ]; then
+           echo "FATAL: $ARTIFACTS_DIR/hardware-e2e.md does not exist —"
+           echo "the mandatory AGENTS.md hardware E2E gate did not produce results."
+           echo "PR creation is blocked. Re-run the gate chain manually:"
+           echo "  bazel test //tests:test_cardputer_e2e //tests:test_cardputer_lora_e2e --test_output=all"
+           exit 1
+         fi
+         ```
+         This check MUST run before any git add, commit, or push. If it fails,
+         output the error prominently and STOP — do not proceed to step 1.
+
       1. Check git status. If uncommitted changes exist, stage and commit ONLY source files that are part of the fix:
          - List them by name with \`git add <path1> <path2> ...\` — never \`git add -A\`, \`git add .\`, or \`git add -u\`
          - **Never commit** scratch / review / PR-body artifacts, even if they appear in \`git status\`:
@@ -215,7 +228,7 @@ nodes:
       6. Create a DRAFT PR: \`gh pr create --draft --base $BASE_BRANCH\`
          - Title: concise, imperative mood, under 70 chars
          - Body: if a PR template was found, fill in **every section** with details from the artifacts. If no template, write a body with: summary, changes, validation evidence (from validation.md), **a \`## Hardware E2E\` section**, and \`Fixes #...\`.
-         - **Hardware E2E section (MANDATORY per AGENTS.md)**: copy the devices + results table from \`$ARTIFACTS_DIR/hardware-e2e.md\` verbatim. If it reports \`SKIPPED — HARDWARE NOT DETECTED\`, include that warning verbatim and prominently instead — never omit the section and never claim hardware results that don't exist.
+         - **Hardware E2E section (MANDATORY per AGENTS.md)**: The \`$ARTIFACTS_DIR/hardware-e2e.md\` file MUST exist (step 0 checks this). Copy the devices + results table from \`$ARTIFACTS_DIR/hardware-e2e.md\` verbatim. If it reports \`SKIPPED — HARDWARE NOT DETECTED\`, include that warning verbatim and prominently instead — never omit the section and never claim hardware results that don't exist.
          - **PR body file location**: if you write the body to a file (e.g. for \`--body-file\`), the file MUST live at \`$ARTIFACTS_DIR/pr-body.md\` or under \`/tmp/\` — NEVER inside the worktree. Files like \`.pr-body.md\` at the repo root will be picked up by later commits.
          - Link to issue: include \`Fixes #...\` or \`Closes #...\`
       7. Capture PR identifiers:
