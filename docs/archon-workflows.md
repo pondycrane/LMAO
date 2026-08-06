@@ -52,8 +52,11 @@ lmao-validate  →  lmao-hardware-e2e  →  lmao-production-health
    sending `Hello from Cardputer` (via the `lmao-server` journal) before the
    workflow may declare success.
 
-**Fast-pass marker**: the chain writes `$ARTIFACTS_DIR/.gate-head` when it
-completes. Re-runs after review/simplify phases skip the full chain *only*
+**Fast-pass marker**: `lmao-production-health` writes `$ARTIFACTS_DIR/.gate-head`
+when the full gate chain completes successfully. No other gate node may write
+this marker — doing so causes downstream hardware gates to fast-pass without
+executing (issue #100). Fast-pass in hardware-e2e and production-health also
+requires the gate's own artifact to exist (defense-in-depth). Re-runs after review/simplify phases skip the full chain *only*
 when `HEAD` is unchanged; any new commit forces the full chain again —
 including reflashing the hardware. This is the direct fix for "the simplify
 phase regressed the e2e test and nothing re-ran it".
