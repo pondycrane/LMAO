@@ -253,8 +253,8 @@ class TestPipelineMonitor:
         assert exc_info.value.code == 1
 
     @pytest.mark.asyncio
-    async def test_nonzero_threshold_exits_early(self, mock_nats_modules, monkeypatch):
-        """Exit 1 when SILENCE_THRESHOLD_HOURS is negative or zero."""
+    async def test_negative_threshold_exits_early(self, mock_nats_modules, monkeypatch):
+        """Exit 1 when SILENCE_THRESHOLD_HOURS is negative."""
         main_fn = _make_monitor_main(monkeypatch, threshold="-1")
 
         with pytest.raises(SystemExit) as exc_info:
