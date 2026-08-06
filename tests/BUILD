@@ -240,8 +240,10 @@ py_test(
 py_test(
     name = "test_pipeline_monitor",
     srcs = ["test_pipeline_monitor.py"],
+    data = [
+        "//k8s-app:pipeline_monitor.py",
+    ],
     deps = [
-        "//k8s-app:pipeline_monitor_lib",
         "//lma_core",
         "@lmao_pip//pytest",
         "@lmao_pip//pytest_asyncio",

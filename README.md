@@ -557,6 +557,28 @@ The IoT Ingest pod subscribes to `lmao.messages.>` on the in-cluster NATS
 and stores validated SensorReport payloads into DuckDB at `/data/sensors.db`
 (backed by a 1Gi PVC).
 
+#### Deploy Pipeline Monitor (silence alerting)
+
+The `k8s/pipeline-monitor.yaml` CronJob checks every hour whether the
+``LMAO_MESSAGES`` JetStream stream has received a message within
+``SILENCE_THRESHOLD_HOURS`` (default 3). On silence it logs
+``PIPELINE SILENCE`` and fails the job (exit 1); it publishes a
+best-effort alert to ``ALERT_SUBJECT`` (default ``lmao.alerts.silence``).
+
+```bash
+kubectl apply -f k8s/pipeline-monitor.yaml
+```
+
+Configuration (ConfigMap ``pipeline-monitor-config``):
+
+| Env var | Default | Description |
+|---------|---------|-------------|
+| ``NATS_SERVER`` | ``nats://nats-server.default.svc.cluster.local:4222`` | NATS JetStream URL |
+| ``SILENCE_THRESHOLD_HOURS`` | ``3`` | Max gap since last message (hours) |
+| ``ALERT_SUBJECT`` | ``lmao.alerts.silence`` | NATS subject for silence alerts |
+
+Exit codes: ``0`` = healthy, ``1`` = silent or fatal error.
+
 #### Using `NatsQueue` from Python
 
 #### Using `NatsQueue` from Python
