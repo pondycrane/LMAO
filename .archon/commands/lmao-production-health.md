@@ -52,12 +52,14 @@ corrupts the fast-pass marker logic (observed in the issue-#91 live test).
 
 ```bash
 cd "$WT"
-if [ -f "$ARTIFACTS_DIR/.gate-head" ] && [ "$(cat "$ARTIFACTS_DIR/.gate-head")" = "$(git rev-parse HEAD)" ]; then
+if [ -f "$ARTIFACTS_DIR/.gate-head" ] && [ "$(cat "$ARTIFACTS_DIR/.gate-head")" = "$(git rev-parse HEAD)" ] \
+   && [ -f "$ARTIFACTS_DIR/production-health.md" ]; then
   echo "FAST-PASS"
 fi
 ```
 
-If `FAST-PASS` printed: this exact HEAD already passed the full gate chain including this health check. Output:
+If `FAST-PASS` printed: this exact HEAD already passed the full gate chain including this health check
+**and** this gate's own artifact (`production-health.md`) exists. Output:
 
 ```markdown
 ## Production Health ✅ (fast-pass — no changes since last gate)

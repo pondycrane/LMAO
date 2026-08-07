@@ -14,6 +14,9 @@ argument-hint: (no arguments - detects attached hardware, runs bazel e2e targets
 3. **The ONLY commands allowed to touch the devices in this gate are the two `bazel test` targets below.** No ad-hoc serial scripts, no `screen`/`minicom`, no REPL experiments while the tests run.
 4. **Leave the production Cardputer running** — the E2E targets restore the production client (with the server's `DEST_HASH`) when they finish. Do not interrupt them mid-flash.
 
+**Gate-chain safety**:
+- **NEVER write `$ARTIFACTS_DIR/.gate-head`** — only `lmao-production-health` owns that marker. Premature writes cause the mandatory hardware E2E gate to silently skip (issue #100).
+
 ---
 
 ## Your Mission
@@ -58,12 +61,15 @@ corrupts the fast-pass marker logic (observed in the issue-#91 live test).
 
 ```bash
 cd "$WT"
-if [ -f "$ARTIFACTS_DIR/.gate-head" ] && [ "$(cat "$ARTIFACTS_DIR/.gate-head")" = "$(git rev-parse HEAD)" ]; then
+if [ -f "$ARTIFACTS_DIR/.gate-head" ] && [ "$(cat "$ARTIFACTS_DIR/.gate-head")" = "$(git rev-parse HEAD)" ] \
+   && [ -f "$ARTIFACTS_DIR/hardware-e2e.md" ]; then
   echo "FAST-PASS"
 fi
 ```
 
-If `FAST-PASS` printed: the full gate chain already completed on this exact HEAD. Output:
+If `FAST-PASS` printed: the full gate chain already completed on this exact HEAD
+**and** this gate's own artifact (`hardware-e2e.md`) exists, so re-running would
+re-test identical code. Output:
 
 ```markdown
 ## Hardware E2E ✅ (fast-pass — no changes since last gate)
