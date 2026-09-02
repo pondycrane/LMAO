@@ -28,7 +28,8 @@ services:
     restart: unless-stopped
     ports:
       - "127.0.0.1:5000:5000"                    # localhost only (host-side)
-      - "192.168.0.36:5000:5000"                  # cluster-network access
+      - "192.168.10.1:5000:5000"                  # cluster via wired link (static)
+      - "192.168.86.94:5000:5000"                 # cluster/LAN via Hankerker WiFi
     environment:
       REGISTRY_STORAGE_FILESYSTEM_ROOTDIRECTORY: /data
       REGISTRY_HTTP_ADDR: 0.0.0.0:5000
