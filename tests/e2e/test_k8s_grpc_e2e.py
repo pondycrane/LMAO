@@ -32,7 +32,7 @@ import sys
 import time
 
 import pytest
-from conftest import cleanup_common_mocks, setup_common_mocks
+from conftest import cleanup_common_mocks
 
 logger = logging.getLogger(__name__)
 
@@ -89,12 +89,33 @@ def _probe_cluster():
 def _resolve_host_ip() -> str | None:
     """Return the host IP address reachable from K8s pods.
 
-    Tries (in order):
-      1. Minikube: ``minikube ip`` → ``host.minikube.internal``
-      2. Docker Desktop / Kind: ``host.docker.internal``
-      3. Host LAN IP: first non-loopback IPv4 from ``hostname -I``
+    Prefers the host LAN IP (``hostname -I``), which is required for a real
+    cluster (EndpointSlice endpoints must be literal IPs).  Only falls back to
+    the Docker Desktop / minikube special hostnames when no usable IPv4 address
+    is found on the host, since those hostnames are not routable outside the
+    Docker-Desktop/minikube VM and would be rejected by an EndpointSlice.
     """
-    # 1. Check for minikube
+    # 1. Host LAN IP: first non-loopback, non-link-local IPv4 from ``hostname -I``
+    try:
+        result = subprocess.run(
+            ["hostname", "-I"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            ips = result.stdout.strip().split()
+            for ip in ips:
+                if (
+                    ":" not in ip  # IPv4 only
+                    and not ip.startswith("127.")
+                    and not ip.startswith("169.254.")
+                ):
+                    return ip
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+
+    # 2. Minikube special hostname (only routable from minikube's own network)
     try:
         result = subprocess.run(
             ["which", "minikube"],
@@ -107,7 +128,7 @@ def _resolve_host_ip() -> str | None:
     except (FileNotFoundError, subprocess.TimeoutExpired):
         pass
 
-    # 2. Check for Docker (Kind / Docker Desktop)
+    # 3. Docker Desktop special hostname (only routable inside the Docker VM)
     try:
         result = subprocess.run(
             ["docker", "info"],
@@ -117,22 +138,6 @@ def _resolve_host_ip() -> str | None:
         )
         if result.returncode == 0:
             return "host.docker.internal"
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        pass
-
-    # 3. Fall back to host LAN IP
-    try:
-        result = subprocess.run(
-            ["hostname", "-I"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        if result.returncode == 0:
-            ips = result.stdout.strip().split()
-            for ip in ips:
-                if not ip.startswith("127.") and not ip.startswith("::1"):
-                    return ip
     except (FileNotFoundError, subprocess.TimeoutExpired):
         pass
 
@@ -169,7 +174,7 @@ def _kubectl(
 
 def _cleanup_resources():
     """Delete K8s resources created by the test.  Best-effort."""
-    resource_types = ["pod", "service", "endpoints"]
+    resource_types = ["pod", "service", "endpoints", "endpointslice"]
     for rtype in resource_types:
         for name in ("lmao-e2e-server", "lmao-e2e-test"):
             try:
@@ -300,136 +305,37 @@ class TestK8sGrpcE2E:
         """Full E2E: deploy pod, exercise gRPC RPCs, verify output.
 
         Steps:
-          1. Start a temporary LMAO server with gRPC on localhost:50051
-          2. Create K8s headless Service + Endpoints pointing to host IP
-          3. Deploys a K8s pod that runs an inline Python script to exercise
+          1. Verify the deployed lmao-server has a ready replica
+          2. Deploy a K8s pod that runs an inline Python script to exercise
              gRPC RPCs (avoids needing a custom container image)
-          4. Verify GetIdentity RPC returns identity hex
-          5. Verify Send RPC returns "queued" status
+          3. Verify GetIdentity returns the live identity hex
+          4. Verify Send returns the documented known-dest error
+          5. Verify Subscribe streams (times out with no messages)
           6. Clean up all K8s resources (finally block)
         """
-        import sys as _sys
-        from unittest.mock import MagicMock
-
-        # ── 1. Start temporary LMAO server ─────────────────────────
-        # Clean stale sys.modules from prior test runs.
-        for mod_name in list(_sys.modules.keys()):
-            if mod_name in ("server", "lmao_server", "lmao_server.server"):
-                _sys.modules.pop(mod_name, None)
-
-        setup_common_mocks(with_grpc=True)
-
+        # ── 1. Verify the live in-cluster LMAO server is up ───────
+        # This test targets the *deployed* lmao-server Service rather than a
+        # throwaway host-run mock. A host-run mock requires pods to reach back
+        # into the host network (firewall / hostNetwork constraints), which is
+        # unreliable on a real cluster and was the source of the flaky
+        # "connection refused" failures. Pointing at the real Service exercises
+        # the genuine production path (issue #103).
+        deploy = _kubectl("get", "deployment", "lmao-server", "-o", "json", timeout=15)
+        if deploy.returncode != 0:
+            pytest.skip(f"lmao-server deployment not found: {deploy.stderr.strip()}")
         try:
-            from lmao_server import server as _server_mod
+            deploy_json = json.loads(deploy.stdout)
+            ready = deploy_json.get("status", {}).get("readyReplicas", 0)
+        except (ValueError, AttributeError):
+            ready = 0
+        if not ready:
+            pytest.skip("lmao-server deployment has no ready replicas")
 
-            assert _server_mod.GRPC_AVAILABLE, "GRPC_AVAILABLE must be True for gRPC E2E tests"
-
-            server_inst = _server_mod.Server()
-            server_inst.router = MagicMock()
-            server_inst.server_identity = MagicMock()
-            server_inst.server_identity.hash = b"\x01" * 16
-        except ImportError as exc:
-            pytest.fail(f"Cannot import lmao_server.server: {exc}")
-
-        # Start gRPC server in a thread so it runs alongside the test.
-        import threading
-
-        grpc_ready = threading.Event()
-        grpc_error: Exception | None = None
         server_port = 50051
 
-        def _run_grpc_server():
-            nonlocal grpc_error
-            try:
-                from concurrent import futures
-
-                import grpc
-
-                # Create gRPC server bound to 0.0.0.0 so K8s pods can reach it
-                grpc_server = grpc.server(futures.ThreadPoolExecutor(max_workers=2))
-                grpc_svc = _server_mod.LMAOGrpcService(server_inst)
-                _server_mod.add_LMAOServicer_to_server(grpc_svc, grpc_server)
-                grpc_server.add_insecure_port(f"0.0.0.0:{server_port}")
-                grpc_server.start()
-                grpc_ready.set()
-                try:
-                    grpc_server.wait_for_termination()
-                except Exception as post_exc:
-                    logger.warning("gRPC server error after startup: %s", post_exc)
-            except Exception as exc:
-                grpc_error = exc
-                grpc_ready.set()
-
-        server_thread = threading.Thread(target=_run_grpc_server, daemon=True)
-        server_thread.start()
-
-        if not grpc_ready.wait(timeout=10):
-            pytest.fail("gRPC server failed to start within 10s")
-        if grpc_error is not None:
-            pytest.fail(f"gRPC server failed to start: {grpc_error}")
-
-        # Give the server a moment to bind
-        time.sleep(0.5)
-
         try:
-            # ── 2. Create K8s Service + Endpoints ─────────────────
-            # Create headless Service
-            svc_result = _kubectl(
-                "apply",
-                "-f",
-                "-",
-                timeout=15,
-                input=json.dumps(
-                    {
-                        "apiVersion": "v1",
-                        "kind": "Service",
-                        "metadata": {
-                            "name": "lmao-e2e-server",
-                            "labels": {"test": "lmao-e2e"},
-                        },
-                        "spec": {
-                            "clusterIP": "None",
-                            "ports": [
-                                {
-                                    "port": server_port,
-                                    "targetPort": server_port,
-                                    "protocol": "TCP",
-                                    "name": "grpc",
-                                }
-                            ],
-                        },
-                    }
-                ),
-            )
-            assert svc_result.returncode == 0, f"kubectl apply Service failed: {svc_result.stderr}"
-
-            # Create Endpoints pointing to host IP
-            ep_result = _kubectl(
-                "apply",
-                "-f",
-                "-",
-                timeout=15,
-                input=json.dumps(
-                    {
-                        "apiVersion": "v1",
-                        "kind": "Endpoints",
-                        "metadata": {
-                            "name": "lmao-e2e-server",
-                            "labels": {"test": "lmao-e2e"},
-                        },
-                        "subsets": [
-                            {
-                                "addresses": [{"ip": _HOST_IP}],
-                                "ports": [{"port": server_port, "name": "grpc"}],
-                            }
-                        ],
-                    }
-                ),
-            )
-            assert ep_result.returncode == 0, f"kubectl apply Endpoints failed: {ep_result.stderr}"
-
-            # ── 3. Deploy test pod ────────────────────────────────
-            server_addr = f"lmao-e2e-server.default.svc.cluster.local:{server_port}"
+            # ── 2. Target the live Service (no host Service/Endpoints) ──
+            server_addr = f"lmao-server.default.svc.cluster.local:{server_port}"
 
             # The pod runs an inline Python script that calls the gRPC
             # endpoints directly via grpc + protobuf (no generated stubs).
@@ -437,7 +343,7 @@ class TestK8sGrpcE2E:
             inline_script = f'''import grpc, os, sys, time
 
 # Build message classes manually using protobuf descriptor
-from google.protobuf import descriptor_pool, symbol_database
+from google.protobuf import descriptor_pool, message_factory
 from google.protobuf import any_pb2, descriptor_pb2
 
 # --- Define SendRequest ---
@@ -446,7 +352,7 @@ file_desc.name = "e2e_test.proto"
 file_desc.package = "lma"
 file_desc.syntax = "proto3"
 
-# SendRequest message
+# SendRequest message — must match proto/lma_grpc.proto exactly.
 msg_send_req = file_desc.message_type.add()
 msg_send_req.name = "SendRequest"
 field_env = msg_send_req.field.add()
@@ -454,25 +360,22 @@ field_env.name = "envelope"
 field_env.number = 1
 field_env.type = descriptor_pb2.FieldDescriptorProto.TYPE_BYTES
 field_env.label = descriptor_pb2.FieldDescriptorProto.LABEL_OPTIONAL
-field_dh = msg_send_req.field.add()
-field_dh.name = "destination_hash"
-field_dh.number = 2
-field_dh.type = descriptor_pb2.FieldDescriptorProto.TYPE_STRING
-field_dh.label = descriptor_pb2.FieldDescriptorProto.LABEL_OPTIONAL
 
-# SendResponse message
+# SendResponse message — field numbers must match proto/lma_grpc.proto:
+#   string destination_hash = 1;
+#   string status = 2;
 msg_send_resp = file_desc.message_type.add()
 msg_send_resp.name = "SendResponse"
-field_status = msg_send_resp.field.add()
-field_status.name = "status"
-field_status.number = 1
-field_status.type = descriptor_pb2.FieldDescriptorProto.TYPE_STRING
-field_status.label = descriptor_pb2.FieldDescriptorProto.LABEL_OPTIONAL
 field_dh2 = msg_send_resp.field.add()
 field_dh2.name = "destination_hash"
-field_dh2.number = 2
+field_dh2.number = 1
 field_dh2.type = descriptor_pb2.FieldDescriptorProto.TYPE_STRING
 field_dh2.label = descriptor_pb2.FieldDescriptorProto.LABEL_OPTIONAL
+field_status = msg_send_resp.field.add()
+field_status.name = "status"
+field_status.number = 2
+field_status.type = descriptor_pb2.FieldDescriptorProto.TYPE_STRING
+field_status.label = descriptor_pb2.FieldDescriptorProto.LABEL_OPTIONAL
 
 # GetIdentityRequest message (empty)
 msg_gi_req = file_desc.message_type.add()
@@ -492,6 +395,24 @@ field_nn.number = 2
 field_nn.type = descriptor_pb2.FieldDescriptorProto.TYPE_STRING
 field_nn.label = descriptor_pb2.FieldDescriptorProto.LABEL_OPTIONAL
 
+# SubscribeRequest message (empty)
+msg_sub_req = file_desc.message_type.add()
+msg_sub_req.name = "SubscribeRequest"
+
+# SubscribeResponse message
+msg_sub_resp = file_desc.message_type.add()
+msg_sub_resp.name = "SubscribeResponse"
+field_sub_env = msg_sub_resp.field.add()
+field_sub_env.name = "envelope"
+field_sub_env.number = 1
+field_sub_env.type = descriptor_pb2.FieldDescriptorProto.TYPE_BYTES
+field_sub_env.label = descriptor_pb2.FieldDescriptorProto.LABEL_OPTIONAL
+field_sub_src = msg_sub_resp.field.add()
+field_sub_src.name = "source_hash"
+field_sub_src.number = 2
+field_sub_src.type = descriptor_pb2.FieldDescriptorProto.TYPE_STRING
+field_sub_src.label = descriptor_pb2.FieldDescriptorProto.LABEL_OPTIONAL
+
 # Register service
 svc = file_desc.service.add()
 svc.name = "LMAO"
@@ -505,14 +426,26 @@ rp_gi = svc.method.add()
 rp_gi.name = "GetIdentity"
 rp_gi.input_type = ".lma.GetIdentityRequest"
 rp_gi.output_type = ".lma.GetIdentityResponse"
+# Subscribe RPC (server-streaming)
+rp_sub = svc.method.add()
+rp_sub.name = "Subscribe"
+rp_sub.input_type = ".lma.SubscribeRequest"
+rp_sub.output_type = ".lma.SubscribeResponse"
+rp_sub.server_streaming = True
 
-pool = descriptor_pool.Default()
+# Use a dedicated pool and build message classes directly from their
+# descriptors. GetSymbol() on the default symbol database raises KeyError
+# here because a FileDescriptorProto added via pool.Add() is not registered
+# in the default symbol database (that path only works for AddSerializedFile).
+pool = descriptor_pool.DescriptorPool()
 pool.Add(file_desc)
 
-SendRequest = symbol_database.Default().GetSymbol("lma.SendRequest")
-SendResponse = symbol_database.Default().GetSymbol("lma.SendResponse")
-GetIdentityRequest = symbol_database.Default().GetSymbol("lma.GetIdentityRequest")
-GetIdentityResponse = symbol_database.Default().GetSymbol("lma.GetIdentityResponse")
+SendRequest = message_factory.GetMessageClass(pool.FindMessageTypeByName("lma.SendRequest"))
+SendResponse = message_factory.GetMessageClass(pool.FindMessageTypeByName("lma.SendResponse"))
+GetIdentityRequest = message_factory.GetMessageClass(pool.FindMessageTypeByName("lma.GetIdentityRequest"))
+GetIdentityResponse = message_factory.GetMessageClass(pool.FindMessageTypeByName("lma.GetIdentityResponse"))
+SubscribeRequest = message_factory.GetMessageClass(pool.FindMessageTypeByName("lma.SubscribeRequest"))
+SubscribeResponse = message_factory.GetMessageClass(pool.FindMessageTypeByName("lma.SubscribeResponse"))
 
 SERVER = "{server_addr}"
 
@@ -531,20 +464,54 @@ print(f"Server identity: {{gi_resp.identity_hex}}")
 print(f"Node name:       {{gi_resp.node_name}}")
 assert gi_resp.identity_hex, "identity_hex must not be empty"
 assert gi_resp.node_name, "node_name must not be empty"
+# The live server has a known, persistent identity (see TURING_PI2_CLUSTER_SETUP.md).
+assert gi_resp.identity_hex == "869183faf01f50575f07e83a27bb4cfb", (
+    f"Unexpected live identity: {{gi_resp.identity_hex}}"
+)
 print("GetIdentity: OK")
 
-# --- Send ---
+# --- Send (valid envelope, unroutable destination → known-dest error) ---
+# Build a *valid* LMAOEnvelope: oneof `text` (field 20, wire-type 2) with a
+# valid TextMessage. The live server parses it, finds no `command` payload, so
+# dest_hash is empty and no identity can be recalled → it must return the
+# documented known-dest error (not INVALID_ARGUMENT). This proves the RPC
+# round-trips through the real server's parse + dispatch path.
+#   TextMessage node_id=e2e               -> 0a 03 65 32 65  (field1 len-delim)
+#   LMAOEnvelope text=<that>               -> a2 01 05 <embedded>
 print("=== Send Example ===")
+valid_envelope = bytes.fromhex("a201050a03653265")
 send_req = SendRequest()
-send_req.envelope = b"e2e-test-payload"
+send_req.envelope = valid_envelope
 send_resp = stub.unary_unary(
     "/lma.LMAO/Send",
     lambda req: req.SerializeToString(),
     lambda data: SendResponse.FromString(data),
 )(send_req)
 print(f"Send response: status={{send_resp.status}}, dest={{send_resp.destination_hash}}")
-assert send_resp.status == "queued", f"Expected 'queued', got '{{send_resp.status}}'"
+assert send_resp.status == "error: invalid or unreachable destination", (
+    f"Expected known-dest error, got '{{send_resp.status}}'"
+)
 print("Send: OK")
+
+# --- Subscribe (server-streaming; expect stream timeout) ---
+# No message should arrive within the timeout, so the stream must raise a
+# DEADLINE_EXCEEDED RpcError. That proves the streaming RPC is wired up.
+print("=== Subscribe Example ===")
+sub_stream = stub.unary_stream(
+    "/lma.LMAO/Subscribe",
+    lambda req: req.SerializeToString(),
+    lambda data: SubscribeResponse.FromString(data),
+)
+try:
+    for _msg in sub_stream(SubscribeRequest(), timeout=5):
+        print(f"Unexpected message: {{_msg}}")
+        raise AssertionError("Did not expect any message during Subscribe timeout")
+    raise AssertionError("Subscribe stream ended without timing out")
+except grpc.RpcError as e:
+    assert e.code() == grpc.StatusCode.DEADLINE_EXCEEDED, (
+        f"Expected DEADLINE_EXCEEDED, got {{e.code()}}"
+    )
+    print("Subscribe: OK (stream timed out as expected)")
 
 channel.close()
 
@@ -572,9 +539,9 @@ con.execute(
 
 # Query it back to prove the storage path works end-to-end
 rows = con.execute("SELECT node_id, value, unit FROM sensor_readings").fetchall()
-assert len(rows) == 1, f"Expected 1 row, got {len(rows)}"
-assert rows[0][0] == "e2e-test-node", f"Expected 'e2e-test-node', got {rows[0][0]}"
-assert rows[0][1] == 42.5, f"Expected 42.5, got {rows[0][1]}"
+assert len(rows) == 1, f"Expected 1 row, got {{len(rows)}}"
+assert rows[0][0] == "e2e-test-node", f"Expected 'e2e-test-node', got {{rows[0][0]}}"
+assert rows[0][1] == 42.5, f"Expected 42.5, got {{rows[0][1]}}"
 
 con.close()
 print("__DUCKDB_OK__")
@@ -594,7 +561,7 @@ print("__E2E_SUCCESS__")
                 "bash",
                 "-c",
                 "pip install -q grpcio protobuf duckdb 2>/dev/null && python3 -",
-                timeout=120,
+                timeout=240,  # cold image pull + pip install can exceed 120s
                 input=inline_script,
             )
 
@@ -704,7 +671,7 @@ async def main():
 
     # ── Publish a test message ───────────────────────
     # Build a minimal SensorReport protobuf manually
-    from google.protobuf import descriptor_pb2, descriptor_pool, symbol_database
+    from google.protobuf import descriptor_pb2, descriptor_pool, message_factory
 
     file_desc = descriptor_pb2.FileDescriptorProto()
     file_desc.name = "test.proto"
@@ -751,9 +718,12 @@ async def main():
     f_sensor.type_name = ".SensorReport"
     f_sensor.label = descriptor_pb2.FieldDescriptorProto.LABEL_OPTIONAL
 
-    pool = descriptor_pool.Default()
+    # Use a dedicated pool + GetMessageClass. A FileDescriptorProto added via
+    # pool.Add() is NOT registered in the default symbol database, so
+    # symbol_database.Default().GetSymbol(...) would raise KeyError.
+    pool = descriptor_pool.DescriptorPool()
     pool.Add(file_desc)
-    LMAOEnvelope = symbol_database.Default().GetSymbol("LMAOEnvelope")
+    LMAOEnvelope = message_factory.GetMessageClass(pool.FindMessageTypeByName("LMAOEnvelope"))
 
     # Build and serialize
     env = LMAOEnvelope()
@@ -836,7 +806,7 @@ asyncio.run(main())
                 "bash",
                 "-c",
                 "pip install -q nats-py duckdb protobuf 2>/dev/null && python3 -",
-                timeout=120,
+                timeout=240,  # cold image pull + pip install can exceed 120s
                 input=inline_script,
             )
 
