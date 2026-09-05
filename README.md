@@ -702,6 +702,18 @@ Access it via `kubectl port-forward`:
 kubectl port-forward svc/iot-query 8080:8080
 ```
 
+> **Note:** The query API requires the current manifest
+> (`k8s/iot-ingest.yaml`) **and** a freshly built `lmao-iot-ingest`
+> image with `aiohttp`/`sqlparse`. If the pod was deployed from a stale
+> manifest or image, port 8080 is not served and the `iot-query` Service
+> may not exist — redeploy with:
+>
+> ```bash
+> ./docker/registry/manage.sh push-ingest   # rebuild + push the image
+> kubectl apply -f k8s/iot-ingest.yaml      # applies iot-query Service, probes, QUERY_* env
+> kubectl rollout status deployment/iot-ingest-consumer
+> ```
+
 ### Endpoints
 
 | Method | Path | Description |
@@ -784,7 +796,12 @@ bazel test //tests:test_cardputer_e2e --test_output=all
 bazel test //tests:test_cardputer_lora_e2e --test_output=all
 ```
 
-The E2E tests auto-skip when the required hardware is not detected.
+The E2E flash test auto-skips when the required hardware is not
+detected. `test_cardputer_lora_e2e` auto-skips only the tests that need
+a **locally attached RNode**; when a Cardputer is attached but the RNode
+lives on the cluster (issue #93), it **actively verifies the production
+LoRa path** instead of silently skipping (see AGENTS.md "E2E flash
+verification").
 
 ### 11a. Archon Workflows (AI Feature-to-PR)
 
@@ -1092,7 +1109,7 @@ For the full system design, see [`ARCHITECTURE.md`](ARCHITECTURE.md).
 | Server can't find RNode | Is ESP32 plugged in? Set `LMAO_RNODE_PORT` or check auto-detected port |
 | In-cluster pod can't find RNode after node reboot/replug | Device may have re-enumerated — `kubectl rollout restart deployment/lmao-server`; verify `/dev/ttyUSB0` exists on tp4 |
 | Server logs "Could not send reply (no source destination)" after a restart | The client identity cache was empty; the client re-announces on its next reboot. Persisted via `LMAO_RNS_TRANSPORT_PATH` on the PVC since issue #93 |
-| `test_cardputer_lora_e2e` skips | The test needs a **locally attached** RNode + Cardputer. With the server running in K8s (RNode on tp4), it auto-skips on other hosts — run it on a machine with both devices plugged in |
+| `test_cardputer_lora_e2e` skips | With the RNode on tp4 (issue #93), the local-RNode-specific tests auto-skip, but the test does **not** silently skip when a Cardputer is attached — it verifies the production LoRa path (server logs + JetStream `iot-ingest` consumer health) and reports PASS / FAIL / UNVERIFIABLE |
 | Server hangs with no output | RNode port not found — the server now warns and starts in WiFi-only mode. Check `LMAO_RNODE_PORT`. |
 | No LoRa packets despite devices on same frequency | Check **all** radio parameters match: SF, BW, CR, and TXP (not just frequency) |
 | Cardputer has µReticulum firmware, not MicroPython | That's expected with rsCardputer firmware — it's a valid LXMF client. Use Option B above. |
