@@ -122,6 +122,8 @@ spec:
                 - "import os; os.kill(1, 0)"
             initialDelaySeconds: 15
             periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 5
           readinessProbe:
             httpGet:
               path: /healthz
