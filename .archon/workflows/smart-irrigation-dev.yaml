@@ -1,0 +1,364 @@
+name: smart-irrigation-dev
+description: |
+  Use when: Developing the Smart Irrigation system (Atom Lite MicroPython node +
+  STM32WLE5CC LoRaWAN DTU) from the blueprint in
+  smart_irrigation/docs/development-plan.md — a phase, a feature, or the
+  mandatory Phase 0 algorithm evaluation.
+  Input: feature description, phase reference ("Phase 2: sensor drivers"), or
+  "Phase 0: algorithm evaluation".
+  Output: reviewed PR with mandatory hardware E2E evidence (Cardputer/RNode
+  checks + Atom Lite checks when attached; loud skip otherwise).
+
+  Workflow:
+  1. Assess the request against the development blueprint (mode = evaluation
+     or development, phase, firmware impact, prerequisites)
+  2. Preflight gate: firmware work is blocked until the Appendix 13 algorithm
+     evaluation (docs/algorithm-evaluation.md) exists
+  3. Algorithm evaluation with benchmark evidence — or fast-pass when delivered
+  4. Blueprint + evaluation-aware implementation plan
+  5. Plan setup + confirmation (reuses lmao-plan-setup / lmao-confirm-plan)
+  6. Implement with Bazel BUILD wiring, MicroPython/Q8.8 constraints, pump
+     safety overrides, host tests with MicroPython mocks
+  7. Gate chain: irrigation-validate (Bazel + MicroPython syntax + vendored
+     integrity + control/protocol evidence) -> irrigation-hardware-e2e
+     (Cardputer/RNode + Atom Lite, loud skips) -> irrigation-production-health
+     (.gate-head owner)
+  8. PR with hardware E2E evidence -> 5 standard review agents + irrigation
+     control/safety review -> fixes -> full gate chain re-run (the #87 guard)
+  9. Summary + notification
+
+  NOT for: plain LMAO Cardputer features (use lmao-feature-dev), GitHub-issue
+  fixes (use lmao-fix-issue), standalone reviews.
+
+  Models: deepseek-v4-pro for evaluation/plan/implement/fixes,
+          deepseek-v4-flash for everything else. No Claude.
+
+nodes:
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 0: ASSESS THE REQUEST AGAINST THE BLUEPRINT
+  # ═══════════════════════════════════════════════════════════════════
+
+  - id: assess
+    context: fresh
+    model: deepseek/deepseek-v4-flash
+    prompt: |
+      You are the dispatcher for the smart-irrigation development workflow.
+
+      Request: $ARGUMENTS
+
+      Read (worktree-relative; the blueprint also exists at the absolute
+      fallback path):
+      1. `smart_irrigation/docs/development-plan.md` — the blueprint. Focus on
+         §8 (development phases), §13 (challenge brief), Appendix B (pin map).
+         Fallback: `/home/pondycrane/smart-irrigation-dev-plan.md`.
+      2. `smart_irrigation/AGENTS.md` — project rules.
+      3. `smart_irrigation/docs/algorithm-evaluation.md` if it exists.
+      4. `ls` the `smart_irrigation/` tree and `git log --oneline -10` to see
+         what is already implemented.
+
+      Classify the request:
+
+      - `mode` = "evaluation" if the request is about the algorithm evaluation
+        itself (mentions evaluation, Appendix 13, challenge brief, "phase 0",
+        or asks to compare/select the control algorithm before firmware).
+        Otherwise "development".
+      - `phase` = the blueprint phase the request maps to: "evaluation",
+        "1".."8", or "cross-cutting".
+      - `touches_firmware` = "true" if implementing the request would write or
+        change anything under `smart_irrigation/firmware/`,
+        `smart_irrigation/stm32-dtu/`, the on-node LXMF/protocol sender, or the
+        control algorithm. Server-only (`k8s-app/`), docs, host scripts, or
+        test-only changes = "false".
+      - `evaluation_present` = "true" if
+        `smart_irrigation/docs/algorithm-evaluation.md` exists.
+      - `prerequisites` = one line listing required prior work/artifacts
+        (e.g. "evaluation verdict", "Phase 1 stack port", "none").
+      - `summary` = 1–2 sentences.
+
+      Write the classification as JSON to `$ARTIFACTS_DIR/assessment.json`
+      (create the artifacts dir if needed) and a readable version to
+      `$ARTIFACTS_DIR/assessment.md` (request, classification, prerequisites,
+      notes). Your structured output must contain the same fields.
+    output_format:
+      type: object
+      properties:
+        mode:
+          type: string
+          enum: ["evaluation", "development"]
+        phase:
+          type: string
+        touches_firmware:
+          type: string
+          enum: ["true", "false"]
+        evaluation_present:
+          type: string
+          enum: ["true", "false"]
+        prerequisites:
+          type: string
+        summary:
+          type: string
+      required: [mode, phase, touches_firmware, evaluation_present, prerequisites, summary]
+
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 1: PREFLIGHT — EVALUATION-FIRST ENFORCEMENT (deterministic)
+  # Firmware/algorithm work may not proceed until the Appendix 13
+  # evaluation has been delivered and merged. This is a hard stop.
+  # ═══════════════════════════════════════════════════════════════════
+
+  - id: preflight
+    bash: |
+      set -uo pipefail
+      ASSESS="$ARTIFACTS_DIR/assessment.json"
+      if [ ! -f "$ASSESS" ]; then
+        echo "FATAL: $ASSESS is missing — the assess node did not write it." >&2
+        exit 1
+      fi
+      python3 -c '
+      import json, os, sys
+      d = json.load(open(sys.argv[1]))
+      mode = d.get("mode", "development")
+      fw = str(d.get("touches_firmware", "false")).lower() == "true"
+      doc = "smart_irrigation/docs/algorithm-evaluation.md"
+      exists = os.path.isfile(doc)
+      if mode == "development" and fw and not exists:
+          print("FATAL: this request touches firmware/algorithm/protocol code, but", file=sys.stderr)
+          print(f"  {doc} does not exist.", file=sys.stderr)
+          print("The development plan (Appendix 13) requires the algorithm evaluation", file=sys.stderr)
+          print("to be completed and merged FIRST. Run:", file=sys.stderr)
+          print("  archon workflow run smart-irrigation-dev \"Phase 0: algorithm evaluation\"", file=sys.stderr)
+          print("review/merge that PR, pull, then re-run this request.", file=sys.stderr)
+          sys.exit(1)
+      print(f"PREFLIGHT_OK mode={mode} touches_firmware={fw} evaluation_present={exists}")
+      ' "$ASSESS"
+    depends_on: [assess]
+    timeout: 60000
+
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 2: ALGORITHM EVALUATION (mandatory first deliverable)
+  # Always runs (never skipped at the DAG level) so downstream state is
+  # consistent; internally fast-passes when the deliverable exists.
+  # ═══════════════════════════════════════════════════════════════════
+
+  - id: algorithm-evaluation
+    command: irrigation-algorithm-evaluation
+    depends_on: [preflight]
+    context: fresh
+    model: deepseek/deepseek-v4-pro
+    effort: max
+    idle_timeout: 2400000
+
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 3: PLAN
+  # ═══════════════════════════════════════════════════════════════════
+
+  - id: create-plan
+    command: irrigation-create-plan
+    depends_on: [algorithm-evaluation]
+    context: fresh
+    model: deepseek/deepseek-v4-pro
+    effort: high
+    idle_timeout: 1200000
+
+  - id: plan-setup
+    command: lmao-plan-setup
+    depends_on: [create-plan]
+    context: fresh
+    model: deepseek/deepseek-v4-flash
+
+  - id: confirm-plan
+    command: lmao-confirm-plan
+    depends_on: [plan-setup]
+    context: fresh
+    model: deepseek/deepseek-v4-flash
+
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 4: IMPLEMENT (MicroPython + Bazel + pump safety)
+  # ═══════════════════════════════════════════════════════════════════
+
+  - id: implement-tasks
+    command: irrigation-implement-tasks
+    depends_on: [confirm-plan]
+    context: fresh
+    model: deepseek/deepseek-v4-pro
+    effort: max
+    idle_timeout: 2400000
+
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 5: GATE CHAIN — validate → hardware E2E → production health
+  # irrigation-production-health owns the .gate-head fast-pass marker.
+  # Hardware absence is a LOUD skip, never a silent pass.
+  # ═══════════════════════════════════════════════════════════════════
+
+  - id: validate
+    command: irrigation-validate
+    depends_on: [implement-tasks]
+    context: fresh
+    model: deepseek/deepseek-v4-flash
+    idle_timeout: 1200000
+
+  - id: hardware-e2e
+    command: irrigation-hardware-e2e
+    depends_on: [validate]
+    context: fresh
+    model: deepseek/deepseek-v4-flash
+    idle_timeout: 1800000
+
+  - id: production-health
+    command: irrigation-production-health
+    depends_on: [hardware-e2e]
+    context: fresh
+    model: deepseek/deepseek-v4-flash
+    idle_timeout: 900000
+
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 6: FINALIZE PR (blocked without hardware E2E evidence)
+  # ═══════════════════════════════════════════════════════════════════
+
+  - id: finalize-pr
+    command: irrigation-finalize-pr
+    depends_on: [production-health]
+    context: fresh
+    model: deepseek/deepseek-v4-flash
+
+  - id: verify-pr-base
+    bash: |
+      set -euo pipefail
+      EXPECTED="$BASE_BRANCH"
+      ACTUAL=$(gh pr view --json baseRefName -q '.baseRefName')
+      if [ "$ACTUAL" != "$EXPECTED" ]; then
+        PR_NUMBER=$(gh pr view --json number -q '.number')
+        echo "Base mismatch on PR #$PR_NUMBER: expected=$EXPECTED actual=$ACTUAL — re-targeting" >&2
+        gh pr edit "$PR_NUMBER" --base "$EXPECTED"
+      else
+        echo "PR base verified: $EXPECTED"
+      fi
+    depends_on: [finalize-pr]
+
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 7: CODE REVIEW — 5 standard agents + irrigation control/safety
+  # ═══════════════════════════════════════════════════════════════════
+
+  - id: review-scope
+    command: archon-pr-review-scope
+    depends_on: [verify-pr-base]
+    context: fresh
+    model: deepseek/deepseek-v4-flash
+
+  - id: sync
+    command: lmao-sync-pr-with-main
+    depends_on: [review-scope]
+    context: fresh
+    model: deepseek/deepseek-v4-flash
+
+  - id: code-review
+    command: archon-code-review-agent
+    depends_on: [sync]
+    context: fresh
+    model: deepseek/deepseek-v4-flash
+
+  - id: error-handling
+    command: archon-error-handling-agent
+    depends_on: [sync]
+    context: fresh
+    model: deepseek/deepseek-v4-flash
+
+  - id: test-coverage
+    command: archon-test-coverage-agent
+    depends_on: [sync]
+    context: fresh
+    model: deepseek/deepseek-v4-flash
+
+  - id: comment-quality
+    command: archon-comment-quality-agent
+    depends_on: [sync]
+    context: fresh
+    model: deepseek/deepseek-v4-flash
+
+  - id: docs-impact
+    command: archon-docs-impact-agent
+    depends_on: [sync]
+    context: fresh
+    model: deepseek/deepseek-v4-flash
+
+  - id: control-safety-review
+    command: irrigation-control-review
+    depends_on: [sync]
+    context: fresh
+    model: deepseek/deepseek-v4-flash
+
+  - id: synthesize
+    command: archon-synthesize-review
+    depends_on: [code-review, error-handling, test-coverage, comment-quality, docs-impact]
+    trigger_rule: one_success
+    context: fresh
+    model: deepseek/deepseek-v4-flash
+
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 8: FIX REVIEW FINDINGS
+  # ═══════════════════════════════════════════════════════════════════
+
+  - id: implement-fixes
+    command: irrigation-implement-review-fixes
+    depends_on: [synthesize, control-safety-review]
+    trigger_rule: none_failed_min_one_success
+    context: fresh
+    model: deepseek/deepseek-v4-pro
+    effort: max
+    idle_timeout: 1800000
+
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 9: FINAL GATE CHAIN — re-run after fix commits.
+  # Fast-pass ONLY when HEAD is unchanged since the first chain
+  # (.gate-head marker); any review-fix commit forces the FULL chain
+  # including hardware re-verification. The #87 regression guard.
+  # ═══════════════════════════════════════════════════════════════════
+
+  - id: final-validate
+    command: irrigation-validate
+    depends_on: [implement-fixes]
+    context: fresh
+    model: deepseek/deepseek-v4-flash
+    idle_timeout: 1200000
+
+  - id: final-hardware-e2e
+    command: irrigation-hardware-e2e
+    depends_on: [final-validate]
+    context: fresh
+    model: deepseek/deepseek-v4-flash
+    idle_timeout: 1800000
+
+  - id: final-production-health
+    command: irrigation-production-health
+    depends_on: [final-hardware-e2e]
+    context: fresh
+    model: deepseek/deepseek-v4-flash
+    idle_timeout: 900000
+
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 10: SUMMARY + NOTIFICATION
+  # ═══════════════════════════════════════════════════════════════════
+
+  - id: workflow-summary
+    command: archon-workflow-summary
+    depends_on: [final-production-health]
+    context: fresh
+    model: deepseek/deepseek-v4-flash
+
+  - id: ntfy-result
+    bash: |
+      if [ ! -f .archon/mcp/ntfy.json ]; then exit 0; fi
+      NTFY_TOPIC="${NTFY_TOPIC:-$(grep -oP '"NTFY_TOPIC":\s*"\K[^"]+' .archon/mcp/ntfy.json 2>/dev/null)}"
+      [ -z "$NTFY_TOPIC" ] && exit 0
+      if [ -f "$ARTIFACTS_DIR/workflow-summary.md" ]; then
+        TITLE="✅ Irrigation Dev Complete"
+        TAGS="white_check_mark"
+        BODY="Workflow completed successfully for: $ARGUMENTS"
+      else
+        TITLE="❌ Irrigation Dev Failed"
+        TAGS="x"
+        BODY="Workflow failed for: $ARGUMENTS"
+      fi
+      curl -sf -H "Title: $TITLE" -H "Priority: 4" -H "Tags: $TAGS" \
+        -d "$BODY" "https://ntfy.sh/$NTFY_TOPIC" > /dev/null 2>&1
+    depends_on: [workflow-summary]
+    trigger_rule: all_done
