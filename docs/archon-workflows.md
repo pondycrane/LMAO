@@ -65,6 +65,13 @@ mandate: if a request touches firmware/algorithm/protocol code and
 fails at its deterministic `preflight` node with instructions to run Phase 0
 first. Server/docs/host-script requests may proceed without it.
 
+**Notifications**: `smart-irrigation-dev` sends start and completion/failure
+messages through Hermes to the Telegram home channel
+(`hermes send --to telegram`, credentials/target from `~/.hermes/.env`).
+The completion message includes the PR URL and the hardware-E2E/validation
+statuses when available. Notification failure is a warning only — it never
+masks the workflow result.
+
 1. **`lmao-validate`** — Bazel-native validation:
    - **BUILD completeness**: every new/changed `*.py` must resolve to a Bazel
      target (`bazel query`). This is the issue #87 regression class — a test

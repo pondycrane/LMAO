@@ -25,7 +25,8 @@ description: |
      (.gate-head owner)
   8. PR with hardware E2E evidence -> 5 standard review agents + irrigation
      control/safety review -> fixes -> full gate chain re-run (the #87 guard)
-  9. Summary + notification
+  9. Summary + Telegram notification via Hermes (`hermes send --to telegram`,
+     home channel from ~/.hermes/.env)
 
   NOT for: plain LMAO Cardputer features (use lmao-feature-dev), GitHub-issue
   fixes (use lmao-fix-issue), standalone reviews.
@@ -34,6 +35,26 @@ description: |
           deepseek-v4-flash for everything else. No Claude.
 
 nodes:
+  # ═══════════════════════════════════════════════════════════════
+  # NOTIFY: START (Hermes → Telegram home channel)
+  # ═══════════════════════════════════════════════════════════════
+
+  - id: hermes-notify-start
+    bash: |
+      HERMES_BIN="${HERMES_BIN:-$(command -v hermes || echo /home/pondycrane/.local/bin/hermes)}"
+      BODY="$ARTIFACTS_DIR/hermes-start.txt"
+      {
+        echo "Request: $ARGUMENTS"
+        echo "Workflow: $WORKFLOW_ID"
+        echo "Started: $(date '+%Y-%m-%d %H:%M %Z')"
+      } > "$BODY"
+      if [ -x "$HERMES_BIN" ] || command -v "$HERMES_BIN" >/dev/null 2>&1; then
+        "$HERMES_BIN" send --to telegram --subject "🚿 Smart Irrigation — started" --file "$BODY" >/dev/null 2>&1 \
+          || echo "warning: hermes start notification failed (workflow continues)" >&2
+      else
+        echo "warning: hermes CLI not found — start notification skipped" >&2
+      fi
+
   # ═══════════════════════════════════════════════════════════════════
   # PHASE 0: ASSESS THE REQUEST AGAINST THE BLUEPRINT
   # ═══════════════════════════════════════════════════════════════════
@@ -335,7 +356,7 @@ nodes:
     idle_timeout: 900000
 
   # ═══════════════════════════════════════════════════════════════════
-  # PHASE 10: SUMMARY + NOTIFICATION
+  # PHASE 10: SUMMARY + TELEGRAM NOTIFICATION (Hermes)
   # ═══════════════════════════════════════════════════════════════════
 
   - id: workflow-summary
@@ -344,21 +365,40 @@ nodes:
     context: fresh
     model: deepseek/deepseek-v4-flash
 
-  - id: ntfy-result
+  # Sends through Hermes' gateway credentials to the Telegram home channel
+  # (TELEGRAM_HOME_CHANNEL in ~/.hermes/.env) — no LLM, no running gateway
+  # required. Runs on success AND failure (trigger_rule: all_done); a
+  # notification failure never masks the workflow result (warning only).
+  - id: hermes-notify-done
     bash: |
-      if [ ! -f .archon/mcp/ntfy.json ]; then exit 0; fi
-      NTFY_TOPIC="${NTFY_TOPIC:-$(grep -oP '"NTFY_TOPIC":\s*"\K[^"]+' .archon/mcp/ntfy.json 2>/dev/null)}"
-      [ -z "$NTFY_TOPIC" ] && exit 0
+      HERMES_BIN="${HERMES_BIN:-$(command -v hermes || echo /home/pondycrane/.local/bin/hermes)}"
+      BODY="$ARTIFACTS_DIR/hermes-done.txt"
       if [ -f "$ARTIFACTS_DIR/workflow-summary.md" ]; then
-        TITLE="✅ Irrigation Dev Complete"
-        TAGS="white_check_mark"
-        BODY="Workflow completed successfully for: $ARGUMENTS"
+        SUBJECT="✅ Smart Irrigation — complete"
       else
-        TITLE="❌ Irrigation Dev Failed"
-        TAGS="x"
-        BODY="Workflow failed for: $ARGUMENTS"
+        SUBJECT="❌ Smart Irrigation — failed"
       fi
-      curl -sf -H "Title: $TITLE" -H "Priority: 4" -H "Tags: $TAGS" \
-        -d "$BODY" "https://ntfy.sh/$NTFY_TOPIC" > /dev/null 2>&1
+      {
+        echo "Request: $ARGUMENTS"
+        echo "Workflow: $WORKFLOW_ID"
+        echo "Finished: $(date '+%Y-%m-%d %H:%M %Z')"
+        if [ -f "$ARTIFACTS_DIR/.pr-url" ]; then
+          echo "PR: $(cat "$ARTIFACTS_DIR/.pr-url")"
+        fi
+        if [ -f "$ARTIFACTS_DIR/hardware-e2e.md" ]; then
+          HW=$(grep -m1 -i '^\*\*Status\*\*' "$ARTIFACTS_DIR/hardware-e2e.md" | sed 's/\*//g' || true)
+          [ -n "$HW" ] && echo "$HW"
+        fi
+        if [ -f "$ARTIFACTS_DIR/validation.md" ]; then
+          VAL=$(grep -m1 -i '^\*\*Status\*\*' "$ARTIFACTS_DIR/validation.md" | sed 's/\*//g' || true)
+          [ -n "$VAL" ] && echo "$VAL"
+        fi
+      } > "$BODY"
+      if [ -x "$HERMES_BIN" ] || command -v "$HERMES_BIN" >/dev/null 2>&1; then
+        "$HERMES_BIN" send --to telegram --subject "$SUBJECT" --file "$BODY" >/dev/null 2>&1 \
+          || echo "warning: hermes completion notification failed" >&2
+      else
+        echo "warning: hermes CLI not found — completion notification skipped" >&2
+      fi
     depends_on: [workflow-summary]
     trigger_rule: all_done
