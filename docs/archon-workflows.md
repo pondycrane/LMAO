@@ -12,6 +12,7 @@ rescue (see issue #89 for the full post-mortem of the #87 run).
 |----------|-------------|
 | `lmao-fix-issue` | Fix / implement a GitHub issue end-to-end: classify → investigate/plan → implement → **gates** → draft PR → review → self-fix → simplify → **gates re-run** → report. |
 | `lmao-feature-dev` | Feature idea → plan → implement → **gates** → PR → 5-agent review → fixes → **gates re-run** → summary. |
+| `smart-irrigation-dev` | Smart Irrigation node (Atom Lite + STM32WLE5CC DTU) work from the blueprint in `smart_irrigation/docs/development-plan.md`: phase features, or the mandatory Phase 0 algorithm evaluation. Firmware work is hard-blocked until `smart_irrigation/docs/algorithm-evaluation.md` exists (blueprint Appendix 13). |
 
 Both run entirely on pi/DeepSeek (`deepseek-v4-pro` for plan/implement/fix,
 `deepseek-v4-flash` for the rest). No Claude references anywhere.
@@ -20,6 +21,10 @@ Both run entirely on pi/DeepSeek (`deepseek-v4-pro` for plan/implement/fix,
 cd /home/pondycrane/LMAO
 archon workflow run lmao-fix-issue "Fix issue #87"
 archon workflow run lmao-feature-dev "Add humidity graphing to the ingest pod"
+
+# Smart Irrigation — run Phase 0 first (algorithm evaluation), then phases:
+archon workflow run smart-irrigation-dev "Phase 0: algorithm evaluation"
+archon workflow run smart-irrigation-dev "Phase 2: PCA9548A + sensor drivers"
 ```
 
 ## The gate chain (what makes these LMAO-specific)
@@ -29,6 +34,49 @@ Every mutating phase is fenced by the same three-node gate chain:
 ```
 lmao-validate  →  lmao-hardware-e2e  →  lmao-production-health
 ```
+
+`smart-irrigation-dev` uses the irrigation variant of the chain:
+
+```
+irrigation-validate  →  irrigation-hardware-e2e  →  irrigation-production-health
+```
+
+- **`irrigation-validate`** — the LMAO host gate (BUILD completeness, `bazel
+  build //...`, ruff/mypy, unit tests) plus irrigation checks: MicroPython
+  syntax (`mpy-cross`/`py_compile`), vendored `firmware/lib/urns/**` integrity
+  against `cardputer_client/`, control-engine sweep/safety-override evidence,
+  and protobuf round-trip checks.
+- **`irrigation-hardware-e2e`** — reuses the LMAO Cardputer/RNode phases
+  (including the production-path fallback from `lmao-hardware-e2e.md`) and
+  adds Atom Lite checks using the **verified fingerprint** in
+  `lma_core/device_detect.py` (FTDI `0403:6001`, product `M5stack`) or
+  `IRRIGATION_PORT` — generic FT232 bridges are never blind-probed. The
+  primary check is the read-only device probe
+  `mpremote connect <port> run smart_irrigation/firmware/tools/probe_hardware.py`
+  (I2C mux + SHT30 + DTU AT identity), compared against
+  `smart_irrigation/docs/hardware-verification.md`. The gate also enforces the
+  **pump safety precondition** (watering module disconnected; no pump pin is
+  ever driven). Missing hardware is a loud SKIP/UNVERIFIABLE written into the
+  PR body.
+- **`irrigation-production-health`** — owns `$ARTIFACTS_DIR/.gate-head`, checks
+  the production Cardputer (journal or K8s) and, when the irrigation node is
+  deployed, SensorReport/DB/JetStream health. Honest UNVERIFIABLE is recorded
+  loudly.
+
+### The irrigation evaluation-first gate
+
+`smart-irrigation-dev` additionally enforces the blueprint's Appendix 13
+mandate: if a request touches firmware/algorithm/protocol code and
+`smart_irrigation/docs/algorithm-evaluation.md` does not exist, the workflow
+fails at its deterministic `preflight` node with instructions to run Phase 0
+first. Server/docs/host-script requests may proceed without it.
+
+**Notifications**: `smart-irrigation-dev` sends start and completion/failure
+messages through Hermes to the Telegram home channel
+(`hermes send --to telegram`, credentials/target from `~/.hermes/.env`).
+The completion message includes the PR URL and the hardware-E2E/validation
+statuses when available. Notification failure is a warning only — it never
+masks the workflow result.
 
 1. **`lmao-validate`** — Bazel-native validation:
    - **BUILD completeness**: every new/changed `*.py` must resolve to a Bazel
