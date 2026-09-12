@@ -15,6 +15,13 @@ Verified real-device fingerprints:
     /dev/ttyUSB0, VID 0x10C4  PID 0xEA60,
     product=CP2102 USB to UART Bridge Controller,
     manufacturer=Silicon Labs
+  - Atom Lite / smart-irrigation node (M5Stack Atom Lite, ESP32-PICO-D4,
+    FTDI FT232 UART bridge):
+    /dev/ttyUSB0, VID 0x0403  PID 0x6001,
+    product=M5stack,
+    manufacturer=Hades2001 (string varies by production batch — the
+    product string is the reliable marker; generic FT232 bridges must NOT
+    match, hence the stricter string requirement for this fingerprint)
 
 API
 ---
@@ -22,8 +29,11 @@ API
   result = detect_devices()
   # result.cardputer     → DeviceInfo | None
   # result.rnode         → DeviceInfo | None
+  # result.atom_lite     → DeviceInfo | None
   # result.cardputer_port   → str | None      (device path)
   # result.rnode_port       → str | None
+  # result.atom_lite_port   → str | None
+  # result.irrigation_port  → str | None      (alias of atom_lite_port)
   # result.all_ports        → list[DeviceInfo]
 
   port = find_cardputer_port(preferred=None)   → str | None
@@ -66,6 +76,17 @@ _RNODE_FINGERPRINTS: tuple[tuple[int, int, dict[str, str]], ...] = (
         {
             "product":      "CP2102 USB to UART Bridge Controller",
             "manufacturer": "Silicon Labs",
+        },
+    ),
+)
+
+_ATOM_LITE_FINGERPRINTS: tuple[tuple[int, int, dict[str, str]], ...] = (
+    (
+        0x0403,  # VID — FTDI
+        0x6001,  # PID — FT232 Serial (UART) IC
+        {
+            "product":      "M5stack",
+            "manufacturer": "Hades2001",
         },
     ),
 )
@@ -118,6 +139,9 @@ class DetectionResult:
     rnode: DeviceInfo | None = None
     """Detected RNode device, or ``None``."""
 
+    atom_lite: DeviceInfo | None = None
+    """Detected M5Stack Atom Lite (smart-irrigation node), or ``None``."""
+
     confidence: dict[str, str] = field(default_factory=dict)
     """Confidence levels: ``{"cardputer": "high"|"medium"|"low", ...}``."""
 
@@ -133,6 +157,16 @@ class DetectionResult:
     def rnode_port(self) -> str | None:
         """Convenience: device path of the RNode, or ``None``."""
         return self.rnode.port if self.rnode else None
+
+    @property
+    def atom_lite_port(self) -> str | None:
+        """Convenience: device path of the Atom Lite, or ``None``."""
+        return self.atom_lite.port if self.atom_lite else None
+
+    @property
+    def irrigation_port(self) -> str | None:
+        """Alias for :attr:`atom_lite_port` (smart-irrigation naming)."""
+        return self.atom_lite_port
 
 
 # ---------------------------------------------------------------------------
@@ -205,9 +239,7 @@ def _match_fingerprint(
 def _desc_matches_any(info: DeviceInfo, keywords: tuple[str, ...]) -> bool:
     """Check if *info.description* (or *product*) contains any keyword."""
     text = " ".join(
-        part.lower()
-        for part in (info.description, info.product, info.manufacturer)
-        if part
+        part.lower() for part in (info.description, info.product, info.manufacturer) if part
     )
     return any(kw in text for kw in keywords)
 
@@ -245,6 +277,7 @@ def detect_devices() -> DetectionResult:
 
     cards: list[tuple[str, DeviceInfo]] = []  # (confidence, info)
     rnodes: list[tuple[str, DeviceInfo]] = []
+    atom_lites: list[tuple[str, DeviceInfo]] = []
 
     for p in ports:
         info = _read_port_info(p)
@@ -252,6 +285,14 @@ def detect_devices() -> DetectionResult:
 
         cp_conf = _match_fingerprint(info, _CARDCOMPUTER_FINGERPRINTS)
         rn_conf = _match_fingerprint(info, _RNODE_FINGERPRINTS)
+        atl_conf = _match_fingerprint(info, _ATOM_LITE_FINGERPRINTS)
+
+        # Atom Lite strictness: 0403:6001 is the ubiquitous FTDI FT232 ID
+        # (generic cables/boards).  Only accept a port whose USB product
+        # string says M5Stack — a probe would be needed otherwise and we
+        # avoid opening unrelated FTDI devices.
+        if atl_conf and "m5stack" not in (info.product or "").lower():
+            atl_conf = ""
 
         # Both fingerprints can theoretically match the same port if
         # there is a VID/PID collision.  Use description keywords to
@@ -267,10 +308,13 @@ def detect_devices() -> DetectionResult:
             cards.append((cp_conf, info))
         if rn_conf:
             rnodes.append((rn_conf, info))
+        if atl_conf:
+            atom_lites.append((atl_conf, info))
 
     # Pick best match for each type (prefer high confidence)
-    cards.sort(key=lambda x: (0 if x[0] == "high" else 1 if x[0] == "medium" else 2))
-    rnodes.sort(key=lambda x: (0 if x[0] == "high" else 1 if x[0] == "medium" else 2))
+    cards.sort(key=lambda x: 0 if x[0] == "high" else 1 if x[0] == "medium" else 2)
+    rnodes.sort(key=lambda x: 0 if x[0] == "high" else 1 if x[0] == "medium" else 2)
+    atom_lites.sort(key=lambda x: 0 if x[0] == "high" else 1 if x[0] == "medium" else 2)
 
     if cards:
         conf, info = cards[0]
@@ -281,6 +325,11 @@ def detect_devices() -> DetectionResult:
         conf, info = rnodes[0]
         result.rnode = info
         result.confidence["rnode"] = conf
+
+    if atom_lites:
+        conf, info = atom_lites[0]
+        result.atom_lite = info
+        result.confidence["atom_lite"] = conf
 
     return result
 
@@ -329,6 +378,28 @@ def find_rnode_port(preferred: str | None = None) -> str | None:
     return None
 
 
+def find_irrigation_port(preferred: str | None = None) -> str | None:
+    """Return the device path of the smart-irrigation Atom Lite node.
+
+    When *preferred* is given it is returned immediately (caller-supplied
+    port override, e.g. ``IRRIGATION_PORT``).  Otherwise all serial ports
+    are scanned using :func:`detect_devices`.
+
+    Args:
+        preferred: Caller-supplied port override (returned as-is).
+
+    Returns:
+        Device path (e.g. ``/dev/ttyUSB0``) or ``None``.
+    """
+    if preferred:
+        return preferred
+
+    d = detect_devices()
+    if d.atom_lite:
+        return d.atom_lite.port
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Optional protocol-level probes
 # ---------------------------------------------------------------------------
@@ -368,12 +439,7 @@ def probe_rnode(port: str, timeout: float = 0.5, attempts: int = 3) -> bool:
                 time.sleep(0.3)
                 data = ser.read(100)
 
-                if (
-                    len(data) >= 4
-                    and data[0:1] == b"\xC0"
-                    and data[1] == 0x08
-                    and data[2] == 0x46
-                ):
+                if len(data) >= 4 and data[0:1] == b"\xc0" and data[1] == 0x08 and data[2] == 0x46:
                     return True
             return False
         finally:
@@ -420,3 +486,20 @@ def probe_cardputer_repl(port: str, timeout: float = 2.0) -> bool:
         return b"raw repl" in combined or b"micropython" in combined
     except Exception:
         return False
+
+
+def probe_atom_lite_repl(port: str, timeout: float = 2.0) -> bool:
+    """Check whether *port* is an Atom Lite (or any device) running MicroPython.
+
+    Uses the same raw-REPL handshake as :func:`probe_cardputer_repl`; kept
+    as a named helper so smart-irrigation tooling does not have to call a
+    Cardputer-specific function.
+
+    Args:
+        port: Serial device path (e.g. ``/dev/ttyUSB0``).
+        timeout: Overall timeout in seconds (default 2.0).
+
+    Returns:
+        ``True`` if the port responds with a MicroPython raw REPL banner.
+    """
+    return probe_cardputer_repl(port, timeout=timeout)

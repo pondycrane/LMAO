@@ -39,9 +39,19 @@ fresh agent using only the plan + repo.
   `/home/pondycrane/smart-irrigation-dev-plan.md`) — read the sections for the
   selected phase plus §3 (sensor map), §4/§13 (algorithm), §7 (payload),
   §9 (constraints), §11 (layout), Appendix B/C.
+- **Verified hardware reality:** `smart_irrigation/docs/hardware-verification.md`
+  — mandatory. Plan the verified pin map (DTU TX=G22/RX=G19; I2C SCL=G32/
+  SDA=G26; mux 0x70; ENV III on ch5), never the blueprint's conflicting
+  guesses. Do not plan pressure as a control input or telemetry field until
+  the QMP6988/mux 0x70 collision is fixed; moisture is analog (Watering Unit
+  U101 probe) unless the user states otherwise; the DTU is RUI4 P2P mode until
+  Phase 6 switches it. The pump default-OFF requirement (boot.py first action
+  + hardware pull-down) is part of any pump-facing task.
 - Existing patterns: `cardputer_client/main.py`, `config.py`,
   `lora_boards.py`, `flash.py`, `cardputer_client/BUILD`,
-  `cardputer_client/proto/lma_encoder.py`, `tests/BUILD`.
+  `cardputer_client/proto/lma_encoder.py`, `tests/BUILD`,
+  `smart_irrigation/firmware/tools/probe_hardware.py` (device probe pattern),
+  `lma_core/device_detect.py` (verified device fingerprints).
 
 **Output**: `$ARTIFACTS_DIR/plan.md`.
 
@@ -225,9 +235,14 @@ Every task must have an executable `VALIDATE` command. No placeholders.
 - [ ] Mode/phase matches the assessment; no phase creep
 - [ ] Firmware plans follow the evaluation verdict (not the blueprint sketch
       when they differ); fallback behavior stated
+- [ ] Plan uses only verified pins/devices from `hardware-verification.md`; any
+      new hardware claim is flagged as needing verification before use
+- [ ] Pressure-dependent behavior has an explicit pressure-absent path (collision)
+- [ ] Pump-facing changes include the default-OFF boot order + pull-down
 - [ ] Every new `.py` file has its BUILD wiring designed
 - [ ] Every safety override appears as a task + test
-- [ ] Hardware E2E explicitly planned (target, observations, skip semantics)
+- [ ] Hardware E2E explicitly planned (target, observations, skip semantics);
+      the probe (`firmware/tools/probe_hardware.py`) is the baseline check
 - [ ] Blueprint assumptions that this feature validates are flagged in Notes
 - [ ] "No prior knowledge" test: a fresh agent could execute using only the plan
 

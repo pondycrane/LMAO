@@ -65,12 +65,23 @@ For each item, find evidence in the diff or mark ❌.
 
 ### B. Pump & water safety (physical consequences)
 - [ ] Overrides are hard-coded and checked **after** control output:
-      saturated lockout, pressure-fall override, battery cutoff.
-- [ ] Fail-off: any sensor error/exception/NaN/WDT path de-energizes the pump.
+      saturated lockout, battery cutoff. The pressure-fall override only
+      applies when pressure is actually readable (QMP collision); otherwise
+      must be a documented no-op, not a fabricated reading.
+- [ ] Fail-off: any sensor error/exception/NaN/WDT/deep-sleep path de-energizes
+      the pump. The WATERING UNIT (U101) default-OFF rule is explicit:
+      the pump control pin is driven OFF as the **first action in `boot.py`**,
+      before sensor/UART/LoRa init, and a hardware pull-down keeps it OFF
+      while floating (see `docs/hardware-verification.md` §5).
 - [ ] Min ON time, min OFF time, max duration, **max daily watering** enforced.
 - [ ] Concurrency: downlink pump commands and the autonomous cycle can't fight
       (interrupt/abort path is safe, no silent restart loops).
 - [ ] No path can hold the pump on while blocked on I2C/network/REPL.
+- [ ] Pump pin/polarity matches the documented Watering Unit wiring — G26/G32
+      are I2C and must never be used as pump/moisture pins in this rig.
+- [ ] Moisture is treated as an analog ADC signal (calibration + noise
+      handling), not an I2C device, unless hardware-verification.md says
+      otherwise; invalid/floating ADC samples must not schedule watering.
 
 ### C. MicroPython reality
 - [ ] `machine`/`micropython`/`esp32` imports guarded for host tests.

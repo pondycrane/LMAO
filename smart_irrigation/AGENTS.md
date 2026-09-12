@@ -8,8 +8,12 @@ workflow (`.archon/workflows/smart-irrigation-dev.yaml`) and its gate chain.
 
 1. `smart_irrigation/docs/development-plan.md` — the blueprint (also at
    `/home/pondycrane/smart-irrigation-dev-plan.md`).
-2. `smart_irrigation/docs/algorithm-evaluation.md` — mandatory deliverable.
-3. `/home/pondycrane/LMAO/AGENTS.md` — repo-wide LMAO rules (they all apply).
+2. `smart_irrigation/docs/hardware-verification.md` — **verified hardware
+   reality** (pin map, DTU firmware/mode, I2C mux + sensor placement, the
+   QMP6988 address collision, watering-unit safety). Supersedes the blueprint
+   wherever they conflict.
+3. `smart_irrigation/docs/algorithm-evaluation.md` — mandatory deliverable.
+4. `/home/pondycrane/LMAO/AGENTS.md` — repo-wide LMAO rules (they all apply).
 
 ## Algorithm evaluation mandate (blueprint Appendix 13)
 
@@ -41,16 +45,23 @@ selected something else — implement the verdict, with the sketch as fallback.
 
 ## Hardware safety (violating these can brick devices)
 
-- **NEVER use esptool** for probing, `chip_id`, or flashing on the Cardputer
-  (`/dev/ttyACM*`), the RNode (`/dev/ttyUSB*`), or the Atom Lite. The Cardputer
-  is flashed only via `bazel run //cardputer_client:flash` (raw REPL); the RNode
-  only via https://flasher.rnode.network/.
-- Atom Lite file uploads go **only** through the project flash tool (MicroPython
-  raw REPL, adapted from `cardputer_client/flash.py`). The one-time MicroPython
-  firmware install is a separate documented procedure requiring explicit user
-  confirmation — it is not part of any automated gate.
+- **NEVER use esptool** on the Cardputer (`/dev/ttyACM*`) or the RNode
+  (`/dev/ttyUSB*`) — any probing/flashing. The Cardputer is flashed only via
+  `bazel run //cardputer_client:flash` (raw REPL); the RNode only via
+  https://flasher.rnode.network/.
+- **Atom Lite (FTDI bridge) exception:** esptool is allowed **only** for the
+  documented one-time MicroPython firmware install and a full flash backup,
+  at **115200 baud** (460800+ is unreliable on the ESP32-PICO-D4 embedded
+  flash). Routine file uploads use MicroPython raw REPL / `mpremote` — never
+  esptool. Never use esptool as a general-purpose probe during a gate.
 - Never open ad-hoc serial sessions (`screen`, `minicom`, REPL experiments) on
-  a device while a gate or E2E test is running.
+  a device while a gate or E2E test is running. The sanctioned probe is
+  `smart_irrigation/firmware/tools/probe_hardware.py` (read-only; never touches
+  pump pins; restores the mux to all-channels-off).
+- **Never power the pump during probing/validation.** The watering module
+  currently runs its motor whenever it is plugged in (floating control line);
+  keep it disconnected until the default-OFF requirement in
+  `docs/hardware-verification.md` §5 is implemented and verified.
 - **Leave the production Cardputer running** with its production config
   (`DEST_HASH`, server radio params) after any test session.
 - Radio parameters (868 MHz, BW 125 kHz, SF 7, CR 4:5, preamble 24, syncword
@@ -72,9 +83,11 @@ selected something else — implement the verdict, with the sketch as fallback.
   format must stay compatible with `cardputer_client/proto/lma_encoder.py`
   and the server's LXMF handler.
 - **Pump safety is hard-coded, never fuzzy**: saturated-soil lockout,
-  pressure-fall override (e.g. < −2 hPa/h → pump off), battery cutoff
-  (< 3.0 V → no watering), pump min ON / min OFF times, max daily watering.
-  Safety overrides must fail off (pump de-energized) on any error.
+  pressure-fall override (only when pressure is actually readable — see the
+  QMP collision), battery cutoff (< 3.0 V → no watering), pump min ON / min OFF
+  times, max daily watering. Safety overrides must fail off (pump
+  de-energized) on any error, including watchdog resets and deep sleep. The
+  pump control pin is configured OFF as the first action of `boot.py`.
 - Node config mirrors `cardputer_client/config.py` structure.
 
 ## Build & test rules (LMAO repo-wide rules apply)
@@ -98,15 +111,32 @@ selected something else — implement the verdict, with the sketch as fallback.
 - E2E gate: hardware tests as scheduled by `irrigation-hardware-e2e`; loud
   skip/UNVERIFIABLE is recorded in the PR — never a silent pass.
 
-## Blueprint working assumptions (validate against hardware, don't guess)
+## Verified hardware reality (see docs/hardware-verification.md)
 
-The blueprint contains known unknowns (see its §9): moisture sensor type
-(analog vs I2C), PCA9548A channel map, LoRaWAN region, pump drive type, UART
-cross-wiring, battery divider ratio, and the Atom Lite variant/SoC (blueprint
-says ESP32-S2; the classic Atom Lite is ESP32). Treat pin/board details as
-working assumptions to verify with `i2c_scan()` and the actual attached device;
-record findings in `docs/pin-mapping.md`. Never guess a pin and never probe
-hardware that is not attached.
+Verified on 2026-09-12 — use these values, not the blueprint's guesses:
+
+- **Atom Lite** = ESP32-PICO-D4 (not ESP32-S2), USB `0403:6001` "M5stack",
+  MAC `c8:85:41:67:dd:34`, MicroPython v1.29.0 installed; 2 MB FS.
+- **Atom ↔ DTU UART: TX=G22, RX=G19 @115200** (blueprint's 17/16 is wrong).
+- **I2C: SCL=G32, SDA=G26** (blueprint's 21/22 is wrong — G22 is the DTU
+  UART). PCA9548A mux at **0x70**; the ENV III-style board (SHT30 `0x44` +
+  QMP6988 `0x70`) sits on **mux channel 5** (blueprint said ch1/ch2).
+- **QMP6988 address collision (BLOCKER):** QMP6988 and the mux are both at
+  `0x70`; pressure reads are corrupted (bus ANDs the data). Pressure must NOT
+  be planned as a control input or telemetry field until the hardware fix in
+  `docs/hardware-verification.md` §4 is applied. The algorithm evaluation must
+  treat pressure as unavailable-by-default.
+- **DTU**: RAK3172, firmware **RUI_4.0.6_RAK3172-E**, currently **P2P mode
+  (`AT+NWM=0`)**. LoRaWAN-only commands return `AT_MODE_NO_SUPPORT`; Phase 6
+  must explicitly switch to LoRaWAN and verify the RUI4 AT command set.
+- **Watering Unit U101** (pump + analog capacitive probe): pump control must be
+  driven OFF as the first action in `boot.py` with a hardware pull-down; no
+  pump actuation in gates/probes. Confirm the actual moisture-ADC and pump
+  pins with the user before planning them (G26/G32 are taken by I2C).
+- Blueprint remaining unknowns still to confirm on hardware: LoRaWAN region
+  plan, battery divider (if any), and whether the mux collision is fixed by
+  re-strapping. Never guess a pin; record new findings in
+  `docs/hardware-verification.md`.
 
 ## Artifacts
 
