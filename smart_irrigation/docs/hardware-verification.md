@@ -117,6 +117,48 @@ transistor turns on. Requirements before the pump is ever connected again:
 4. **Min ON / min OFF / max daily** enforcement from the control engine, hard
    overrides always winning.
 
+### Concrete fix recipe (do this before reconnecting the pump)
+
+The U101 is **active-HIGH**: `PUMP_EN` (yellow wire) HIGH = pump ON (M5Stack's
+example does `digitalWrite(PUMP_PIN, 1)`; U101 pin map: Black=GND, Red=5V,
+Yellow=PUMP_EN, White=moisture analog out). The "motor always on" happens when
+PUMP_EN sits on a line that is high/floating at power-on — most commonly the
+**I2C Grove port**, whose SDA/SCL are pulled up (on this rig G26/G32 already
+carry the PCA9548A mux + ENV III; never put PUMP_EN there).
+
+1. **Wire it to a non-I2C port.** Here the Atom's Grove port is the I2C bus
+   (G26/G32, occupied by the mux). Use the DTU base's J1 header (G21/G25) or
+   another free GPIO — one pin for PUMP_EN, one **ADC** pin for the moisture
+   output. Preferred: moisture on **G33** (ADC1, works with WiFi on) or G25
+   (ADC2, WiFi must be off); PUMP_EN on **G21/G23** (normal GPIOs, not
+   strapping pins). Avoid ESP32 strapping pins (GPIO0/2/5/12/15) for the pump.
+2. **Fit a 10 kΩ pull-down from PUMP_EN to GND**, physically at the unit's
+   connector. This defines the input as LOW (OFF) whenever the GPIO is
+   floating/uninitialized — including the whole boot, reset, flashing,
+   deep-sleep and crash windows. This is the actual fix; firmware alone cannot
+   cover the window before MicroPython starts.
+3. **Firmware drives OFF first, before anything else** in `boot.py`:
+   `from machine import Pin; Pin(PUMP_PIN, Pin.OUT, value=0)`. Keep this as the
+   very first executable line (before WiFi/UART/I2C/deep-sleep setup) and
+   re-assert OFF on every wake/deep-sleep path. Never rely on `Pin.OUT` alone
+   without the external pull-down.
+4. **Power the pump separately.** The pump is 5 W (~1 A at 5 V). Do not run it
+   from the Atom's USB/Grove 5 V rail; use a dedicated 5 V supply with a common
+   ground (or the base's 12 V input with a suitable buck, respecting its
+   current limit). Keep the pump's ground star-connected to the unit ground.
+5. **Verify without water before reconnecting the pump:**
+   - With the pump motors unplugged, drive PUMP_EN and measure the unit's pump
+     connector (or an LED + 1 kΩ across the motor terminals) — must read ~0 V
+     at boot and with GPIO LOW.
+   - Toggle the GPIO in a test and confirm the output goes high only when
+     commanded.
+   - Then connect the pump on a current-limited bench supply (set ~1.2 A,
+     5 V) and repeat the boot test: pump must stay off through reset/flash
+     cycles before it is ever used with water.
+6. **If a future module is active-LOW:** invert step 2 (10 kΩ pull-up to 3.3 V)
+   and drive HIGH first in `boot.py`. Determine polarity with the LED test
+   first — never guess.
+
 ---
 
 ## 6. Open items
