@@ -7,6 +7,8 @@ sensor sample to the LMAO server over LoRa for offline ML training.
 **The development blueprint is the single source of truth:**
 [`docs/development-plan.md`](docs/development-plan.md)
 (also at `/home/pondycrane/smart-irrigation-dev-plan.md`).
+**Verified hardware reality (pin map, DTU firmware, sensor placement, known
+collisions):** [`docs/hardware-verification.md`](docs/hardware-verification.md).
 
 ## System at a glance
 
@@ -47,12 +49,18 @@ smart_irrigation/
 
 ## Hardware (fixed — per blueprint §13, Appendix B)
 
-| Component | Role |
-|-----------|------|
-| Atom Lite (ESP32) | MicroPython host: sensors, control engine, LXMF, pump |
-| STM32WLE5CC DTU | LoRaWAN Class A radio bridge over UART |
-| PCA9548A | I2C hub: ch0 moisture, ch1 SHT30, ch2 QMP6988 |
-| Pump relay/MOSFET | Irrigation actuator (min on/off, max daily caps) |
+**Verified on 2026-09-12** — see [`docs/hardware-verification.md`](docs/hardware-verification.md)
+for evidence, pin map, and open items. Summary:
+
+| Component | Verified reality |
+|-----------|------------------|
+| Atom Lite (ESP32-PICO-D4, not S2) | FTDI `0403:6001` "M5stack"; MicroPython v1.29.0; MAC `c8:85:41:67:dd:34` |
+| Atom ↔ DTU UART | **TX=G22, RX=G19** @115200 (blueprint's 17/16 is wrong) |
+| I2C bus | **SCL=G32, SDA=G26**; PCA9548A mux at `0x70` (blueprint's 21/22 is wrong) |
+| Sensors | SHT30 `0x44` + QMP6988 on **mux ch5** (ENV III board); moisture **analog** (Watering Unit probe) |
+| QMP6988 pressure | ⚠️ **address collision with the mux (`0x70` → `0x70`)** — unreadable until the hardware fix; not a control input by default |
+| STM32WLE5CC DTU | M5Stack A152-EU868 / **RAK3172 RUI_4.0.6**, currently **P2P mode** (`AT+NWM=0`); AT console verified |
+| Pump | M5Stack Watering Unit (U101): analog moisture + GPIO pump; pump runs whenever the control line floats |
 
 ## The algorithm evaluation gate
 
@@ -81,11 +89,16 @@ workflow reference.
 
 ## Safety (also in AGENTS.md)
 
-- Never use esptool to probe/flash any device (Cardputer, RNode, Atom Lite).
-  Atom Lite file uploads go only through the project flash tool (raw REPL);
-  the one-time MicroPython firmware install is a separate, documented,
-  user-confirmed procedure.
-- Never poke serial ports ad hoc while a gate/test is running.
+- Never use esptool to probe/flash the Cardputer, RNode, or Atom Lite. Atom
+  Lite file uploads go only through `mpremote`/the raw-REPL flash tool; esptool
+  is allowed only for the documented one-time MicroPython install/backup at
+  115200 baud.
+- Never poke serial ports ad hoc while a gate/test is running. The sanctioned
+  probe is `firmware/tools/probe_hardware.py` (read-only, restores the mux).
 - Leave the production Cardputer running with its production config.
+- **Never power the pump during probing/validation.** The Watering Unit's
+  motor runs whenever its control line floats — it must stay disconnected until
+  the default-OFF boot order + hardware pull-down are implemented and verified.
 - The pump must always be driven through the safety overrides (saturation
-  lockout, pressure-fall override, battery cutoff, min on/off, daily cap).
+  lockout, pressure override only when pressure is readable, battery cutoff,
+  min on/off, daily cap), with fail-off on any error.

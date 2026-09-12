@@ -141,9 +141,7 @@ class TestMatchFingerprint:
     def test_cardputer_high_confidence(self):
         """Real Cardputer fingerprint → high confidence."""
         info = device_detect._read_port_info(_CARDPUTER_PORT)
-        result = device_detect._match_fingerprint(
-            info, device_detect._CARDCOMPUTER_FINGERPRINTS
-        )
+        result = device_detect._match_fingerprint(info, device_detect._CARDCOMPUTER_FINGERPRINTS)
         assert result == "high"
 
     def test_rnode_high_confidence(self):
@@ -155,17 +153,13 @@ class TestMatchFingerprint:
     def test_no_match_returns_empty(self):
         """Unknown device returns empty string."""
         info = device_detect.DeviceInfo(port="/dev/ttyUSB1", vid=0xABCD, pid=0x1234)
-        result = device_detect._match_fingerprint(
-            info, device_detect._CARDCOMPUTER_FINGERPRINTS
-        )
+        result = device_detect._match_fingerprint(info, device_detect._CARDCOMPUTER_FINGERPRINTS)
         assert result == ""
 
     def test_no_vid_pid_returns_empty(self):
         """Device without VID/PID returns empty."""
         info = device_detect.DeviceInfo(port="/dev/ttyS0", vid=None, pid=None)
-        result = device_detect._match_fingerprint(
-            info, device_detect._CARDCOMPUTER_FINGERPRINTS
-        )
+        result = device_detect._match_fingerprint(info, device_detect._CARDCOMPUTER_FINGERPRINTS)
         assert result == ""
 
     def test_vid_pid_match_without_strings_high_confidence(self):
@@ -173,9 +167,7 @@ class TestMatchFingerprint:
         info = device_detect.DeviceInfo(
             port="/dev/ttyACM0", vid=0x303A, pid=0x8120, product=None, manufacturer=None
         )
-        result = device_detect._match_fingerprint(
-            info, device_detect._CARDCOMPUTER_FINGERPRINTS
-        )
+        result = device_detect._match_fingerprint(info, device_detect._CARDCOMPUTER_FINGERPRINTS)
         assert result == "high"
 
     def test_vid_pid_match_with_mismatched_manufacturer_medium(self):
@@ -187,9 +179,7 @@ class TestMatchFingerprint:
             product="SomeOtherProduct",
             manufacturer="WrongVendor",
         )
-        result = device_detect._match_fingerprint(
-            info, device_detect._CARDCOMPUTER_FINGERPRINTS
-        )
+        result = device_detect._match_fingerprint(info, device_detect._CARDCOMPUTER_FINGERPRINTS)
         assert result == "medium"
 
     def test_vid_pid_match_with_mismatched_product_medium(self):
@@ -201,9 +191,7 @@ class TestMatchFingerprint:
             product="WrongProduct",
             manufacturer="Silicon Labs",
         )
-        result = device_detect._match_fingerprint(
-            info, device_detect._RNODE_FINGERPRINTS
-        )
+        result = device_detect._match_fingerprint(info, device_detect._RNODE_FINGERPRINTS)
         assert result == "medium"
 
 
@@ -216,9 +204,7 @@ class TestDescMatchesAny:
     """Tests for _desc_matches_any()."""
 
     def test_matches_keyword_in_description(self):
-        info = device_detect.DeviceInfo(
-            port="/dev/ttyACM0", description="M5Stack Cardputer ADV"
-        )
+        info = device_detect.DeviceInfo(port="/dev/ttyACM0", description="M5Stack Cardputer ADV")
         assert device_detect._desc_matches_any(info, ("cardputer", "m5stack")) is True
 
     def test_matches_keyword_in_product(self):
@@ -234,9 +220,7 @@ class TestDescMatchesAny:
         assert device_detect._desc_matches_any(info, ("m5stack",)) is True
 
     def test_no_match(self):
-        info = device_detect.DeviceInfo(
-            port="/dev/ttyACM0", description="FTDI USB Serial"
-        )
+        info = device_detect.DeviceInfo(port="/dev/ttyACM0", description="FTDI USB Serial")
         assert device_detect._desc_matches_any(info, ("cardputer", "m5stack")) is False
 
 
@@ -450,8 +434,7 @@ class TestDetectDevicesNoCrossMatching:
             result = device_detect.detect_devices()
 
         assert result.cardputer is None, (
-            "CH340 device must NOT be classified as Cardputer "
-            "(keyword fallback was removed)"
+            "CH340 device must NOT be classified as Cardputer (keyword fallback was removed)"
         )
 
 
@@ -544,7 +527,7 @@ class TestProbeRnode:
     def test_short_response(self):
         """Response shorter than 4 bytes → False."""
         mock_ser = MagicMock()
-        mock_ser.read.return_value = b"\xC0\x08"
+        mock_ser.read.return_value = b"\xc0\x08"
 
         with patch("serial.Serial", return_value=mock_ser):
             result = device_detect.probe_rnode("/dev/ttyUSB0")
@@ -732,6 +715,128 @@ class TestDetectDevicesMultipleSameType:
 
         assert result.rnode is not None
         assert result.rnode.port == "/dev/ttyUSB0"  # first one wins
+
+
+# ---------------------------------------------------------------------------
+# Atom Lite (smart-irrigation node) detection
+# ---------------------------------------------------------------------------
+
+
+_ATOM_LITE_PORT = _make_port(
+    device="/dev/ttyUSB0",
+    vid=0x0403,
+    pid=0x6001,
+    product="M5stack",
+    manufacturer="Hades2001",
+    serial_number="69526EE94F",
+    description="M5stack",
+)
+
+
+class TestAtomLiteDetection:
+    """Atom Lite (FTDI FT232 bridge) classification."""
+
+    def test_atom_lite_high_confidence(self):
+        with _mock_comports([_ATOM_LITE_PORT]):
+            result = device_detect.detect_devices()
+
+        assert result.atom_lite is not None
+        assert result.atom_lite.port == "/dev/ttyUSB0"
+        assert result.confidence.get("atom_lite") == "high"
+        assert result.atom_lite_port == "/dev/ttyUSB0"
+        assert result.irrigation_port == "/dev/ttyUSB0"
+
+    def test_generic_ft232_not_matched(self):
+        """A plain FT232 (USB Serial Converter) must NOT classify as Atom Lite.
+
+        0403:6001 is the ubiquitous FTDI FT232 ID; only the M5Stack product
+        string confirms an Atom Lite.
+        """
+        generic = _make_port(
+            device="/dev/ttyUSB1",
+            vid=0x0403,
+            pid=0x6001,
+            product="USB Serial Converter",
+            manufacturer="FTDI",
+        )
+        with _mock_comports([generic]):
+            result = device_detect.detect_devices()
+
+        assert result.atom_lite is None, "generic FT232 bridge must NOT be classified as Atom Lite"
+        assert result.atom_lite_port is None
+
+    def test_atom_lite_alongside_cardputer_and_rnode(self):
+        """All three device types classify independently."""
+        atom_second = _make_port(
+            device="/dev/ttyUSB1",
+            vid=0x0403,
+            pid=0x6001,
+            product="M5stack",
+            manufacturer="Hades2001",
+        )
+        with _mock_comports([_CARDPUTER_PORT, _RNODE_PORT, atom_second]):
+            result = device_detect.detect_devices()
+
+        assert result.cardputer is not None
+        assert result.rnode is not None
+        assert result.atom_lite is not None
+        assert result.atom_lite.port == "/dev/ttyUSB1"
+
+    def test_two_atom_lites_first_wins(self):
+        second = _make_port(
+            device="/dev/ttyUSB7",
+            vid=0x0403,
+            pid=0x6001,
+            product="M5stack",
+            manufacturer="Hades2001",
+        )
+        with _mock_comports([_ATOM_LITE_PORT, second]):
+            result = device_detect.detect_devices()
+
+        assert result.atom_lite is not None
+        assert result.atom_lite.port == "/dev/ttyUSB0"
+
+
+class TestFindIrrigationPort:
+    """Tests for find_irrigation_port()."""
+
+    def test_preferred_returned_immediately(self):
+        with patch("serial.tools.list_ports.comports") as mock_comports:
+            result = device_detect.find_irrigation_port(preferred="/dev/ttyUSB9")
+        mock_comports.assert_not_called()
+        assert result == "/dev/ttyUSB9"
+
+    def test_atom_lite_detected(self):
+        with _mock_comports([_ATOM_LITE_PORT]):
+            result = device_detect.find_irrigation_port()
+        assert result == "/dev/ttyUSB0"
+
+    def test_no_atom_lite_returns_none(self):
+        with _mock_comports([_CARDPUTER_PORT, _RNODE_PORT]):
+            result = device_detect.find_irrigation_port()
+        assert result is None
+
+
+class TestProbeAtomLiteRepl:
+    """Tests for probe_atom_lite_repl() (delegates to the raw-REPL probe)."""
+
+    def test_micropython_banner_detected(self):
+        mock_ser = MagicMock()
+        mock_ser.in_waiting = 0
+        mock_ser.read.return_value = b"raw REPL; CTRL-B to exit\r\n>"
+
+        with patch("serial.Serial", return_value=mock_ser):
+            result = device_detect.probe_atom_lite_repl("/dev/ttyUSB0")
+        assert result is True
+
+    def test_no_banner(self):
+        mock_ser = MagicMock()
+        mock_ser.in_waiting = 0
+        mock_ser.read.return_value = b"at+ver=?\r\nOK\r\n"
+
+        with patch("serial.Serial", return_value=mock_ser):
+            result = device_detect.probe_atom_lite_repl("/dev/ttyUSB0")
+        assert result is False
 
 
 if __name__ == "__main__":

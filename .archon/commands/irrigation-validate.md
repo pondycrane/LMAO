@@ -72,11 +72,15 @@ the full gate below becomes mandatory again.
 CHANGED_PY=$( { git diff --name-only "$BASE_BRANCH"...HEAD -- '*.py'; git ls-files --others --exclude-standard -- '*.py'; } | sort -u | grep -v '^bazel-' || true )
 CHANGED_FW=$(echo "$CHANGED_PY" | grep '^smart_irrigation/firmware/' || true)
 CHANGED_IRR=$(echo "$CHANGED_PY" | grep '^smart_irrigation/' || true)
+# Device (MicroPython) files are syntax-checked, not linted/type-checked as
+# host Python — ruff/mypy do not understand `machine`/`esp` imports.
+CHANGED_HOST_PY=$(echo "$CHANGED_PY" | grep -v '^smart_irrigation/firmware/' || true)
 echo "$CHANGED_PY"
 ```
 
-Lint/type checks run on `$CHANGED_PY` only. Never reformat files outside the
-changed set.
+Lint/type checks run on `$CHANGED_HOST_PY` only; MicroPython device code under
+`smart_irrigation/firmware/` is covered by the syntax check in Phase 5.1 and by
+BUILD wiring in Phase 2. Never reformat files outside the changed set.
 
 If `$CHANGED_PY` is empty, still run Phases 2, 3, 6 and mark the rest N/A.
 
@@ -132,12 +136,12 @@ Must exit 0. **Record**: ✅ / ❌ (fixed)
 
 ---
 
-## Phase 4: LINT + TYPES (changed files)
+## Phase 4: LINT + TYPES (changed host files)
 
 ```bash
-ruff check $CHANGED_PY
-ruff format --check $CHANGED_PY
-mypy $CHANGED_PY
+ruff check $CHANGED_HOST_PY
+ruff format --check $CHANGED_HOST_PY
+mypy $CHANGED_HOST_PY
 ```
 
 Auto-fix with `ruff check --fix` / `ruff format`, then re-check. Configs:

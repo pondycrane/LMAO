@@ -108,28 +108,27 @@ print(f"CARDPUTER={cardputer or 'NONE'}")
 print(f"RNODE={rnode or 'NONE'}")
 EOF
 
-# Atom Lite: explicit opt-in only (no auto-probe!)
+# Atom Lite: verified fingerprint in lma_core.device_detect
+# (FTDI 0403:6001, product "M5stack") — string-confirmed, so generic FT232
+# bridges are never blind-probed. Verified unit: MAC c8:85:41:67:dd:34.
 if [ -n "${IRRIGATION_PORT:-}" ] && [ -e "$IRRIGATION_PORT" ]; then
-  echo "IRRIGATION=$IRRIGATION_PORT (from IRRIGATION_PORT)"
+  IRRIGATION="$IRRIGATION_PORT"
+  echo "IRRIGATION=$IRRIGATION (from IRRIGATION_PORT)"
 else
-  # Optional: a verified fingerprint may have been added to device_detect.py
   IRRIGATION=$(python3 - <<'EOF' 2>/dev/null || true
-try:
-    from lma_core.device_detect import detect_devices
-    d = detect_devices()
-    port = getattr(d, "atom_lite_port", None) or getattr(d, "irrigation_port", None)
-    print(port or "")
-except Exception:
-    print("")
+from lma_core.device_detect import detect_devices
+d = detect_devices()
+print(d.atom_lite_port or "")
 EOF
 )
   echo "IRRIGATION=${IRRIGATION:-NONE}"
 fi
 ```
 
-If the fingerprint does not exist yet, that is expected — the Atom Lite
-port must be supplied via `IRRIGATION_PORT` until a verified fingerprint is
-committed. Do **not** guess it from VID/PID alone.
+If the port is detected but the device does not answer as a MicroPython node
+(see the probe in Phase 4b), mark the irrigation checks UNVERIFIABLE — **never
+fall back to esptool probing** and never guess a port from generic FTDI
+VID/PIDs.
 
 ---
 
@@ -160,6 +159,18 @@ Record the Cardputer/RNode results exactly as that command's table does.
 Run only when `IRRIGATION != NONE`; otherwise record
 `⚠️ UNVERIFIABLE — Atom Lite not attached (set IRRIGATION_PORT)`.
 
+### 4.0 PUMP SAFETY PRECONDITION (do this first)
+
+**The watering module must not be connected or powered during the gate.**
+The U101 pump runs whenever its control line floats (see
+`smart_irrigation/docs/hardware-verification.md` §5).
+
+- If the pump is audible/moving, or the watering module is plugged in:
+  **FAIL the gate immediately** with the default-OFF requirement — do not
+  continue, do not drive any pump pin, do not "test" it.
+- The probe and any E2E target used here must be read-only with respect to the
+  pump GPIO. Never configure or toggle a pump pin in this gate.
+
 ### 4a. Find irrigation E2E targets
 
 ```bash
@@ -172,7 +183,31 @@ If an E2E target exists (named/tagged for hardware E2E), run it uncached:
 bazel test //smart_irrigation/e2e:<target> --test_output=all --cache_test_results=no
 ```
 
-### 4b. Otherwise: flash + boot verification via the project tool
+### 4b. Hardware probe (verified, read-only) — primary check
+
+Run the project probe on the detected Atom Lite:
+
+```bash
+mpremote connect "$IRRIGATION" run smart_irrigation/firmware/tools/probe_hardware.py
+```
+
+Capture every `PROBE` line (raw evidence). Expected on the verified rig
+(2026-09-12, see `docs/hardware-verification.md`):
+
+| Line | Expected | Fail / warn rules |
+|------|----------|-------------------|
+| `PROBE DEVICE ... mac=...` | MicroPython 1.29.x, MAC `c8:85:41:67:dd:34` | different MAC = note it; not MicroPython = UNVERIFIABLE |
+| `PROBE I2C scl=32 sda=26 devices=0x70` | mux on the Grove bus | missing mux = FAIL if the change touches I2C/sensors, else UNVERIFIABLE |
+| `PROBE MUX_CH ... QMP_COLLISION(read=0x50)` | collision expected **until** the hardware fix | FAIL only if the change claims to fix the collision and it persists |
+| `PROBE SHT30 ... temp_c humidity_pct` | plausible values | missing/error = FAIL for sensor-path changes |
+| `PROBE DTU ... alive=True ver=RUI_4.0.6_RAK3172-E` | AT console answers | `alive=False` = FAIL for DTU/LoRa changes, else UNVERIFIABLE |
+
+Probe side effects: it restores the mux to all-channels-off; it only sends
+read-only AT queries; it never touches pump pins. If the probe tool does not
+exist in this branch, record `⚠️ UNVERIFIABLE — probe tooling missing` and use
+4c.
+
+### 4c. Otherwise: flash + boot verification via the project tool
 
 If no E2E target exists yet but the flash tool exists
 (`smart_irrigation/firmware/flash.py` or `//tools:install_all` with irrigation
@@ -188,12 +223,14 @@ support), use **only** that tool (raw REPL — never esptool):
 If the flash tool does not exist yet → `⚠️ UNVERIFIABLE — irrigation flash
 tooling not implemented yet`.
 
-### 4c. STM32WLE5CC DTU
+### 4d. STM32 DTU (build-level)
 
-If a DTU/PlatformIO build exists, run the build-only check
-(`pio run` in `smart_irrigation/stm32-dtu/`). Any on-air LoRaWAN verification
-is `⚠️ UNVERIFIABLE` unless a DTU is attached and documented. Never claim DTU
-E2E without it.
+Any on-air LoRaWAN verification is `⚠️ UNVERIFIABLE` unless the DTU is
+attached and documented. The probe's `PROBE DTU` line is the identity/liveness
+check (RUI4, P2P mode by default — `nwm=0` is expected until Phase 6 switches
+to LoRaWAN). If a PlatformIO project exists, run the build-only check
+(`pio run` in `smart_irrigation/stm32-dtu/`). Never claim DTU E2E without
+on-air evidence.
 
 ---
 
@@ -227,7 +264,7 @@ Compute one status:
 |--------|------|---------|--------|
 | Cardputer | {/dev/ttyACM0 or NONE} | 303a:8120 | auto-detect |
 | RNode | {/dev/ttyUSB0 or NONE} | 10c4:ea60 | auto-detect |
-| Atom Lite | {port or NONE} | {known fingerprint or n/a} | IRRIGATION_PORT / detect_devices |
+| Atom Lite | {port or NONE} | 0403:6001 M5stack | IRRIGATION_PORT / detect_devices (verified fingerprint) |
 
 ## Results
 
@@ -236,11 +273,17 @@ Compute one status:
 | Cardputer flash E2E | ✅ / ❌ / ⏭ SKIP | {summary} |
 | LoRa E2E (local RNode) | ✅ / ❌ / ⏭ SKIP | {summary} |
 | LoRa production path | ✅ / ❌ / ⚠️ UNVERIFIABLE / N/A | {server log + JetStream} |
-| Atom Lite flash/boot | ✅ / ⚠️ UNVERIFIABLE / N/A | {tool used, boot output} |
-| Atom Lite SensorReport → server | ✅ / ⚠️ UNVERIFIABLE / N/A | {evidence} |
-| STM32 DTU build/on-air | ✅ build / ⚠️ UNVERIFIABLE / N/A | {pio result} |
+| Atom Lite hw probe | ✅ / ⚠️ UNVERIFIABLE / N/A | {PROBE DEVICE/I2C/MUX/SHT30 lines} |
+| Atom Lite flash/boot + SensorReport → server | ✅ / ⚠️ UNVERIFIABLE / N/A | {tool used, boot output, server evidence} |
+| DTU AT identity (`PROBE DTU`) | ✅ / ❌ / ⚠️ UNVERIFIABLE | {RUI version, nwm} |
+| DTU on-air LoRaWAN | ⚠️ UNVERIFIABLE (unless on-air evidence) / N/A | — |
+| Pump safety (module disconnected, default-OFF preserved) | ✅ / ❌ | {how verified} |
 
 Production Cardputer restored with server `DEST_HASH`: {yes/no/N-A}
+
+Reference baseline: `smart_irrigation/docs/hardware-verification.md`
+(MAC `c8:85:41:67:dd:34`, RUI_4.0.6_RAK3172-E, mux 0x70, ENV III on ch5,
+QMP collision known).
 
 ## Why anything is UNVERIFIABLE / SKIPPED
 
@@ -261,6 +304,8 @@ UNVERIFIABLE, include this warning verbatim in the output so it lands in the PR:
 - **DETECTED_OR_LOUD_SKIP**: absence of any device is written into both artifact and output
 - **NO_ESPTOOL**: no esptool or ad-hoc serial access anywhere
 - **CLEAN_CARDPUTER_PATH**: when shared code changed and hardware was attached, the LMAO E2E ran uncached and green
-- **IRRIGATION_HONESTY**: Atom Lite/DTU results are PASS only with raw evidence; otherwise UNVERIFIABLE/N/A
+- **IRRIGATION_HONESTY**: Atom Lite/DTU results are PASS only with raw probe/devices evidence; otherwise UNVERIFIABLE/N-A
+- **PUMP_SAFE**: pump module was not connected/powered; no pump pin was configured or driven
+- **PROBE_BASELINE**: probe results are compared against `docs/hardware-verification.md`; the known QMP collision is reported, not hidden
 - **ARTIFACT_WRITTEN**: `hardware-e2e.md` has devices + results + reasons
 - **NO_MARKER**: `.gate-head` untouched

@@ -100,10 +100,33 @@ that case.)
    - `cardputer_client/proto/lma_encoder.py` — protobuf wire format,
    - `k8s-app/iot_ingest.py` — server-side ingest to extend,
    - `lma_core/` — shared device/identity helpers.
-3. Note the blueprint's own unknowns (its §9) and treat pin/board details as
-   assumptions to be validated on hardware.
+3. **Read the verified hardware reality:**
+   `smart_irrigation/docs/hardware-verification.md` — it supersedes the
+   blueprint wherever they conflict. Facts the evaluation MUST incorporate:
+   - Atom Lite is an **ESP32-PICO-D4** (dual-core 240 MHz, 520 KB SRAM) — not
+     ESP32-S2; MicroPython v1.29.0; 4 MB flash / 2 MB FS.
+   - **Pressure is not usable by default**: the QMP6988 (`0x70`) collides
+     with the PCA9548A mux (`0x70`) on the current wiring, so pressure reads
+     are corrupted. Treat pressure (and any pressure-trend control input) as
+     **optional and unavailable** until the hardware fix is applied; the
+     evaluation must still quantify the pressure-trend sensitivity so the
+     decision is ready if the collision is fixed, and must define a
+     pressure-absent degradation path.
+   - **Soil moisture is analog** (M5Stack Watering Unit U101 probe over ADC),
+     not an I2C device; SHT30 `0x44` and the ENV III board sit on mux
+     **channel 5** (not ch1/ch2).
+   - **DTU**: RAK3172 **RUI_4.0.6_RAK3172-E**, currently **P2P mode
+     (`AT+NWM=0`)** on UART TX=G22/RX=G19. Protocol/command assumptions must
+     target RUI4 (M5Stack's `M5-LoRaWAN-RAK` library targets an older RUI
+     generation) and must state the explicit P2P→LoRaWAN switch for Phase 6.
+   - Pump/watering-unit safety constraints (§5 of the verification doc) are
+     hard requirements for any algorithm whose output drives the pump.
+4. Note the blueprint's own unknowns (its §9) and treat pin/board details as
+   assumptions validated by the verification doc; anything still unverified
+   must be listed as an open question, not silently assumed.
 
-**CHECKPOINT**: blueprint read, reuse targets identified, unknowns listed.
+**CHECKPOINT**: blueprint read, reuse targets identified, hardware-verification
+facts incorporated, remaining unknowns listed.
 
 ---
 
@@ -137,7 +160,9 @@ inputs required from the user.
 **Pressure-trend sensitivity (mandatory)**: with the fuzzy/rule layer, sweep
 pressure trend from −3 to +3 hPa/h and report the max % change in pump
 duration. If < 10% in every case, recommend dropping pressure trend as a
-control input (keep it as an ML feature) and say so in the verdict.
+control input (keep it as an ML feature) and say so in the verdict. The
+verdict must also state what the controller does when pressure is absent
+(the current QMP collision) — i.e. the default deployed behavior.
 
 **Record** the harness, scenario definitions, and raw results. Save every
 number into `$ARTIFACTS_DIR/evaluation-evidence.md`.
@@ -216,6 +241,9 @@ proposed destination path inside the repo (e.g.
 - [ ] Response surface / sweep data exists (CSV or table in the artifact)
 - [ ] Rule matrix (if fuzzy/hybrid) is machine-readable and Q8.8
 - [ ] Safety overrides defined as hard overrides (not fuzzy)
+- [ ] Hardware-verification facts honored: pressure optional/absent path
+      defined, analog moisture assumption used, DTU RUI4/P2P→LoRaWAN switch
+      stated, Watering Unit default-OFF requirement reflected
 - [ ] `evaluation-assets/MANIFEST.md` complete
 - [ ] No firmware code was written to the repo by this command
 
@@ -238,6 +266,7 @@ Next: plan the evaluation commit (`create-plan`).
 
 - **EVIDENCE_BASED**: every controller compared with measured numbers on the same scenarios
 - **VERDICT_MADE**: one approach recommended, blueprint sketch explicitly adopted or superseded
-- **PRESSURE_SENSITIVITY**: measured and acted on (<10% ⇒ drop as control input)
+- **PRESSURE_SENSITIVITY**: measured and acted on (<10% ⇒ drop as control input); pressure-absent behavior defined for the current collision
+- **HARDWARE_GROUNDED**: verdict consistent with `docs/hardware-verification.md` (no invalid pins/sensors/modes)
 - **ASSETS_READY**: reference implementations + manifest ready for the implement phase
 - **NO_FIRMWARE**: no repo firmware files written by this command

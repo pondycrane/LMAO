@@ -48,10 +48,16 @@ irrigation-validate  →  irrigation-hardware-e2e  →  irrigation-production-he
   and protobuf round-trip checks.
 - **`irrigation-hardware-e2e`** — reuses the LMAO Cardputer/RNode phases
   (including the production-path fallback from `lmao-hardware-e2e.md`) and
-  adds Atom Lite checks only when `IRRIGATION_PORT` (or a verified fingerprint
-  in `lma_core/device_detect.py`) is set — never auto-probes serial ports,
-  since the Atom Lite bridge can share VID/PID `10c4:ea60` with the RNode.
-  Missing hardware is a loud SKIP/UNVERIFIABLE written into the PR body.
+  adds Atom Lite checks using the **verified fingerprint** in
+  `lma_core/device_detect.py` (FTDI `0403:6001`, product `M5stack`) or
+  `IRRIGATION_PORT` — generic FT232 bridges are never blind-probed. The
+  primary check is the read-only device probe
+  `mpremote connect <port> run smart_irrigation/firmware/tools/probe_hardware.py`
+  (I2C mux + SHT30 + DTU AT identity), compared against
+  `smart_irrigation/docs/hardware-verification.md`. The gate also enforces the
+  **pump safety precondition** (watering module disconnected; no pump pin is
+  ever driven). Missing hardware is a loud SKIP/UNVERIFIABLE written into the
+  PR body.
 - **`irrigation-production-health`** — owns `$ARTIFACTS_DIR/.gate-head`, checks
   the production Cardputer (journal or K8s) and, when the irrigation node is
   deployed, SensorReport/DB/JetStream health. Honest UNVERIFIABLE is recorded
