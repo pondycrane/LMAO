@@ -67,6 +67,12 @@ nodes:
 
       Request: $ARGUMENTS
 
+      If the request references a GitHub issue (e.g. "#42", "issue 42",
+      "implement issue 42"), fetch it first and use its title + body as the
+      feature description for the classification:
+        gh issue view <number> --json title,body,labels,url
+      Record the issue number and URL in assessment.md.
+
       Read (worktree-relative; the blueprint also exists at the absolute
       fallback path):
       1. `smart_irrigation/docs/development-plan.md` — the blueprint. Focus on
