@@ -1123,6 +1123,15 @@ For the full system design, see [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
 ---
 
+## License
+
+**LMAO is released under the MIT License** — see [LICENSE](LICENSE) and
+[CONTRIBUTING.md](CONTRIBUTING.md). This project depends on Reticulum and
+LXMF, which are distributed under the Reticulum License (a permissive license
+with restrictions on use that purposefully harms humans and on use in AI/ML
+training datasets) — see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for
+full attribution and terms.
+
 ## References
 
 - [Reticulum Network Stack](https://reticulum.network/)
