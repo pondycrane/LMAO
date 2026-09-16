@@ -1,8 +1,13 @@
-# Smart Irrigation — LMAO Irrigation Node
+# Sprout — LMAO Smart Irrigation Node
 
-Edge irrigation controller: fuses soil moisture + air temperature/humidity +
+**Node name: `sprout`** — an edge irrigation controller built on the M5Stack
+Atom Lite stacked on the DTU LoRaWAN base (A152-EU868), fused with the M5Stack
+Watering Unit (soil moisture + pump) and the ENV III sensor board (air
+temp/humidity + pressure). It fuses soil moisture + air temperature/humidity +
 pressure trend into an irrigation decision, drives a pump, and reports every
 sensor sample to the LMAO server over LoRa for offline ML training.
+
+![Sprout setup](../docs/images/sprout-setup.jpg)
 
 **The development blueprint is the single source of truth:**
 [`docs/development-plan.md`](docs/development-plan.md)
@@ -10,19 +15,22 @@ sensor sample to the LMAO server over LoRa for offline ML training.
 **Verified hardware reality (pin map, DTU firmware, sensor placement, known
 collisions):** [`docs/hardware-verification.md`](docs/hardware-verification.md).
 
-## System at a glance
+## System at a glance (verified topology, 2026-09-16)
 
 ```
-Atom Lite (MicroPython)                    STM32WLE5CC DTU (LoRaWAN)
-├── sensors (PCA9548A I2C hub)             ├── OTAA Class A join
-│   ├── ch0 capacitive soil moisture       ├── UART bridge to Atom Lite
-│   ├── ch1 SHT30 (air T / humidity)       └── LoRa uplink/downlink
-│   └── ch2 QMP6988 (pressure)                        │
-├── control engine (fuzzy / ET₀ model —   ▼
-│   see docs/algorithm-evaluation.md)     LMAO server (K8s / Turing Pi 2)
-├── pump relay/MOSFET                     ├── LXMF router → SensorReport
-└── LXMF SensorReport ──── UART ──────────┤── NATS JetStream → DuckDB
-                                          └── downlink CommandRequest → pump
+Atom Lite (MicroPython)                     STM32WLE5CC DTU (LoRaWAN) @UART G19/G22
+├── Grove bus (SCL=G32, SDA=G26)            ├── OTAA / LoRa uplink+downlink
+│   └── Watering Unit U101                  └── Grove Port A bus (SCL=G21, SDA=G25)
+│       ├── moisture probe → ADC G32            └── ENV III
+│       └── pump control   → GPIO G26               ├── SHT30 (air T / humidity)
+├── control engine (verdict: docs/                  └── QMP6988 (pressure, no mux)
+│   algorithm-evaluation.md)
+└── LXMF SensorReport ─── UART ─────────────────────────┘
+                                             │
+                                             ▼
+                       LMAO server (K8s / Turing Pi 2):
+                       LXMF router → SensorReport → NATS → DuckDB
+                       CommandRequest downlink → pump
 ```
 
 ## Repository layout (grown by the workflow, not scaffolded up front)
@@ -49,18 +57,20 @@ smart_irrigation/
 
 ## Hardware (fixed — per blueprint §13, Appendix B)
 
-**Verified on 2026-09-12** — see [`docs/hardware-verification.md`](docs/hardware-verification.md)
-for evidence, pin map, and open items. Summary:
+**Verified 2026-09-12, re-verified 2026-09-16 (final functional pass = PASS).**
+See [`docs/hardware-verification.md`](docs/hardware-verification.md) for
+evidence, pin map, and open items. Summary:
 
 | Component | Verified reality |
 |-----------|------------------|
 | Atom Lite (ESP32-PICO-D4, not S2) | FTDI `0403:6001` "M5stack"; MicroPython v1.29.0; MAC `c8:85:41:67:dd:34` |
-| Atom ↔ DTU UART | **TX=G22, RX=G19** @115200 (blueprint's 17/16 is wrong) |
-| I2C bus | **SCL=G32, SDA=G26**; PCA9548A mux at `0x70` (blueprint's 21/22 is wrong) |
-| Sensors | SHT30 `0x44` + QMP6988 on **mux ch5** (ENV III board); moisture **analog** (Watering Unit probe) |
-| QMP6988 pressure | ⚠️ **address collision with the mux (`0x70` → `0x70`)** — unreadable until the hardware fix; not a control input by default |
-| STM32WLE5CC DTU | M5Stack A152-EU868 / **RAK3172 RUI_4.0.6**, currently **P2P mode** (`AT+NWM=0`); AT console verified |
-| Pump | M5Stack Watering Unit (U101): analog moisture + GPIO pump; pump runs whenever the control line floats |
+| Stack | Atom Lite on **DTU LoRaWAN base (A152-EU868)** via 9-pin socket; **ENV III on base Port A** |
+| Atom ↔ DTU UART | **TX=G22, RX=G19** @115200; DTU `AT` alive (**RUI_4.0.6**, P2P mode `AT+NWM=0`) |
+| Grove bus (Atom) | **SCL=G32, SDA=G26** — carries the **Watering Unit only** (analog+GPIO, not I2C) |
+| Watering Unit U101 | **moisture → ADC G32** (air ≈2067 / submerged ≈1580, 12-bit); **pump → GPIO G26**, active-HIGH; **3× supervised 5 s fail-off motor tests ✅**; pump left driven LOW |
+| Port A bus (base) | **SCL=G21, SDA=G25** — independent I2C rail: **SHT30 @0x44** (27.04 °C / 53.89 % RH) + **QMP6988 @0x70** |
+| QMP6988 pressure | ✅ **collision resolved by topology** (no mux on Port A) — chip ID clean `0x5C`; hPa readout pending Phase 2 driver |
+| Pump safety | ⚠️ supervised tests done only; **hardware pull-down + default-OFF `boot.py` still mandatory** (issue #119) |
 
 ## The algorithm evaluation gate
 
