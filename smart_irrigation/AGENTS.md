@@ -113,30 +113,34 @@ selected something else — implement the verdict, with the sketch as fallback.
 
 ## Verified hardware reality (see docs/hardware-verification.md)
 
-Verified on 2026-09-12 — use these values, not the blueprint's guesses:
+**Node name: `sprout`.** Verified 2026-09-12, re-verified 2026-09-16 — use
+these values, not the blueprint's guesses:
 
 - **Atom Lite** = ESP32-PICO-D4 (not ESP32-S2), USB `0403:6001` "M5stack",
   MAC `c8:85:41:67:dd:34`, MicroPython v1.29.0 installed; 2 MB FS.
+- **Stack**: Atom Lite on the **DTU LoRaWAN base (A152-EU868)** via the 9-pin
+  socket; **ENV III on the base's Grove Port A**. Two independent I2C rails.
 - **Atom ↔ DTU UART: TX=G22, RX=G19 @115200** (blueprint's 17/16 is wrong).
-- **I2C: SCL=G32, SDA=G26** (blueprint's 21/22 is wrong — G22 is the DTU
-  UART). PCA9548A mux at **0x70**; the ENV III-style board (SHT30 `0x44` +
-  QMP6988 `0x70`) sits on **mux channel 5** (blueprint said ch1/ch2).
-- **QMP6988 address collision (BLOCKER):** QMP6988 and the mux are both at
-  `0x70`; pressure reads are corrupted (bus ANDs the data). Pressure must NOT
-  be planned as a control input or telemetry field until the hardware fix in
-  `docs/hardware-verification.md` §4 is applied. The algorithm evaluation must
-  treat pressure as unavailable-by-default.
-- **DTU**: RAK3172, firmware **RUI_4.0.6_RAK3172-E**, currently **P2P mode
-  (`AT+NWM=0`)**. LoRaWAN-only commands return `AT_MODE_NO_SUPPORT`; Phase 6
-  must explicitly switch to LoRaWAN and verify the RUI4 AT command set.
-- **Watering Unit U101** (pump + analog capacitive probe): pump control must be
-  driven OFF as the first action in `boot.py` with a hardware pull-down; no
-  pump actuation in gates/probes. Confirm the actual moisture-ADC and pump
-  pins with the user before planning them (G26/G32 are taken by I2C).
-- Blueprint remaining unknowns still to confirm on hardware: LoRaWAN region
-  plan, battery divider (if any), and whether the mux collision is fixed by
-  re-strapping. Never guess a pin; record new findings in
-  `docs/hardware-verification.md`.
+  DTU = RAK3172, **RUI_4.0.6_RAK3172-E**, currently **P2P mode (`AT+NWM=0`)**;
+  LoRaWAN-only commands return `AT_MODE_NO_SUPPORT` until Phase 6 switches it.
+- **Grove bus (SCL=G32, SDA=G26)** carries the **Watering Unit only** (not
+  I2C): **moisture analog → G32** (air ≈2067 / submerged ≈1580, 12-bit ADC),
+  **pump → G26 active-HIGH**. Confirmed by submersion test + 3× supervised 5 s
+  fail-off motor tests (pump left driven LOW after each).
+- **DTU base Port A bus (SCL=G21, SDA=G25)** carries the **ENV III** direct
+  (no mux): **SHT30 @0x44** (air T/humidity — 27.04 °C / 53.89 % RH) and
+  **QMP6988 @0x70**. **The PCA9548A is no longer in the path**; the old QMP
+  `0x70` collision is **resolved** — chip ID reads clean `0x5C`. Pressure hPa
+  readout still needs the Phase 2 QMP config/sample driver.
+- **Watering Unit U101 pump safety is still mandatory**: pump control must be
+  driven OFF as the first action in `boot.py` and a **hardware pull-down must
+  be fitted** before firmware ever drives the pump; no pump actuation in
+  gates/probes. Supervised manual tests (2026-09-16) verified the drive path
+  but do not substitute for pull-down + default-OFF `boot.py` (issue #119).
+- Known weak point: the ENV III Grove plug on Port A is contact-sensitive — a
+  loose connection makes the SHT30/QMP vanish from the bus (reseat to fix).
+- Blueprint remaining unknowns: LoRaWAN region plan, battery divider (if any).
+  Never guess a pin; record new findings in `docs/hardware-verification.md`.
 
 ## Artifacts
 

@@ -78,7 +78,7 @@ archon workflow run lmao-fix-issue "Fix issue #N"
 # Feature idea to reviewed PR with the same gates
 archon workflow run lmao-feature-dev "description of feature"
 
-# Smart irrigation node (Atom Lite + STM32WLE5CC DTU) — blueprint phases.
+# Sprout — smart irrigation node (Atom Lite + DTU base + Watering Unit + ENV III). Blueprint phases.
 # Firmware work is hard-blocked until smart_irrigation/docs/algorithm-evaluation.md
 # exists (blueprint Appendix 13) — run Phase 0 first.
 archon workflow run smart-irrigation-dev "Phase 0: algorithm evaluation"
