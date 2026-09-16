@@ -44,7 +44,7 @@ smart_irrigation/
 │   └── algorithm-evaluation.md   # MANDATORY deliverable before firmware work
 ├── firmware/                     # Atom Lite MicroPython node (µReticulum port)
 │   ├── config.py, lora_boards.py, flash.py, boot.py, main.py
-│   ├── lib/urns/                 # vendored copy of cardputer_client/lib/urns
+│   ├── lib/urns/                 # NOT in this tree — snapshotted to .mpy at build time from cardputer_client/lib/urns (tools/build_mpy.sh)
 │   ├── lib/sensors/              # pca9548a.py, dht20.py, ...
 │   ├── proto/lma_encoder.py      # vendored copy
 │   ├── src/                      # control engine, sensor fusion, pump
