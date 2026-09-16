@@ -392,6 +392,26 @@ py_test(
     tags = ["e2e", "requires_hardware"],
 )
 
+
+py_test(
+    name = "test_sprout_e2e",
+    srcs = [
+        "e2e/test_sprout_e2e.py",
+    ],
+    main = "e2e/test_sprout_e2e.py",
+    deps = [
+        "//cardputer_client:flash_lib",
+        "@lmao_pip//pyserial",
+        "@lmao_pip//pytest",
+    ],
+    # E2E test for the Sprout irrigation node (Atom Lite + DTU base +
+    # Watering Unit + ENV III). Requires the Sprout stack on the machine's
+    # USB (FTDI 0403:6001 "M5stack"); auto-skips when not connected.
+    # SAFETY: never actuates the pump; DTU gets read-only AT only.
+    tags = ["e2e", "requires_hardware"],
+)
+
+
 py_test(
     name = "test_storage",
     srcs = ["test_storage.py"],

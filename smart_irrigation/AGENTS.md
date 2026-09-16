@@ -1,8 +1,14 @@
 # Smart Irrigation project rules
 
 These rules are mandatory for every coding agent working under
-`smart_irrigation/`. They are enforced by the `smart-irrigation-dev` Archon
-workflow (`.archon/workflows/smart-irrigation-dev.yaml`) and its gate chain.
+`smart_irrigation/`. ⚠️ **Enforcement note:** the `smart-irrigation-dev` Archon
+workflow (`.archon/workflows/smart-irrigation-dev.yaml`) is **NOT ready to run**
+ — it is a heavy copy of the mature LMAO gate chain and needs refinement
+([#122](https://github.com/pondycrane/LMAO/issues/122)). Until then the rules
+below are enforced manually: BUILD completeness + unit gates via
+`bazel test //tests:all --test_tag_filters=-requires_hardware`, hardware via
+`bazel test //tests:test_sprout_e2e --test_output=all`, and the Phase 0
+algorithm-evaluation deliverable is a manual gate.
 
 ## Read first
 
