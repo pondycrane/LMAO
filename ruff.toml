@@ -15,7 +15,7 @@ per-file-ignores = {
   # `import gc; gc.collect()` (E702), bare `except:` (E722), ambiguous
   # names `l` and `I` (E741), and `lambda` fallback assignments (E731)
   # that are standard MicroPython idioms.
-  "cardputer_client/lib/urns/**" = ["E702", "E722", "E741", "E731", "F401", "F841", "E402", "N801", "N806", "N802", "N803", "N816", "N818", "E501", "UP031", "B904", "I001", "SIM102", "SIM105", "SIM115"],
+  "cardputer_client/lib/urns/**" = ["E702", "E722", "E741", "E731", "F401", "F841", "E402", "N801", "N806", "N802", "N803", "N816", "N818", "E501", "UP031", "B904", "B905", "I001", "SIM102", "SIM105", "SIM115"],
   # Cardputer client main.py — uses config variable names like DEST_HASH,
   # SENSOR_TYPE etc. from config.py imports (N806), and B904 for MicroPython.
   "cardputer_client/main.py" = ["N806", "B904", "E501"],
@@ -23,6 +23,16 @@ per-file-ignores = {
   # (N806), importing inside functions (E402), and multi-line `with`
   # statements (SIM117) that are standard test idioms.
   "tests/**" = ["I001", "N806", "N802", "N803", "E402", "SIM102", "SIM105", "SIM108", "SIM114", "SIM115", "SIM117", "SIM300", "UP031", "B904", "E501"],
+  # Sprout irrigation node (smart_irrigation) device firmware — same
+  # MicroPython idioms as the Cardputer client (imports inside functions,
+  # config globals DEST_HASH/NODE_NAME, mpy/bytecode build targets).
+  # (urns is NOT in the Sprout tree — it is snapshotted at build time from
+  # cardputer_client/lib/urns, which has its own per-file ignores above.)
+  "smart_irrigation/firmware/config.py" = ["N806", "N802", "B904", "E501", "E402"],
+  "smart_irrigation/firmware/lib/dtu/**" = ["E402", "N806", "N802", "B904", "E501", "SIM105", "I001"],
+  "smart_irrigation/firmware/lib/contextlib.py" = ["E501", "SIM105", "N801", "E722"],
+  "smart_irrigation/firmware/lib/__init__.py" = ["F401", "E501"],
+  "smart_irrigation/firmware/tools/**" = ["I001", "UP045", "SIM108", "E501", "SIM105", "B904", "E402", "N806"],
   # Tool scripts
   "tools/**" = ["I001", "UP045", "SIM108", "E501"],
   # Server and library files

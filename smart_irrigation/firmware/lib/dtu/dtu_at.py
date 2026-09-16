@@ -17,7 +17,6 @@ LMAO mesh radio parameters (must match the server-side RNode):
 
 import time
 
-from machine import Pin, UART
 
 # LMAO mesh radio parameters as RUI4 P2P values.
 P2P_RADIO = {
@@ -111,28 +110,55 @@ class RAK3172P2P:
 
     # -- TX / RX --------------------------------------------------------------
 
+    def _drain(self, timeout_ms=60):
+        """Discard any buffered UART input (stray +EVT lines, etc.)."""
+        deadline = time.ticks_ms() + timeout_ms
+        while time.ticks_ms() < deadline:
+            if self.u.any():
+                self.u.read(self.u.any())
+            time.sleep_ms(10)
+
     def tx(self, payload, log=None):
-        """Transmit *payload* (bytes) over P2P. Returns True if the DTU ACKed."""
+        """Transmit *payload* (bytes) over P2P. Returns True if the DTU ACKed.
+
+        RUI4 P2P requires RX to be OFF while transmitting (``AT+PRECV=0``
+        before ``AT+PSEND``); re-enabling RX is the caller's job. The late
+        ``+EVT:TXP2P DONE`` event is drained so it can't pollute the next
+        read.
+        """
         if len(payload) > 250:
             raise ValueError(f"P2P payload too large: {len(payload)} B (max ~250)")
-        hexdata = payload.hex()
-        resp = self.at(f"AT+PSEND={hexdata}", timeout_ms=2000)
+        # Disable RX first (module busy/AT_BUSY_ERROR if left in RX).
+        self.at("AT+PRECV=0", timeout_ms=900)
+        time.sleep_ms(50)
+        self._drain()
+        # Write the AT line in chunks so no single large contiguous string is
+        # needed (the PICO-D4 heap is tiny + fragmented at send time).
+        self.u.write(b"AT+PSEND=")
+        for i in range(0, len(payload), 32):
+            self.u.write(payload[i : i + 32].hex().encode())
+        self.u.write(b"\r\n")
+        resp = self._read(3000)
         if log:
-            log(
-                f"  TX {len(payload)}B hex_len={len(hexdata)} "
-                f"-> {resp.decode().strip()!r}"
-            )
-        return b"+EVT:TXP2P DONE" in resp or (
+            log(f"  TX {len(payload)}B -> {resp.decode().strip()!r}")
+        self._drain(200)  # swallow the late +EVT:TXP2P DONE / OK
+        ok = b"+EVT:TXP2P DONE" in resp or (
             b"OK" in resp and b"ERROR" not in resp and b"+EVT:TXP2P FAIL" not in resp
         )
+        return ok
 
     def rx_start(self, listen=True, log=None):
-        """Enable (65535) or disable (0) continuous P2P receive."""
-        resp = self.at("AT+PRECV=65535" if listen else "AT+PRECV=0", timeout_ms=900)
-        if log:
-            log(f"  AT+PRECV={'65535' if listen else '0'} -> "
-                f"{resp.decode().strip()!r}")
-        return b"OK" in resp
+        """Enable (continuous) or disable P2P receive. Idempotent."""
+        self.at("AT+PRECV=0", timeout_ms=900)
+        time.sleep_ms(60)
+        self._drain()
+        resp = b""
+        if listen:
+            resp = self.at("AT+PRECV=65535", timeout_ms=1200)
+            if log:
+                log(f"  AT+PRECV=65535 -> {resp.decode().strip()!r}")
+            self._drain(200)
+        return b"OK" in resp and b"ERROR" not in resp
 
     def poll(self, timeout_ms=2000):
         """Wait for a P2P RX event; return (payload_bytes, rssi, snr) or None."""
