@@ -3,10 +3,15 @@
 
 __version__ = "0.1.0"
 
-from . import bz2dec, const, lxmf
+# NOTE (2026-09-16): the heavy modules (lxmf, link, bz2dec, resource) are no
+# longer imported eagerly by this package. Consumers import them directly
+# (e.g. ``from urns.lxmf import LXMRouter``, which is what the Cardputer does),
+# so they load lazily on first use. This slashes the baseline heap for
+# small-heap devices such as Sprout (ESP32-PICO-D4) — the Cardputer is
+# unaffected (it never relied on eager package-level attributes).
+from . import const
 from .destination import Destination
 from .identity import Identity
-from .link import Link
 from .log import (
     LOG_CRITICAL,
     LOG_DEBUG,

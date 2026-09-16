@@ -127,6 +127,7 @@ class Reticulum:
         "SerialInterface": "serial",
         "E32Interface": "e32",
         "LoRaInterface": "lora",
+        "DtuInterface": "dtu",
         "TCPClientInterface": "tcp",
     }
 
