@@ -6,7 +6,17 @@
 
 exports_files([
     "tools/probe_hardware.py",
+    "tools/dtu_p2p_probe.py",
 ])
+
+filegroup(
+    name = "dtu_lib",
+    srcs = [
+        "lib/dtu/__init__.py",
+        "lib/dtu/dtu_at.py",
+    ],
+    visibility = ["//visibility:public"],
+)
 
 filegroup(
     name = "firmware_files",
