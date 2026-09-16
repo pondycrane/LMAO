@@ -80,8 +80,10 @@ archon workflow run lmao-feature-dev "description of feature"
 
 # Sprout — smart irrigation node (Atom Lite + DTU base + Watering Unit + ENV III). Blueprint phases.
 # Firmware work is hard-blocked until smart_irrigation/docs/algorithm-evaluation.md
-# exists (blueprint Appendix 13) — run Phase 0 first.
-archon workflow run smart-irrigation-dev "Phase 0: algorithm evaluation"
+# exists (blueprint Appendix 13). ⚠️ The smart-irrigation-dev workflow is NOT ready
+# to run yet — pending refinement in #122. Do not run `archon workflow run
+# smart-irrigation-dev`; run Phase 0 (algorithm evaluation) as a manual gate, and
+# verify hardware with `bazel test //tests:test_sprout_e2e --test_output=all`.
 ```
 
 These workflows encode the rules on this page (esptool bans, Bazel BUILD

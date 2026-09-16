@@ -12,7 +12,7 @@ rescue (see issue #89 for the full post-mortem of the #87 run).
 |----------|-------------|
 | `lmao-fix-issue` | Fix / implement a GitHub issue end-to-end: classify → investigate/plan → implement → **gates** → draft PR → review → self-fix → simplify → **gates re-run** → report. |
 | `lmao-feature-dev` | Feature idea → plan → implement → **gates** → PR → 5-agent review → fixes → **gates re-run** → summary. |
-| `smart-irrigation-dev` | Smart Irrigation node (Atom Lite + STM32WLE5CC DTU) work from the blueprint in `smart_irrigation/docs/development-plan.md`: phase features, or the mandatory Phase 0 algorithm evaluation. Firmware work is hard-blocked until `smart_irrigation/docs/algorithm-evaluation.md` exists (blueprint Appendix 13). |
+| `smart-irrigation-dev` | **⚠️ NOT READY TO RUN** (pending refinement in [#122](https://github.com/pondycrane/LMAO/issues/122)) — do not run until refined. When ready: Smart Irrigation node (Sprout) work from the blueprint in `smart_irrigation/docs/development-plan.md`: phase features, or the mandatory Phase 0 algorithm evaluation. Firmware work is hard-blocked until `smart_irrigation/docs/algorithm-evaluation.md` exists (blueprint Appendix 13). |
 
 Both run entirely on pi routing to the in-house GX10 box — every node uses
 the local DeepSeek V4 Flash model (`gx10/deepseek-ai/DeepSeek-V4-Flash-0731`,
@@ -24,9 +24,10 @@ cd /home/pondycrane/LMAO
 archon workflow run lmao-fix-issue "Fix issue #87"
 archon workflow run lmao-feature-dev "Add humidity graphing to the ingest pod"
 
-# Smart Irrigation — run Phase 0 first (algorithm evaluation), then phases:
-archon workflow run smart-irrigation-dev "Phase 0: algorithm evaluation"
-archon workflow run smart-irrigation-dev "Phase 2: PCA9548A + sensor drivers"
+# Smart Irrigation — ⚠️ workflow NOT ready yet (#122): do not run it.
+# Phase 0 (algorithm evaluation) is currently a MANUAL gate — write
+# smart_irrigation/docs/algorithm-evaluation.md directly (blueprint App 13).
+# Manual hardware E2E:  bazel test //tests:test_sprout_e2e --test_output=all
 ```
 
 ## The gate chain (what makes these LMAO-specific)
