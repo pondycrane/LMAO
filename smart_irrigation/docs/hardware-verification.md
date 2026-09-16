@@ -1,9 +1,16 @@
 # Hardware Verification — Atom Lite + DTU + sensors
 
+**Node name**: `sprout`.
 **Verified**: 2026-09-12 (on the dev machine, `/dev/ttyUSB0`)
-**Method**: safe, read-only probing — no pump connected, no DTU configuration
-written, no esptool flashing (except the documented MicroPython install and
-full factory-backup read).
+**Updated**: 2026-09-16 — Watering Unit connected & fully verified (moisture ADC on
+G32, pump enable on G26 via Grove; supervised 5 s fail-off motor test ×3); Atom
+stacked on DTU base (9-pin), ENV III on base Port A (G21/G25); **final combined
+functional pass = PASS** (moisture → pump 5 s fail-off → moisture unchanged →
+ENV III 27.04 °C / 53.89 % RH → DTU alive).
+**Method**: safe, read-only probing — no DTU configuration written, no esptool
+flashing (except the documented MicroPython install and full factory-backup
+read); the only active pin drives were the user-supervised pump fail-off tests
+(§5).
 **Reproduce**: `mpremote connect /dev/ttyUSB0 run smart_irrigation/firmware/tools/probe_hardware.py`
 
 This document is a **verified-input** for the algorithm evaluation
@@ -20,11 +27,11 @@ sensor placement) wherever they conflict.
 | M5Stack **Atom Lite** (ESP32-PICO-D4) | FTDI `0403:6001` product `M5stack`, mfr `Hades2001`, serial `69526EE94F`; `esptool flash_id` → ESP32-PICO-D4 rev v1.1, 4 MB embedded flash, MAC `c8:85:41:67:dd:34` | ✅ present |
 | MicroPython **v1.29.0** on the Atom | `mpremote` REPL; `os.uname()` → `esp32` / `v1.29.0 on 2026-08-24`; 2 MB MicroPython FS (2036 KB free) | ✅ installed 2026-09-12 |
 | M5Stack **Atom DTU LoRaWAN-EU868** base (A152-EU868) with **RAK3172 / STM32WLE5CC** | AT console on Atom UART2 (TX=G22/RX=G19): `AT+VER=?` → `RUI_4.0.6_RAK3172-E`, `AT+HWMODEL=?` → `rak3172` | ✅ present, AT-responsive |
-| **PCA9548A I2C mux** | ACKs at `0x70`; every read echoes the written byte (control register) | ✅ present |
-| **SHT30** temp/humidity | `0x44` on mux **channel 5**; measured 25.32 °C / 55.68 % RH | ✅ working |
-| **QMP6988** pressure | Chip ID `0x5C` detectable behind mux ch5 but **address collides with the mux (both 0x70)** | ⚠️ present, unusable via current wiring |
-| Soil-moisture sensor | Not detected on I2C (no device on any mux channel) | ⚠️ not connected / analog |
-| M5Stack **Watering Unit (U101)** (pump + capacitive probe) | Not connected — user-confirmed: pump runs whenever it is plugged in | ⛔ intentionally disconnected |
+| **PCA9548A I2C mux** | Was `0x70` on the 2026-09-12 rig (Grove bus); **not in the current 9-pin stacked topology** (Grove bus now carries only the Watering Unit, which is not I2C) | superseded 2026-09-16 |
+| **SHT30** temp/humidity | **On DTU base Port A bus (SCL=G21, SDA=G25)**, direct `0x44`; measured **25.41 °C / 56.03 % RH** (2026-09-16) | ✅ working |
+| **QMP6988** pressure | On Port A bus direct `0x70`; **chip ID reads clean `0x5C`** (2026-09-16) — no mux in line, collision resolved | ✅ address fixed; pressure values pending Phase 2 driver |
+| Soil-moisture sensor (Watering Unit probe) | **Analog on GPIO32** (Grove "SCL") — measured air 2068 / water ~1580 (12-bit) | ✅ connected, verified 2026-09-16 |
+| M5Stack **Watering Unit (U101)** (pump + capacitive probe) | **Pump on GPIO26** (Grove "SDA"), active-HIGH; supervised 5 s fail-off motor test passed 2× | ✅ connected, verified 2026-09-16 |
 | Cardputer / RNode | Not attached to this machine (RNode lives on K8s tp4 per issue #93) | n/a |
 
 **Factory firmware backup** (taken before the MicroPython install):
@@ -41,9 +48,9 @@ sensor placement) wherever they conflict.
 | I2C (Grove port, mux bus) | **SCL=G32, SDA=G26**, 100 kHz | SDA=21, SCL=22 | Matches the M5Stack Atom Lite Grove I2C convention |
 | PCA9548A mux address | **0x70** | (not specified) | Default strap; collides with QMP6988 |
 | SHT30 / QMP6988 (ENV III unit) | mux **channel 5** | ch1 / ch2 | Both on the same ENV III-style board on one channel |
-| Base J1 "IIC" port (G21/G25) | **empty** (no devices) | — | Not the sensor bus in this setup |
-| Watering Unit moisture (analog) | not connected | ADC GPIO32 | G32 is the mux SCL — the blueprint's moisture pin conflicts with the actual I2C bus |
-| Watering Unit pump | not connected | GPIO26 | G26 is the mux SDA — another blueprint conflict |
+| DTU base **Port A** (ENV III) | **SCL=G21, SDA=G25** (separate I2C bus from the Atom Grove) | blueprint n/a | SHT30@`0x44` + QMP6988@`0x70`, no mux; watering unit on G26/G32 does NOT collide |
+| Watering Unit moisture (analog) | **GPIO32 (Grove SCL)** | ADC GPIO32 | ✅ confirmed by submersion test (air ≈2068 / water ≈1580 counts); SCL shares the Grove I2C line — conflicts with any I2C device on the same bus |
+| Watering Unit pump | **GPIO26 (Grove SDA)** | GPIO26 | ✅ confirmed, active-HIGH (HIGH = ON); 5 s fail-off test spun motor reliably; pin left driven LOW; still requires hardware pull-down (§5) |
 | DTU antenna / region | EU868 (A152-EU868) | EU868/US915 TBD | RAK3172 RUI4 |
 
 ---
@@ -69,9 +76,11 @@ sensor placement) wherever they conflict.
 ## 4. I2C bus / sensors
 
 ```
-I2C scan (SCL=G32, SDA=G26): 0x70            ← PCA9548A mux
-  ch0..4, 6, 7 : empty
-  ch5          : 0x44 (SHT30) + QMP6988 (0x70) ← ENV III-style board
+Two independent I2C buses in the 2026-09-16 stacked topology:
+```
+Atom Grove bus (SCL=G32, SDA=G26): none (I2C)   ← Watering Unit only (analog+GPIO)
+DTU Port A bus  (SCL=G21, SDA=G25): 0x44, 0x70   ← ENV III: SHT30 + QMP6988 (no mux)
+```
 ```
 
 - **SHT30 works**: 25.32 °C / 55.68 % RH (command `0x2C06`, 6-byte read).
@@ -90,10 +99,17 @@ I2C scan (SCL=G32, SDA=G26): 0x70            ← PCA9548A mux
   3. Move the ENV III board off the mux (direct bus) and keep the mux for
      other devices — then the bus has SHT30 `0x44` + QMP `0x70` only.
   4. Remove the mux if only one sensor chain is needed (then no collision).
-- **No soil-moisture device on I2C.** The M5Stack Watering Unit's probe is
-  **analog** (ADC), and its pump is a **GPIO** output (U101, Port B style:
-  moisture ADC + pump control). Confirm the actual wiring with the user before
-  planning ADC/pump pins; do not reuse G26/G32 (I2C).
+- **Soil moisture is analog, not I2C.** The M5Stack Watering Unit's probe is an
+  **analog (capacitive) ADC** output confirmed on **GPIO32** and its pump a
+  **GPIO** output on **GPIO26** (U101; moisture ADC + pump control, both via the
+  Grove cable — white=moisture→G32, yellow=PUMP_EN→G26, red=5V, black=GND).
+  Verified 2026-09-16: air ≈2068 / submerged ≈1580 counts (~1819/~1435 mV),
+  stable and reproducible after ~60 s settling. **⚠️ Both pins are on the Grove
+  I2C bus (G32=SCL, G26=SDA) — the moisture analog output and pump drive share
+  the I2C lines. This is fine while only the Watering Unit is on the Grove
+  port, but ANY I2C device added to that bus (e.g. an ENV III via the DTU base
+  Grove port) will collide with the moisture signal on SCL and the pump drive
+  on SDA. Plan a non-I2C port for the Watering Unit before adding I2C sensors.**
 
 ---
 
@@ -114,7 +130,15 @@ transistor turns on. Requirements before the pump is ever connected again:
    pins; the hardware E2E gate must explicitly refuse pump actuation until the
    default-OFF behavior is verified with the pump disconnected (LED/meter on
    the control line), then with the pump on a current-limited supply.
-4. **Min ON / min OFF / max daily** enforcement from the control engine, hard
+4. **Supervised manual motor tests (2026-09-16, outside any gate):** two 5 s
+   fail-off cycles were run at the user's request with the pump recirculating
+   in water, both motor power rails live and the user ready to cut power. The
+   script drives G26 LOW first, holds HIGH 5 s, then drives LOW again and
+   leaves the pin **driven LOW** (never deinit/floats). Both runs: motor spun
+   during ON, stopped at OFF, no residual running. This verifies the drive
+   path, but it is **not** a substitute for the hardware pull-down + default-OFF
+   `boot.py` — both are still required before the pump is trusted by firmware.
+5. **Min ON / min OFF / max daily** enforcement from the control engine, hard
    overrides always winning.
 
 ### Concrete fix recipe (do this before reconnecting the pump)
@@ -165,9 +189,10 @@ carry the PCA9548A mux + ENV III; never put PUMP_EN there).
 
 | Item | Needed for | Owner |
 |------|-----------|-------|
-| Fix the QMP6988/mux address collision (one of §4's options) | pressure telemetry + any pressure-trend input | hardware/wiring |
-| Confirm soil-moisture sensor model + pins (Watering Unit ADC line vs separate sensor) | Phase 2 drivers, calibration | user |
-| Confirm the Watering Unit's pump control pin and OFF polarity | Phase 5 pump driver | user + firmware |
+| ~~QMP6988 `0x70` collision~~ **RESOLVED 2026-09-16 by topology:** ENV III on DTU Port A (G21/G25) has no mux in line → chip ID `0x5C` reads clean. Still to do: real pressure readout in Phase 2 (config/sample sequence) | pressure telemetry + pressure-trend input | Phase 2 driver |
+| ~~Soil-moisture pins~~ **DONE 2026-09-16:** moisture ADC on G32, calibrated air≈2068 / water≈1580; full moisture calibration curve + soil-data point still pending | Phase 2/3 calibration & control | done + user |
+| ~~Pump pin & polarity~~ **DONE 2026-09-16:** pump enable on G26, active-HIGH, 5 s fail-off test passed; **hardware pull-down + default-OFF `boot.py` still pending** before firmware may drive it | Phase 5 pump driver | done + firmware |
+| Resolve Grove-port sharing before stacking DTU base + ENV III with the Watering Unit (both would drive/share G26/G32) | air T/humidity on same bus as moisture/pump | user + firmware |
 | Decide DTU mode transition (P2P currently; LoRaWAN needed for server path) | Phase 6 | evaluation/plan |
 | Verify the alternative Atom↔base connectors (J1 G21/G25) | sensor relocation option | hardware |
 

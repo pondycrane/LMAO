@@ -1102,6 +1102,30 @@ For the full system design, see [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
 ---
 
+## Sprout — Smart Irrigation Node
+
+**Sprout** is the LMAO network's edge irrigation controller: it fuses soil
+moisture + air temperature/humidity + pressure into an irrigation decision,
+drives a water pump, and reports every sensor sample to the LMAO server over
+LoRa for offline ML training.
+
+![Sprout — LMAO Smart Irrigation Node](docs/images/sprout-setup.jpg)
+
+**Hardware (verified 2026-09-16, final functional pass = PASS):** M5Stack
+**Atom Lite** stacked on the **DTU LoRaWAN base (A152-EU868)** via the 9-pin
+socket; **Watering Unit U101** on the Atom's Grove port (moisture ADC **G32**,
+pump **G26** active-HIGH — fail-off motor test passed); **ENV III** on the
+base's Grove **Port A** (SHT30 air T/humidity on **G21/G25** + QMP6988
+pressure — no mux collision).
+
+See [`smart_irrigation/`](smart_irrigation/) for the full project — blueprint,
+verified hardware map ([`docs/hardware-verification.md`](smart_irrigation/docs/hardware-verification.md)),
+hard rules, and the Archon workflow. **Status:** hardware fully verified
+everywhere (sensors + pump + LoRa); node firmware is gated on the Phase 0
+algorithm evaluation.
+
+---
+
 ## Troubleshooting
 
 | Problem | Check |
