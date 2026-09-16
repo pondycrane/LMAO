@@ -14,8 +14,10 @@ rescue (see issue #89 for the full post-mortem of the #87 run).
 | `lmao-feature-dev` | Feature idea → plan → implement → **gates** → PR → 5-agent review → fixes → **gates re-run** → summary. |
 | `smart-irrigation-dev` | Smart Irrigation node (Atom Lite + STM32WLE5CC DTU) work from the blueprint in `smart_irrigation/docs/development-plan.md`: phase features, or the mandatory Phase 0 algorithm evaluation. Firmware work is hard-blocked until `smart_irrigation/docs/algorithm-evaluation.md` exists (blueprint Appendix 13). |
 
-Both run entirely on pi/DeepSeek (`deepseek-v4-pro` for plan/implement/fix,
-`deepseek-v4-flash` for the rest). No Claude references anywhere.
+Both run entirely on pi routing to the in-house GX10 box — every node uses
+the local DeepSeek V4 Flash model (`gx10/deepseek-ai/DeepSeek-V4-Flash-0731`,
+such as `gx10-f156.local:8000/v1`, defined in `~/.pi/agent/models.json`). The
+cloud DeepSeek endpoint is no longer used by default. No Claude anywhere.
 
 ```bash
 cd /home/pondycrane/LMAO
