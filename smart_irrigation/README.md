@@ -74,16 +74,21 @@ evidence, pin map, and open items. Summary:
 
 ## The algorithm evaluation gate
 
+> ⚠️ **Archaic-workflow status:** the `smart-irrigation-dev` Archon workflow is
+> **NOT ready to run** — pending refinement in [#122](https://github.com/pondycrane/LMAO/issues/122).
+> Until it's right-sized, run the phase gates manually: Phase 0 below, and the
+> hardware E2E via `bazel test //tests:test_sprout_e2e --test_output=all`.
+
 The blueprint's Challenge Brief (Appendix 13) **forbids writing firmware
 before an algorithm evaluation exists**. `docs/algorithm-evaluation.md` must
 contain: the verdict across state-machine / PID / fuzzy / model-based-hybrid,
 the rulebase or ET₀ model, the ML dataset schema, the on-node protocol
 recommendation, risk assessment, and a revised phase plan — with benchmark
-evidence. Run it first:
+evidence. Run it first (manually until the workflow is refined):
 
 ```bash
-cd /home/pondycrane/LMAO
-archon workflow run smart-irrigation-dev "Phase 0: algorithm evaluation"
+# Manual Phase 0 (workflow not ready yet, #122):
+# author smart_irrigation/docs/algorithm-evaluation.md per blueprint Appendix 13
 ```
 
 Then develop phases/features one at a time:
