@@ -31,8 +31,7 @@ description: |
   NOT for: plain LMAO Cardputer features (use lmao-feature-dev), GitHub-issue
   fixes (use lmao-fix-issue), standalone reviews.
 
-  Models: deepseek-v4-pro for evaluation/plan/implement/fixes,
-          deepseek-v4-flash for everything else. No Claude.
+  Models: gx10 DeepSeek V4 Flash (gx10/deepseek-ai/DeepSeek-V4-Flash-0731) for everything. No Claude.
 
 nodes:
   # ═══════════════════════════════════════════════════════════════
@@ -61,7 +60,7 @@ nodes:
 
   - id: assess
     context: fresh
-    model: deepseek/deepseek-v4-flash
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
     prompt: |
       You are the dispatcher for the smart-irrigation development workflow.
 
@@ -170,7 +169,7 @@ nodes:
     command: irrigation-algorithm-evaluation
     depends_on: [preflight]
     context: fresh
-    model: deepseek/deepseek-v4-pro
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
     effort: max
     idle_timeout: 2400000
 
@@ -182,7 +181,7 @@ nodes:
     command: irrigation-create-plan
     depends_on: [algorithm-evaluation]
     context: fresh
-    model: deepseek/deepseek-v4-pro
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
     effort: high
     idle_timeout: 1200000
 
@@ -190,13 +189,13 @@ nodes:
     command: lmao-plan-setup
     depends_on: [create-plan]
     context: fresh
-    model: deepseek/deepseek-v4-flash
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
 
   - id: confirm-plan
     command: lmao-confirm-plan
     depends_on: [plan-setup]
     context: fresh
-    model: deepseek/deepseek-v4-flash
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
 
   # ═══════════════════════════════════════════════════════════════════
   # PHASE 4: IMPLEMENT (MicroPython + Bazel + pump safety)
@@ -206,7 +205,7 @@ nodes:
     command: irrigation-implement-tasks
     depends_on: [confirm-plan]
     context: fresh
-    model: deepseek/deepseek-v4-pro
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
     effort: max
     idle_timeout: 2400000
 
@@ -220,21 +219,21 @@ nodes:
     command: irrigation-validate
     depends_on: [implement-tasks]
     context: fresh
-    model: deepseek/deepseek-v4-flash
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
     idle_timeout: 1200000
 
   - id: hardware-e2e
     command: irrigation-hardware-e2e
     depends_on: [validate]
     context: fresh
-    model: deepseek/deepseek-v4-flash
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
     idle_timeout: 1800000
 
   - id: production-health
     command: irrigation-production-health
     depends_on: [hardware-e2e]
     context: fresh
-    model: deepseek/deepseek-v4-flash
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
     idle_timeout: 900000
 
   # ═══════════════════════════════════════════════════════════════════
@@ -245,7 +244,7 @@ nodes:
     command: irrigation-finalize-pr
     depends_on: [production-health]
     context: fresh
-    model: deepseek/deepseek-v4-flash
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
 
   - id: verify-pr-base
     bash: |
@@ -269,56 +268,56 @@ nodes:
     command: archon-pr-review-scope
     depends_on: [verify-pr-base]
     context: fresh
-    model: deepseek/deepseek-v4-flash
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
 
   - id: sync
     command: lmao-sync-pr-with-main
     depends_on: [review-scope]
     context: fresh
-    model: deepseek/deepseek-v4-flash
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
 
   - id: code-review
     command: archon-code-review-agent
     depends_on: [sync]
     context: fresh
-    model: deepseek/deepseek-v4-flash
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
 
   - id: error-handling
     command: archon-error-handling-agent
     depends_on: [sync]
     context: fresh
-    model: deepseek/deepseek-v4-flash
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
 
   - id: test-coverage
     command: archon-test-coverage-agent
     depends_on: [sync]
     context: fresh
-    model: deepseek/deepseek-v4-flash
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
 
   - id: comment-quality
     command: archon-comment-quality-agent
     depends_on: [sync]
     context: fresh
-    model: deepseek/deepseek-v4-flash
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
 
   - id: docs-impact
     command: archon-docs-impact-agent
     depends_on: [sync]
     context: fresh
-    model: deepseek/deepseek-v4-flash
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
 
   - id: control-safety-review
     command: irrigation-control-review
     depends_on: [sync]
     context: fresh
-    model: deepseek/deepseek-v4-flash
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
 
   - id: synthesize
     command: archon-synthesize-review
     depends_on: [code-review, error-handling, test-coverage, comment-quality, docs-impact]
     trigger_rule: one_success
     context: fresh
-    model: deepseek/deepseek-v4-flash
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
 
   # ═══════════════════════════════════════════════════════════════════
   # PHASE 8: FIX REVIEW FINDINGS
@@ -329,7 +328,7 @@ nodes:
     depends_on: [synthesize, control-safety-review]
     trigger_rule: none_failed_min_one_success
     context: fresh
-    model: deepseek/deepseek-v4-pro
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
     effort: max
     idle_timeout: 1800000
 
@@ -344,21 +343,21 @@ nodes:
     command: irrigation-validate
     depends_on: [implement-fixes]
     context: fresh
-    model: deepseek/deepseek-v4-flash
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
     idle_timeout: 1200000
 
   - id: final-hardware-e2e
     command: irrigation-hardware-e2e
     depends_on: [final-validate]
     context: fresh
-    model: deepseek/deepseek-v4-flash
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
     idle_timeout: 1800000
 
   - id: final-production-health
     command: irrigation-production-health
     depends_on: [final-hardware-e2e]
     context: fresh
-    model: deepseek/deepseek-v4-flash
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
     idle_timeout: 900000
 
   # ═══════════════════════════════════════════════════════════════════
@@ -369,7 +368,7 @@ nodes:
     command: archon-workflow-summary
     depends_on: [final-production-health]
     context: fresh
-    model: deepseek/deepseek-v4-flash
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
 
   # Sends through Hermes' gateway credentials to the Telegram home channel
   # (TELEGRAM_HOME_CHANNEL in ~/.hermes/.env) — no LLM, no running gateway

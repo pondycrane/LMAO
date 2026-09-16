@@ -22,8 +22,7 @@ description: |
 
   NOT for: Executing existing plans (use archon-plan-to-pr), quick fixes, standalone reviews.
 
-  Models: deepseek-v4-pro for planning/implementation/fixes,
-          deepseek-v4-flash for the rest. No Claude anywhere.
+  Models: gx10 DeepSeek V4 Flash (gx10/deepseek-ai/DeepSeek-V4-Flash-0731) for everything. No Claude anywhere.
 
 nodes:
   # ═══════════════════════════════════════════════════════════════════
@@ -33,7 +32,7 @@ nodes:
   - id: create-plan
     command: lmao-create-plan
     context: fresh
-    model: deepseek/deepseek-v4-pro
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
     effort: high
 
   # ═══════════════════════════════════════════════════════════════════
@@ -44,7 +43,7 @@ nodes:
     command: lmao-plan-setup
     depends_on: [create-plan]
     context: fresh
-    model: deepseek/deepseek-v4-flash
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
 
   # ═══════════════════════════════════════════════════════════════════
   # PHASE 2: CONFIRM PLAN
@@ -54,7 +53,7 @@ nodes:
     command: lmao-confirm-plan
     depends_on: [plan-setup]
     context: fresh
-    model: deepseek/deepseek-v4-flash
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
 
   # ═══════════════════════════════════════════════════════════════════
   # PHASE 3: IMPLEMENT (LMAO safety rules + Bazel)
@@ -64,7 +63,7 @@ nodes:
     command: lmao-implement-tasks
     depends_on: [confirm-plan]
     context: fresh
-    model: deepseek/deepseek-v4-pro
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
     effort: max
 
   # ═══════════════════════════════════════════════════════════════════
@@ -76,19 +75,19 @@ nodes:
     command: lmao-validate
     depends_on: [implement-tasks]
     context: fresh
-    model: deepseek/deepseek-v4-flash
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
 
   - id: hardware-e2e
     command: lmao-hardware-e2e
     depends_on: [validate]
     context: fresh
-    model: deepseek/deepseek-v4-flash
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
 
   - id: production-health
     command: lmao-production-health
     depends_on: [hardware-e2e]
     context: fresh
-    model: deepseek/deepseek-v4-flash
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
 
   # ═══════════════════════════════════════════════════════════════════
   # PHASE 5: FINALIZE PR (includes hardware E2E evidence)
@@ -98,7 +97,7 @@ nodes:
     command: lmao-finalize-pr
     depends_on: [production-health]
     context: fresh
-    model: deepseek/deepseek-v4-flash
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
 
   # ═══════════════════════════════════════════════════════════════════
   # PHASE 6: CODE REVIEW
@@ -122,50 +121,50 @@ nodes:
     command: archon-pr-review-scope
     depends_on: [verify-pr-base]
     context: fresh
-    model: deepseek/deepseek-v4-flash
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
 
   - id: sync
     command: lmao-sync-pr-with-main
     depends_on: [review-scope]
     context: fresh
-    model: deepseek/deepseek-v4-flash
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
 
   - id: code-review
     command: archon-code-review-agent
     depends_on: [sync]
     context: fresh
-    model: deepseek/deepseek-v4-flash
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
 
   - id: error-handling
     command: archon-error-handling-agent
     depends_on: [sync]
     context: fresh
-    model: deepseek/deepseek-v4-flash
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
 
   - id: test-coverage
     command: archon-test-coverage-agent
     depends_on: [sync]
     context: fresh
-    model: deepseek/deepseek-v4-flash
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
 
   - id: comment-quality
     command: archon-comment-quality-agent
     depends_on: [sync]
     context: fresh
-    model: deepseek/deepseek-v4-flash
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
 
   - id: docs-impact
     command: archon-docs-impact-agent
     depends_on: [sync]
     context: fresh
-    model: deepseek/deepseek-v4-flash
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
 
   - id: synthesize
     command: archon-synthesize-review
     depends_on: [code-review, error-handling, test-coverage, comment-quality, docs-impact]
     trigger_rule: one_success
     context: fresh
-    model: deepseek/deepseek-v4-flash
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
 
   # ═══════════════════════════════════════════════════════════════════
   # PHASE 7: FIX REVIEW ISSUES (LMAO-adapted)
@@ -175,7 +174,7 @@ nodes:
     command: lmao-implement-review-fixes
     depends_on: [synthesize]
     context: fresh
-    model: deepseek/deepseek-v4-pro
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
     effort: max
 
   # ═══════════════════════════════════════════════════════════════════
@@ -190,19 +189,19 @@ nodes:
     command: lmao-validate
     depends_on: [implement-fixes]
     context: fresh
-    model: deepseek/deepseek-v4-flash
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
 
   - id: final-hardware-e2e
     command: lmao-hardware-e2e
     depends_on: [final-validate]
     context: fresh
-    model: deepseek/deepseek-v4-flash
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
 
   - id: final-production-health
     command: lmao-production-health
     depends_on: [final-hardware-e2e]
     context: fresh
-    model: deepseek/deepseek-v4-flash
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
 
   # ═══════════════════════════════════════════════════════════════════
   # PHASE 9: FINAL SUMMARY & FOLLOW-UP
@@ -212,7 +211,7 @@ nodes:
     command: archon-workflow-summary
     depends_on: [final-production-health]
     context: fresh
-    model: deepseek/deepseek-v4-flash
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
 
   # ─── Push notification via ntfy (bash + curl) ─────────────────
   # To enable, create .archon/mcp/ntfy.json with {"NTFY_TOPIC": "..."}
