@@ -201,6 +201,22 @@ def _identity_to_destination(identity):
     )
 
 
+def _announce_delivery_destinations(router):
+    """Announce every registered delivery destination for LoRa path discovery.
+
+    Single source of truth for both the startup announce and the periodic
+    re-announce (issue #134).  LXMF's ``router.announce()`` requires the
+    *delivery destination hash* (keyed in ``router.delivery_destinations``),
+    NOT the raw identity hash — passing the identity hash is a silent no-op.
+    """
+    for dest_hash in list(router.delivery_destinations):
+        router.announce(dest_hash)
+    logger.info(
+        "Server announce sent (%d delivery destinations).",
+        len(router.delivery_destinations),
+    )
+
+
 class Server:
     """Encapsulates LMAO server lifecycle: Reticulum init, LXMF router, and message handling."""
 
@@ -713,29 +729,30 @@ async def async_main():
     # identity hash is a silent no-op. Announce PERIODICALLY (not just at
     # startup) so late-joining clients can learn the server identity over the
     # air without requiring an RNS path-request (native Sprout #130 doesn't
-    # implement path-requests yet).
+    # implement path-requests yet). Both the startup announce and the periodic
+    # re-announce share one implementation (issue #134).
     ANNOUNCE_INTERVAL = float(os.environ.get("LMAO_ANNOUNCE_INTERVAL", "60"))
-
-    async def _announce_loop():
-        while True:
-            try:
-                for dest_hash in list(router.delivery_destinations):
-                    router.announce(dest_hash)
-                logger.info(
-                    "Server announce sent (%d delivery destinations).",
-                    len(router.delivery_destinations),
-                )
-            except Exception as e:
-                logger.warning(
-                    "Server announce failed (LoRa may be unavailable): %s", e
-                )
-            await asyncio.sleep(ANNOUNCE_INTERVAL)
 
     logger.info(
         "Announcing server presence for LoRa path discovery (every ~%.0fs)...",
         ANNOUNCE_INTERVAL,
     )
-    asyncio.create_task(_announce_loop())
+    try:
+        _announce_delivery_destinations(router)
+    except Exception as e:
+        logger.warning("Server announce failed (LoRa may be unavailable): %s", e)
+
+    async def _periodic_announce():
+        while True:
+            await asyncio.sleep(ANNOUNCE_INTERVAL)
+            try:
+                _announce_delivery_destinations(router)
+            except Exception as e:
+                logger.warning(
+                    "Periodic announce failed (LoRa may be unavailable): %s", e
+                )
+
+    announce_task = asyncio.ensure_future(_periodic_announce())
 
     # ── NATS connect (optional) ─────────────────────────────────
     nats_queue = None
@@ -785,21 +802,9 @@ async def async_main():
         logger.info("gRPC server started on 0.0.0.0:50051")
         print("gRPC server ready on 0.0.0.0:50051")
 
-    # Keep running, re-announcing periodically so late-joining clients
-    # can discover a path.  Runs as a background task so it works whether
-    # or not gRPC is active.
-    ANNOUNCE_INTERVAL = 300  # re-announce every 5 minutes
-
-    async def _periodic_announce():
-        while True:
-            await asyncio.sleep(ANNOUNCE_INTERVAL)
-            try:
-                _announce_delivery_destinations()
-                logger.debug("Periodic announce sent.")
-            except Exception as e:
-                logger.warning("Periodic announce failed: %s", e)
-
-    announce_task = asyncio.ensure_future(_periodic_announce())
+    # Keep running until interrupted.  The periodic announce task was already
+    # started above (see _periodic_announce) so it runs whether gRPC is active
+    # or not (issue #134 — single announce loop, no duplicate/NameError).
     try:
         if grpc_server:
             await grpc_server.wait_for_termination()
