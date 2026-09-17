@@ -14,6 +14,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "nvs_flash.h"
+#include "nvs.h"
 #include "driver/gpio.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -24,6 +25,7 @@
 #include "rtreticulum/transport.h"
 #include "rtreticulum/reticulum.h"
 #include "uart_at_interface.h"
+#include "path_find.h"
 #include "sht30.h"
 #include "lma_encoder.h"
 #include "lxmf_send.h"
@@ -85,7 +87,10 @@ static void send_sensor_report(const Identity& my_identity) {
     Identity srv = s_server_identity;
     if (s_ident_lock) xSemaphoreGive(s_ident_lock);
     if (!have) {
-        ESP_LOGW(TAG, "server identity not learned yet — skipping LXMF send");
+        // TODO(#130): native RNS path-request hits an RTReticulum PLAIN-dest
+        // abort (upstream). For now we discover the server via its periodic
+        // announce (server announces every ~60s).
+        ESP_LOGW(TAG, "server identity not learned yet — skipping LXMF send (awaiting server announce)");
         return;
     }
     Destination server_delivery(srv, Type::Destination::OUT, Type::Destination::SINGLE,
@@ -133,10 +138,40 @@ void app_main() {
         ESP_LOGW(TAG, "DTU radio interface failed to start");
     }
 
-    // TODO: persist identity (61af0d5b...) to NVS so the node keeps its identity
-    // across boots (and across the MicroPython -> native migration).
+    // Persistent identity (NVS): keep the same RNS identity across boots so the
+    // node is a stable mesh peer and can be whitelisted on the server (#130).
+    // TODO: seed with the old MicroPython key (61af0d5b...) for full continuity.
     Identity identity;
+    {
+        nvs_handle_t nv = 0;
+        if (nvs_open("sprout", NVS_READWRITE, &nv) == ESP_OK) {
+            uint8_t key[64];
+            size_t len = sizeof(key);
+            if (nvs_get_blob(nv, "identity64", key, &len) == ESP_OK && len == 64) {
+                Identity loaded(false);
+                loaded.load_private_key(Bytes(key, 64));
+                identity = loaded;
+                ESP_LOGI(TAG, "loaded persisted identity from NVS");
+            } else {
+                identity = Identity(true);
+                Bytes pk = identity.get_private_key();
+                nvs_set_blob(nv, "identity64", pk.data(), pk.size());
+                nvs_commit(nv);
+                ESP_LOGI(TAG, "generated and persisted identity to NVS");
+            }
+            nvs_close(nv);
+        } else {
+            identity = Identity(true);
+        }
+    }
     ESP_LOGI(TAG, "identity hash: %s", hexstr(identity.get_salt()).c_str());
+    {
+        // The server whitelists the sender's lxmf/delivery hash (what it logs
+        // as "From:") — print ours now so it can be added to the server list.
+        Destination dm(identity, Type::Destination::OUT, Type::Destination::SINGLE,
+                       "lxmf", "delivery");
+        ESP_LOGI(TAG, "my lxmf/delivery hash: %s", hexstr(dm.hash()).c_str());
+    }
 
     Destination dest(identity, Type::Destination::IN, Type::Destination::SINGLE,
                      "lmao", "sprout");

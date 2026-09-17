@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <cstring>
 #include "esp_log.h"
+#include "esp_random.h"
 #include "driver/uart.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -67,7 +68,14 @@ void UartAtInterface::send_outgoing(const Bytes& data) {
     uart_wait_tx_done(UART_NUM_2, 300);
     drain_ms(60);
 
-    std::string cmd = "AT+PSEND=" + to_hex(data) + "\r\n";
+    // On-air frames carry a 1-byte RNode/urns LoRa interface header BEFORE the
+    // RNS frame (random seq in the upper nibble, no split flag for one frame) —
+    // the server's RNode strips it on RX, so we must prepend it on TX.
+    uint8_t hdr = (uint8_t)(esp_random() & 0xF0);
+    RNS::Bytes onair;
+    onair.append(RNS::Bytes(&hdr, 1));
+    onair.append(data);
+    std::string cmd = "AT+PSEND=" + to_hex(onair) + "\r\n";
     uart_write(cmd.c_str(), cmd.size());
     uart_wait_tx_done(UART_NUM_2, 500);
     drain_ms(300);  // swallow the late +EVT:TXP2P DONE / OK
@@ -93,6 +101,27 @@ void UartAtInterface::loop() {
         if (line.find("+EVT:RXP2P") != std::string::npos) {
             _expect_hex = true;
             ESP_LOGI(TAG, "RX event: %s", line.c_str());
+            // RUI4 appends the hex payload AFTER the last ':' on this same
+            // line (e.g. ";+EVT:RXP2P:-18:13:010000DA...."), not on a
+            // separate line. Extract it here; the next-line branch below is a
+            // fallback for the two-line firmware format.
+            size_t colon = line.rfind(':');
+            if (colon != std::string::npos && colon + 1 < line.size()) {
+                Bytes p = from_hex(line.substr(colon + 1));
+                if (!p.empty()) {
+                    _expect_hex = false;
+                    // On-air frames on this mesh carry a 1-byte RNode/urns
+                    // LoRa interface header (seq+split) BEFORE the RNS frame;
+                    // the RNS core expects the frame without it (urns does the
+                    // same in LoRaInterface). Splitting (>254B) not needed yet.
+                    if (p.size() > 1) {
+                        Bytes rframe(p.data() + 1, p.size() - 1);
+                        ESP_LOGI(TAG, "RX %u bytes payload (inline)",
+                                 (unsigned)rframe.size());
+                        handle_incoming(rframe);
+                    }
+                }
+            }
         } else if (_expect_hex && !line.empty()) {
             _expect_hex = false;
             Bytes payload = from_hex(line);
