@@ -20,7 +20,14 @@ DEBUG = 1
 # Destination hash of the server's lxmf.delivery destination (hex of a
 # 16-byte hash). None = don't send. Injected at flash/run time so Sprout
 # knows where to deliver SensorReports.
-DEST_HASH = None
+# Destination hash of the server's lxmf.delivery destination (hex of a
+# 16-byte hash). Currently the in-cluster LMAO-server delivery hash (2026-09-16);
+# update if the server identity changes. None = don't send.
+DEST_HASH = "dad35b80164b25f7b1474be86e443702"
+
+# Seconds to keep the RNS event loop running after a send (poll for the server
+# path/announce + let the deferred LXMF transmit fire).
+SEND_RUN_SECONDS = 90
 
 # Send interval in seconds for SensorReports. Minimum 10s to avoid LoRa
 # congestion.
