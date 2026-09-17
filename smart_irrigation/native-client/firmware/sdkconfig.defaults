@@ -1,0 +1,11 @@
+CONFIG_IDF_TARGET="esp32"
+# The Atom Lite has 4 MB of embedded flash.
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
+CONFIG_FREERTOS_HZ=1000
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_160=y
+# mbedTLS algorithms RTReticulum needs.
+CONFIG_MBEDTLS_HARDWARE_AES=y
+CONFIG_MBEDTLS_HARDWARE_SHA=y
+CONFIG_MBEDTLS_HKDF_C=y
+# Announcing every 30 s; deep idle is fine (native stack is event-driven).
