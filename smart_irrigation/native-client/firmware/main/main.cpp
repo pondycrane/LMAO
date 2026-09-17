@@ -14,6 +14,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "nvs_flash.h"
+#include "driver/gpio.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
@@ -104,6 +105,17 @@ extern "C" void app_main(void);
 void app_main() {
     ESP_LOGI(TAG, "Sprout native client starting");
 
+    // SAFETY (#119): drive the watering-unit pump enable LOW (OFF) as the very
+    // FIRST action — never leave the pump control line floating.
+    {
+        gpio_config_t io = {};
+        io.pin_bit_mask = (1ULL << GPIO_NUM_26);
+        io.mode = GPIO_MODE_OUTPUT;
+        gpio_config(&io);
+        gpio_set_level(GPIO_NUM_26, 0);
+        ESP_LOGI(TAG, "pump enable G26 driven LOW (OFF) as first action");
+    }
+
     esp_err_t nv = nvs_flash_init();
     if (nv == ESP_ERR_NVS_NO_FREE_PAGES || nv == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         nvs_flash_erase();
@@ -114,6 +126,12 @@ void app_main() {
 
     auto dt = std::make_shared<UartAtInterface>();
     Transport::register_interface(dt);
+    bool dt_up = dt->start();   // configures the RAK3172 DTU P2P radio + PRECV on (Reticulum only calls loop())
+    if (dt_up) {
+        ESP_LOGI(TAG, "DTU radio interface started");
+    } else {
+        ESP_LOGW(TAG, "DTU radio interface failed to start");
+    }
 
     // TODO: persist identity (61af0d5b...) to NVS so the node keeps its identity
     // across boots (and across the MicroPython -> native migration).
