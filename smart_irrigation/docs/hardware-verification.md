@@ -183,6 +183,38 @@ carry the PCA9548A mux + ENV III; never put PUMP_EN there).
    and drive HIGH first in `boot.py`. Determine polarity with the LED test
    first — never guess.
 
+## 5a. ENV III Port A contact — issue #124 (known weak point)
+
+**Symptom:** the ENV III (SHT30/QMP6988 on the DTU base **Port A**, G21/G25)
+intermittently vanishes from the bus; every I2C op returns `OSError ETIMEDOUT`.
+Dropped **4+ times on 2026-09-16**, always recovered by reseating the Grove
+plug in Port A.
+
+**Diagnosed failure signature (2026-09-16):** the Grove plug's **SCL pin
+(G21) loses electrical contact** while SDA (G25) stays seated:
+
+- `G21` with internal pull-up engaged reads `0` (floating low, no board pull-up
+  present on that line) until force-driven high once, then reads `1` → **open
+  contact**, not a short.
+- `G25` reads `1` (board pull-up live → SDA still connected).
+- Consequence: SCL held/floating low → clock dead → `ETIMEDOUT` on anything →
+  the sensor reports missing.
+- Partial engagement (one pin not seated) is the likely cause; vibration or
+  moving the rig triggers it.
+
+**Mitigations:**
+- **Software (in this repo):** `test_sprout_e2e.py` retries ENV III reads **once**
+  before FAIL (loud note; a genuine absence still fails) and `probe_hardware.py`
+  emits the `g21`/`g25` pin states so a failed probe says which line is open.
+- **Hardware (recommended, the actual fix):**
+  1. Fully seat the Grove plug until it *clicks*; verify both latch tabs.
+  2. **Strain relief** — a dot of tape/blu-tack around the plug-to-socket seam
+     (or a short Grove cable to the ENV III) so movement can't lever the SCL
+     pin open.
+  3. Avoid moving the rig while it is powered; reseat at power-off if possible.
+  4. If the socket is worn, relocate the ENV III to a spare Grove port (verify
+     it is on G21/G25 or update the pin map).
+
 ---
 
 ## 6. Open items
