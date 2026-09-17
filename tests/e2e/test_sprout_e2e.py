@@ -25,6 +25,7 @@ Run with::
 """
 
 import logging
+import time
 from typing import Optional
 
 import pytest
@@ -145,6 +146,31 @@ def _parse_marker(output: str, marker: str) -> dict:
     )
 
 
+def _env3_retry(sprout: "_SproutFixture", code: str, marker: str, what: str):
+    """Run an ENV III device probe; retry once on failure.
+
+    The ENV III rides the DTU base Port A Grove socket, which is a KNOWN
+    intermittent contact (issue #124) — a plug bump can momentarily lose the
+    SCL pin and every I2C op ETIMEDOUTs. To keep the gate honest we retry ONCE
+    (with a loud note); a genuine absence still FAILs on the second attempt.
+    Returns ``(info, output)`` of the last attempt.
+    """
+    out = sprout.on_device(code)
+    info = _parse_marker(out, marker)
+    bad = (not info) or "ERR" in info
+    if not bad:
+        return info, out
+    time.sleep(0.6)
+    out2 = sprout.on_device(code)
+    info2 = _parse_marker(out2, marker)
+    ok2 = bool(info2) and "ERR" not in info2
+    print(
+        f"ENV III {what}: first read failed (Port A contact, #124); "
+        f"retry -> {'OK' if ok2 else 'STILL FAILING'}"
+    )
+    return info2, out2
+
+
 def test_sprout_identity(sprout: "_SproutFixture"):
     """Device is an ESP32 running MicroPython."""
     out = sprout.on_device(
@@ -191,8 +217,13 @@ def test_pump_line_passive_off_g26(sprout: "_SproutFixture"):
 
 
 def test_env3_bus_g21_g25(sprout: "_SproutFixture"):
-    """ENV III on the DTU base Port A bus (G21/G25) exposes SHT30 + QMP6988."""
-    out = sprout.on_device(
+    """ENV III on the DTU base Port A bus (G21/G25) exposes SHT30 + QMP6988.
+
+    Also reports the raw SCL/SDA pin states (with internal pull-up) so a
+    failure says WHICH contact is open (issue #124: G21/SCL is the one that
+    drops, showing g21=0 while g25 stays 1).
+    """
+    CODE = (
         "import machine\n"
         "i2c=machine.SoftI2C(scl=machine.Pin(21), sda=machine.Pin(25), freq=100000)\n"
         "found=[]\n"
@@ -201,17 +232,21 @@ def test_env3_bus_g21_g25(sprout: "_SproutFixture"):
         "        i2c.readfrom(ad, 1); found.append(ad)\n"
         "    except OSError:\n"
         "        pass\n"
-        'print("SPROUT_ENV3 addrs=" + ",".join("%02x" % a for a in found))'
+        "g21=machine.Pin(21, machine.Pin.IN, machine.Pin.PULL_UP).value()\n"
+        "g25=machine.Pin(25, machine.Pin.IN, machine.Pin.PULL_UP).value()\n"
+        'print("SPROUT_ENV3 addrs=" + ",".join("%02x" % a for a in found) + '
+        '" g21=%d g25=%d" % (g21, g25))'
     )
-    info = _parse_marker(out, "SPROUT_ENV3")
+    info, out = _env3_retry(sprout, CODE, "SPROUT_ENV3", "bus scan")
     addrs = set(info.get("addrs", "").split(","))
-    assert "44" in addrs, f"SHT30 (0x44) missing on Port A: {out!r}"
-    assert "70" in addrs, f"QMP6988 (0x70) missing on Port A: {out!r}"
+    diag = f"g21={info.get('g21','?')} g25={info.get('g25','?')} (SCL-open if g21=0)"
+    assert "44" in addrs, f"SHT30 (0x44) missing on Port A [{diag}]: {out!r}"
+    assert "70" in addrs, f"QMP6988 (0x70) missing on Port A [{diag}]: {out!r}"
 
 
 def test_sht30_temp_humidity(sprout: "_SproutFixture"):
     """ENV III air temperature + humidity read in sane physical ranges."""
-    out = sprout.on_device(
+    CODE = (
         "import machine\n"
         "from time import sleep_ms\n"
         "i2c=machine.SoftI2C(scl=machine.Pin(21), sda=machine.Pin(25), freq=100000)\n"
@@ -224,7 +259,7 @@ def test_sht30_temp_humidity(sprout: "_SproutFixture"):
         "except Exception as e:\n"
         '    print("SPROUT_SHT30 ERR %s" % type(e).__name__)'
     )
-    info = _parse_marker(out, "SPROUT_SHT30")
+    info, out = _env3_retry(sprout, CODE, "SPROUT_SHT30", "SHT30 read")
     if "ERR" in info:
         pytest.fail(f"SHT30 read failed: {out!r}")
     temp = float(info.get("temp_c", "nan"))
@@ -235,7 +270,7 @@ def test_sht30_temp_humidity(sprout: "_SproutFixture"):
 
 def test_qmp6988_chip_id(sprout: "_SproutFixture"):
     """QMP6988 chip-ID is clean 0x5C -- proves the 0x70 mux collision is gone."""
-    out = sprout.on_device(
+    CODE = (
         "import machine\n"
         "i2c=machine.SoftI2C(scl=machine.Pin(21), sda=machine.Pin(25), freq=100000)\n"
         "try:\n"
@@ -244,7 +279,7 @@ def test_qmp6988_chip_id(sprout: "_SproutFixture"):
         "except Exception as e:\n"
         '    print("SPROUT_QMP ERR %s" % type(e).__name__)'
     )
-    info = _parse_marker(out, "SPROUT_QMP")
+    info, out = _env3_retry(sprout, CODE, "SPROUT_QMP", "QMP chip-ID")
     if "ERR" in info:
         pytest.fail(f"QMP6988 read failed: {out!r}")
     assert int(info.get("chip_id", "0x0"), 16) == QMP_CHIP_ID, (
