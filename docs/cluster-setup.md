@@ -119,6 +119,21 @@ QUERY_PORT=8080, QUERY_MAX_ROWS=1000, QUERY_TIMEOUT=10), `iot-ingest-code`
 
 The LMAO server runs **in-cluster** as `deployment/lmao-server` (issue #93), pinned to **tp4** where the Heltec ESP32 RNode is attached via USB (`/dev/ttyUSB0`, hostPath + privileged, hostNetwork). The LXMF identity and Reticulum transport state live on the `lmao-server-identity` PVC (`/data/lxmf`, `/data/transport`). A ClusterIP Service resolves `lmao-server.default.svc.cluster.local:50051` to the pod; gRPC is also reachable on the node IP `192.168.0.44:50051`. After an RNode replug or tp4 reboot: `kubectl rollout restart deployment/lmao-server`.
 
+### LMAO server — env knobs
+
+- `LMAO_ANNOUNCE_INTERVAL` (default `60`) — seconds between **periodic LXMF
+delivery announces** so clients can discover the server's identity over the
+air without an RNS path-request (needed by the native Sprout client #130;
+standard small-mesh discovery policy).
+- **Client allow-list (security)** — the server accepts LXMF messages only from
+known client identities (sender's `lxmf/delivery` destination hash, i.e. the
+`Source/From:` the server logs). Defaults are the Cardputer
+(`2026d6bbec2eecb2a4cc4e42a78bb16d`) and Sprout native
+(`f5f05952392627393f067df8c9eaf6c6`, NVS-persisted identity, printed at boot
+as "my lxmf/delivery hash"). Extend without a rebuild via
+`LMAO_ALLOWED_CLIENTS` (comma-separated hex). Add a new client: capture the
+identity/delivery hash from a boot log, then add it here or via env.
+
 **Querying stored data:** `kubectl port-forward svc/iot-query 8080:8080` then
 use `POST /query`, `GET /tables`, `GET /schema/<table>` (see README
 §"Querying stored data"). Readiness probe is HTTP `GET /healthz` on 8080.
