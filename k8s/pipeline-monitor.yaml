@@ -55,7 +55,7 @@ spec:
         spec:
           containers:
             - name: monitor
-              image: 192.168.0.36:5000/lmao-iot-ingest:latest
+              image: 192.168.50.153:5000/lmao-iot-ingest:latest
               imagePullPolicy: Always
               command: ["python", "k8s-app/pipeline_monitor.py"]
               envFrom:
