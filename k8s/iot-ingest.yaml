@@ -14,7 +14,7 @@
 #     (/etc/rancher/k3s/registries.yaml — see README §13)
 #
 # Internal services are always deployed from the local Docker registry
-# (192.168.0.36:5000) for a consistent release path.  Do not revert to
+# (192.168.50.153:5000) for a consistent release path.  Do not revert to
 # a local/daemon-only image tag — cluster nodes cannot see the Pi's
 # Docker daemon.
 #
@@ -97,7 +97,7 @@ spec:
     spec:
       containers:
         - name: consumer
-          image: 192.168.0.36:5000/lmao-iot-ingest:latest
+          image: 192.168.50.153:5000/lmao-iot-ingest:latest
           imagePullPolicy: Always
           ports:
             - containerPort: 8080

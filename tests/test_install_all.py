@@ -1182,7 +1182,7 @@ class TestInstallPiServer:
             install_services.install_pi_server(result, "/fake/repo")
             assert result.status == "OK"
             assert "released to local registry" in result.detail
-            assert "192.168.0.36:5000/lmao-server:latest" in result.detail
+            assert "192.168.50.153:5000/lmao-server:latest" in result.detail
 
     def test_fails_when_registry_unreachable(self):
         """Result should be FAIL when the local registry is unreachable."""
@@ -1416,7 +1416,7 @@ class TestInstallIotIngestConsumer:
             install_services.install_iot_ingest_consumer(result, "/fake/repo")
             assert result.status == "OK"
             assert "deployed and Running" in result.detail
-            assert "192.168.0.36:5000/lmao-iot-ingest:latest" in result.detail
+            assert "192.168.50.153:5000/lmao-iot-ingest:latest" in result.detail
 
     def test_fails_when_registry_unreachable(self):
         """Result should be FAIL when the local registry is unreachable."""

@@ -237,7 +237,7 @@ bazel run //tools:install_all -- --client-root /path/to/cardputer_client
 
 # Also deploy Pi server and K8s services
 # (internal services are released through the local Docker registry at
-#  192.168.0.36:5000 and deployed via Docker from the registry image)
+#  192.168.50.153:5000 and deployed via Docker from the registry image)
 bazel run //tools:install_all -- --include-services
 bazel run //tools:install_all -- --include-services --skip-server
 bazel run //tools:install_all -- --include-services --skip-k8s
@@ -395,7 +395,7 @@ See [`k8s-app/iot_ingest.py`](k8s-app/iot_ingest.py) for a complete example.
 
 The server Docker image is the release artifact for the in-cluster
 Deployment (§9). Internal services are always released through the
-[local Docker registry](#13-local-docker-registry) (`192.168.0.36:5000`);
+[local Docker registry](#13-local-docker-registry) (`192.168.50.153:5000`);
 `bazel run //tools:install_all -- --include-services` performs the full
 build → push → `kubectl apply` cycle automatically.
 
@@ -404,8 +404,8 @@ build → push → `kubectl apply` cycle automatically.
 docker build -t lmao-server .
 
 # Push to the local registry
-docker tag lmao-server 192.168.0.36:5000/lmao-server:latest
-docker push 192.168.0.36:5000/lmao-server:latest
+docker tag lmao-server 192.168.50.153:5000/lmao-server:latest
+docker push 192.168.50.153:5000/lmao-server:latest
 ```
 
 Running the container standalone (e.g. on a laptop for development) still
@@ -664,7 +664,7 @@ bazel run //tools:install_all -- --include-services
 
 > **Using the local registry:** The Deployment manifest references the
 > [local Docker registry](#13-local-docker-registry) image
-> (`192.168.0.36:5000/lmao-iot-ingest:latest`) directly.  Release a new
+> (`192.168.50.153:5000/lmao-iot-ingest:latest`) directly.  Release a new
 > version by pushing the image, then re-apply:
 > ```bash
 > ./docker/registry/manage.sh push-ingest
@@ -836,7 +836,7 @@ If an RNode is connected, LoRa messaging is available.
 
 ### 13. Local Docker Registry
 
-A **self-hosted Docker registry** runs on the Pi server (`selfhost`, `192.168.0.36:5000`)
+A **self-hosted Docker registry** runs on the Pi server (`selfhost`, `192.168.50.153:5000`)
 for local image storage and distribution to the K3s cluster. This eliminates the need to
 pull from Docker Hub on cluster nodes or use the manual `docker save | k3s ctr image import -`
 workflow.
@@ -851,7 +851,7 @@ workflow.
 ./docker/registry/manage.sh push
 
 # 3. Verify
-curl http://192.168.0.36:5000/v2/_catalog
+curl http://192.168.50.153:5000/v2/_catalog
 # → {"repositories":["lmao-server","lmao-iot-ingest"]}
 ```
 
@@ -879,13 +879,13 @@ automatically on reboot (`restart: unless-stopped`).
 #### Pushing images
 
 ```bash
-docker tag lmao-server 192.168.0.36:5000/lmao-server:latest
-docker push 192.168.0.36:5000/lmao-server:latest
+docker tag lmao-server 192.168.50.153:5000/lmao-server:latest
+docker push 192.168.50.153:5000/lmao-server:latest
 ```
 
 #### Pulling from the Pi itself
 
-The Pi's Docker daemon is configured to trust `192.168.0.36:5000` as an insecure
+The Pi's Docker daemon is configured to trust `192.168.50.153:5000` as an insecure
 registry (see `/etc/docker/daemon.json`). Images pushed to the registry are
 immediately pullable on the Pi without any extra setup.
 
@@ -910,15 +910,15 @@ Or generate the config with the helper:
 ./docker/registry/manage.sh k3s-config | sudo tee /etc/rancher/k3s/registries.yaml
 ```
 
-The config tells containerd to reach the Pi's registry (`192.168.0.36:5000`)
+The config tells containerd to reach the Pi's registry (`192.168.50.153:5000`)
 via plain HTTP. After restarting K8s services, update your Deployments to
-reference `192.168.0.36:5000/lmao-server:latest` instead of `lmao-server:latest`.
+reference `192.168.50.153:5000/lmao-server:latest` instead of `lmao-server:latest`.
 
 #### Deploying from the registry
 
 ```yaml
 # In your K8s Deployment YAML:
-image: 192.168.0.36:5000/lmao-server:latest
+image: 192.168.50.153:5000/lmao-server:latest
 imagePullPolicy: Always
 ```
 
@@ -941,7 +941,7 @@ The registry is configured via environment variables:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `REGISTRY_HOST` | `192.168.0.36` | Registry hostname/IP |
+| `REGISTRY_HOST` | `192.168.50.153` | Registry hostname/IP |
 | `REGISTRY_PORT` | `5000` | Registry port |
 
 ---

@@ -9,15 +9,16 @@ Each node has **two network interfaces**:
 | Interface | Subnet | Purpose | Stable? |
 |-----------|--------|---------|---------|
 | `eth0` | `192.168.10.0/24` | Internal cluster network (node-to-node) | ✅ Static |
-| `wlan0` | `192.168.0.0/24` | LAN / external access | ❌ DHCP (may change) |
+| `wlan0` | `192.168.50.0/24` | LAN / external access | ❌ DHCP (may change) |
 
 | Hostname | Role | Internal IP (eth0) | LAN IP (wlan0) | Hardware | OS |
 |----------|------|-------------------|----------------|----------|----|
-| `tp3` | **control-plane** | `192.168.10.40` | `192.168.0.49` | RK1 module slot 2 | Debian 11 (bullseye), kernel 6.1.21-v8+ |
-| `tp2` | worker | `192.168.10.28` | `192.168.0.43` | RK1 module slot 1 | Debian 11 (bullseye), kernel 5.15.84-v8+ |
-| `tp4` | worker | `192.168.10.19` | `192.168.0.44` | RK1 module slot 3 | Debian 11 (bullseye), kernel 5.15.84-v8+ |
-| `turing-bmc` | BMC | — | `192.168.0.47` | ESP32 on Turing Pi 2 | BMC firmware (default `root:turing`) |
-| `selfhost` | workstation | — | `192.168.0.36` (eth0) | Raspberry Pi 5 | Ubuntu 26.04 LTS (Resolute Raccoon), aarch64 |
+| `tp1` | worker | `192.168.10.11` | `192.168.50.183` | RK1 module slot 1 (new) | Debian 13 (trixie), kernel 6.12.47+rpt |
+| `tp2` | worker | `192.168.10.28` | `192.168.50.156` | RK1 module slot 1 | Debian 11 (bullseye), kernel 5.15.84-v8+ |
+| `tp3` | **control-plane** | `192.168.10.40` | `192.168.50.90` | RK1 module slot 2 | Debian 11 (bullseye), kernel 6.1.21-v8+ |
+| `tp4` | worker | `192.168.10.19` | `192.168.50.67` | RK1 module slot 3 | Debian 11 (bullseye), kernel 5.15.84-v8+ |
+| `turing-bmc` | BMC | — | `192.168.0.47` (verify — moves w/ LAN) | ESP32 on Turing Pi 2 | BMC firmware (default `root:turing`) |
+| `selfhost` | workstation | — | `192.168.50.153` (eth0) | Raspberry Pi 5 | Ubuntu 26.04 LTS (Resolute Raccoon), aarch64 |
 
 The workstation `selfhost` is a **separate machine** — not a cluster node.
 The internal `192.168.10.x` network is **not reachable from selfhost** — only node-to-node.
@@ -58,7 +59,10 @@ No hardcoded IP flags in systemd services. All configuration is in YAML config f
 ```yaml
 tls-san:
   - 192.168.10.40     # internal (stable)
-  - 192.168.0.49      # LAN (DHCP — update if changed)
+  - 192.168.50.90     # LAN (DHCP — updated 2026-09-16). NOTE: API cert SAN
+                      # does not yet include this IP; run `k3s certificate rotate`
+                      # (or add via tls-san + restart) to make direct kubectl
+                      # TLS-valid without --insecure-skip-tls-verify.
   - 192.168.0.45      # legacy (TLS backwards compat)
 ```
 
@@ -91,9 +95,9 @@ ExecStart=/usr/local/bin/k3s \
 **`/etc/rancher/k3s/registries.yaml`:**
 ```yaml
 mirrors:
-  192.168.0.36:5000:
+  192.168.50.153:5000:
     endpoint:
-      - "http://192.168.0.36:5000"
+      - "http://192.168.50.153:5000"
 ```
 
 ---
@@ -126,8 +130,8 @@ use `POST /query`, `GET /tables`, `GET /schema/<table>` (see README
 ### Option A: Push to local registry
 ```bash
 cd /home/pondycrane/LMAO
-docker build -f Dockerfile.iot-ingest -t 192.168.0.36:5000/lmao-iot-ingest:latest .
-docker push 192.168.0.36:5000/lmao-iot-ingest:latest
+docker build -f Dockerfile.iot-ingest -t 192.168.50.153:5000/lmao-iot-ingest:latest .
+docker push 192.168.50.153:5000/lmao-iot-ingest:latest
 ```
 
 ### Option B: Load directly into containerd
@@ -158,14 +162,17 @@ kubectl get pods -A        # all pods
 kubectl get svc -A         # all services
 ```
 
-API server: `https://192.168.0.49:6443` (tp3). Kubeconfig at `~/.kube/config` on selfhost.
+API server: `https://192.168.50.90:6443` (tp3). Kubeconfig at `~/.kube/config` on selfhost
+(updated: the API cert SAN is still pending the new IP — local kubectl uses
+`insecure-skip-tls-verify` until `k3s certificate rotate`).
 
 SSH (from selfhost):
 ```bash
-ssh tp3-lan     # 192.168.0.49 — via LAN (from workstation)
-ssh tp3         # 192.168.10.40 — internal network (from within cluster)
-ssh tp2         # 192.168.10.28 — internal
-ssh tp4         # 192.168.10.19 — internal
+ssh tp3          # 192.168.50.90 — LAN (current; ~/.ssh/config updated)
+ssh tp2          # 192.168.50.156 — LAN
+ssh tp1          # 192.168.50.183 — LAN
+ssh tp4          # 192.168.50.67 — LAN
+# internal (from within cluster): tp3=192.168.10.40, tp2/tp4=192.168.10.28/.19, tp1=192.168.10.11
 ```
 
 ---

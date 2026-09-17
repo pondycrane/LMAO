@@ -72,7 +72,7 @@ spec:
       dnsPolicy: ClusterFirstWithHostNet
       containers:
         - name: lmao-server
-          image: 192.168.0.36:5000/lmao-server:latest
+          image: 192.168.50.153:5000/lmao-server:latest
           imagePullPolicy: Always
           securityContext:
             privileged: true  # required for host USB serial device access
