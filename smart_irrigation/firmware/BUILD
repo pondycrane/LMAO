@@ -8,6 +8,7 @@ exports_files([
     "tools/probe_hardware.py",
     "tools/dtu_p2p_probe.py",
     "tools/rns_bringup.py",
+    "tools/sprout_send_temp.py",
     "config.py",
 ])
 
