@@ -1,6 +1,7 @@
 set(SRCS
     "main.cpp"
     "uart_at_interface.cpp"
+    "path_find.cpp"
     "sht30.cpp"
     "lma_encoder.cpp"
     "lxmf_send.cpp"
