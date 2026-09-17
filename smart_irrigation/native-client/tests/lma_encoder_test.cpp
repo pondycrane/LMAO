@@ -43,6 +43,28 @@ int main() {
     CHECK_EQ(to_hex(rd_t), "0803150000cc411a014320c0c407", "reading temp (id3)");
     CHECK_EQ(to_hex(rd_h), "08021500006c421a012520c1c407", "reading hum (id2)");
 
+    // Soil moisture (id 4, %) — golden from cardputer_client/proto/lma_encoder.py.
+    std::string rd_m = encode_reading(4, 35.0f, "%", 123458);
+    CHECK_EQ(to_hex(rd_m), "08041500000c421a012520c2c407", "reading moist (id4)");
+
+    // ONE SensorReport bundles air temp + humidity + soil moisture in the
+    // same readings[] (the Sprout sensor bundle), all in one envelope.
+    std::string rep3 = encode_sensor_report("a1b2c3", 7, 3.7f, {rd_t, rd_h, rd_m});
+    CHECK_EQ(
+        to_hex(rep3),
+        "0a0661316232633310071dcdcc6c40220e0803150000cc411a014320c0c407"
+        "220e08021500006c421a012520c1c407"
+        "220e08041500000c421a012520c2c407",
+        "sensor_report_3_readings");
+
+    std::string env3 = encode_envelope(rep3);
+    CHECK_EQ(
+        to_hex(env3),
+        "523f0a0661316232633310071dcdcc6c40220e0803150000cc411a014320c0c407"
+        "220e08021500006c421a012520c1c407"
+        "220e08041500000c421a012520c2c407",
+        "lmao_envelope_3_readings");
+
     // SensorReport
     std::string rep = encode_sensor_report("a1b2c3", 7, 3.7f, {rd_t, rd_h});
     CHECK_EQ(

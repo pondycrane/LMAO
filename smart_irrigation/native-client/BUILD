@@ -24,6 +24,22 @@ cc_test(
     tags = ["unit"],
 )
 
+# Soil-moisture calibration math (pure inline function in moisture.h; the
+# ESP-IDF ADC wrapper itself builds out-of-band with the device firmware).
+cc_library(
+    name = "moisture_math",
+    hdrs = ["firmware/main/moisture.h"],
+    strip_include_prefix = "firmware/main",
+    visibility = ["//visibility:public"],
+)
+
+cc_test(
+    name = "moisture_calib_test",
+    srcs = ["tests/moisture_calib_test.cpp"],
+    deps = [":moisture_math"],
+    tags = ["unit"],
+)
+
 # ── Host-testable RTReticulum-dependent units (issue #133, work item 4) ──
 # RTReticulum + Mbed TLS are vendored in WORKSPACE (pinned http_archive), so
 # lxmf_send is now a real cc_library and the radio-path announce decode gets a

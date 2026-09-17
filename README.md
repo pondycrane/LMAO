@@ -1073,9 +1073,13 @@ See [`proto/lma_messages.proto`](proto/lma_messages.proto) and [`proto/lma_grpc.
 > interfaces. Text, sensor, and command messages fit comfortably in LoRa packets.
 
 > **Sensor Readings Convention:** Each `SensorReading` in a `SensorReport.readings[]`
-> uses `sensor_id` to identify the measurement type: `sensor_id=1` = temperature (°C),
-> `sensor_id=2` = humidity (%). New sensor types should use `sensor_id >= 3` and
-> be documented here.
+> uses `sensor_id` to identify the measurement type. The canonical registry lives in
+> `proto/lma_messages.proto`; in short:
+> `1` = die temperature (°C), `2` = humidity (%), `3` = ambient temperature (°C),
+> `4` = soil moisture (%), `5` = pressure (hPa), `6`/`7` = pump duration/active,
+> `8` = battery (V), `9` = RSSI (dBm). A node may bundle several ids in one report —
+> e.g. the Sprout sends air temp + humidity + soil moisture (3+2+4) together every
+> 5 minutes. New types use `sensor_id >= 10` and are documented in the proto.
 
 ---
 
