@@ -73,6 +73,36 @@ except ImportError:
 # or the host's cluster network.
 _NATS_SERVER = os.environ.get("NATS_SERVER", "nats://localhost:4222")
 
+# ── Client allow-list (security) ────────────────────────────────────
+# Accept LXMF messages ONLY from known client identities. A stranger node that
+# reaches the LoRa mesh must not be able to inject into the LMAO pipeline
+# (SensorReports -> NATS -> DuckDB, or CommandRequests). The matching field is
+# the *sender's lxmf/delivery destination hash*, i.e. exactly what the server
+# logs as ``Source ... From: <hex>`` (the OUT lxmf.delivery destination hash,
+# not the raw identity hash).
+#
+# Whitelist values:
+#   2026d6bbec2eecb2a4cc4e42a78bb16d  production Cardputer (verified on-air)
+#   f5f05952392627393f067df8c9eaf6c6  Sprout native client (NVS-persisted
+#                                     identity; printed at boot as
+#                                     "my lxmf/delivery hash")
+# Extend at deploy time via env LMAO_ALLOWED_CLIENTS (comma-separated hex).
+_DEFAULT_ALLOWED_CLIENTS = {
+    "2026d6bbec2eecb2a4cc4e42a78bb16d",  # Cardputer
+    "f5f05952392627393f067df8c9eaf6c6",  # Sprout native
+}
+
+
+def _build_allowed_clients() -> set:
+    s = set(_DEFAULT_ALLOWED_CLIENTS)
+    env = os.environ.get("LMAO_ALLOWED_CLIENTS", "")
+    s.update(x.strip().lower() for x in env.split(",") if x.strip())
+    return s
+
+
+
+ALLOWED_CLIENTS = _build_allowed_clients()
+
 
 def _warn_if_rnode_missing(rnode_port):
     """Warn if the RNode port does not exist (delegates to shared helper)."""
@@ -330,6 +360,18 @@ class Server:
             source_hash = (
                 RNS.hexrep(source_dest.hash, delimit=False) if source_dest else "<unknown>"
             )
+
+            # Security gate: only allow known client identities (see the
+            # ALLOWED_CLIENTS allow-list at module top). Drop everyone else
+            # silently-ish (a loud log, but no reply, no NATS publish, no gRPC
+            # fan-out), so a stranger node cannot inject into the pipeline.
+            if source_hash.lower() not in ALLOWED_CLIENTS:
+                logger.warning(
+                    "Dropping LXMF from unauthorized node %s (not in allow-list) — "
+                    "add its lxmf/delivery hash to ALLOWED_CLIENTS or LMAO_ALLOWED_CLIENTS.",
+                    source_hash,
+                )
+                return
             content_bytes = message.content if hasattr(message, "content") else b""
             title = message.title_as_string() if hasattr(message, "title_as_string") else ""
 
@@ -664,21 +706,36 @@ async def async_main():
     router.register_delivery_callback(lmao_server.handle_lxmf_delivery)
 
     # ── Announce presence for LoRa path discovery ─────────────────
-    # Clients (e.g. Cardputer) need the server to announce so they can
-    # discover a path and recall the server's identity keys.  LXMF's
-    # router.announce() requires the *delivery destination hash* (keyed
-    # in router.delivery_destinations), NOT the raw identity hash —
-    # passing the identity hash is a silent no-op.
-    def _announce_delivery_destinations():
-        for dest_hash in list(router.delivery_destinations):
-            router.announce(dest_hash)
+    # Clients (e.g. Cardputer, Sprout/native #130) need the server to announce
+    # so they can discover a path and recall the server's identity keys.  LXMF's
+    # router.announce() requires the *delivery destination hash* (keyed in
+    # router.delivery_destinations), NOT the raw identity hash — passing the
+    # identity hash is a silent no-op. Announce PERIODICALLY (not just at
+    # startup) so late-joining clients can learn the server identity over the
+    # air without requiring an RNS path-request (native Sprout #130 doesn't
+    # implement path-requests yet).
+    ANNOUNCE_INTERVAL = float(os.environ.get("LMAO_ANNOUNCE_INTERVAL", "60"))
 
-    logger.info("Announcing server presence for LoRa path discovery...")
-    try:
-        _announce_delivery_destinations()
-        logger.info("Server announce sent.")
-    except Exception as e:
-        logger.warning("Server announce failed (LoRa may be unavailable): %s", e)
+    async def _announce_loop():
+        while True:
+            try:
+                for dest_hash in list(router.delivery_destinations):
+                    router.announce(dest_hash)
+                logger.info(
+                    "Server announce sent (%d delivery destinations).",
+                    len(router.delivery_destinations),
+                )
+            except Exception as e:
+                logger.warning(
+                    "Server announce failed (LoRa may be unavailable): %s", e
+                )
+            await asyncio.sleep(ANNOUNCE_INTERVAL)
+
+    logger.info(
+        "Announcing server presence for LoRa path discovery (every ~%.0fs)...",
+        ANNOUNCE_INTERVAL,
+    )
+    asyncio.create_task(_announce_loop())
 
     # ── NATS connect (optional) ─────────────────────────────────
     nats_queue = None
