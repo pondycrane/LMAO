@@ -1,5 +1,8 @@
 """Tests for server startup and lifecycle (with mocked RNS/LXMF)."""
 
+import asyncio
+import logging
+import os
 import sys
 from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
@@ -192,6 +195,117 @@ class TestAnnounceOnStartup:
         server_mod.GRPC_AVAILABLE = original_grpc
         server_mod.NATS_AVAILABLE = original_nats
         cleanup_common_mocks()
+
+    def test_announce_helper_announces_every_destination(self):
+        """_announce_delivery_destinations() is the single source of truth.
+
+        It lives at module scope (not nested in async_main) so both the
+        startup announce and the periodic announce can call it.  Regression
+        for issue #134: the shipped image referenced this name from the
+        periodic task when it had been deleted during a bad merge, raising
+        ``NameError: name '_announce_delivery_destinations' is not defined``
+        on every re-announce interval.
+        """
+        for _mod in ("server", "lmao_server", "lmao_server.server"):
+            if _mod in sys.modules:
+                del sys.modules[_mod]
+
+        setup_common_mocks(with_grpc=True)
+
+        from lmao_server import server as server_mod
+
+        mock_router = MagicMock()
+        mock_router.delivery_destinations = {
+            b"\x02" * 16: MagicMock(),
+            b"\x03" * 16: MagicMock(),
+        }
+
+        with patch.object(server_mod.logger, "info"):
+            server_mod._announce_delivery_destinations(mock_router)
+
+        # Announced each registered delivery destination by hash.
+        assert mock_router.announce.call_count == 2
+        mock_router.announce.assert_any_call(b"\x02" * 16)
+        mock_router.announce.assert_any_call(b"\x03" * 16)
+
+        cleanup_common_mocks()
+
+    @pytest.mark.asyncio
+    async def test_periodic_announce_runs_without_nameerror(self, capsys, caplog):
+        """Periodic re-announce must run repeatedly without NameError.
+
+        Regression for issue #134: the deployed image logged
+        "Periodic announce failed: name '_announce_delivery_destinations'
+        is not defined" on alternating announce cycles because the periodic
+        task referenced a helper that no longer existed / was out of scope.
+
+        Uses the real event loop (NOT a patched asyncio.sleep, which starves
+        the background task) and a short LMAO_ANNOUNCE_INTERVAL so the
+        periodic task wakes several times during the test window.
+        """
+        for _mod in ("server", "lmao_server", "lmao_server.server"):
+            if _mod in sys.modules:
+                del sys.modules[_mod]
+
+        setup_common_mocks(with_grpc=True)
+
+        from lmao_server import server as server_mod
+
+        original_grpc = server_mod.GRPC_AVAILABLE
+        original_nats = server_mod.NATS_AVAILABLE
+        original_interval = os.environ.get("LMAO_ANNOUNCE_INTERVAL")
+        os.environ["LMAO_ANNOUNCE_INTERVAL"] = "0.05"
+        try:
+            server_mod.GRPC_AVAILABLE = False
+            server_mod.NATS_AVAILABLE = False
+
+            mock_identity = MagicMock()
+            type(mock_identity).hash = PropertyMock(return_value=b"\x01" * 16)
+            sys.modules["RNS"].Identity.return_value = mock_identity
+
+            mock_router = sys.modules["LXMF"].LXMRouter.return_value
+            mock_router.delivery_destinations = {b"\x02" * 16: MagicMock()}
+
+            task = asyncio.ensure_future(server_mod.async_main())
+            try:
+                with caplog.at_level(logging.INFO, logger="lmao_server.server"):
+                    # Real suspension -> the periodic task actually runs.
+                    await asyncio.sleep(0.35)
+            finally:
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, KeyboardInterrupt):
+                    pass
+        finally:
+            if original_interval is None:
+                os.environ.pop("LMAO_ANNOUNCE_INTERVAL", None)
+            else:
+                os.environ["LMAO_ANNOUNCE_INTERVAL"] = original_interval
+            server_mod.GRPC_AVAILABLE = original_grpc
+            server_mod.NATS_AVAILABLE = original_nats
+            cleanup_common_mocks()
+
+        # The periodic task should have woken several times: startup + repeats.
+        assert mock_router.announce.call_count >= 3, (
+            f"Expected repeated announces, got {mock_router.announce.call_count}"
+        )
+
+        # The shared log line proves both call sites use one implementation.
+        sent_logs = [r for r in caplog.records if "Server announce sent" in r.message]
+        assert len(sent_logs) >= 2
+
+        # The exact production bug must be absent: no NameError-formatted
+        # periodic failure.
+        for record in caplog.records:
+            if "Periodic announce failed" not in record.message:
+                continue
+            assert "is not defined" not in record.message, (
+                f"Periodic announce NameError regression: {record.message}"
+            )
+            assert "NameError" not in record.message, (
+                f"Periodic announce NameError regression: {record.message}"
+            )
 
 
 class TestInitRnsAndLxmf:

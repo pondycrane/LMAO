@@ -32,6 +32,12 @@ def server_with_mocks():
 
     from lmao_server import server
 
+    # setup_common_mocks() stubs RNS.hexrep to return "testhash1234", so the
+    # allow-list gate (PR #132) computes every mock sender as that hash.
+    # Authorize it so the behavior tests exercise the allowed path instead of
+    # being dropped as "unauthorized" — see handle_lxmf_delivery/ALLOWED_CLIENTS.
+    server.ALLOWED_CLIENTS = server.ALLOWED_CLIENTS | {"testhash1234"}
+
     server_instance = server.Server()
     server_instance.router = MagicMock()
     server_instance.server_identity = MagicMock()
@@ -265,6 +271,31 @@ class TestHandleLXMFDelivery:
         reply_content = call_kwargs.get("content")
         assert reply_content is not None
         assert len(reply_content) > 0, "Reply envelope must not be empty"
+
+    def test_unauthorized_sender_dropped(self, server_with_mocks, caplog):
+        """Senders outside the allow-list are dropped (PR #132): no reply, no
+        pipeline processing — just a WARNING.  This is the security contract
+        the allow-list gate enforces in handle_lxmf_delivery."""
+        server = server_with_mocks
+
+        msg = MagicMock()
+        msg.get_source.return_value = MagicMock()
+        msg.get_source.return_value.hash = b"\xdd" * 16
+        msg.content = b"inject me"
+        msg.title_as_string.return_value = "p:Envelope"
+
+        # 0xdd is NOT in the allow-list; setup_common_mocks() stubs
+        # RNS.hexrep → "testhash1234" (which the fixture authorizes), so point
+        # it at an unknown hash to make the gate compute an unauthorized sender.
+        with (
+            patch.object(sys.modules["RNS"], "hexrep", return_value="deadbeef00"),
+            caplog.at_level(logging.WARNING),
+        ):
+            server.handle_lxmf_delivery(msg)
+
+        assert "Dropping LXMF from unauthorized node deadbeef00" in caplog.text
+        # No reply was generated, and nothing downstream ran.
+        server.router.handle_outbound.assert_not_called()
 
 
 class TestSubscriberManagement:
