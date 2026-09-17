@@ -22,10 +22,14 @@ http_archive(
     name = "rtreticulum",
     build_file = "//smart_irrigation/native-client:rtreticulum.BUILD",
     patch_args = ["-p1"],
-    # rtreticulum_plain_dest.patch: PLAIN destinations (rnstransport/path/request)
-    # may be built on a keyless Identity — enable has_key() and use it in the
-    # Destination ctors + name/hash (issue #133, work item 2).
-    patches = ["//smart_irrigation/native-client:rtreticulum_plain_dest.patch"],
+    # rtreticulum_fixes.patch (issue #133):
+    #  - Identity::has_key() + Destination ctors accept a keyless identity for
+    #    PLAIN destinations (rnstransport.path.request, work item 2).
+    #  - Packet::context_flag() + Transport::process_announce reads the optional
+    #    32-byte ratchet an announce carries when the context flag is set — the
+    #    live radio-path announce-decode fix (work item 1; validated against a
+    #    real server announce captured from the rig).
+    patches = ["//smart_irrigation/native-client:rtreticulum_fixes.patch"],
     sha256 = "5a7e8af49b58bea8c36ae386f64ca1944d14b30cf18ab3d7c8b39ece19f92b92",
     strip_prefix = "RTReticulum-dab4362cf3577e464e98e85b71abc5cb26185224",
     urls = ["https://github.com/0xSeren/RTReticulum/archive/dab4362cf3577e464e98e85b71abc5cb26185224.tar.gz"],

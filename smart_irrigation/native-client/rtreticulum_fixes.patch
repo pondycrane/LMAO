@@ -1,0 +1,124 @@
+diff --git a/include/rtreticulum/identity.h b/include/rtreticulum/identity.h
+index 755f68e..a8b760b 100644
+--- a/include/rtreticulum/identity.h
++++ b/include/rtreticulum/identity.h
+@@ -41,6 +41,13 @@ namespace RNS {
+ 
+         Identity& operator=(const Identity& other) { _object = other._object; return *this; }
+         explicit operator bool() const { return _object != nullptr; }
++        /* True when this identity actually holds usable key material (either
++         * generated or loaded), as opposed to a keyless placeholder such as
++         * Identity(false). operator bool() is true for a keyless placeholder
++         * (the object exists), which is why Destination must use has_key() to
++         * decide whether appending the identity to a name/hash is valid or
++         * whether a PLAIN destination may not hold it (issue #133 item 2). */
++        bool has_key() const { return _object && _object->_pub && _object->_sig_pub; }
+         bool operator<(const Identity& other) const { return _object.get() < other._object.get(); }
+ 
+         void createKeys();
+diff --git a/include/rtreticulum/packet.h b/include/rtreticulum/packet.h
+index de45c2c..ef70bcf 100644
+--- a/include/rtreticulum/packet.h
++++ b/include/rtreticulum/packet.h
+@@ -39,6 +39,7 @@ namespace RNS {
+ 
+         Type::Packet::types         packet_type()   const { return _object->_packet_type; }
+         Type::Packet::context_types context()       const { return _object->_context; }
++        Type::Packet::context_flags context_flag()  const { return _object->_context_flag; }
+         Type::Packet::header_types  header_type()   const { return _object->_header_type; }
+         const Bytes&                destination_hash() const { return _object->_destination_hash; }
+         const Bytes&                raw()           const { return _object->_raw; }
+diff --git a/src/destination.cpp b/src/destination.cpp
+index 5430506..fccfc72 100644
+--- a/src/destination.cpp
++++ b/src/destination.cpp
+@@ -25,7 +25,7 @@ Destination::Destination(const Identity& identity, TD::directions direction, TD:
+         _object->_identity = Identity();
+         fullaspects += "." + _object->_identity.hexhash();
+     }
+-    if (_object->_identity && type == TD::PLAIN)
++    if (_object->_identity.has_key() && type == TD::PLAIN)
+         throw std::invalid_argument("PLAIN destination cannot hold an identity");
+ 
+     _object->_name      = expand_name(_object->_identity, app_name, fullaspects.c_str());
+@@ -39,7 +39,7 @@ Destination::Destination(const Identity& identity, TD::directions direction, TD:
+     : _object(std::make_shared<Object>(identity)) {
+     _object->_type      = type;
+     _object->_direction = direction;
+-    if (_object->_identity && type == TD::PLAIN)
++    if (_object->_identity.has_key() && type == TD::PLAIN)
+         throw std::invalid_argument("PLAIN destination cannot hold an identity");
+     _object->_hash      = precomputed_hash;
+     _object->_hexhash   = _object->_hash.toHex();
+@@ -51,13 +51,13 @@ std::string Destination::expand_name(const Identity& identity, const char* app_n
+         throw std::invalid_argument("Dots can't be used in app names");
+     std::string name(app_name);
+     if (aspects && aspects[0]) name += std::string(".") + aspects;
+-    if (identity)              name += "." + identity.hexhash();
++    if (identity.has_key())              name += "." + identity.hexhash();
+     return name;
+ }
+ 
+ Bytes Destination::hash(const Identity& identity, const char* app_name, const char* aspects) {
+     Bytes addr_material = name_hash(app_name, aspects);
+-    if (identity) addr_material << identity.hash();
++    if (identity.has_key()) addr_material << identity.hash();
+     return Identity::truncated_hash(addr_material);
+ }
+ 
+diff --git a/src/transport.cpp b/src/transport.cpp
+index 18270e7..1e9c764 100644
+--- a/src/transport.cpp
++++ b/src/transport.cpp
+@@ -208,24 +208,40 @@ bool Transport::process_announce(const Packet& packet, const Interface& iface) {
+     /* Called only from inbound() which already holds _mutex. */
+     if (!_seen_announces.insert(packet.get_hash()).second) return false;
+ 
+-    constexpr size_t KEY  = Type::Identity::KEYSIZE / 8;
+-    constexpr size_t NHL  = Type::Identity::NAME_HASH_LENGTH / 8;
+-    constexpr size_t RHL  = Type::Identity::RANDOM_HASH_LENGTH / 8;
+-    constexpr size_t SIGL = Type::Identity::SIGLENGTH / 8;
+-    constexpr size_t MIN  = KEY + NHL + RHL + SIGL;
++    constexpr size_t KEY  = Type::Identity::KEYSIZE / 8;              // 64 (enc+sign pubkey)
++    constexpr size_t NHL  = Type::Identity::NAME_HASH_LENGTH / 8;     // 10
++    constexpr size_t RHL  = Type::Identity::RANDOM_HASH_LENGTH / 8;   // 10
++    constexpr size_t RST  = Type::Identity::RATCHETSIZE / 8;          // 32 (present when ctx flag set)
++    constexpr size_t SIGL = Type::Identity::SIGLENGTH / 8;            // 64
+ 
+     const Bytes& d = packet.data();
+-    if (d.size() < MIN) return false;
++    if (d.size() < KEY + NHL + RHL + SIGL) return false;
+ 
+     Bytes public_key  = d.left(KEY);
+-    Bytes name_hash   = d.mid(KEY, NHL);
+-    Bytes random_hash = d.mid(KEY + NHL, RHL);
+-    Bytes signature   = d.mid(KEY + NHL + RHL, SIGL);
++    Bytes name_hash;
++    Bytes random_hash;
++    Bytes ratchet;   // empty unless the announce carries a ratchet (context flag)
++    Bytes signature;
++    size_t off;
++    if (packet.context_flag() == Type::Packet::FLAG_SET) {
++        /* RNS: announce carries a 32-byte ratchet between random_hash and
++         * signature (Destination.announce sets FLAG_SET when ratcheting). */
++        name_hash   = d.mid(KEY, NHL);
++        random_hash = d.mid(KEY + NHL, RHL);
++        ratchet     = d.mid(KEY + NHL + RHL, RST);
++        signature   = d.mid(KEY + NHL + RHL + RST, SIGL);
++        off = KEY + NHL + RHL + RST + SIGL;
++    } else {
++        name_hash   = d.mid(KEY, NHL);
++        random_hash = d.mid(KEY + NHL, RHL);
++        signature   = d.mid(KEY + NHL + RHL, SIGL);
++        off = KEY + NHL + RHL + SIGL;
++    }
+     Bytes app_data;
+-    if (d.size() > MIN) app_data = d.mid(MIN);
++    if (d.size() > off) app_data = d.mid(off);
+ 
+     Bytes signed_data;
+-    signed_data << packet.destination_hash() << public_key << name_hash << random_hash;
++    signed_data << packet.destination_hash() << public_key << name_hash << random_hash << ratchet;
+     if (!app_data.empty()) signed_data << app_data;
+ 
+     Identity announced(false);
