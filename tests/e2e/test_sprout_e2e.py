@@ -20,14 +20,15 @@ Two kinds of gate here:
   that answers the MicroPython raw REPL.  The Sprout now runs the native-client
   firmware (C++, issue #130+) which does NOT expose a raw REPL, so these
   loud-skip on such a rig.
-* **Pushed-reading test** (``TestSproutPushedAirTemp``): the architecture-true
-  check for the ENV III air temp/humidity.  The native firmware reads the SHT30
-  and pushes an LXMF SensorReport over LoRa to the in-cluster server RNode
-  (~60s cadence); the server persists it to DuckDB via NATS.  This test listens
-  on the in-cluster query API for a fresh pushed reading with sane physical
-  values — it never re-initialises the ENV III I2C bus over USB (which would
-  disturb the firmware that now owns it).  Requires ``kubectl`` + a reachable
-  cluster; loud-skips otherwise.
+* **Pushed-reading test** (``TestSproutPushedReadings``): the architecture-true
+  check for the sensor bundle.  The native firmware reads the SHT30 (air temp +
+  humidity) and the soil-moisture probe, and pushes ONE LXMF SensorReport
+  bundling all three (sensor_ids 3+2+4) over LoRa to the in-cluster server RNode
+  every 5 minutes; the server persists every reading to DuckDB via NATS.  This
+  test listens on the in-cluster query API for a fresh full bundle with sane
+  physical values — it never re-initialises the sensor buses over USB (which
+  would disturb the firmware that owns them).  Requires ``kubectl`` + a
+  reachable cluster; loud-skips otherwise.
 
 SAFETY: this test NEVER actuates the pump.  The pump check is a passive read of
 the control line (must be off).  The DTU receives read-only AT queries only.
@@ -146,7 +147,7 @@ def sprout() -> "_SproutFixture":
             "Sprout does not answer the MicroPython raw REPL — it is running the "
             "native-client firmware (C++, issue #130+). USB-probe tests only apply "
             "to a MicroPython Sprout; the pushed-reading test "
-            "(TestSproutPushedAirTemp) verifies the ENV III measurement instead."
+            "(TestSproutPushedReadings) verifies the ENV III measurement instead."
         )
     yield _SproutFixture(ser)
     try:
@@ -240,25 +241,24 @@ def test_dtu_lora_at_alive(sprout: "_SproutFixture"):
     _logger.info("Sprout E2E DTU: AT=%r VER=%r", info.get("at"), info.get("ver"))
 
 
-class TestSproutPushedAirTemp:
-    """ENV III air temp + humidity verified from the PUSHED path.
+class TestSproutPushedReadings:
+    """ENV III air temp + humidity AND soil moisture verified from the PUSHED path.
 
-    The native-client Sprout firmware (issue #130+) owns the ENV III I2C bus,
-    reads SHT30 air temp/humidity, and PUSHES an LXMF SensorReport over LoRa
-    to the in-cluster server RNode every ~60s.  The server encodes air temp as
-    ``sensor_id 3`` (unit C) and humidity as ``sensor_id 2`` (unit %) in the
-    protobuf SensorReport, and the iot-ingest consumer persists each reading
-    to the ``sensor_readings`` DuckDB table via NATS.
+    The native-client Sprout firmware (issue #130+) owns the sensors' I2C/ADC
+    buses and PUSHES ONE LXMF SensorReport bundling air temp (``sensor_id 3``,
+    unit C), humidity (``sensor_id 2``, %) and soil moisture (``sensor_id 4``,
+    %) over LoRa to the in-cluster server RNode every 5 minutes.  The server's
+    iot-ingest consumer persists every reading to ``sensor_readings`` in DuckDB
+    via NATS.
 
-    Probing the ENV III bus over the USB raw REPL is obsolete (the new
-    firmware owns the bus, so re-initialising SoftI2C can disturb the live
-    reading) — this test LISTENS for a fresh pushed reading to land in DuckDB
-    instead, asserting the full Sprout → LoRa → RNode → server → NATS →
-    DuckDB path with sane physical values.
+    Probing the sensor buses over the USB raw REPL is obsolete (the native
+    firmware owns them) — this test LISTENS for a fresh full bundle to land in
+    DuckDB, asserting the complete Sprout → LoRa → RNode → server → NATS →
+    DuckDB path with sane physical values for all three readings from one node.
     """
 
-    PUSH_WINDOW_S = 200      # Enough for >= 2 pushes at the ~60-90 s cadence.
-    POLL_INTERVAL_S = 15
+    PUSH_WINDOW_S = 660     # >= 2 pushes at the 5-min (300 s) native cadence.
+    POLL_INTERVAL_S = 20
 
     # -- query-API plumbing ----------------------------------------
 
@@ -341,7 +341,7 @@ class TestSproutPushedAirTemp:
 
     # -- test ------------------------------------------------------
 
-    def test_air_temp_and_humidity_arrive_in_duckdb(self):
+    def test_sensor_bundle_arrives_in_duckdb(self):
         pf, port = self._start_port_forward()
         if pf is None:
             pytest.skip("Could not port-forward svc/iot-query (pipeline query API down)")
@@ -358,7 +358,7 @@ class TestSproutPushedAirTemp:
                         port,
                         "SELECT node_id, sensor_id, value, unit, ingested_at "
                         "FROM sensor_readings "
-                        "WHERE sensor_id IN (2, 3) "
+                        "WHERE sensor_id IN (2, 3, 4) "
                         "ORDER BY ingested_at DESC",
                     )
                 except Exception as exc:  # transient poll error — keep waiting
@@ -373,31 +373,37 @@ class TestSproutPushedAirTemp:
                     seen[(r["node_id"], r["sensor_id"])] = r
                 air = next((r for (n, s), r in seen.items() if s == 3), None)
                 hum = next((r for (n, s), r in seen.items() if s == 2), None)
+                moist = next((r for (n, s), r in seen.items() if s == 4), None)
                 if (
                     air is not None
                     and hum is not None
-                    and air["node_id"] == hum["node_id"]
+                    and moist is not None
+                    and air["node_id"] == hum["node_id"] == moist["node_id"]
                 ):
                     temp = float(air["value"])
                     humidity = float(hum["value"])
+                    moisture = float(moist["value"])
                     assert TEMP_C_MIN <= temp <= TEMP_C_MAX, (
                         f"pushed air temp {temp} C out of range: {air}"
                     )
                     assert 0.0 <= humidity <= HUM_PCT_MAX, (
                         f"pushed humidity {humidity} % out of range: {hum}"
                     )
+                    assert 0.0 <= moisture <= 100.0, (
+                        f"pushed soil moisture {moisture} % out of range: {moist}"
+                    )
                     print(
                         f"PUSHED OK node={air['node_id'][:8]} "
                         f"temp={temp:.2f} C hum={humidity:.2f} % "
-                        f"at {air['ingested_at']}"
+                        f"moist={moisture:.1f} % at {air['ingested_at']}"
                     )
                     return
                 time.sleep(self.POLL_INTERVAL_S)
             pytest.fail(
-                "No fresh Sprout air-temp/humidity reading landed in DuckDB within "
-                f"{self.PUSH_WINDOW_S}s (baseline {baseline!r}). Is the Sprout rig "
-                "powered and pushing SensorReports over LoRa (native-client "
-                f"firmware)? Fresh rows seen: {seen!r}"
+                "No fresh Sprout temp/humidity/moisture bundle landed in DuckDB "
+                f"within {self.PUSH_WINDOW_S}s (baseline {baseline!r}). Is the "
+                "rig on the sensor-bundle firmware and pushing LXMF over LoRa? "
+                f"Fresh rows seen: {seen!r}"
             )
         finally:
             pf.terminate()

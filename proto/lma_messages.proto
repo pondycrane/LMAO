@@ -26,6 +26,19 @@ message SensorReport {
   repeated SensorReading readings = 4;
 }
 
+// Canonical sensor_id registry (shared across Cardputer, Sprout, and any LMAO
+// node).  One SensorReport.readings[] may bundle several ids (e.g. the Sprout
+// sends 2+3+4 in a single report).
+//   sensor_id 1  = die temperature          unit "C"    Espressif internal temp
+//   sensor_id 2  = ambient humidity         unit "%"    SHT30 / DHT20
+//   sensor_id 3  = ambient temperature      unit "C"    SHT30 (ENV III)
+//   sensor_id 4  = soil moisture            unit "%"    2-point calibrated
+//   sensor_id 5  = barometric pressure      unit "hPa"  QMP6988
+//   sensor_id 6  = pump duration            unit "s"
+//   sensor_id 7  = pump active              unit ""     bool 0/1
+//   sensor_id 8  = battery voltage          unit "V"
+//   sensor_id 9  = RSSI                     unit "dBm"
+// Add new measurement types with sensor_id >= 10 and document them here.
 message SensorReading {
   uint32 sensor_id   = 1;
   float  value       = 2;
