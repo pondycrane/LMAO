@@ -1,5 +1,6 @@
 #include "uart_at_interface.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include "esp_log.h"
@@ -9,6 +10,11 @@
 #include "freertos/task.h"
 
 static const char* TAG = "uart_at";
+
+// Max RNS payload per LoRa frame (RNode/urns framing: 255 - 1 header byte).
+// Payloads above this are split into exactly 2 frames (max 508 B), matching
+// the reference RNode firmware + urns dtu (interfaces/dtu.py).
+static constexpr size_t DTU_FRAME_PAYLOAD = 254;
 
 using namespace RNS;
 
@@ -28,17 +34,24 @@ bool UartAtInterface::start() {
     ESP_LOGI(TAG, "UART2 up (tx=%u rx=%u) — configuring RAK3172 P2P mesh params",
              (unsigned)PIN_UART_TX, (unsigned)PIN_UART_RX);
 
+    // RUI4/RAK3172 powers up with P2P RX ALREADY ON; radio-set commands
+    // (AT+PFREQ/PSF/PBW/…/SYNCWORD/PTP) are REJECTED with AT_BUSY_ERROR until
+    // P2P RX is disabled first (observed live: every set cmd was refused with
+    // "P2P_RX_ON already, please disable P2P RX before setting. AT_BUSY_ERROR").
+    // Disable RX first, then configure, then re-arm continuous RX at the end.
+    uart_write("AT+PRECV=0\r\n", 12);
+    uart_wait_tx_done(UART_NUM_2, 500);
+    drain_ms(150);
+
     for (int i = 0; DTU_CONFIG_CMDS[i]; ++i) {
         uart_write(DTU_CONFIG_CMDS[i]);
         uart_write("\r\n", 2);
         uart_wait_tx_done(UART_NUM_2, 500);
-        drain_ms(100);
+        std::string rsp = read_response_ms(120);
+        ESP_LOGI(TAG, "cfg '%s' -> %s", DTU_CONFIG_CMDS[i],
+                 (rsp.find("ERROR") != std::string::npos || rsp.find("BUSY") != std::string::npos) ? "ERROR" : "OK");
         vTaskDelay(pdMS_TO_TICKS(30));
     }
-    // RX off then on (avoid AT_BUSY_ERROR between commands).
-    uart_write("AT+PRECV=0\r\n", 12);
-    uart_wait_tx_done(UART_NUM_2, 500);
-    drain_ms(100);
     uart_write("AT+PRECV=65535\r\n", 16);  // continuous rx
     uart_wait_tx_done(UART_NUM_2, 500);
     drain_ms(250);
@@ -59,30 +72,53 @@ void UartAtInterface::stop() {
 }
 
 void UartAtInterface::send_outgoing(const Bytes& data) {
-    if (!_online) return;
-    ESP_LOGI(TAG, "TX %u bytes via AT+PSEND", (unsigned)data.size());
+    if (!_online || data.empty()) return;
+    ESP_LOGI(TAG, "TX %u bytes via AT+PSEND (%u frame%s)", (unsigned)data.size(),
+             (unsigned)((data.size() + DTU_FRAME_PAYLOAD - 1) / DTU_FRAME_PAYLOAD),
+             data.size() > DTU_FRAME_PAYLOAD ? "s" : "");
     _txb += data.size();
 
-    // RUI4 P2P requires RX to be OFF while transmitting.
-    uart_write("AT+PRECV=0\r\n", 12);
-    uart_wait_tx_done(UART_NUM_2, 300);
-    drain_ms(60);
-
     // On-air frames carry a 1-byte RNode/urns LoRa interface header BEFORE the
-    // RNS frame (random seq in the upper nibble, no split flag for one frame) —
-    // the server's RNode strips it on RX, so we must prepend it on TX.
-    uint8_t hdr = (uint8_t)(esp_random() & 0xF0);
-    RNS::Bytes onair;
-    onair.append(RNS::Bytes(&hdr, 1));
-    onair.append(data);
-    std::string cmd = "AT+PSEND=" + to_hex(onair) + "\r\n";
-    uart_write(cmd.c_str(), cmd.size());
-    uart_wait_tx_done(UART_NUM_2, 500);
-    drain_ms(300);  // swallow the late +EVT:TXP2P DONE / OK
+    // RNS frame (random seq in the upper nibble; bit0 = FLAG_SPLIT) — the
+    // server's RNode strips it on RX, so we must prepend it on TX.
+    uint8_t seq = (uint8_t)(esp_random() & 0xF0);
 
-    uart_write("AT+PRECV=65535\r\n", 16);  // re-arm rx
-    uart_wait_tx_done(UART_NUM_2, 300);
-    drain_ms(80);
+    // Payloads >254 B do NOT fit a single RAK3172 P2P AT+PSEND (the DTU
+    // rejects them with AT_PARAM_ERROR, observed live). Split into 2 frames
+    // with the RNode split protocol, exactly like urns interfaces/dtu.py:
+    // both frames carry the split-flagged header (seq|0x01) and the receiver
+    // reassembles by matching seq.
+    bool split = data.size() > DTU_FRAME_PAYLOAD;
+    size_t off = 0;
+    do {
+        size_t chunk = std::min(DTU_FRAME_PAYLOAD, data.size() - off);
+        uint8_t hdr = split ? (uint8_t)(seq | 0x01) : seq;
+        RNS::Bytes onair;
+        onair.append(RNS::Bytes(&hdr, 1));
+        onair.append(RNS::Bytes(data.data() + off, chunk));
+
+        // RUI4 P2P requires RX to be OFF while transmitting.
+        uart_write("AT+PRECV=0\r\n", 12);
+        uart_wait_tx_done(UART_NUM_2, 300);
+        drain_ms(80);
+
+        std::string cmd = "AT+PSEND=" + to_hex(onair) + "\r\n";
+        uart_write(cmd.c_str(), cmd.size());
+        uart_wait_tx_done(UART_NUM_2, 500);
+        std::string rsp = read_response_ms(1200);
+        bool ok = rsp.find("ERROR") == std::string::npos;  // AT_PARAM_ERROR / AT_BUSY_ERROR
+        ESP_LOGI(TAG, "frame %u/%u @%u (%uB) -> %s%s",
+                 (unsigned)(off / DTU_FRAME_PAYLOAD) + 1,
+                 (unsigned)((data.size() + DTU_FRAME_PAYLOAD - 1) / DTU_FRAME_PAYLOAD),
+                 (unsigned)off, (unsigned)chunk, ok ? "OK" : "ERR", split ? " (split)" : "");
+
+        // Re-arm continuous rx (also between split frames, like urns rx_start).
+        uart_write("AT+PRECV=65535\r\n", 16);
+        uart_wait_tx_done(UART_NUM_2, 300);
+        drain_ms(80);
+
+        off += chunk;
+    } while (off < data.size());
 }
 
 void UartAtInterface::loop() {
@@ -145,6 +181,18 @@ void UartAtInterface::drain_ms(uint32_t ms) {
         int n = uart_read_bytes(UART_NUM_2, b, sizeof(b), 20);
         (void)n;  // discard
     }
+}
+
+// Read the DTU's pending AT response during `ms` (diagnostics).
+std::string UartAtInterface::read_response_ms(uint32_t ms) {
+    std::string out;
+    uint8_t b[128];
+    TickType_t start = xTaskGetTickCount();
+    while ((TickType_t)(xTaskGetTickCount() - start) < pdMS_TO_TICKS(ms)) {
+        int n = uart_read_bytes(UART_NUM_2, b, sizeof(b), 20);
+        if (n > 0) out.append((const char*)b, (size_t)n);
+    }
+    return out;
 }
 
 std::string UartAtInterface::to_hex(const Bytes& b) {

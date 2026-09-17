@@ -178,6 +178,16 @@ void app_main() {
     Transport::register_destination(dest);
     ESP_LOGI(TAG, "dest hash: %s", hexstr(dest.hash()).c_str());
 
+    // LXMF delivery destination (IN) — announced so the server can recall the
+    // Sprout identity keyed by THIS delivery hash (f5f05952…). Without it the
+    // server's LXMF get_source() resolves <unknown> and the allow-list gate
+    // drops our SensorReport (the Cardputer works because its delivery hash is
+    // announced; ours was only ever heard under lmao/sprout).
+    Destination delivery(identity, Type::Destination::IN, Type::Destination::SINGLE,
+                         "lxmf", "delivery");
+    Transport::register_destination(delivery);
+    ESP_LOGI(TAG, "delivery dest hash: %s", hexstr(delivery.hash()).c_str());
+
     Transport::on_announce(on_announce_cb);
 
     if (!Reticulum::start(100, 8192, 5)) {
@@ -188,6 +198,7 @@ void app_main() {
     uint64_t last_send_ms = 0;
     for (;;) {
         dest.announce(Bytes(), true);
+        delivery.announce(Bytes(), true);
         ESP_LOGI(TAG, "announced");
         uint64_t now_ms = (uint64_t)(esp_timer_get_time() / 1000);
         if (now_ms - last_send_ms >= 60000) {     // SensorReport ~every 60s

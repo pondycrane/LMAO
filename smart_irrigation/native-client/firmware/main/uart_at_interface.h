@@ -43,6 +43,7 @@ namespace RNS {
         void uart_write(const char* s);
         void uart_write(const char* s, size_t n);
         void drain_ms(uint32_t ms);
+        std::string read_response_ms(uint32_t ms);
         static std::string to_hex(const Bytes& b);
         static Bytes from_hex(const std::string& h);
     };
