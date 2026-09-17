@@ -16,14 +16,14 @@
 #   ./docker/registry/manage.sh status       # Check registry health
 #
 # Config:
-#   REGISTRY_HOST  - Registry host (default: 192.168.0.36)
+#   REGISTRY_HOST  - Registry host (default: 192.168.50.153)
 #   REGISTRY_PORT  - Registry port (default: 5000)
 # ──────────────────────────────────────────────────────────────────────────────
 
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-REGISTRY_HOST="${REGISTRY_HOST:-192.168.0.36}"
+REGISTRY_HOST="${REGISTRY_HOST:-192.168.50.153}"
 REGISTRY_PORT="${REGISTRY_PORT:-5000}"
 REGISTRY="${REGISTRY_HOST}:${REGISTRY_PORT}"
 
@@ -233,7 +233,7 @@ main() {
             echo "  status       Check registry health"
             echo ""
             echo "Environment:"
-            echo "  REGISTRY_HOST  (default: 192.168.0.36)"
+            echo "  REGISTRY_HOST  (default: 192.168.50.153)"
             echo "  REGISTRY_PORT  (default: 5000)"
             ;;
     esac
