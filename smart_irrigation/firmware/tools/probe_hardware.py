@@ -243,6 +243,25 @@ def main():
         mux_off(i2c, mux)
     else:
         emit("SHT30", "not_found")
+        # #124: the ENV III rides the DTU base Port A Grove socket, whose SCL pin
+        # (G21, in the 2026-09-16 topology) intermittently loses contact. Emit the
+        # raw SCL/SDA pin states (with internal pull-up) so a failed probe says
+        # WHICH line is open: a 0 on a pin with pull-up engaged = line not
+        # connected/pulled (contact issue), both 1 = just nothing attached.
+        try:
+            from machine import Pin as _Pin
+
+            _pin_states = {}
+            for _g in (21, 25):
+                _p = _Pin(_g, _Pin.IN, _Pin.PULL_UP)
+                _pin_states[_g] = _p.value()
+            emit(
+                "SHT30",
+                "not_found "
+                + " ".join(f"env3_pins g{g}={v}" for g, v in _pin_states.items()),
+            )
+        except Exception as _e:
+            emit("SHT30", f"not_found env3_pin_diag_err={_e}")
 
     probe_dtu()
     emit("DONE", "note=pressure/QMP requires the address-collision fix")
