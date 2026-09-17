@@ -46,6 +46,13 @@ cc_test(
 )
 
 cc_test(
+    name = "real_announce_test",
+    srcs = ["tests/real_announce_test.cpp"],
+    deps = ["@rtreticulum//:rtreticulum"],
+    tags = ["unit"],
+)
+
+cc_test(
     name = "path_request_test",
     srcs = ["tests/path_request_test.cpp"],
     deps = ["@rtreticulum//:rtreticulum"],
