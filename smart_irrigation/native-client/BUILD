@@ -24,11 +24,54 @@ cc_test(
     tags = ["unit"],
 )
 
+# ── Host-testable RTReticulum-dependent units (issue #133, work item 4) ──
+# RTReticulum + Mbed TLS are vendored in WORKSPACE (pinned http_archive), so
+# lxmf_send is now a real cc_library and the radio-path announce decode gets a
+# cc_test — the same code the device firmware compiles, exercised on the host.
+
+cc_library(
+    name = "lxmf_send",
+    srcs = ["firmware/main/lxmf_send.cpp"],
+    hdrs = ["firmware/main/lxmf_send.h"],
+    strip_include_prefix = "firmware/main",
+    deps = ["@rtreticulum//:rtreticulum"],
+    visibility = ["//visibility:public"],
+)
+
+cc_test(
+    name = "announce_decode_test",
+    srcs = ["tests/announce_decode_test.cpp"],
+    deps = ["@rtreticulum//:rtreticulum"],
+    tags = ["unit"],
+)
+
+cc_test(
+    name = "path_request_test",
+    srcs = ["tests/path_request_test.cpp"],
+    deps = ["@rtreticulum//:rtreticulum"],
+    tags = ["unit"],
+)
+
+# Host RNS-interop harness (issue #133, work item 4): connects RTReticulum to a
+# Python RNS TCPServerInterface peer (see host/README.md). Manual — needs a
+# live Python peer on the network; buildable so the whole package is in Bazel.
+cc_binary(
+    name = "interop",
+    srcs = [
+        "host/tcp_interface.h",
+        "host/interop.cpp",
+        "host/tcp_interface.cpp",
+    ],
+    includes = ["host"],
+    copts = ["-std=c++17"],
+    deps = ["@rtreticulum//:rtreticulum"],
+    tags = ["manual"],
+)
+
 # ── Device/ESP-IDF firmware sources (built out-of-band by firmware/build.sh) ──
-# RTReticulum-dependent (lxmf_send, path_find) and ESP-IDF-only (uart_at,
-# sht30, main) code cannot compile on the host under Bazel yet; once
-# RTReticulum is vendored/http_archive'd these get real cc_library targets
-# (tracked in the native-client next-step issue).
+# ESP-IDF-only code (uart_at, sht30, main, path_find) cannot compile on the
+# host under Bazel (they pull esp_log/freertos/esp_timer); they are represented
+# as filegroups so the whole tree stays in the Bazel graph.
 filegroup(
     name = "firmware_sources",
     srcs = glob([
