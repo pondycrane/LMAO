@@ -1,6 +1,9 @@
 set(SRCS
     "main.cpp"
     "uart_at_interface.cpp"
+    "sht30.cpp"
+    "lma_encoder.cpp"
+    "lxmf_send.cpp"
 )
 
 idf_component_register(
@@ -10,6 +13,7 @@ idf_component_register(
         rtreticulum
         driver
         esp_driver_uart
+        esp_driver_i2c
         esp_timer
         esp_hw_support
         nvs_flash
