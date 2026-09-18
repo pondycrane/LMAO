@@ -121,12 +121,12 @@ The LMAO server runs **in-cluster** as `deployment/lmao-server` (issue #93), pin
 
 ### LMAO server — env knobs
 
-- `LMAO_ANNOUNCE_INTERVAL` (default `0` = **off**) — clients (Sprout native
-  `path_find`, Cardputer µReticulum `ensure_path`) discover the server **on
-  demand via RNS path requests** (issue #135; the server answers them as a
-  leaf node), so the server only announces its LXMF delivery destination once
-  at startup. Set a positive number of seconds to opt back into periodic
-  re-announces (optional for nodes that never implement path requests).
+- `LMAO_ANNOUNCE_INTERVAL` (default `60`) — seconds between **periodic LXMF
+delivery announces**, kept ON so boot-time discovery works for every node.
+Clients can additionally discover the server **on demand via RNS path
+requests** (Sprout native `path_find`, Cardputer µReticulum `ensure_path`;
+the server answers them as a leaf node — issue #135). Set to `0` to disable
+the periodic re-announce and rely on on-demand discovery only.
 - **Client allow-list (security)** — the server accepts LXMF messages only from
 known client identities (sender's `lxmf/delivery` destination hash, i.e. the
 `Source/From:` the server logs). Defaults are the Cardputer
