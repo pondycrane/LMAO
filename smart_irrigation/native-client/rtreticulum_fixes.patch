@@ -28,6 +28,36 @@ index de45c2c..ef70bcf 100644
          Type::Packet::header_types  header_type()   const { return _object->_header_type; }
          const Bytes&                destination_hash() const { return _object->_destination_hash; }
          const Bytes&                raw()           const { return _object->_raw; }
+diff --git a/include/rtreticulum/transport.h b/include/rtreticulum/transport.h
+index cf5d08d..8652317 100644
+--- a/include/rtreticulum/transport.h
++++ b/include/rtreticulum/transport.h
+@@ -57,6 +57,13 @@ namespace RNS {
+         static void on_announce(AnnounceCallback cb);
+         static void reset();
+ 
++        /* RNS on-demand path discovery (issue #135): the well-known PLAIN
++         * destination hash for "rnstransport.path.request" (computed exactly
++         * as Python RNS does). DATA packets addressed to it are path requests;
++         * this node answers for its own IN/SINGLE destinations by announcing
++         * them with the PATH_RESPONSE context byte set. */
++        static const Bytes& path_request_hash();
++
+         /* Lazy-init accessor for the recursive mutex protecting the static
+          * state below. Public so the in-file Lock RAII helper can reach it
+          * without being a friend. */
+@@ -79,7 +86,11 @@ namespace RNS {
+         static AnnounceCallback                                 _on_announce;
+         static LinkRequestCallback                              _on_link_request;
+ 
++        static Bytes                        _path_request_hash;
++        static std::vector<Bytes>           _seen_path_requests;  // bounded target+tag dedup
++
+         static bool process_announce(const Packet& packet, const Interface& iface);
++        static bool process_path_request(const Packet& packet, const Interface& iface);
+     };
+ 
+ }
 diff --git a/src/destination.cpp b/src/destination.cpp
 index 5430506..fccfc72 100644
 --- a/src/destination.cpp
@@ -67,10 +97,56 @@ index 5430506..fccfc72 100644
  }
  
 diff --git a/src/transport.cpp b/src/transport.cpp
-index 18270e7..1e9c764 100644
+index 18270e7..1217201 100644
 --- a/src/transport.cpp
 +++ b/src/transport.cpp
-@@ -208,24 +208,40 @@ bool Transport::process_announce(const Packet& packet, const Interface& iface) {
+@@ -18,6 +18,20 @@ std::map<Bytes, std::shared_ptr<Link>>      Transport::_links;
+ std::set<Bytes>                             Transport::_seen_announces;
+ Transport::AnnounceCallback                 Transport::_on_announce = nullptr;
+ Transport::LinkRequestCallback              Transport::_on_link_request = nullptr;
++Bytes                                       Transport::_path_request_hash;
++std::vector<Bytes>                          Transport::_seen_path_requests;
++
++const Bytes& Transport::path_request_hash() {
++    /* RNS wire-compatible: the PLAIN destination for app "rnstransport",
++     * aspect "path/request" — hash = trunc(sha256( trunc(sha256(name)) )),
++     * locked byte-for-byte in path_request_test against Python RNS. */
++    if (_path_request_hash.empty()) {
++        Bytes name_hash = Identity::full_hash(Bytes("rnstransport.path.request"))
++                              .left(Type::Identity::NAME_HASH_LENGTH / 8);
++        _path_request_hash = Identity::truncated_hash(name_hash);
++    }
++    return _path_request_hash;
++}
+ 
+ ur_recursive_mutex_t* Transport::mutex() {
+     if (!_mutex) _mutex = rt_hal_recursive_mutex_create();
+@@ -147,6 +161,8 @@ void Transport::reset() {
+     _path_table.clear();
+     _links.clear();
+     _seen_announces.clear();
++    _seen_path_requests.clear();
++    _path_request_hash = Bytes();
+     _on_announce = nullptr;
+     _on_link_request = nullptr;
+ }
+@@ -180,6 +196,15 @@ void Transport::inbound(const Bytes& raw, const Interface& iface) {
+     }
+ 
+     if (pkt.packet_type() == Type::Packet::DATA) {
++        /* RNS on-demand path discovery (issue #135): a DATA packet addressed
++         * to the well-known PLAIN "rnstransport.path.request" destination is
++         * a path request — answer local destinations with a PATH_RESPONSE
++         * announce. Handle it before the local-destination lookup since this
++         * control destination is never registered as a local dest. */
++        if (pkt.destination_hash() == path_request_hash()) {
++            process_path_request(pkt, iface);
++            return;
++        }
+         auto it = _destinations.find(pkt.destination_hash());
+         if (it != _destinations.end()) {
+             Destination d = it->second;
+@@ -208,24 +233,40 @@ bool Transport::process_announce(const Packet& packet, const Interface& iface) {
      /* Called only from inbound() which already holds _mutex. */
      if (!_seen_announces.insert(packet.get_hash()).second) return false;
  
@@ -122,3 +198,74 @@ index 18270e7..1e9c764 100644
      if (!app_data.empty()) signed_data << app_data;
  
      Identity announced(false);
+@@ -257,6 +298,11 @@ bool Transport::process_announce(const Packet& packet, const Interface& iface) {
+     entry.via_interface = via;
+     _path_table.insert_or_assign(packet.destination_hash(), entry);
+ 
++    if (packet.context() == Type::Packet::PATH_RESPONSE)
++        DEBUGF("Transport: path response for %s (hops=%u) -> path table",
++               packet.destination_hash().toHex().substr(0, 16).c_str(),
++               (unsigned)entry.hops);
++
+     if (_on_announce) _on_announce(packet.destination_hash(), announced, app_data);
+ 
+     if (packet.hops() < Type::Transport::PATHFINDER_M) {
+@@ -270,4 +316,58 @@ bool Transport::process_announce(const Packet& packet, const Interface& iface) {
+     return true;
+ }
+ 
++bool Transport::process_path_request(const Packet& packet, const Interface& iface) {
++    /* Called only from inbound() which already holds _mutex.
++     *
++     * Mirrors RNS Transport.path_request_handler + the local-destination
++     * branch of Transport.path_request(): a DATA packet to the PLAIN
++     * "rnstransport.path.request" destination whose payload is
++     *   target_destination_hash(16) [+ transport_id(16)] + tag(<=16)
++     * asks who can reach *target*. If the target is a destination local to
++     * this node (IN/SINGLE), answer by announcing it with the PATH_RESPONSE
++     * context byte set (0x0B) — the requester's normal announce handling
++     * then populates its path table from the reply (on-demand discovery, so
++     * a node no longer has to wait for the periodic announce). */
++    constexpr size_t HL = Type::Reticulum::DESTINATION_LENGTH;   // 16
++    const Bytes& d = packet.data();
++    if (d.size() < HL) return false;
++    const Bytes target = d.left(HL);
++
++    /* Tag follows the transport instance ID when one is present; the leaf
++     * form (no transport node) is target(16) + tag(16). */
++    Bytes tag;
++    if (d.size() > 2 * HL) tag = d.mid(2 * HL, HL);
++    else if (d.size() > HL) tag = d.mid(HL);
++    else return false;
++    if (tag.size() > HL) tag = tag.left(HL);
++    if (tag.empty()) return false;
++
++    Bytes unique = target; unique.append(tag);
++    if (std::find(_seen_path_requests.begin(), _seen_path_requests.end(), unique) !=
++        _seen_path_requests.end())
++        return false;   // duplicate request (same target + tag)
++    _seen_path_requests.push_back(unique);
++    if (_seen_path_requests.size() > 32) _seen_path_requests.erase(_seen_path_requests.begin());
++
++    auto it = _destinations.find(target);
++    if (it == _destinations.end() || it->second.direction() != Type::Destination::IN)
++        return false;   // not a local IN destination — nothing to answer with
++
++    Bytes raw = it->second.announce(Bytes(), /*send=*/false);
++    if (raw.empty()) return false;
++
++    /* Stamp the PATH_RESPONSE context byte so peers recognise the reply as a
++     * path response (RNS does the same when answering path requests). Context
++     * lives at 2 + DEST_LEN for HEADER_1, 2 + 2*DEST_LEN for HEADER_2. */
++    constexpr size_t DST = Type::Reticulum::DESTINATION_LENGTH;
++    const bool hdr2 = (raw.data()[0] & 0x40) != 0;
++    const size_t off = 2 + (hdr2 ? 2 * DST : DST);
++    if (raw.size() > off) raw[off] = static_cast<uint8_t>(Type::Packet::PATH_RESPONSE);
++
++    DEBUGF("Transport: path request answered for %s",
++           target.toHex().substr(0, 16).c_str());
++    broadcast(raw);
++    return true;
++}
++
+ }

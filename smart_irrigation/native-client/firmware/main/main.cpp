@@ -230,6 +230,18 @@ void app_main() {
         dest.announce(Bytes(), true);
         delivery.announce(Bytes(), true);
         ESP_LOGI(TAG, "announced");
+
+        // On-demand path discovery (issue #135): if the server identity is not
+        // learned yet, ask the mesh for a path to the server's lxmf/delivery
+        // destination instead of waiting for the server's periodic announce.
+        // path_find::request() is rate-limited internally (~20 s).
+        {
+            if (s_ident_lock) xSemaphoreTake(s_ident_lock, portMAX_DELAY);
+            bool have_srv = s_have_server;
+            if (s_ident_lock) xSemaphoreGive(s_ident_lock);
+            if (!have_srv) path_find::request(DEST_HASH_HEX);
+        }
+
         uint64_t now_ms = (uint64_t)(esp_timer_get_time() / 1000);
         // First report immediately after boot, then every SEND_INTERVAL_MS
         // (5 min) — the Phase 0 evaluation decision cadence.
