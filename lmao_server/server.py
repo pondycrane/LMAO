@@ -722,37 +722,40 @@ async def async_main():
     router.register_delivery_callback(lmao_server.handle_lxmf_delivery)
 
     # ── Announce presence for LoRa path discovery ─────────────────
-    # Clients (e.g. Cardputer, Sprout/native #130) need the server to announce
-    # so they can discover a path and recall the server's identity keys.  LXMF's
-    # router.announce() requires the *delivery destination hash* (keyed in
-    # router.delivery_destinations), NOT the raw identity hash — passing the
-    # identity hash is a silent no-op. Announce PERIODICALLY (not just at
-    # startup) so late-joining clients can learn the server identity over the
-    # air without requiring an RNS path-request (native Sprout #130 doesn't
-    # implement path-requests yet). Both the startup announce and the periodic
-    # re-announce share one implementation (issue #134).
-    ANNOUNCE_INTERVAL = float(os.environ.get("LMAO_ANNOUNCE_INTERVAL", "60"))
+    # Clients need the server to announce so they can discover a path and
+    # recall the server's identity keys.  LXMF's router.announce() requires
+    # the *delivery destination hash* (keyed in router.delivery_destinations),
+    # NOT the raw identity hash — passing the identity hash is a silent no-op.
+    #
+    # Since issue #135 clients discover the server ON DEMAND via RNS path
+    # requests (Sprout native path_find::request; Cardputer µReticulum
+    # ensure_path), and the server now answers them even as a leaf node
+    # (rns_init leaf-node patch), so the periodic re-announce is reverted:
+    # the server announces ONCE at startup.  Set LMAO_ANNOUNCE_INTERVAL to a
+    # positive number of seconds to opt back into periodic re-announces (the
+    # shared _announce_delivery_destinations() implementation is unchanged
+    # from the #134 consolidation).
+    ANNOUNCE_INTERVAL = float(os.environ.get("LMAO_ANNOUNCE_INTERVAL", "0"))
 
-    logger.info(
-        "Announcing server presence for LoRa path discovery (every ~%.0fs)...",
-        ANNOUNCE_INTERVAL,
-    )
+    logger.info("Announcing server presence for LoRa path discovery...")
     try:
         _announce_delivery_destinations(router)
     except Exception as e:
         logger.warning("Server announce failed (LoRa may be unavailable): %s", e)
 
-    async def _periodic_announce():
-        while True:
-            await asyncio.sleep(ANNOUNCE_INTERVAL)
-            try:
-                _announce_delivery_destinations(router)
-            except Exception as e:
-                logger.warning(
-                    "Periodic announce failed (LoRa may be unavailable): %s", e
-                )
+    announce_task = None
+    if ANNOUNCE_INTERVAL > 0:
+        async def _periodic_announce():
+            while True:
+                await asyncio.sleep(ANNOUNCE_INTERVAL)
+                try:
+                    _announce_delivery_destinations(router)
+                except Exception as e:
+                    logger.warning(
+                        "Periodic announce failed (LoRa may be unavailable): %s", e
+                    )
 
-    announce_task = asyncio.ensure_future(_periodic_announce())
+        announce_task = asyncio.ensure_future(_periodic_announce())
 
     # ── NATS connect (optional) ─────────────────────────────────
     nats_queue = None
@@ -815,7 +818,8 @@ async def async_main():
     except KeyboardInterrupt:
         print("\nShutting down...")
     finally:
-        announce_task.cancel()
+        if announce_task:
+            announce_task.cancel()
         if grpc_server:
             await grpc_server.stop(5)
         if lmao_server:
