@@ -14,6 +14,7 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
 
 from lma_core.rns_di import LXMF, RNS
 
@@ -30,6 +31,11 @@ logger = logging.getLogger(__name__)
 # additive: anything that is not a control-destination DATA packet falls
 # through to the original inbound untouched.
 _PATCHED_INBOUND_SENTINEL = "_lmao_patched_inbound"
+
+# A half-duplex requester cannot receive a reply sent during its own TX->RX
+# turnaround, so the PATH_RESPONSE answer is deferred by this many seconds
+# (issue #142).  Test hook: LMAO_PATH_REQ_ANSWER_DELAY overrides it.
+_PATH_REQUEST_ANSWER_DELAY = 1.0
 
 
 def _patch_leaf_node_path_request_delivery():
@@ -91,7 +97,25 @@ def _patch_leaf_node_path_request_delivery():
                             logger.warning("path-req patch: control dest %s has no packet callback", hexd)
                         else:
                             logger.info("path-req patch: control-dest DATA %s delivered -> answered", hexd)
-                            cb(pkt.data, pkt)   # == Destination.receive for a PLAIN dest (no decrypt)
+                            # Defer the answer slightly.  The requester is a
+                            # half-duplex node that has *just* transmitted this
+                            # request; an answer arriving ~2ms later lands in its
+                            # TX->RX turnaround window and is missed entirely,
+                            # leaving it unlearned (issue #142).  Answering a
+                            # second later puts the PATH_RESPONSE announce
+                            # outside that window.  Override (tests) with
+                            # LMAO_PATH_REQ_ANSWER_DELAY; 0 = answer inline.
+                            _delay = float(
+                                os.environ.get("LMAO_PATH_REQ_ANSWER_DELAY", "")
+                                or _PATH_REQUEST_ANSWER_DELAY
+                            )
+                            if _delay > 0:
+                                timer = threading.Timer(_delay, cb, args=(pkt.data, pkt))
+                                timer.daemon = True
+                                logger.debug("path-req patch: deferring answer by %.2fs", _delay)
+                                timer.start()
+                            else:
+                                cb(pkt.data, pkt)   # == Destination.receive for a PLAIN dest (no decrypt)
                         break
                 return  # consumed: original inbound would drop it anyway
             except Exception as exc:

@@ -727,37 +727,19 @@ async def async_main():
     # the *delivery destination hash* (keyed in router.delivery_destinations),
     # NOT the raw identity hash — passing the identity hash is a silent no-op.
     #
-    # Since issue #135 the native clients can also discover the server ON
-    # DEMAND via RNS path requests (Sprout path_find::request; Cardputer
-    # µReticulum ensure_path) and the server answers them even as a leaf node
-    # (rns_init leaf-node patch). The periodic re-announce is kept ON by
-    # default (periodic + on-demand are additive and the periodic one keeps
-    # boot-time discovery reliable for every node type); set
-    # LMAO_ANNOUNCE_INTERVAL to 0 to disable the periodic re-announce and
-    # rely solely on on-demand path requests (the shared
-    # _announce_delivery_destinations() implementation is unchanged from the
-    # #134 consolidation).
-    ANNOUNCE_INTERVAL = float(os.environ.get("LMAO_ANNOUNCE_INTERVAL", "60"))
-
+    # This one-shot announce on startup is the ONLY announce the server sends.
+    # The periodic re-announce is retired (issue #142): native clients discover
+    # the server ON DEMAND via RNS path requests (Sprout native `path_find`,
+    # Cardputer µReticulum `ensure_path`), which the server answers even as a
+    # leaf node (rns_init leaf-node patch, issue #135).  Since #142 the answer
+    # is deferred by _PATH_REQUEST_ANSWER_DELAY so a half-duplex requester does
+    # not miss it in its own TX→RX turnaround.  The startup announce below is
+    # kept only for clients already listening when the server boots.
     logger.info("Announcing server presence for LoRa path discovery...")
     try:
         _announce_delivery_destinations(router)
     except Exception as e:
         logger.warning("Server announce failed (LoRa may be unavailable): %s", e)
-
-    announce_task = None
-    if ANNOUNCE_INTERVAL > 0:
-        async def _periodic_announce():
-            while True:
-                await asyncio.sleep(ANNOUNCE_INTERVAL)
-                try:
-                    _announce_delivery_destinations(router)
-                except Exception as e:
-                    logger.warning(
-                        "Periodic announce failed (LoRa may be unavailable): %s", e
-                    )
-
-        announce_task = asyncio.ensure_future(_periodic_announce())
 
     # ── NATS connect (optional) ─────────────────────────────────
     nats_queue = None
@@ -807,9 +789,9 @@ async def async_main():
         logger.info("gRPC server started on 0.0.0.0:50051")
         print("gRPC server ready on 0.0.0.0:50051")
 
-    # Keep running until interrupted.  The periodic announce task was already
-    # started above (see _periodic_announce) so it runs whether gRPC is active
-    # or not (issue #134 — single announce loop, no duplicate/NameError).
+    # Keep running until interrupted.  Discovery is on-demand: the server
+    # answers client path requests (rns_init leaf-node patch) rather than
+    # re-announcing periodically (issue #142 — no announce task to track).
     try:
         if grpc_server:
             await grpc_server.wait_for_termination()
@@ -820,8 +802,6 @@ async def async_main():
     except KeyboardInterrupt:
         print("\nShutting down...")
     finally:
-        if announce_task:
-            announce_task.cancel()
         if grpc_server:
             await grpc_server.stop(5)
         if lmao_server:
