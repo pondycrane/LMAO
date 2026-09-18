@@ -86,8 +86,12 @@ def _patch_leaf_node_path_request_delivery():
                 RNS.Transport.add_packet_hash(pkt.packet_hash)
                 for d in dests:
                     if d.hash == pkt.destination_hash:
-                        logger.info("path-req patch: control-dest DATA %s -> answered", hexd)
-                        d.receive(pkt)
+                        cb = getattr(getattr(d, "callbacks", None), "packet", None)
+                        if cb is None:
+                            logger.warning("path-req patch: control dest %s has no packet callback", hexd)
+                        else:
+                            logger.info("path-req patch: control-dest DATA %s delivered -> answered", hexd)
+                            cb(pkt.data, pkt)   # == Destination.receive for a PLAIN dest (no decrypt)
                         break
                 return  # consumed: original inbound would drop it anyway
             except Exception as exc:
