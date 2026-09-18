@@ -4,7 +4,13 @@
 # components/rtreticulum wrapper compiles the RNS lib + ESP-IDF HAL), then
 # builds for the ESP32-PICO-D4 target.
 set -euo pipefail
-APP="$(cd "$(dirname "$0")" && pwd)"
+# Locate the firmware source dir.  `bazel run //smart_irrigation/native-client:build_firmware`
+# exports BUILD_WORKSPACE_DIRECTORY; a direct `./build.sh` from this dir uses $0.
+if [ -n "${BUILD_WORKSPACE_DIRECTORY:-}" ]; then
+    APP="$BUILD_WORKSPACE_DIRECTORY/smart_irrigation/native-client/firmware"
+else
+    APP="$(cd "$(dirname "$0")" && pwd)"
+fi
 PARENT="$(dirname "$APP")"
 RTR="$PARENT/.rtreticulum"
 IDF_IMG="${IDF_IMG:-espressif/idf:v5.3.1}"
