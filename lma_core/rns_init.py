@@ -20,6 +20,91 @@ from lma_core.rns_di import LXMF, RNS
 logger = logging.getLogger(__name__)
 
 
+# RNS ships path requests for a TRANSPORT-enabled node's control destinations,
+# but a leaf node (transport disabled — which this server is) drops inbound
+# DATA to rnstransport.path.request at the `transport_enabled() or
+# for_local_client ...` gate before its callback runs, so it can never answer.
+# Wrap Transport.inbound to deliver control-destination DATA (leaf-gap fix,
+# issue #135) so the server can answer Sprout path requests with a
+# PATH_RESPONSE announce even with periodic announces off.  Strictly
+# additive: anything that is not a control-destination DATA packet falls
+# through to the original inbound untouched.
+_PATCHED_INBOUND_SENTINEL = "_lmao_patched_inbound"
+
+
+def _patch_leaf_node_path_request_delivery():
+    """Install the leaf-node path-request delivery wrap on RNS.Transport.inbound.
+
+    Idempotent.  No-op (silently) if the RNS API moved.
+    """
+    try:
+        # RNS.Transport is lazily usable once Reticulum() has started.
+        import RNS  # noqa: F811  (the local import keeps this decoupled)
+
+        Transport = RNS.Transport
+        if getattr(Transport, _PATCHED_INBOUND_SENTINEL, False):
+            return
+        orig_inbound = Transport.inbound
+        control_hashes = None
+        control_destinations = None
+
+        # Cache the attribute lookups on first inbound use (Transport.start()
+        # populates them; Reticulum() has started by the time we install this).
+        def _resolve_resources():
+            nonlocal control_hashes, control_destinations
+            if control_hashes is None:
+                control_hashes = Transport.control_hashes
+                control_destinations = Transport.control_destinations
+            return control_hashes, control_destinations
+
+        def wrapped(raw, interface=None):
+            try:
+                if not (isinstance(raw, bytes) and len(raw) > 18):
+                    orig_inbound(raw, interface)
+                    return
+                hashes, dests = _resolve_resources()
+                dst = raw[2:18] if not (raw[0] & 0x40) else (raw[18:34] if len(raw) > 34 else None)
+                if dst is None or dst not in hashes:
+                    orig_inbound(raw, interface)
+                    return
+                # Control-destination DATA — deliver to its callback the same
+                # way RNS would (Packet + unpack + filter + receive).
+                hexd = dst.hex()
+                pkt = RNS.Packet(None, raw)
+                if not pkt.unpack():
+                    logger.warning("path-req patch: unpack failed for %s", hexd)
+                    orig_inbound(raw, interface)
+                    return
+                if pkt.packet_type != RNS.Packet.DATA:
+                    orig_inbound(raw, interface)
+                    return
+                pkt.receiving_interface = interface
+                pkt.hops += 1
+                if not Transport.packet_filter(pkt):
+                    orig_inbound(raw, interface)
+                    return
+                RNS.Transport.add_packet_hash(pkt.packet_hash)
+                for d in dests:
+                    if d.hash == pkt.destination_hash:
+                        cb = getattr(getattr(d, "callbacks", None), "packet", None)
+                        if cb is None:
+                            logger.warning("path-req patch: control dest %s has no packet callback", hexd)
+                        else:
+                            logger.info("path-req patch: control-dest DATA %s delivered -> answered", hexd)
+                            cb(pkt.data, pkt)   # == Destination.receive for a PLAIN dest (no decrypt)
+                        break
+                return  # consumed: original inbound would drop it anyway
+            except Exception as exc:
+                logger.warning("path-req patch error: %r", exc, exc_info=True)
+            orig_inbound(raw, interface)
+
+        Transport.inbound = staticmethod(wrapped)
+        setattr(Transport, _PATCHED_INBOUND_SENTINEL, True)
+        logger.info("Installed leaf-node path-request delivery patch (issue #135)")
+    except Exception as exc:
+        logger.warning("Could not install path-request delivery patch: %s", exc)
+
+
 def _is_temp_configdir(configdir):
     """True when *configdir* is a throwaway dir under the system temp root.
 
@@ -116,6 +201,10 @@ def init_rns_and_lxmf(
             extra="Check your config and RNode connection. See README Troubleshooting.",
         )
     print("Reticulum initialized.")
+
+    # Leaf-node path-request delivery (issue #135): allow the server to answer
+    # on-demand path requests even with transport disabled.
+    _patch_leaf_node_path_request_delivery()
 
     # Load or create identity.  Persisting the identity is critical:
     # clients (Cardputer) bake the server's lxmf.delivery destination hash
