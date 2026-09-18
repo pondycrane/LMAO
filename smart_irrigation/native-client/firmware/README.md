@@ -19,18 +19,25 @@ mesh (proven: RTReticulum `on_announce` <-> Python RNS, see `../host`).
 - `sdkconfig.defaults` / `partitions.csv` — `esp32` target, 4 MB flash.
 
 ## Build (Docker ESP-IDF)
+
 ```bash
 ./build.sh          # clones RTReticulum into ../.rtreticulum, stages this app
                     # into its firmware/sprout, and runs idf.py set-target esp32 + build
 ```
+Or from Bazel (same script, workspace-rooted):
+```bash
+bazel run //smart_irrigation/native-client:build_firmware
+```
 Requires Docker; first run pulls `espressif/idf:v5.3.1` (~1-2 GB).
 
-## Flash (⚠️ supervised — replaces the MicroPython runtime)
-The Atom currently runs MicroPython (our sensors/probes depend on it; full
-factory backup: `/home/pondycrane/atom_lite_factory_backup_20260912.bin`).
-First flash of the native app via the serial (esptool download) is a deliberate
-step — do it with the user present:
+## Flash (⚠️ supervised — replaces the running firmware)
+The rig runs the native app (since #133); re-flashing replaces it. Flashing is
+a deliberate step — do it with the user present (full MicroPython factory
+backup: `/home/pondycrane/atom_lite_factory_backup_20260912.bin`):
 ```bash
+bazel run //smart_irrigation/native-client:flash_firmware          # port /dev/ttyUSB0
+bazel run //smart_irrigation/native-client:flash_firmware -- --port /dev/ttyACM0
+# equivalent, standalone:
 idf.py -p /dev/ttyUSB0 flash    # inside the build container
 idf.py -p /dev/ttyUSB0 monitor
 ```
