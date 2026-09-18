@@ -1,9 +1,11 @@
 # Sprout native client — Bazel targets (issue #131).
 #
 # Everything in this package is either a host-testable C++ unit (fully under
-# Bazel) or device/ESP-IDF sources that build out-of-band (via firmware/build.sh
-# + the RTReticulum clone in ../.rtreticulum) and are represented here as
-# filegroups so the whole tree is in the Bazel graph.
+# Bazel) or device/ESP-IDF sources that build via the Docker ESP-IDF toolchain
+# (the RTReticulum clone in ../.rtreticulum).  A host-testable layer lives in
+# Bazel as cc_library/cc_test; the ESP-IDF build+flash are wrapped as manual
+# sh_binary targets (:build_firmware / :flash_firmware) and the sources are
+# represented as filegroups so the whole tree is in the Bazel graph.
 
 # ── Host-testable core: the wire-compatible SensorReport/ LMAOEnvelope encoder ──
 # Pure C++ (std::string/vector only) — no ESP-IDF, no RTReticulum deps.
@@ -21,6 +23,22 @@ cc_test(
     deps = [":sprout_encoder"],
     # Golden bytes generated from cardputer_client/proto/lma_encoder.py
     # (Python) so the C++ port must produce byte-identical LMAOEnvelope output.
+    tags = ["unit"],
+)
+
+# Soil-moisture calibration math (pure inline function in moisture.h; the
+# ESP-IDF ADC wrapper itself builds out-of-band with the device firmware).
+cc_library(
+    name = "moisture_math",
+    hdrs = ["firmware/main/moisture.h"],
+    strip_include_prefix = "firmware/main",
+    visibility = ["//visibility:public"],
+)
+
+cc_test(
+    name = "moisture_calib_test",
+    srcs = ["tests/moisture_calib_test.cpp"],
+    deps = [":moisture_math"],
     tags = ["unit"],
 )
 
@@ -84,13 +102,36 @@ filegroup(
     srcs = glob([
         "firmware/**/*.cpp",
         "firmware/**/*.h",
+        "firmware/**/*.sh",
         "firmware/CMakeLists.txt",
         "firmware/sdkconfig.defaults",
         "firmware/partitions.csv",
-        "firmware/build.sh",
         "firmware/README.md",
     ]),
     visibility = ["//visibility:public"],
+)
+
+# ── Firmware build / flash (manual — Docker + ESP-IDF, device-attached) ──
+# The native firmware cannot build under pure Bazel (ESP-IDF headers/FreeRTOS);
+# these wrap the documented Docker build (build.sh) and flash (README) so the
+# whole loop is driven from Bazel:
+#   bazel run //smart_irrigation/native-client:build_firmware
+#   bazel run //smart_irrigation/native-client:flash_firmware [-- --port X]
+# Both are manual: they require Docker (and the device for flash) and are never
+# pulled into `bazel test` runs.
+
+sh_binary(
+    name = "build_firmware",
+    srcs = ["firmware/build.sh"],
+    data = [":firmware_sources"],
+    tags = ["manual"],
+)
+
+sh_binary(
+    name = "flash_firmware",
+    srcs = ["firmware/flash.sh"],
+    data = [":firmware_sources"],
+    tags = ["manual"],
 )
 
 # Host RNS-interop harness (RTReticulum-dependent; built out-of-band — see

@@ -2,9 +2,11 @@
 //
 // Step 3 (issue #130): boot RNS + UART-AT (RAK3172 DTU P2P) interface on the
 // LMAO mesh, register "lmao/sprout", announce every 30s.
-// Step 4: every 60s read the ENV III air temp + humidity (SHT30, G21/G25),
-// build an LMAOEnvelope SensorReport (sensor_id 3=air temp, 2=humidity), wrap
-// it in a send-only LXMF message to the server's lxmf/delivery destination
+// Step 4/5: every SEND_INTERVAL_MS (5 min) read the ENV III air temp +
+// humidity (SHT30, G21/G25) AND the soil-moisture probe (ADC1_CH4/GPIO32),
+// build ONE LMAOEnvelope SensorReport bundling all three readings
+// (sensor_id 3=air temp °C, 2=humidity %, 4=soil moisture %), wrap it in a
+// send-only LXMF message to the server's lxmf/delivery destination
 // (DEST_HASH), and transmit it on the DTU link. Also learns the server identity
 // from its announce (single-hop RNode path).
 #include <cstdio>
@@ -27,6 +29,7 @@
 #include "uart_at_interface.h"
 #include "path_find.h"
 #include "sht30.h"
+#include "moisture.h"
 #include "lma_encoder.h"
 #include "lxmf_send.h"
 
@@ -35,6 +38,12 @@ static const char* TAG = "sprout";
 
 // Server LXMF delivery destination hash (issue #127 / install_all DEST_HASH).
 static const char* DEST_HASH_HEX = "dad35b80164b25f7b1474be86e443702";
+
+// Sensor bundle cadence.  5 min per the Phase 0 algorithm evaluation: the
+// irrigation decision runs on a ~5 min cadence and the ML dataset batches
+// 6 x 5-min samples; 60 s pushes just added LoRa/DuckDB load with no
+// control benefit.  The first report is sent immediately after boot.
+#define SEND_INTERVAL_MS 300000UL
 
 static std::string hexstr(const Bytes& b) {
     static const char* H = "0123456789abcdef";
@@ -63,22 +72,42 @@ static void on_announce_cb(const Bytes& dh, const Identity& peer, const Bytes&) 
 }
 
 static void send_sensor_report(const Identity& my_identity) {
-    Sht30Reading r;
-    if (!sht30_read(&r)) {
-        ESP_LOGW(TAG, "SHT30 read failed (Port A contact? #124)");
-        return;
-    }
     uint64_t now_ms = (uint64_t)(esp_timer_get_time() / 1000);
     uint64_t unix_s = 946684800ULL + (uint64_t)(esp_timer_get_time() / 1000000ULL); // ~2000-epoch offset
     uint32_t seq = (uint32_t)(now_ms % 100000U);
 
-    std::string rd_t = lma_encoder::encode_reading(3, r.temp_c, "C", now_ms);
-    std::string rd_h = lma_encoder::encode_reading(2, r.hum_pct, "%", now_ms);
+    // Bundle every reading we can take into ONE SensorReport.  A Port A
+    // SHT30 contact failure (#124) no longer drops the whole report — the
+    // soil-moisture reading (the control input) still gets through.
+    std::vector<std::string> readings;
+
+    Sht30Reading r;
+    if (sht30_read(&r)) {
+        readings.push_back(lma_encoder::encode_reading(3, r.temp_c, "C", now_ms));
+        readings.push_back(lma_encoder::encode_reading(2, r.hum_pct, "%", now_ms));
+        ESP_LOGI(TAG, "SHT30 ok: temp=%.2f C hum=%.2f %%", r.temp_c, r.hum_pct);
+    } else {
+        ESP_LOGW(TAG, "SHT30 read failed (Port A contact? #124) — bundle continues without air T/H");
+    }
+
+    float moist_pct = 0.0f;
+    if (moisture_read_percent(&moist_pct)) {
+        readings.push_back(lma_encoder::encode_reading(4, moist_pct, "%", now_ms));
+        ESP_LOGI(TAG, "moisture=%.1f%%", moist_pct);
+    } else {
+        ESP_LOGW(TAG, "moisture read failed");
+    }
+
+    if (readings.empty()) {
+        ESP_LOGW(TAG, "no sensor readings available — skipping SensorReport");
+        return;
+    }
+
     std::string sreport = lma_encoder::encode_sensor_report(
-        hexstr(my_identity.get_salt()), seq, 0.0f, {rd_t, rd_h});
+        hexstr(my_identity.get_salt()), seq, 0.0f, readings);
     std::string envelope = lma_encoder::encode_envelope(sreport);
-    ESP_LOGI(TAG, "SensorReport env=%uB temp=%.2f hum=%.2f",
-             (unsigned)envelope.size(), r.temp_c, r.hum_pct);
+    ESP_LOGI(TAG, "SensorReport env=%uB readings=%u (temp/hum/moisture bundle)",
+             (unsigned)envelope.size(), (unsigned)readings.size());
 
     Destination my_delivery(my_identity, Type::Destination::OUT, Type::Destination::SINGLE,
                             "lxmf", "delivery");
@@ -101,7 +130,8 @@ static void send_sensor_report(const Identity& my_identity) {
                                        Bytes(envelope), Bytes("p:Envelope"), unix_s);
     Bytes frame = lxmf_send::opportunistic_frame(server_delivery, body);
     if (frame.empty()) { ESP_LOGW(TAG, "no opportunistic frame"); return; }
-    ESP_LOGI(TAG, "TX LXMF frame %uB (air temp + humidity) -> server", (unsigned)frame.size());
+    ESP_LOGI(TAG, "TX LXMF frame %uB (temp/hum/moisture bundle) -> server",
+             (unsigned)frame.size());
     Transport::broadcast(frame, nullptr);
 }
 
@@ -201,7 +231,9 @@ void app_main() {
         delivery.announce(Bytes(), true);
         ESP_LOGI(TAG, "announced");
         uint64_t now_ms = (uint64_t)(esp_timer_get_time() / 1000);
-        if (now_ms - last_send_ms >= 60000) {     // SensorReport ~every 60s
+        // First report immediately after boot, then every SEND_INTERVAL_MS
+        // (5 min) — the Phase 0 evaluation decision cadence.
+        if (last_send_ms == 0 || now_ms - last_send_ms >= SEND_INTERVAL_MS) {
             last_send_ms = now_ms;
             send_sensor_report(identity);
         }
