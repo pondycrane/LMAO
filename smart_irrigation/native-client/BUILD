@@ -77,6 +77,13 @@ cc_test(
     tags = ["unit"],
 )
 
+cc_test(
+    name = "path_request_handler_test",
+    srcs = ["tests/path_request_handler_test.cpp"],
+    deps = ["@rtreticulum//:rtreticulum"],
+    tags = ["unit"],
+)
+
 # Host RNS-interop harness (issue #133, work item 4): connects RTReticulum to a
 # Python RNS TCPServerInterface peer (see host/README.md). Manual — needs a
 # live Python peer on the network; buildable so the whole package is in Bazel.
