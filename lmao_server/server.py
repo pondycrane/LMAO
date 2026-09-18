@@ -727,15 +727,17 @@ async def async_main():
     # the *delivery destination hash* (keyed in router.delivery_destinations),
     # NOT the raw identity hash — passing the identity hash is a silent no-op.
     #
-    # Since issue #135 clients discover the server ON DEMAND via RNS path
-    # requests (Sprout native path_find::request; Cardputer µReticulum
-    # ensure_path), and the server now answers them even as a leaf node
-    # (rns_init leaf-node patch), so the periodic re-announce is reverted:
-    # the server announces ONCE at startup.  Set LMAO_ANNOUNCE_INTERVAL to a
-    # positive number of seconds to opt back into periodic re-announces (the
-    # shared _announce_delivery_destinations() implementation is unchanged
-    # from the #134 consolidation).
-    ANNOUNCE_INTERVAL = float(os.environ.get("LMAO_ANNOUNCE_INTERVAL", "0"))
+    # Since issue #135 the native clients can also discover the server ON
+    # DEMAND via RNS path requests (Sprout path_find::request; Cardputer
+    # µReticulum ensure_path) and the server answers them even as a leaf node
+    # (rns_init leaf-node patch). The periodic re-announce is kept ON by
+    # default (periodic + on-demand are additive and the periodic one keeps
+    # boot-time discovery reliable for every node type); set
+    # LMAO_ANNOUNCE_INTERVAL to 0 to disable the periodic re-announce and
+    # rely solely on on-demand path requests (the shared
+    # _announce_delivery_destinations() implementation is unchanged from the
+    # #134 consolidation).
+    ANNOUNCE_INTERVAL = float(os.environ.get("LMAO_ANNOUNCE_INTERVAL", "60"))
 
     logger.info("Announcing server presence for LoRa path discovery...")
     try:
