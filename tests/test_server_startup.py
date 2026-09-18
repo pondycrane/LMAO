@@ -2,7 +2,6 @@
 
 import asyncio
 import logging
-import os
 import sys
 from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
@@ -231,17 +230,14 @@ class TestAnnounceOnStartup:
         cleanup_common_mocks()
 
     @pytest.mark.asyncio
-    async def test_periodic_announce_runs_without_nameerror(self, capsys, caplog):
-        """Periodic re-announce must run repeatedly without NameError.
+    async def test_announce_is_one_shot_no_periodic_reannounce(self, capsys, caplog):
+        """Startup announce only — the periodic re-announce is retired (#142).
 
-        Regression for issue #134: the deployed image logged
-        "Periodic announce failed: name '_announce_delivery_destinations'
-        is not defined" on alternating announce cycles because the periodic
-        task referenced a helper that no longer existed / was out of scope.
-
-        Uses the real event loop (NOT a patched asyncio.sleep, which starves
-        the background task) and a short LMAO_ANNOUNCE_INTERVAL so the
-        periodic task wakes several times during the test window.
+        Issue #142: discovery is on-demand (the server answers client path
+        requests), so async_main must announce exactly once and never schedule
+        a repeating announce — even after real time passes.  Uses the real
+        event loop (NOT a patched asyncio.sleep, which starves background
+        tasks) so a re-announce task would actually fire here.
         """
         for _mod in ("server", "lmao_server", "lmao_server.server"):
             if _mod in sys.modules:
@@ -253,8 +249,6 @@ class TestAnnounceOnStartup:
 
         original_grpc = server_mod.GRPC_AVAILABLE
         original_nats = server_mod.NATS_AVAILABLE
-        original_interval = os.environ.get("LMAO_ANNOUNCE_INTERVAL")
-        os.environ["LMAO_ANNOUNCE_INTERVAL"] = "0.05"
         try:
             server_mod.GRPC_AVAILABLE = False
             server_mod.NATS_AVAILABLE = False
@@ -269,7 +263,7 @@ class TestAnnounceOnStartup:
             task = asyncio.ensure_future(server_mod.async_main())
             try:
                 with caplog.at_level(logging.INFO, logger="lmao_server.server"):
-                    # Real suspension -> the periodic task actually runs.
+                    # Real suspension -> a periodic task would wake in here.
                     await asyncio.sleep(0.35)
             finally:
                 task.cancel()
@@ -278,34 +272,22 @@ class TestAnnounceOnStartup:
                 except (asyncio.CancelledError, KeyboardInterrupt):
                     pass
         finally:
-            if original_interval is None:
-                os.environ.pop("LMAO_ANNOUNCE_INTERVAL", None)
-            else:
-                os.environ["LMAO_ANNOUNCE_INTERVAL"] = original_interval
             server_mod.GRPC_AVAILABLE = original_grpc
             server_mod.NATS_AVAILABLE = original_nats
             cleanup_common_mocks()
 
-        # The periodic task should have woken several times: startup + repeats.
-        assert mock_router.announce.call_count >= 3, (
-            f"Expected repeated announces, got {mock_router.announce.call_count}"
+        # One announce per delivery destination, and only at startup.
+        assert mock_router.announce.call_count == 1, (
+            f"Expected a single startup announce, got {mock_router.announce.call_count}"
         )
-
-        # The shared log line proves both call sites use one implementation.
         sent_logs = [r for r in caplog.records if "Server announce sent" in r.message]
-        assert len(sent_logs) >= 2
+        assert len(sent_logs) == 1, f"Expected exactly one announce log, got {len(sent_logs)}"
 
-        # The exact production bug must be absent: no NameError-formatted
-        # periodic failure.
+        # Issue #134's NameError form must stay absent too.
         for record in caplog.records:
-            if "Periodic announce failed" not in record.message:
-                continue
-            assert "is not defined" not in record.message, (
-                f"Periodic announce NameError regression: {record.message}"
-            )
-            assert "NameError" not in record.message, (
-                f"Periodic announce NameError regression: {record.message}"
-            )
+            assert "_announce_delivery_destinations" not in record.message or (
+                "is not defined" not in record.message
+            ), f"Announce NameError regression: {record.message}"
 
 
 class TestInitRnsAndLxmf:
