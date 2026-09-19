@@ -217,13 +217,38 @@ plug in Port A.
 
 ---
 
+## 5b. Native default-OFF + floating-line observation (2026-09-18)
+
+The node now runs the **native-client** firmware
+(`native-client/firmware/main/`), not the MicroPython `boot.py` this recipe was
+written against. The default-OFF requirement is implemented in `pump.cpp`:
+
+- `pump_init()` drives **G26 LOW as the very first action of `app_main`**, before
+  NVS / UART / sensors / RNS, and enables the pad's internal pull-down as a weak
+  extra (the pad driver is the authority; the internal ~45 kΩ is *not* a
+  substitute for the 10 kΩ hardware pull-down).
+- Verified on hardware 2026-09-18: the boot log's **second line** is
+  `pump: pump enable G26 driven LOW (OFF), actuation DISABLED (dry run)`.
+- `pump_set(true)` is additionally refused while `PUMP_ACTUATION_ENABLED` is `0`.
+
+**Observation (user-witnessed, 2026-09-18):** during a supervised `idf.py flash`
+the ESP sits in download mode with G26 floating for ~1 minute, and the pump
+motor **stayed off for the whole window**. This is consistent with the topology
+change in §4 — nothing pulls G26 up any more now that the I2C mux / ENV III are
+off the Grove bus — but it is *one observation*, not a fix: the "always on"
+failure mode in §5 was measured on the old topology, and a floating control line
+remains undefined behaviour. **The 10 kΩ pull-down stays required (issue #119)
+before firmware ever actuates the pump.**
+
+---
+
 ## 6. Open items
 
 | Item | Needed for | Owner |
 |------|-----------|-------|
 | ~~QMP6988 `0x70` collision~~ **RESOLVED 2026-09-16 by topology:** ENV III on DTU Port A (G21/G25) has no mux in line → chip ID `0x5C` reads clean. Still to do: real pressure readout in Phase 2 (config/sample sequence) | pressure telemetry + pressure-trend input | Phase 2 driver |
-| ~~Soil-moisture pins~~ **DONE 2026-09-16:** moisture ADC on G32, calibrated air≈2068 / water≈1580; full moisture calibration curve + soil-data point still pending | Phase 2/3 calibration & control | done + user |
-| ~~Pump pin & polarity~~ **DONE 2026-09-16:** pump enable on G26, active-HIGH, 5 s fail-off test passed; **hardware pull-down + default-OFF `boot.py` still pending** before firmware may drive it | Phase 5 pump driver | done + firmware |
+| ~~Soil-moisture pins~~ **DONE 2026-09-16:** moisture ADC on G32, calibrated air≈2068 / water≈1580; full moisture calibration curve + soil-data point still pending. **Live 2026-09-18 data:** probe-in-air ≤ 1.4 %, probe seated in the Kale pot 42.0–47.5 % → a 5 % plausibility floor safely separates "not in soil" from "dry soil" (`algorithm-evaluation.md` §1.4 A1.5) | Phase 2/3 calibration & control | done + user |
+| ~~Pump pin & polarity~~ **DONE 2026-09-16:** pump enable on G26, active-HIGH, 5 s fail-off test passed. **Default-OFF is now implemented in the native firmware and hardware-verified** as the first boot action (2026-09-18, `pump.cpp`, §5b); **the 10 kΩ hardware pull-down is still to be fitted** before firmware may energise the pump | Phase 5 pump driver | firmware done, pull-down pending (#119) |
 | Resolve Grove-port sharing before stacking DTU base + ENV III with the Watering Unit (both would drive/share G26/G32) | air T/humidity on same bus as moisture/pump | user + firmware |
 | Decide DTU mode transition (P2P currently; LoRaWAN needed for server path) | Phase 6 | evaluation/plan |
 | Verify the alternative Atom↔base connectors (J1 G21/G25) | sensor relocation option | hardware |

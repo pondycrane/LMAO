@@ -6,6 +6,7 @@ load("@rules_python//python:defs.bzl", "py_binary", "py_library")
 exports_files([
     "boot.py",
     "main.py",
+    "chart.py",
     "config.py",
     "lora_boards.py",
 ])
@@ -27,12 +28,23 @@ filegroup(
     name = "client_files",
     srcs = [
         "boot.py",
+        "chart.py",
         "config.py",
         "lora_boards.py",
         "main.py",
         "//cardputer_client/proto:lma_encoder.py",
         ":lib_files",
     ],
+    visibility = ["//visibility:public"],
+)
+
+# ── Chart renderer (reusable by unit tests) ────────────────────────
+# Pure MicroPython: the DATA-line parser and the geometry are exercised on the
+# host with a fake display (see //tests:test_chart).
+py_library(
+    name = "chart_lib",
+    srcs = ["chart.py"],
+    imports = ["."],
     visibility = ["//visibility:public"],
 )
 

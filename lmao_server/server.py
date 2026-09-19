@@ -30,6 +30,7 @@ from lma_core.message_utils import decode_lmao_message
 from lma_core.rns_di import LXMF, RNS
 from lma_core.rns_init import init_rns_and_lxmf as _shared_init
 from lma_core.rns_init import warn_if_rnode_missing
+from lma_core.sprout_history import SproutHistory
 
 # Local imports
 from lmao_server import config
@@ -102,6 +103,13 @@ def _build_allowed_clients() -> set:
 
 
 ALLOWED_CLIENTS = _build_allowed_clients()
+
+# Recent Sprout soil-moisture samples, folded in from every SensorReport the
+# server receives and appended to the client reply below as a DATA line so a
+# client (the Cardputer) can chart it — the server holds the stream in memory,
+# the ingest pod owns DuckDB, and the chart needs no extra airtime because the
+# client already round-trips a message every interval.
+SPROUT_HISTORY = SproutHistory()
 
 
 def _warn_if_rnode_missing(rnode_port):
@@ -398,6 +406,17 @@ class Server:
                 len(content_bytes),
             )
 
+            # Fold Sprout telemetry into the chart buffer.  A message that is
+            # not a SensorReport (or an undecodable payload) must never disturb
+            # the ACK path below.
+            try:
+                envelope = LMAOEnvelope()
+                envelope.ParseFromString(content_bytes)
+                if envelope.WhichOneof("payload") == "sensor":
+                    SPROUT_HISTORY.update(envelope.sensor)
+            except Exception:
+                logger.debug("No SensorReport in this message — chart buffer unchanged")
+
             # Decode content (protobuf first, UTF-8 fallback, byte-count placeholder)
             decode_lmao_message(content_bytes)
 
@@ -405,6 +424,11 @@ class Server:
             reply_text = (
                 f"ACK from LMAO Server — received your message ({len(content_bytes)} bytes)"
             )
+            data_line = SPROUT_HISTORY.data_line()
+            if data_line:
+                # Piggyback the chart payload on the reply the client already
+                # solicits — no extra frames, no query protocol.
+                reply_text = f"{reply_text}\n{data_line}"
             logger.info("Reply: %s", reply_text)
 
             if source_dest is not None and self.router is not None:
