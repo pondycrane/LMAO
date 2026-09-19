@@ -77,6 +77,106 @@ every DECISION_PERIOD (300 s), after moisture ADC settles (~60 s):
 - **Decision cadence** 300 s: pump duty is slow; 60 s pushes are for telemetry (evidence E shows T/RH don't need faster control sampling).
 - **Moisture noise band:** hysteresis ≥ ±30 LSB = 12 % of span (evidence C); the observed T/RH noise (evidence E) is far below any control threshold — T/RH are monitoring/ET₀ inputs only, never on-off triggers.
 
+### 1.4 Amendment A1 (2026-09-18) — pulse dosing + plant profiles
+
+Two requirements arrived with the node installed on a **Kale** plant
+(2026-09-18). They refine §1.3; the verdict itself is unchanged (hysteresis
+state machine on soil moisture — still no fuzzy engine, still no PID on θ).
+
+**A1.1 The watering session must never out-run the pot (no overflow).** The
+single fixed-length `WATER_DURATION` burst of §1.3 becomes a **pulse train**:
+one session = N pulses of `pulse_on_ms` separated by `soak_ms`, with the probe
+re-read at the end of every soak and an early stop as soon as a settled reading
+reaches `WET`.
+
+- `soak_ms >= probe_settle_ms (60 s)` is enforced, so every reading that
+  authorises the next pulse is hydraulically settled — that is what makes the
+  closed-loop stop trustworthy instead of a local wet-spot artefact.
+- Hard, non-plant-tunable ceilings: `pulse_on_ms <= 15 s`, `max_pulses <= 5`,
+  `session_max_ms = 300 s` of wall clock, plus a ceiling on any profile's daily
+  cap. Sessions are short **by construction**, not by configuration.
+- The verified 5 s motor spin-up stays the pulse-width floor: **session
+  shortness comes from pulse count + soak, not from sub-5 s pulses** (a 2–3 s
+  pulse would need its own supervised motor-start test).
+
+**A1.2 The optimum must be configurable per plant type.** `DRY`/`WET` stop
+being fixed constants: a `PlantProfile` supplies `target_pct` + `hyst_pct`
+(band centre ± half-band → dry/wet), the pulse/soak shape, the per-session pulse
+cap and the daily cap. Profiles shipped: **kale (default)**, herbs, tomato,
+succulent, generic. The node stores the profile **by name** in NVS, so the
+table can be reordered without mis-configuring a deployed plant.
+
+| profile | target | band | dry/wet | pulse | soak | max pulses | min gap | daily cap |
+|---|---|---|---|---|---|---|---|---|
+| kale (default) | 45 % | ±8 | 37 / 53 | 5 s | 90 s | 1 (→2–3 after flow cal.) | 30 min | 60 s |
+| herbs | 40 % | ±8 | 32 / 48 | 5 s | 90 s | 2 | 30 min | 60 s |
+| tomato | 55 % | ±10 | 45 / 65 | 5 s | 120 s | 3 | 20 min | 90 s |
+| succulent | 20 % | ±6 | 14 / 26 | 5 s | 120 s | 1 | 120 min | 30 s |
+| generic | 40 % | ±8 | 32 / 48 | 5 s | 90 s | 1 | 30 min | 60 s |
+
+- **These are sensor-scale percentages, not volumetric water content** (100 % =
+  probe submerged, well past field capacity). They are horticultural starting
+  points to be re-fitted from the §4 decay curves; R1 (soil-type/calibration
+  mismatch) is unchanged and is now explicitly per-profile.
+- Kale seeds at `max_pulses = 1` until the pump flow (ml/s) is calibrated (R3):
+  one 5 s pulse, stop, observe the pot.
+
+**A1.3 Unchanged from §1.3:** the override layer is evaluated **after** the
+control law and always wins — probe read failure → immediate fail-off + `Fault`;
+saturation 85 % or air RH 90 % → off + 2 h lockout; min ON / min OFF; daily cap;
+the pump pin OFF as the first boot action (#119). The engine stays integer-only
+(Q8.8) on the same 0–100 % scale, and the ET₀/VPD scaler (§3) still multiplies
+the dose in v2.
+
+**A1.4 Clock caveat.** The node has no RTC, so the daily-cap window advances by
+**awake** time and the totaliser is persisted in NVS. A power cycle can only
+delay the 24 h rollover, i.e. it can under-water, never over-water.
+
+**A1.5 Probe plausibility floor (2026-09-18, from live data).** The 2-point
+curve anchors 0 % at **air** (2068 counts), so a probe that is *not* in soil
+reads indistinguishable from bone-dry soil. The live stream showed it: **139 of
+159 moisture samples ≤ 1.4 %** for 14 h (probe unseated) versus **42.0–47.5 %**
+once seated in the pot. Acting on that reading would have dosed the pot every
+30 min up to the daily cap with nothing measuring the result — which is why a
+**settled reading below `plausible_floor = 5 %` is treated as an implausible
+input rather than as data**: the engine fails off (pump de-energised, state
+`Fault`) and resumes only when the reading comes back above the floor.
+
+- The floor sits inside the empirically observed air/soil gap (≤ 1.4 % vs
+  ≥ 42 %), so it cannot block a genuinely dry pot: 6 % waters normally, and the
+  boundary is covered by tests on both sides.
+- The settle gate is now "pump **OFF** and ≥ 60 s since the last pulse", so a
+  reading taken during drive can never abort a pulse or latch a lockout.
+- **Remaining gap, documented not implemented:** a probe that stays *in* soil
+  but stops responding cannot be separated from genuinely dry soil without a
+  measured dose-response (i.e. without the flow calibration). That case stays
+  bounded by the pulse-count cap, the session backstop and the daily cap.
+
+**A1.6 Input conditioning — settled-sample median window (2026-09-18).** The
+probe is a coarse analog channel (488 LSB span) on an unshielded cable, and the
+live stream contains sub-second outliers: one sample at **36.9 %** against a
+42.0–47.5 % cluster, while the engine's own 1 s ticks around it never left the
+band. One such glitch below `dry` is enough to move water, so decisions no
+longer act on a single reading:
+
+- Only **settled** samples (pump OFF and ≥ 60 s since the last pulse) enter a
+  30-sample window, and the value used for *every* comparison — `dry`/`wet`,
+  saturation, plausibility — is the **median** of that window. A median ignores
+  up to half the window being garbage and needs no tuning beyond N; a mean or
+  EMA is still dragged by outliers, and an EMA biases the reading during
+  genuine drying.
+- The window is **cleared on every pump edge**, so the post-pulse reading that
+  authorises the next pulse is made only of post-pulse samples. Without that,
+  the median would still be the pre-pulse dry soil and the engine would keep
+  dosing blind — covered by a dedicated regression test.
+- Until the window is full the reading counts as **unavailable**: the engine
+  stays idle rather than deciding on a partial window. Post-pulse that is the
+  60 s hydraulic settle plus 30 s of sampling = 90 s, i.e. exactly the kale soak.
+- **Dataset impact:** `sensor_id 4` now carries the conditioned value (median of
+  the settled window), falling back to the instantaneous sample during a pulse
+  train where no filtered value exists. Historic rows and new rows are therefore
+  **not the same estimator** — do not mix them when fitting.
+
 ---
 
 ## 2. Rulebase / membership functions
@@ -123,9 +223,10 @@ Per-sample telemetry (sensor_id already live/planned, blueprint §3.1 + native-c
 |---|---|---|
 | 2 | humidity % (SHT30) | **live** |
 | 3 | air temp °C (SHT30) | **live** |
-| 4 | soil moisture % (calibrated) | to add (v1 controller) |
+| 4 | soil moisture % (calibrated) | live — conditioned: median of the settled window (§1.4 A1.6) |
 | 6 / 7 | pump duration (s) / pump active (0/1) | to add (v1 controller; **required for watering-event tagging**) |
 | 5 | pressure hPa (QMP6988) | to add (ML-only; §2) |
+| 10 / 11 | active profile dry / wet threshold % | live with the v1 controller — the band each sample was judged against, and what the Cardputer chart's threshold lines are drawn from |
 | 8 / 9 | battery V / RSSI dBm | later |
 
 Derived features (server-side, from the 60 s raw stream):
@@ -188,7 +289,8 @@ Replaces the blueprint's Phase 3 (fuzzy engine) and re-sequences the rest agains
 
 1. **P3a — v1 controller (control engine, issue #113 first slice):**
    hysteresis state machine (§1.3) in the native-client, with the always-last safety override layer (#113) and the already-shipped pump default-OFF (#119). Emit sensor_id **4** (moisture) and **6/7** (pump duration/active) for ML.
-   - Host unit tests (native-client `tests/`): threshold/hysteresis transitions, override precedence (saturation lockout, min-ON/OFF, max-daily), fail-off on read error/NaN.
+   - Amended by §1.4: the session is a **pulse train** (`control.h/.cpp`) and the thresholds come from a **plant profile** (`target ± band`), with the dose/overflow ceilings in the hard-limits layer.
+   - Host unit tests (native-client `tests/`, `sprout_control_test`): pulse width and dose caps, soak ≥ probe settle, early stop at `WET`, override precedence (saturation lockout, RH lockout, min-ON/OFF, daily cap + its ceiling), fail-off on probe read error, hysteresis band, monotonicity sweep (drier ⇒ ≥ dose), NVS state roundtrip + daily-window rollover.
 2. **Calibration (one-time, user-assisted, hardware):** 10 kΩ pull-down on G26 (#119); moisture soil sample (2-point + soil type); pump flow trial (ml/s). These unblock trusting v1 thresholds.
 3. **P3b — ET₀ v2 scaler (post-data):** after ≥1 week of `Δθ`/VPD data, fit `k` (§3), enable `WATER_SCALE`.
 4. **Downlink (issue #115):** CommandRequest (`pump_on/off`, duration update, reboot) → the same state-machine core mutates parameters, overrides still last.

@@ -41,18 +41,18 @@ smart_irrigation/
 ├── AGENTS.md                     # hard rules for coding agents
 ├── docs/
 │   ├── development-plan.md       # the blueprint (phases 1–8 + appendices)
-│   └── algorithm-evaluation.md   # MANDATORY deliverable before firmware work
-├── firmware/                     # Atom Lite MicroPython node (µReticulum port)
-│   ├── config.py, lora_boards.py, flash.py, boot.py, main.py
-│   ├── lib/urns/                 # NOT in this tree — snapshotted to .mpy at build time from cardputer_client/lib/urns (tools/build_mpy.sh)
-│   ├── lib/sensors/              # pca9548a.py, dht20.py, ...
-│   ├── proto/lma_encoder.py      # vendored copy
-│   ├── src/                      # control engine, sensor fusion, pump
-│   └── tests/                    # host-side pytest with MicroPython mocks
-├── stm32-dtu/                    # STM32WLE5CC LoRaWAN bridge (C, PlatformIO)
-├── k8s-app/                      # server-side ingest extensions (if not in repo root)
-├── scripts/                      # sim/benchmark/dataset tools (dev machine)
-└── tests/                        # E2E + integration tests (Bazel targets)
+│   ├── hardware-verification.md  # verified pin map / wiring reality
+│   └── algorithm-evaluation.md   # MANDATORY deliverable, §1.3–§1.4 = the control verdict
+├── native-client/                # THE NODE FIRMWARE — ESP-IDF C++17 (issue #130+)
+│   ├── BUILD                     # host cc_library/cc_test + build/flash sh_binary
+│   ├── firmware/                 # main/*.cpp (control, pump, sensors, DTU-AT, LXMF)
+│   │   ├── build.sh, flash.sh    # Docker ESP-IDF build / supervised flash
+│   │   └── components/rtreticulum
+│   ├── tests/                    # host C++ tests of the same code the device runs
+│   └── host/                     # RTReticulum <-> Python RNS interop harness
+├── firmware/                     # legacy MicroPython shell: config.py + tools/ only
+│   └── tools/probe_hardware.py   # the sanctioned read-only hardware probe
+└── hardware/enclosure/           # Sprout enclosure (OpenSCAD + STLs)
 ```
 
 ## Hardware (fixed — per blueprint §13, Appendix B)
@@ -101,6 +101,79 @@ archon workflow run smart-irrigation-dev "Phase 6: UART bridge + LoRaWAN integra
 
 See [`../docs/archon-workflows.md`](../docs/archon-workflows.md) for the full
 workflow reference.
+
+## Irrigation controller (v1 — in `native-client/`)
+
+The control law is the verdict of `docs/algorithm-evaluation.md` §1.3 as amended
+by §1.4: a hysteresis state machine on the soil probe, where one watering
+session is a **pulse train** — 5 s pulses, a soak of at least the 90 s/probe
+settle time, the probe re-read after every soak, and an early stop as soon as
+the reading reaches `WET`. A session therefore cannot out-run the pot, and the
+hard safety layer is evaluated last and always wins (probe read failure →
+fail-off; a settled reading at/below the 5 % plausibility floor → fail-off, since
+the 0 % anchor is *air* and an unseated probe looks bone dry; saturation 85 % /
+air RH 90 % → off + 2 h lockout; min ON / min OFF; daily cap; pump pin OFF as the
+first boot action, #119).
+
+The plant's optimum is a **plant profile**: `target ± band` becomes the dry/wet
+thresholds, plus the pulse/soak shape and dose caps. Shipped profiles: **kale
+(default)**, herbs, tomato, succulent, generic. The node stores the profile by
+name in NVS (`profile`); switching it today means a reflash or an NVS write —
+remote switching lands with the LXMF downlink phase (#115).
+
+Decisions never act on a single probe reading: only samples taken with the pump
+off and settled enter a 30-sample window, and the value compared against every
+threshold is the **median** of that window — the live stream contains
+sub-second outliers that would otherwise move water. The window is cleared on
+each pump edge so a post-pulse reading is never mixed with pre-pulse soil.
+
+| Where | What |
+|---|---|
+| `native-client/firmware/main/control.{h,cpp}` | profiles, pulse-train state machine, hard overrides (pure C++, integer Q8.8) |
+| `native-client/firmware/main/pump.{h,cpp}` | G26 driver: default-OFF, actuation gate, on-time accounting |
+| `native-client/tests/control_test.cpp` | `bazel test //smart_irrigation/native-client:sprout_control_test` |
+
+⚠️ **Actuation stays off** — `PUMP_ACTUATION_ENABLED` is `0` in `pump.h` until the
+#119 hardware pull-down is fitted and the OFF level is verified through
+reset/flash. The node runs the engine in **DRY RUN**: it decides and logs, the
+pump stays de-energised, sensor_id 6/7 (pump duration/active) are *not* emitted,
+and nothing is written to the persisted control blob — so the ML stream and the
+daily cap never count doses that did not happen.
+
+## Cardputer chart (viewing the Sprout data)
+
+The production Cardputer draws the Sprout soil-moisture series on its 240x135
+screen: the latest value in the header, a white trace, the plant profile's
+**dry** (red) and **wet** (cyan) threshold lines, and `dry/wet/n` in the footer.
+It redraws on every reply, i.e. once per 300 s send cycle — matching the
+Sprout's 5-minute telemetry cadence, so no cycle fetches unchanged data.
+
+The data path adds no protocol and no airtime — the server already ACKs every
+allow-listed client message, so it *piggybacks* the series on that ACK
+(`cardputer_client/chart.py` parses it):
+
+```
+Sprout → sensor_id 4 (moisture) + 10/11 (active dry/wet band) → server
+server → keeps a 30-sample ring per node (lma_core/sprout_history.py)
+       → appends "DATA <node8> <dry> <wet> <v0..vn>" to its ACK reply
+Cardputer → chart.draw() on each drained reply
+```
+
+Notes:
+- The band travels with the data, so the chart's threshold lines are the node's
+  *actual* profile, not a copy that can drift, and the training stream records
+  which band each sample was judged against.
+- The server's ring is in memory: a server restart empties the chart, which
+  refills over the next 2.5 h (30 samples x 5 min).
+- The Cardputer ADV's MicroPython ships **M5.Lcd** (LovyanGFX) — there is no
+  `st7789` module, so the client's old st7789 display path never engaged. The
+  chart talks to a small adapter in `cardputer_client/main.py` that converts
+  RGB888 to the panel's colour depth.
+
+⚠️ **Flash the Cardputer with `bazel run //tools:install_all -- --skip-rnode`**,
+not `bazel run //cardputer_client:flash`: only `install_all` injects the
+server's `DEST_HASH`, and the plain flash target uploads the repo's
+`config.py` (where it is `None`) — which silently stops the node sending.
 
 ## Safety (also in AGENTS.md)
 
