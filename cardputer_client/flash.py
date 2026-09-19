@@ -37,6 +37,7 @@ except ImportError:
 FILES_TO_UPLOAD = [
     "boot.py",
     "config.py",
+    "chart.py",
     "lora_boards.py",
     "main.py",
     "proto/lma_encoder.py",

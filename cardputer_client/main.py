@@ -31,25 +31,35 @@ for _lp in _LIB_PATHS:
 else:
     HAS_URNS = False
 
-# Display support (if available)
+# Display support (if available).  The Cardputer ADV ships M5Stack's
+# MicroPython, whose display is M5.Lcd (LovyanGFX) — there is no ``st7789``
+# module on this device, so the previous st7789 path here never engaged.
 try:
-    import st7789
-    from machine import SPI, Pin
+    import M5
 
-    HAS_DISPLAY = True
+    HAS_DISPLAY = hasattr(M5, "Lcd")
 except ImportError:
     HAS_DISPLAY = False
+
+# Chart renderer (optional — the text status screen is the fallback)
+try:
+    import chart
+
+    HAS_CHART = True
+except ImportError:
+    HAS_CHART = False
+    chart = None  # type: ignore[assignment]
 
 # Proto encoder (optional — gracefully degrades if not on device)
 try:
     from proto.lma_encoder import (
+        FIELD_ACK,
         decode_envelope,
         encode_command_ack,
         encode_command_envelope,
         encode_field,
         encode_length_delimited,
         encode_sensor_envelope,
-        FIELD_ACK,
         make_poc_message,
         parse_poc_message,
     )
@@ -142,10 +152,7 @@ def _init_wifi(ssid, password, config, debug=0):
     """
     # Check if any interface requires WiFi
     interfaces = config.get("interfaces", [])
-    needs_wifi = any(
-        iface.get("type") in ("UDPInterface", "WiFiInterface")
-        for iface in interfaces
-    )
+    needs_wifi = any(iface.get("type") in ("UDPInterface", "WiFiInterface") for iface in interfaces)
     if not needs_wifi:
         return False
 
@@ -231,33 +238,62 @@ def make_sensor_message(identity_hex, seq, battery=3.7, strict=False):
 # ---- Display helpers ----
 
 
+class LcdDisplay:
+    """Adapter exposing the four primitives the status screen and the chart use.
+
+    ``M5.Lcd`` is LovyanGFX: it speaks ``fillScreen``/``drawPixel``/``drawLine``/
+    ``drawString``, and its colour depth varies by build (16-bit RGB565 or
+    24-bit RGB888).  Everything above this class works in RGB888 and the adapter
+    converts, so the chart never has to know which panel it is talking to.
+    """
+
+    def __init__(self, lcd):
+        self._lcd = lcd
+        self._set_text_color = getattr(lcd, "setTextColor", None)
+        depth = 16
+        try:
+            depth = lcd.getColorDepth()
+        except Exception:
+            depth = 16  # assume RGB565 when the panel cannot report its depth
+        self._rgb565 = depth == 16
+
+    def _color(self, rgb888):
+        if not self._rgb565:
+            return rgb888
+        r = (rgb888 >> 16) & 0xFF
+        g = (rgb888 >> 8) & 0xFF
+        b = rgb888 & 0xFF
+        return ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3)
+
+    def fill(self, rgb888):
+        self._lcd.fillScreen(self._color(rgb888))
+
+    def pixel(self, x, y, rgb888):
+        self._lcd.drawPixel(int(x), int(y), self._color(rgb888))
+
+    def line(self, x0, y0, x1, y1, rgb888):
+        self._lcd.drawLine(int(x0), int(y0), int(x1), int(y1), self._color(rgb888))
+
+    def text(self, string, x, y, rgb888):
+        if self._set_text_color is not None:
+            self._set_text_color(self._color(rgb888), self._color(0x000000))
+        self._lcd.drawString(string, int(x), int(y))
+
+
 def init_display():
-    """Initialize the Cardputer ST7789 display."""
+    """Initialise the Cardputer display, or None when unavailable."""
     if not HAS_DISPLAY:
         return None
     try:
-        spi = SPI(
-            1,
-            baudrate=40000000,
-            polarity=1,
-            phase=0,
-            sck=Pin(36),
-            mosi=Pin(35),
-            miso=Pin(37),
-        )
-        tft = st7789.ST7789(
-            spi,
-            240,
-            135,
-            reset=Pin(33, Pin.OUT),
-            dc=Pin(34, Pin.OUT),
-            cs=Pin(12, Pin.OUT),
-            backlight=Pin(38, Pin.OUT),
-            rotation=1,
-        )
-        tft.init()
-        tft.fill(0x0000)
-        return tft
+        display = LcdDisplay(M5.Lcd)
+        panel = "unknown"
+        try:
+            panel = f"{M5.Lcd.width()}x{M5.Lcd.height()}"
+        except Exception:
+            panel = "unknown"
+        print(f"Display ready: {panel}")
+        display.fill(0x000000)
+        return display
     except Exception as e:
         print(f"Display init failed: {e}")
         return None
@@ -267,10 +303,10 @@ def display_status(tft, lines):
     if tft is None:
         return None
     try:
-        tft.fill(0x0000)
+        tft.fill(0x000000)
         y = 5
         for line in lines[:10]:
-            tft.text(line, 5, y, 0xFFFF)
+            tft.text(line, 5, y, 0xFFFFFF)
             y += 13
         return tft
     except Exception as e:
@@ -279,13 +315,18 @@ def display_status(tft, lines):
 
 
 def log(msg, tft=None, status_lines=None):
-    """Print to serial and optionally update display."""
+    """Print to serial and optionally update display.
+
+    Once the chart owns the screen the text repaint is suppressed (the lines
+    still go to serial and status_lines) so the chart is not wiped and redrawn
+    on every send; it comes back automatically if the chart fails to draw.
+    """
     print(msg)
     if status_lines is not None:
         status_lines.append(msg)
         if len(status_lines) > 8:
             status_lines.pop(0)
-        if tft is not None:
+        if tft is not None and not _CHART_ON_SCREEN:
             tft = display_status(tft, status_lines)
     return tft
 
@@ -410,9 +451,7 @@ def handle_reply(message):
     content = ""
     source_info = "unknown"
     try:
-        source_info = (
-            message.source_hash.hex()[:8] if message.source_hash else "unknown"
-        )
+        source_info = message.source_hash.hex()[:8] if message.source_hash else "unknown"
         # Decode protobuf LMAOEnvelope content first, fall back to raw UTF-8
         raw = message.content if hasattr(message, "content") else b""
         if HAS_PROTO and parse_poc_message is not None:
@@ -459,11 +498,17 @@ def handle_reply(message):
                 if action_lower == "reboot":
                     print(f"handle_reply: REBOOT command received (id={cmd_id})")
                     # Send best-effort CommandAck before resetting
-                    if _ROUTER is not None and encode_command_ack is not None and encode_field is not None:
+                    if (
+                        _ROUTER is not None
+                        and encode_command_ack is not None
+                        and encode_field is not None
+                    ):
                         try:
                             ack_bytes = encode_command_ack(cmd_id, self_hex, True, "Rebooting")
                             ack_envelope = encode_field(
-                                FIELD_ACK, 2, encode_length_delimited(ack_bytes)  # noqa: F821
+                                FIELD_ACK,
+                                2,
+                                encode_length_delimited(ack_bytes),  # noqa: F821
                             )
                             _ROUTER.send_message(
                                 destination_hash=message.source_hash,
@@ -479,10 +524,7 @@ def handle_reply(message):
                     return
 
                 # Unknown action — log but don't crash
-                print(
-                    f"handle_reply: unknown command action '{action}' "
-                    f"(id={cmd_id}) — ignoring"
-                )
+                print(f"handle_reply: unknown command action '{action}' (id={cmd_id}) — ignoring")
                 return
         except Exception as cmd_err:
             print(f"handle_reply: CommandRequest decode error: {cmd_err}")
@@ -495,6 +537,11 @@ def handle_reply(message):
 
 
 pending_replies: list[str] = []
+
+# True while the chart owns the display (see log()).  Set by _periodic_send
+# after a successful draw, cleared when a draw fails so the text screen can
+# take over again.
+_CHART_ON_SCREEN = False
 
 
 # ---- Helpers ----
@@ -721,9 +768,21 @@ def main():
     try:
         import uasyncio as asyncio
 
-        asyncio.run(_async_runtime(tft, status_lines, rns, router, identity_hex,
-                        DEST_HASH, SEND_SENSOR, HAS_PROTO, _CONFIG, pending_replies,
-                        wdt))
+        asyncio.run(
+            _async_runtime(
+                tft,
+                status_lines,
+                rns,
+                router,
+                identity_hex,
+                DEST_HASH,
+                SEND_SENSOR,
+                HAS_PROTO,
+                _CONFIG,
+                pending_replies,
+                wdt,
+            )
+        )
     except KeyboardInterrupt:
         log("Shutting down...", tft, status_lines)
     except Exception as e:
@@ -734,9 +793,17 @@ def main():
     log("Halting.", tft, status_lines)
 
 
-async def _periodic_send(tft, status_lines, router, identity_hex,
-                      dest_hash, send_sensor, has_proto, config,
-                      pending_replies):
+async def _periodic_send(
+    tft,
+    status_lines,
+    router,
+    identity_hex,
+    dest_hash,
+    send_sensor,
+    has_proto,
+    config,
+    pending_replies,
+):
     """Periodic send loop: sends Hello + SensorReport on interval.
 
     Defined at module level (not nested) to avoid MicroPython closure
@@ -749,6 +816,8 @@ async def _periodic_send(tft, status_lines, router, identity_hex,
     DEST_HASH after server reboot).
     """
     import uasyncio as asyncio
+
+    global _CHART_ON_SCREEN
 
     seq = 0
     MAX_CONSECUTIVE_ERRORS = 10
@@ -832,10 +901,34 @@ async def _periodic_send(tft, status_lines, router, identity_hex,
                         sys.print_exception(sensor_err)
                         log(f"Sensor send failed: {sensor_err}", tft, status_lines)
 
-            # Drain pending replies
+            # Drain pending replies.  A DATA line carries the Sprout moisture
+            # series (the server piggybacks it on this ACK, so the chart costs
+            # no extra airtime); anything else is a plain status line.
+            #
+            # The chart is drawn AFTER the whole drain: log() repaints the text
+            # status screen, so a later text reply must not land on top of it.
+            chart_data = None
             for reply in pending_replies:
-                tft = log(f"Reply: {reply}", tft, status_lines)
+                data = chart.parse_data_line(reply) if HAS_CHART else None
+                if data is not None:
+                    chart_data = data  # a later record is the fresher one
+                else:
+                    tft = log(f"Reply: {reply}", tft, status_lines)
             pending_replies.clear()
+
+            if chart_data is not None:
+                result = chart.draw(tft, chart_data)
+                if result["error"]:
+                    _CHART_ON_SCREEN = False
+                    tft = log(f"Chart unavailable: {result['error']}", tft, status_lines)
+                else:
+                    _CHART_ON_SCREEN = True
+                    # Serial-only (no tft) so the chart stays on the display.
+                    log(
+                        f"Chart: {chart_data['samples'][-1]}% "
+                        f"dry {chart_data['dry']} wet {chart_data['wet']} "
+                        f"n={len(chart_data['samples'])}"
+                    )
 
             # Success — reset error counter and sleep the normal interval.
             consecutive_errors = 0
@@ -875,14 +968,24 @@ async def _periodic_send(tft, status_lines, router, identity_hex,
             # VM always yields and Ctrl+C is always processed.
             delay = min(
                 config["interval_seconds"],
-                BACKOFF_BASE * (2 ** consecutive_errors),
+                BACKOFF_BASE * (2**consecutive_errors),
             )
             await asyncio.sleep(delay)
 
 
-async def _async_runtime(tft, status_lines, rns, router, identity_hex,
-                     dest_hash, send_sensor, has_proto, config, pending_replies,
-                     wdt=None):
+async def _async_runtime(
+    tft,
+    status_lines,
+    rns,
+    router,
+    identity_hex,
+    dest_hash,
+    send_sensor,
+    has_proto,
+    config,
+    pending_replies,
+    wdt=None,
+):
     """Async runtime: runs the Reticulum event loop (job_loop + poll_loop)
     alongside a periodic send task for Hello and SensorReport messages.
 
@@ -901,9 +1004,17 @@ async def _async_runtime(tft, status_lines, rns, router, identity_hex,
 
     # ---- Launch concurrent tasks ----
     send_task = asyncio.create_task(
-        _periodic_send(tft, status_lines, router, identity_hex,
-                       dest_hash, send_sensor, has_proto, config,
-                       pending_replies)
+        _periodic_send(
+            tft,
+            status_lines,
+            router,
+            identity_hex,
+            dest_hash,
+            send_sensor,
+            has_proto,
+            config,
+            pending_replies,
+        )
     )
 
     # Hardware watchdog feeder — only task whose starvation is fatal.

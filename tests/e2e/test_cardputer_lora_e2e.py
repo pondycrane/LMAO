@@ -459,13 +459,17 @@ class TestCardputerLoRaE2E:
                 "DEST_HASH assignment (string or None)."
             )
 
-            # Set a shorter interval for E2E tests (avoids exceeding the 30s serial deadline)
-            # and enable the external sensor if one is configured via env var.
-            patched_config = patched_config.replace(
-                "INTERVAL_SECONDS = 60",
+            # Set a shorter interval for E2E tests (avoids exceeding the 30s serial
+            # deadline) and enable the external sensor if one is configured via
+            # env var.  Matched by regex, not by literal, so the production
+            # default in config.py can change without breaking this patch.
+            patched_config, _n_int = _re.subn(
+                r"^INTERVAL_SECONDS\s*=\s*\d+",
                 "INTERVAL_SECONDS = 15",
+                patched_config,
+                flags=_re.MULTILINE,
             )
-            assert "INTERVAL_SECONDS = 15" in patched_config, "INTERVAL_SECONDS patch failed"
+            assert _n_int == 1, "INTERVAL_SECONDS patch failed"
             # NOTE: DEBUG is kept at 1 (the default).  Do NOT patch DEBUG=2
             # on the device — the ESP32-S3 USB-Serial-JTAG TX FIFO overflows
             # under continuous radio diagnostic output, which blocks print()
@@ -805,19 +809,17 @@ class TestCardputerLoRaE2E:
                                 _cleanup_ser = None
 
                         if _cleanup_ser is not None:
-                            # Build a safe config ensuring three critical
-                            # settings are always restored to defaults,
-                            # regardless of what the host config.py says.
+                            # Build a safe config ensuring the settings this
+                            # test patches are always restored, regardless of
+                            # what the host config.py says.  INTERVAL_SECONDS
+                            # is NOT rewritten: original_config comes from the
+                            # source tree, so it already carries the production
+                            # default (hard-coding it here silently reverted the
+                            # device to a stale value when the default changed).
                             safe_config = original_config
                             safe_config = _re.sub(
                                 r"^DEBUG\s*=\s*\d+",
                                 "DEBUG = 1",
-                                safe_config,
-                                flags=_re.MULTILINE,
-                            )
-                            safe_config = _re.sub(
-                                r"^INTERVAL_SECONDS\s*=\s*\d+",
-                                "INTERVAL_SECONDS = 60",
                                 safe_config,
                                 flags=_re.MULTILINE,
                             )

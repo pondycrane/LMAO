@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stdint.h>
 
 // Soil-moisture (M5Stack Watering Unit U101 capacitive probe) on GPIO32,
 // which is ADC1 channel 4.  Values are the verified 12-bit / 11 dB readings
@@ -21,9 +22,26 @@ inline float moisture_percent_from_counts(int raw) {
     return pct;
 }
 
+// Fixed-point variant for the control engine (AGENTS.md: no float in the
+// engine): the same 2-point curve in Q8.8, 0..25600 for 0..100 %.  Integer
+// math, so the engine's thresholds compare exactly and the host tests need no
+// float tolerance.  Lives here (not in control.h) so the calibration constants
+// stay in one place.
+inline int32_t moisture_q8_from_counts(int raw) {
+    const int32_t span = (int32_t)(MOISTURE_DRY_COUNT - MOISTURE_WET_COUNT);
+    if (span <= 0) return 0;
+    // (dry - raw) / span * 100 % * 256, rounded half away from zero.
+    int32_t num = ((int32_t)MOISTURE_DRY_COUNT - raw) * 100 * 256;
+    num += (num >= 0) ? (span / 2) : -(span / 2);
+    int32_t q8 = num / span;
+    if (q8 < 0) q8 = 0;
+    if (q8 > 25600) q8 = 25600;
+    return q8;
+}
+
 // Configure ADC1_CH4 (GPIO32) at 12-bit / 11 dB.  Idempotent; safe to call
 // after the pump-safety first action (G26 is a different pin).
 bool moisture_init(void);
 
-// Read the probe and normalise to 0..100 %.  Returns false on ADC failure.
-bool moisture_read_percent(float* out_pct);
+// Read the probe as Q8.8 percent.  Returns false on ADC failure.
+bool moisture_read_q8(int32_t* out_q8);

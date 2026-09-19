@@ -13,6 +13,7 @@ py_library(
         "rns_di.py",
         "rns_init.py",
         "server_identity.py",
+        "sprout_history.py",
         "storage.py",
     ],
     visibility = ["//visibility:public"],
