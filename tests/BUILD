@@ -133,6 +133,7 @@ py_test(
     data = [
         "//cardputer_client:boot.py",
         "//cardputer_client:config.py",
+        "//cardputer_client:chart.py",
         "//cardputer_client:lora_boards.py",
         "//cardputer_client:main.py",
         "//cardputer_client/proto:lma_encoder.py",
@@ -393,6 +394,7 @@ py_test(
     data = [
         "//cardputer_client:boot.py",
         "//cardputer_client:config.py",
+        "//cardputer_client:chart.py",
         "//cardputer_client:lora_boards.py",
         "//cardputer_client:main.py",
         "//cardputer_client/proto:lma_encoder.py",

@@ -580,10 +580,12 @@ class TestMain:
             patch("cardputer_client.flash.auto_discover_lib_files", return_value=[]),
             patch(
                 "cardputer_client.flash.upload_file",
-                side_effect=[
-                    cardputer_flash.DeviceStalledError("wedged at byte 0"),
-                    True, True, True, True, True,
-                ],
+                # The full file list is re-uploaded from the start after wedge
+                # recovery, so the success tail must match FILES_TO_UPLOAD one
+                # for one.  Derived, not literal: adding a client file (e.g.
+                # chart.py) must not silently break this mock.
+                side_effect=[cardputer_flash.DeviceStalledError("wedged at byte 0")]
+                + [True] * len(cardputer_flash.FILES_TO_UPLOAD),
             ),
             patch(
                 "cardputer_client.flash.recover_wedged_device",
