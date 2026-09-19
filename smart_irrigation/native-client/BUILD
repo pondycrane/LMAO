@@ -42,6 +42,27 @@ cc_test(
     tags = ["unit"],
 )
 
+# ── Irrigation control engine (Phase 3 per docs/algorithm-evaluation.md) ──
+# Pure C++: profiles + pulse-dosing hysteresis state machine + hard safety
+# overrides.  No ESP-IDF, so the host tests exercise exactly the device code.
+cc_library(
+    name = "sprout_control",
+    srcs = ["firmware/main/control.cpp"],
+    hdrs = ["firmware/main/control.h"],
+    strip_include_prefix = "firmware/main",
+    visibility = ["//visibility:public"],
+)
+
+cc_test(
+    name = "sprout_control_test",
+    srcs = ["tests/control_test.cpp"],
+    deps = [
+        ":moisture_math",
+        ":sprout_control",
+    ],
+    tags = ["unit"],
+)
+
 # ── Host-testable RTReticulum-dependent units (issue #133, work item 4) ──
 # RTReticulum + Mbed TLS are vendored in WORKSPACE (pinned http_archive), so
 # lxmf_send is now a real cc_library and the radio-path announce decode gets a

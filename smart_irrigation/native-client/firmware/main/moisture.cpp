@@ -12,6 +12,19 @@
 static const char* TAG = "moisture";
 static bool g_inited = false;
 
+// Shared raw read: both the telemetry % (float) and the engine's Q8.8 path
+// must come from one ADC sample path.
+static bool moisture_read_raw(int* out_raw) {
+    if (!g_inited && !moisture_init()) return false;
+    const int raw = adc1_get_raw(ADC1_CHANNEL_4);
+    if (raw < 0) {
+        ESP_LOGW(TAG, "ADC read failed (raw=%d)", raw);
+        return false;
+    }
+    *out_raw = raw;
+    return true;
+}
+
 bool moisture_init(void) {
     if (g_inited) return true;
     if (adc1_config_width(ADC_WIDTH_BIT_12) != ESP_OK) return false;
@@ -21,14 +34,9 @@ bool moisture_init(void) {
     return true;
 }
 
-bool moisture_read_percent(float* out_pct) {
-    if (!g_inited && !moisture_init()) return false;
-    int raw = adc1_get_raw(ADC1_CHANNEL_4);
-    if (raw < 0) {
-        ESP_LOGW(TAG, "ADC read failed (raw=%d)", raw);
-        return false;
-    }
-    *out_pct = moisture_percent_from_counts(raw);
-    ESP_LOGD(TAG, "raw=%d -> %.1f%%", raw, *out_pct);
+bool moisture_read_q8(int32_t* out_q8) {
+    int raw = 0;
+    if (!moisture_read_raw(&raw)) return false;
+    *out_q8 = moisture_q8_from_counts(raw);
     return true;
 }

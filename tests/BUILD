@@ -133,6 +133,7 @@ py_test(
     data = [
         "//cardputer_client:boot.py",
         "//cardputer_client:config.py",
+        "//cardputer_client:chart.py",
         "//cardputer_client:lora_boards.py",
         "//cardputer_client:main.py",
         "//cardputer_client/proto:lma_encoder.py",
@@ -157,6 +158,27 @@ py_test(
         "//cardputer_client:main_lib",
         "@lmao_pip//pytest",
         "@lmao_pip//pytest_asyncio",
+    ],
+)
+
+# The Sprout chart: DATA-line parser + geometry + draw, exercised against a
+# fake display (no st7789, no hardware).
+py_test(
+    name = "test_chart",
+    srcs = ["test_chart.py"],
+    deps = [
+        "//cardputer_client:chart_lib",
+        "@lmao_pip//pytest",
+    ],
+)
+
+# The server-side ring that the chart's DATA line is built from.
+py_test(
+    name = "test_sprout_history",
+    srcs = ["test_sprout_history.py"],
+    deps = [
+        "//lma_core",
+        "@lmao_pip//pytest",
     ],
 )
 
@@ -372,6 +394,7 @@ py_test(
     data = [
         "//cardputer_client:boot.py",
         "//cardputer_client:config.py",
+        "//cardputer_client:chart.py",
         "//cardputer_client:lora_boards.py",
         "//cardputer_client:main.py",
         "//cardputer_client/proto:lma_encoder.py",
