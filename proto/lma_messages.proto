@@ -38,6 +38,8 @@ message SensorReport {
 //   sensor_id 7  = pump active              unit ""     bool 0/1
 //   sensor_id 8  = battery voltage          unit "V"
 //   sensor_id 9  = RSSI                     unit "dBm"
+//   sensor_id 10 = profile dry threshold    unit "%"    Sprout plant profile
+//   sensor_id 11 = profile wet threshold    unit "%"    Sprout plant profile
 // Add new measurement types with sensor_id >= 10 and document them here.
 message SensorReading {
   uint32 sensor_id   = 1;
