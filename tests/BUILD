@@ -160,6 +160,27 @@ py_test(
     ],
 )
 
+# The Sprout chart: DATA-line parser + geometry + draw, exercised against a
+# fake display (no st7789, no hardware).
+py_test(
+    name = "test_chart",
+    srcs = ["test_chart.py"],
+    deps = [
+        "//cardputer_client:chart_lib",
+        "@lmao_pip//pytest",
+    ],
+)
+
+# The server-side ring that the chart's DATA line is built from.
+py_test(
+    name = "test_sprout_history",
+    srcs = ["test_sprout_history.py"],
+    deps = [
+        "//lma_core",
+        "@lmao_pip//pytest",
+    ],
+)
+
 py_test(
     name = "test_sensors",
     srcs = ["test_sensors.py"],
