@@ -44,8 +44,11 @@ DEBUG = 1
 DEST_HASH = None
 
 # Send interval in seconds — how often the Cardputer transmits sensor data.
-# Default 60s = 1 reading per minute. Minimum 10s to avoid LoRa congestion.
-INTERVAL_SECONDS = 60
+# 300 s matches the Sprout's telemetry cadence: the reply that carries the
+# chart's DATA line, and the Cardputer's own readings, change no faster than
+# that, so a shorter interval only spends LoRa airtime on identical data.
+# Minimum 10s to avoid LoRa congestion.
+INTERVAL_SECONDS = 300
 
 # External humidity/temperature sensor type on the Grove I2C port.
 # Supported values: "DHT20" (Grove DHT20 / AHT20), None (no sensor).
