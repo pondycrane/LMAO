@@ -6,6 +6,7 @@ are ``@pytest.mark.asyncio``.
 """
 
 import sys
+import time
 import types
 from unittest.mock import MagicMock, patch
 
@@ -265,8 +266,10 @@ class TestDuckDbStoreWrite:
         mock_envelope.sensor.readings = [reading1, reading2]
 
         # Patch LMAOEnvelope to return our mock when instantiated
+        t0_ms = int(time.time() * 1000)
         with patch("lma_core.LMAOEnvelope", return_value=mock_envelope):
             await store.store_sensor_report(b"valid_protobuf_bytes")
+        t1_ms = int(time.time() * 1000)
 
         # Should have called executemany with the INSERT
         mock_conn.executemany.assert_called_once()
@@ -283,14 +286,17 @@ class TestDuckDbStoreWrite:
         assert row0[3] == 1
         assert row0[4] == 22.5
         assert row0[5] == "C"
-        assert row0[6] == 1700000000000
+        # timestamp_ms is the ingest Unix epoch ms (issue #145), not the
+        # node-embedded value the mock carried.
+        assert t0_ms <= row0[6] <= t1_ms
 
         row1 = rows[1]
         assert row1[0] == "node-7"
         assert row1[3] == 2
         assert row1[4] == 68.0
         assert row1[5] == "%"
-        assert row1[6] == 1700000000001
+        # All readings in one envelope share the same ingest stamp.
+        assert row1[6] == row0[6]
 
     @pytest.mark.asyncio
     async def test_store_handles_parse_error(self, initialized_store):
