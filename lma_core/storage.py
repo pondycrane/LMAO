@@ -388,7 +388,11 @@ class DuckDbStore:
         the node's value is not a reliable Unix-epoch wall-clock (device
         clocks are unset, drift, or are scaled to a non-Unix epoch), so it
         is unusable for freshness / ordering (issue #145).  All readings in
-        one envelope share the same ingestion stamp.
+        one envelope share the same ingestion stamp.  Because the
+        iot-ingest consumer is a durable pull consumer that NAKs on failure,
+        messages drained/redelivered from the NATS backlog are stamped with
+        the drain/ingest time here rather than their original arrival time
+        (accepted per issue #145's "ingest wall-clock" acceptance).
         """
         sensor = envelope.sensor
         now_ms = int(time.time() * 1000)
