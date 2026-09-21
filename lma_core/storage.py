@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Any
 
 _logger = logging.getLogger(__name__)
@@ -380,8 +381,21 @@ class DuckDbStore:
 
     @staticmethod
     def _extract_sensor_rows(envelope: Any) -> list[tuple]:
-        """Extract sensor reading rows from a ``SensorReport`` envelope."""
+        """Extract sensor reading rows from a ``SensorReport`` envelope.
+
+        The stored ``timestamp_ms`` is the ingest wall-clock in Unix epoch
+        milliseconds, not the node-embedded ``reading.timestamp_ms`` value:
+        the node's value is not a reliable Unix-epoch wall-clock (device
+        clocks are unset, drift, or are scaled to a non-Unix epoch), so it
+        is unusable for freshness / ordering (issue #145).  All readings in
+        one envelope share the same ingestion stamp.  Because the
+        iot-ingest consumer is a durable pull consumer that NAKs on failure,
+        messages drained/redelivered from the NATS backlog are stamped with
+        the drain/ingest time here rather than their original arrival time
+        (accepted per issue #145's "ingest wall-clock" acceptance).
+        """
         sensor = envelope.sensor
+        now_ms = int(time.time() * 1000)
         rows: list[tuple] = []
         for reading in sensor.readings:
             rows.append(
@@ -392,7 +406,7 @@ class DuckDbStore:
                     reading.sensor_id,
                     reading.value,
                     reading.unit,
-                    reading.timestamp_ms,
+                    now_ms,
                 )
             )
         return rows
