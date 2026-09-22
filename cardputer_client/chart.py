@@ -190,12 +190,14 @@ def _line(tft, x0, y0, x1, y1, color):
             y0 += sy
 
 
-def _trace(tft, values, lo, hi, color, label=False):
+def _trace(tft, values, lo, hi, color, label=False, thick=False):
     """Draw one time series across the plot box.
 
     Returns the number of line segments drawn.  The newest sample gets a 2x2
     marker (so it reads as a dot, not a stray pixel); *label* additionally
-    prints its value next to it for the primary soil series.
+    prints its value next to it for the primary soil series.  *thick* draws
+    each segment as a 2-px bar so a flat series is still visibly a trace (the
+    air-temperature line can otherwise vanish into the axis when flat).
     """
     count = len(values)
     if count < 2:
@@ -210,12 +212,18 @@ def _trace(tft, values, lo, hi, color, label=False):
         x = x_px(i, count)
         y = y_px(values[i], lo, hi)
         _line(tft, px, py, x, y, color)
+        if thick:
+            _line(tft, px, py + 1, x, y + 1, color)
         px, py = x, y
         points += 1
     tft.pixel(px, py, color)
     tft.pixel(px - 1, py, color)
     tft.pixel(px, py - 1, color)
     tft.pixel(px - 1, py - 1, color)
+    if thick:
+        for oy in (1, 2):
+            for ox in (0, -1):
+                tft.pixel(px + ox, py + oy, color)
     if label:
         tft.text(str(values[-1]), max(PLOT_L, px - 16), max(PLOT_T, py - 16), WHITE)
     return points
@@ -282,12 +290,16 @@ def draw(tft, data):
         result["points"] += _trace(tft, samples, lo, hi, SOIL_COLOR, label=True)
         # Air humidity (green) shares the percent axis.
         result["points"] += _trace(tft, humidity, lo, hi, HUM_COLOR)
-        # Air temperature (orange) on its own auto-scaled °C axis, labelled in
-        # the right gutter.
+        # Air temperature (orange) on its own auto-scaled °C axis, drawn thick
+        # (a flat temperature can otherwise vanish into the axis) and labelled
+        # with its value at the newest point so it never reads as a frame line.
         if temps:
-            result["points"] += _trace(tft, temps, tlo, thi, TEMP_COLOR)
+            result["points"] += _trace(tft, temps, tlo, thi, TEMP_COLOR, thick=True)
             tft.text(str(int(round(thi))), _TEMP_AXIS_X, PLOT_T, TEMP_COLOR)
             tft.text(str(int(round(tlo))), _TEMP_AXIS_X, PLOT_B - 8, TEMP_COLOR)
+            lx = x_px(len(temps) - 1, len(temps))
+            ly = y_px(temps[-1], tlo, thi)
+            tft.text(f"{temps[-1]:.0f}C", max(PLOT_L, lx - 24), max(PLOT_T, ly - 7), TEMP_COLOR)
 
         return result
     except Exception as exc:  # noqa: BLE001 — display drivers vary; never kill the loop

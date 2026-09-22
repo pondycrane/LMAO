@@ -284,6 +284,20 @@ class TestDraw:
         assert "HUM --" in rendered and "AIR --" in rendered, "air placeholders"
         assert tft.colors() and chart.SOIL_COLOR in tft.colors()
 
+    def test_temperature_trace_is_visible_even_when_flat(self):
+        # Live regression: the Sprout's temperature is often constant (e.g. all
+        # 24.0°C), so a 1px orange line is invisible against the axis and reads
+        # as "no temperature". The trace must be drawn thick AND tagged with its
+        # °C value so a flat reading is still visibly the temperature line.
+        tft = FakeTft()
+        data = self._data(humidity=[60] * 5, temp=[24.0] * 5)
+        result = chart.draw(tft, data)
+        assert result["error"] is None
+        orange_segs = [l for l in tft.lines if l[4] == chart.TEMP_COLOR]
+        assert len(orange_segs) >= 2 * 4, "temperature trace drawn thick (y and y+1)"
+        orange_labels = [t[0] for t in tft.texts if t[3] == chart.TEMP_COLOR]
+        assert "24C" in orange_labels, "flat temperature still labelled in orange"
+
     def test_single_sample_waits_instead_of_dividing_by_zero(self):
         tft = FakeTft()
         result = chart.draw(tft, self._data(samples=[46]))
