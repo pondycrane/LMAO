@@ -46,7 +46,8 @@ class FakeTft:
 class TestParseDataLine:
     def test_parses_a_record_sharing_the_message_with_the_ack(self):
         msg = (
-            "ACK from LMAO Server — received your message (89 bytes)\nDATA e824ad2d 37 53 46 45 47"
+            "ACK from LMAO Server — received your message (89 bytes)\n"
+            "DATA e824ad2d 37 53 2 25 26 2 54 55 3 46 45 47"
         )
         data = chart.parse_data_line(msg)
         assert data["node"] == "e824ad2d"
@@ -54,15 +55,44 @@ class TestParseDataLine:
         assert data["wet"] == 53
         assert data["samples"] == [46, 45, 47], "oldest first, order preserved"
 
+    def test_parses_all_three_series_with_their_counts(self):
+        data = chart.parse_data_line("DATA e824ad2d 37 53 3 25 26 27 2 54 55 3 40 41 42")
+        assert data["temp"] == [25.0, 26.0, 27.0], "temperature kept as °C floats"
+        assert data["humidity"] == [54, 55], "humidity as integer percent"
+        assert data["samples"] == [40, 41, 42]
+
+    def test_parses_empty_series_counts(self):
+        data = chart.parse_data_line("DATA e824ad2d -1 -1 0 0 1 42")
+        assert data["dry"] == -1
+        assert data["wet"] == -1
+        assert data["temp"] == []
+        assert data["humidity"] == []
+        assert data["samples"] == [42]
+
+    def test_old_moisture_only_format_is_ignored(self):
+        # A line in the pre-air format would misparse the first count field;
+        # it must be ignored rather than drawn as garbage — the server and the
+        # Cardputer are flashed together, so this only happens mid-deploy.
+        assert chart.parse_data_line("DATA e824ad2d 37 53 40 41 42") is None
+
+    def test_temp_only_line_is_rejected(self):
+        # Air is only ever emitted alongside moisture, so a percent-less line
+        # (temperature alone) is not a valid record — reaching draw() would
+        # otherwise blank the chart.
+        assert chart.parse_data_line("DATA e824ad2d 37 53 2 25 26 0 0") is None
+
     def test_reports_unknown_band_as_minus_one(self):
-        data = chart.parse_data_line("DATA e824ad2d -1 -1 40 41")
+        data = chart.parse_data_line("DATA e824ad2d -1 -1 0 0 2 40 41")
         assert data["dry"] == -1
         assert data["wet"] == -1
         assert data["samples"] == [40, 41]
 
     def test_rounds_fractional_values(self):
-        data = chart.parse_data_line("DATA e824ad2d 36.5 53.4 46.6")
-        assert (data["dry"], data["wet"], data["samples"]) == (36, 53, [47])
+        data = chart.parse_data_line("DATA e824ad2d 36.5 53.4 1 26.4 1 60.5 1 46.6")
+        assert (data["dry"], data["wet"]) == (36, 53)
+        assert data["temp"] == [26.4]
+        assert data["humidity"] == [60]
+        assert data["samples"] == [47]
 
     def test_ignores_non_data_traffic(self):
         assert chart.parse_data_line("ACK from LMAO Server") is None
@@ -71,8 +101,14 @@ class TestParseDataLine:
 
     def test_ignores_malformed_records(self):
         assert chart.parse_data_line("DATA e824ad2d 37") is None
-        assert chart.parse_data_line("DATA e824ad2d 37 53 notanumber") is None
-        assert chart.parse_data_line("DATA e824ad2d 37 53") is None, "no samples"
+        assert chart.parse_data_line("DATA e824ad2d 37 53 1 notanumber") is None
+        assert chart.parse_data_line("DATA e824ad2d 37 53 0") is None, "no series"
+        assert chart.parse_data_line("DATA e824ad2d 37 53 1 26 2 55") is None, (
+            "moisture count missing"
+        )
+        assert chart.parse_data_line("DATA e824ad2d 37 53 1 26 1 55 1 40 999") is None, (
+            "trailing garbage"
+        )
 
 
 class TestGeometry:
@@ -99,6 +135,26 @@ class TestGeometry:
         assert chart.x_px(0, 10) == chart.PLOT_L
         assert chart.x_px(9, 10) == chart.PLOT_R
         assert chart.x_px(0, 1) == chart.PLOT_L
+
+    def test_temp_window_pads_and_wraps_the_values(self):
+        lo, hi = chart.temp_window([20, 21, 22])
+        assert lo <= 20 and hi >= 22, "window covers every temperature"
+        assert hi - lo >= 4, "flat series keeps a readable span"
+
+    def test_temp_window_handles_a_flat_or_single_value(self):
+        lo, hi = chart.temp_window([21.5])
+        assert lo < 21.5 < hi
+        assert hi - lo >= 4
+
+    def test_temp_window_handles_negative_values(self):
+        lo, hi = chart.temp_window([-3, -1])
+        assert lo <= 100
+        assert lo <= -3 and hi >= -1
+
+    def test_empty_window_returns_the_default_range(self):
+        # Defense in depth: draw() always passes at least one percent series,
+        # but an empty window must not crash the min()/max() computation.
+        assert chart.y_window(None, None) == (0, 100)
 
 
 class TestDraw:
@@ -149,9 +205,10 @@ class TestDraw:
 
     def test_newest_sample_is_labeled(self):
         tft = FakeTft()
-        chart.draw(tft, self._data())
+        data = self._data()
+        chart.draw(tft, data)
         white_labels = [t[0] for t in tft.texts if t[3] == chart.WHITE]
-        assert "47%" in white_labels or "47" in white_labels, (
+        assert str(data["samples"][-1]) in white_labels, (
             "newest value drawn next to the marker"
         )
 
@@ -166,9 +223,10 @@ class TestDraw:
 
     def test_labels_show_the_latest_reading_and_the_band(self):
         tft = FakeTft()
-        chart.draw(tft, self._data())
+        data = self._data()
+        chart.draw(tft, data)
         rendered = " | ".join(t[0] for t in tft.texts)
-        assert "47%" in rendered, "latest sample in the header"
+        assert f"{data['samples'][-1]}%" in rendered, "latest sample in the header"
         assert "dry 37" in rendered and "wet 53" in rendered
         assert "n=4" in rendered
 
@@ -179,6 +237,52 @@ class TestDraw:
         assert chart.WET_COLOR not in tft.colors()
         rendered = " | ".join(t[0] for t in tft.texts)
         assert "dry --" in rendered and "wet --" in rendered
+
+    def test_draws_humidity_and_temperature_traces(self):
+        tft = FakeTft()
+        data = self._data(humidity=[50, 60, 70, 55], temp=[20, 21, 22, 23])
+        result = chart.draw(tft, data)
+        assert result["error"] is None
+        assert chart.HUM_COLOR in tft.colors(), "humidity trace drawn in green"
+        assert chart.TEMP_COLOR in tft.colors(), "temperature trace drawn in orange"
+        assert result["points"] == 9, "three line segments per trace for four samples"
+
+    def test_humidity_shares_the_percent_axis(self):
+        tft = FakeTft()
+        data = self._data(humidity=[50, 60, 70, 55], temp=[20, 21, 22, 23])
+        chart.draw(tft, data)
+        lo, hi = chart.y_window(data["dry"], data["wet"], data["samples"], data["humidity"])
+        # Newest humidity sample y equals where the percent axis maps it.
+        row = tft.rows_with(chart.HUM_COLOR)
+        assert chart.y_px(data["humidity"][-1], lo, hi) in row
+
+    def test_temperature_uses_its_own_axis_with_right_gutter_labels(self):
+        tft = FakeTft()
+        data = self._data(humidity=[50, 60, 70, 55], temp=[20, 21, 22, 23])
+        chart.draw(tft, data)
+        tlo, thi = chart.temp_window(data["temp"])
+        labels = [t[0] for t in tft.texts if t[3] == chart.TEMP_COLOR]
+        assert str(int(round(thi))) in labels and str(int(round(tlo))) in labels, (
+            "temperature scale labelled in its own colour"
+        )
+        for _, x, _, _ in tft.texts:
+            assert x <= chart.W - 8, "labels stay right of the plot box still on screen"
+
+    def test_header_shows_the_latest_air_readings(self):
+        tft = FakeTft()
+        data = self._data(humidity=[50, 60, 70, 55], temp=[20, 21, 22, 23])
+        chart.draw(tft, data)
+        rendered = " | ".join(t[0] for t in tft.texts)
+        assert "HUM 55%" in rendered, "newest humidity in the header"
+        assert "AIR 23C" in rendered, "newest temperature in the header (integer °C)"
+
+    def test_missing_air_series_still_draws_the_soil_chart(self):
+        tft = FakeTft()
+        result = chart.draw(tft, self._data())
+        assert result["error"] is None
+        rendered = " | ".join(t[0] for t in tft.texts)
+        assert "HUM --" in rendered and "AIR --" in rendered, "air placeholders"
+        assert tft.colors() and chart.SOIL_COLOR in tft.colors()
 
     def test_single_sample_waits_instead_of_dividing_by_zero(self):
         tft = FakeTft()
@@ -206,3 +310,11 @@ class TestDraw:
 
     def test_no_display_is_not_an_error_to_raise(self):
         assert chart.draw(None, self._data())["error"] == "no display"
+
+
+if __name__ == "__main__":
+    import sys
+
+    import pytest
+
+    sys.exit(pytest.main([__file__] + sys.argv[1:]))
