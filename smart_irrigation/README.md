@@ -153,10 +153,13 @@ allow-listed client message, so it *piggybacks* the series on that ACK
 (`cardputer_client/chart.py` parses it):
 
 ```
-Sprout → sensor_id 4 (moisture) + 10/11 (active dry/wet band) → server
-server → keeps a 30-sample ring per node (lma_core/sprout_history.py)
-       → appends "DATA <node8> <dry> <wet> <v0..vn>" to its ACK reply
-Cardputer → chart.draw() on each drained reply
+Sprout → sensor_id 2/3 (air humidity/temp) + 4 (moisture) + 10/11 (band) → server
+server → keeps a 30-sample ring per sensor (lma_core/sprout_history.py)
+       → appends "DATA <node8> <dry> <wet> <ct> <t..> <ch> <h..> <cm> <m..>" to its ACK reply
+         (air series capped at 10 samples so the LXMF OPPORTUNISTIC reply stays
+         under its 295-byte single-packet limit)
+Cardputer → chart.draw() on each drained reply: soil (white) + humidity (green)
+            on the % axis, temperature (orange) on its own right-hand °C axis
 ```
 
 Notes:

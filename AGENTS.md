@@ -26,6 +26,49 @@ attached the gate does NOT skip: it actively verifies the production LoRa path
 `iot-ingest` consumer health, recording PASS / FAIL / UNVERIFIABLE. See
 `.archon/commands/lmao-hardware-e2e.md` (Phases 4a-4c) for the exact checks.
 
+## Deployment ("deploy the services" / "e2e deployment") — REQUIRED flags
+
+When a task says to install/uninstall/deploy for e2e, or to put a server-side
+change (e.g. `lma_core`) live, that means running `install_all` with **both**
+service flags. Missing one is a common source of wasted back-and-forth:
+
+```bash
+# Full e2e deployment. Publish images first, then deploy services.
+# On a dev box (RNode is on the K8s node tp4, issue #93) also pass --skip-rnode.
+bazel run //tools:install_all -- --setup-registry --include-services --skip-rnode
+```
+
+- **`--setup-registry`** → publish step (`manage.sh start` + `manage.sh push`):
+  starts the local Docker registry and **builds + pushes all LMAO images**.
+  This must come first so the deploy runs the freshly built image.
+- **`--include-services`** → builds/pushes `lmao-server` + `lmao-iot-ingest`,
+  applies the K8s manifests, and deploys the in-cluster `lmao-server`.
+
+⚠️ **Gotcha — applying unchanged `:latest` does not roll the pod.** The
+`k8s/lmao-server.yaml` Deployment references the mutable tag
+`192.168.50.153:5000/lmao-server:latest`. `install_all`'s `kubectl apply` of an
+*identical* spec creates no rollout, so **the running pod keeps the OLD code**
+and the "Deployment rolled out" banner is misleading. After any service
+deploy, ALWAYS force the rollover and verify:
+
+```bash
+kubectl rollout restart deployment/lmao-server \
+  && kubectl rollout status deployment/lmao-server --timeout=240s
+POD=$(kubectl get pods -l app=lmao-server -o jsonpath='{.items[0].metadata.name}')
+kubectl logs "$POD" | grep "Delivery destination"     # DEST_HASH must be unchanged (identity PVC, #70/#93)
+kubectl logs "$POD" | grep -E "DATA .*" | tail -1      # confirm the new server payload is being served
+```
+
+Notes:
+- `--setup-registry`'s `manage.sh start` is **not idempotent**: if the
+  `lmao-registry` container already exists it fails with a name Conflict,
+  even though the registry is fine and the image is still published by the
+  `--include-services` build steps. A registry `[FAIL]` of that shape is a
+  false alarm — verify with `curl -s -XGET http://192.168.50.153:5000/v2/_catalog`.
+- `DEST_HASH` continuity is critical (#70, #93): the flashed Cardputer only
+  works if the rolled pod serves the same delivery destination. The identity
+  persists in the `lmao-server-identity` PVC, so a rollover keeps it.
+
 ### Humidity Sensor E2E Validation
 
 When an external humidity sensor (e.g., DHT20) is connected to the Cardputer,
