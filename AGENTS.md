@@ -108,6 +108,10 @@ The Cardputer runs MicroPython (M5Stack Cardputer ADV firmware), not native firm
 
 **First-time setup:** Erase + flash MicroPython firmware, then `bazel run //cardputer_client:flash` to upload client files.
 
+**⚠️ DEST_HASH clobbering — always (re)flash a client via `install_all`, not the bare `:flash` target.** The `//cardputer_client:flash` target uploads the *source* `config.py`, whose default `DEST_HASH = None` — so it silently wipes the injected server destination and the device logs `No destination configured — not sending` (it stops reaching the server/chart). Only `//tools:install_all` injects the server's `DEST_HASH` (and re-flashes the client with it). So: any flash that must keep the device talking to the server uses
+`bazel run //tools:install_all -- --skip-rnode --cardputer-port /dev/ttyACM0`
+(e.g. `install_all` also re-injects `DEST_HASH` when it changes). Use `:flash` only for a machine that is not expected to send (or re-inject afterward).
+
 ## Archon workflows (LMAO-specific)
 
 Use the dedicated, versioned workflows in `.archon/workflows/` — not the
