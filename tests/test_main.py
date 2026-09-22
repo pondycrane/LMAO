@@ -1559,6 +1559,73 @@ class TestStdinDrain:
                 _sys.modules["uselect"] = saved
 
 
+# ── View toggle (BtnA/G0 chart <-> log) ────────────────────────────
+
+
+class FakeTftToggle:
+    """Minimal display adapter for the view-toggle tests."""
+
+    def __init__(self):
+        self.fills = 0
+        self.pixels = {}
+        self.lines = []
+        self.texts = []
+
+    def fill(self, color):
+        self.fills += 1
+        self.pixels.clear()
+        self.lines = []
+        self.texts = []
+
+    def line(self, *a):
+        self.lines.append(a)
+
+    def pixel(self, x, y, color):
+        self.pixels[(x, y)] = color
+
+    def text(self, s, x, y, color):
+        self.texts.append((s, x, y, color))
+
+
+class TestViewToggle:
+    """"_show_chart_or_log" must respect the manual log-view lock."""
+
+    DATA = {
+        "node": "e824ad2d",
+        "dry": 37,
+        "wet": 53,
+        "samples": [46, 45, 47],
+        "temp": [25.0, 26.0],
+        "humidity": [55, 56],
+    }
+
+    def setup_method(self):
+        lmao_client._LAST_CHART_DATA = None
+        lmao_client._LOG_VIEW = False
+        lmao_client._CHART_ON_SCREEN = False
+
+    def test_log_unlocked_draws_the_chart(self):
+        lmao_client._LAST_CHART_DATA = self.DATA
+        tft = FakeTftToggle()
+        lmao_client._show_chart_or_log(tft, ["l1"])
+        assert lmao_client._CHART_ON_SCREEN is True, "chart owns the screen"
+        assert tft.fills == 1, "a chart was drawn"
+
+    def test_log_view_locked_keeps_the_text_screen(self):
+        lmao_client._LAST_CHART_DATA = self.DATA
+        lmao_client._LOG_VIEW = True
+        tft = FakeTftToggle()
+        lmao_client._show_chart_or_log(tft, ["l1"])
+        assert lmao_client._CHART_ON_SCREEN is False, "log view stays, chart suppressed"
+        assert tft.fills == 1, "text status screen repainted"
+
+    def test_no_payload_falls_back_to_text(self):
+        lmao_client._LAST_CHART_DATA = None
+        tft = FakeTftToggle()
+        lmao_client._show_chart_or_log(tft, ["l1"])
+        assert lmao_client._CHART_ON_SCREEN is False
+
+
 # ── import guard ────────────────────────────────────────────────────
 
 
