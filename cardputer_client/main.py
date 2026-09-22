@@ -543,6 +543,69 @@ pending_replies: list[str] = []
 # take over again.
 _CHART_ON_SCREEN = False
 
+# Last chart payload that drew successfully.  Kept so the user can flip back
+# to the chart (BtnA/G0 button) without waiting for the next telemetry reply.
+_LAST_CHART_DATA = None
+
+# Manual log-view lock (toggled by the BtnA/G0 button).  When True the text
+# status screen stays up even after a fresh chart payload arrives; when False
+# (default) a successful draw takes the screen automatically.
+_LOG_VIEW = False
+
+
+def _show_chart_or_log(tft, status_lines):
+    """Redraw the active view: the chart (if a payload is held and log view is
+    unlocked) or the text status screen.  Also flips ``_CHART_ON_SCREEN`` so
+    ``log()`` stops repainting the text screen over the chart.
+    """
+    global _LOG_VIEW, _CHART_ON_SCREEN
+    if not _LOG_VIEW and _LAST_CHART_DATA is not None and HAS_CHART:
+        result = chart.draw(tft, _LAST_CHART_DATA)
+        if not result["error"]:
+            _CHART_ON_SCREEN = True
+            return
+    _CHART_ON_SCREEN = False
+    if tft is not None:
+        display_status(tft, status_lines)
+
+
+async def _button_task(tft, status_lines):
+    """Toggle the chart / text-log view on the BtnA/G0 button (GPIO0).
+
+    GPIO0 is active-low with a pull-up (boot.py uses it for safe mode; at
+    runtime the same button toggles the display).  Press to switch views,
+    press again to switch back.  Debounced on the falling edge with a short
+    ignore window, and gracefully no-ops where ``machine`` is unavailable
+    (unit-test / non-ESP32 hosts).
+    """
+    try:
+        import machine
+        import utime
+
+        btn = machine.Pin(0, machine.Pin.IN, machine.Pin.PULL_UP)
+    except Exception:
+        return  # not on ESP32 hardware (unit tests)
+
+    import uasyncio as asyncio
+
+    global _LOG_VIEW
+    prev = 1  # released
+    ignore_until_ms = 0
+    while True:
+        await asyncio.sleep(0.02)
+        try:
+            val = btn.value()
+        except Exception:
+            continue
+        now_ms = utime.ticks_ms() if hasattr(utime, "ticks_ms") else 0
+        if val == 0 and prev == 1 and now_ms >= ignore_until_ms:
+            _LOG_VIEW = not _LOG_VIEW
+            _show_chart_or_log(tft, status_lines)
+            # ignore further presses for ~400 ms so one tap toggles once
+            ignore_until_ms = (utime.ticks_add(now_ms, 400)
+                               if hasattr(utime, "ticks_add") else now_ms + 400)
+        prev = val
+
 
 # ---- Helpers ----
 
@@ -917,23 +980,37 @@ async def _periodic_send(
             pending_replies.clear()
 
             if chart_data is not None:
-                result = chart.draw(tft, chart_data)
-                if result["error"]:
-                    _CHART_ON_SCREEN = False
-                    tft = log(f"Chart unavailable: {result['error']}", tft, status_lines)
+                global _LAST_CHART_DATA, _LOG_VIEW
+                _LAST_CHART_DATA = chart_data
+                if not _LOG_VIEW:
+                    # Auto view: the chart owns the screen unless it fails.
+                    result = chart.draw(tft, chart_data)
+                    if result["error"]:
+                        _CHART_ON_SCREEN = False
+                        tft = log(f"Chart unavailable: {result['error']}", tft, status_lines)
+                    else:
+                        _CHART_ON_SCREEN = True
                 else:
-                    _CHART_ON_SCREEN = True
-                    # Serial-only (no tft) so the chart stays on the display.
-                    soil = chart_data["samples"]
-                    air_t = chart_data["temp"]
-                    air_h = chart_data["humidity"]
-                    soil_l = f"{soil[-1]}%" if soil else "--"
-                    air_t_l = f"{air_t[-1]:.0f}C" if air_t else "--"
-                    air_h_l = f"{air_h[-1]}%" if air_h else "--"
-                    log(
-                        f"Chart: soil={soil_l} air={air_t_l}/{air_h_l} "
-                        f"dry {chart_data['dry']} wet {chart_data['wet']} n={len(soil)}"
+                    # Manual log view (toggled via BtnA/G0): keep the text
+                    # screen; the payload is held for when the user flips back.
+                    _CHART_ON_SCREEN = False
+                    tft = log(
+                        f"Chart data ready (n={len(chart_data['samples'])}) — BtnA to view",
+                        tft,
+                        status_lines,
                     )
+                # Serial-only summary (no tft) so the view stays on the display.
+                soil = chart_data["samples"]
+                air_t = chart_data["temp"]
+                air_h = chart_data["humidity"]
+                soil_l = f"{soil[-1]}%" if soil else "--"
+                air_t_l = f"{air_t[-1]:.0f}C" if air_t else "--"
+                air_h_l = f"{air_h[-1]}%" if air_h else "--"
+                log(
+                    f"Chart: soil={soil_l} air={air_t_l}/{air_h_l} "
+                    f"dry {chart_data['dry']} wet {chart_data['wet']} n={len(soil)}",
+                    None,  # serial-only; the view above already owns the screen
+                )
 
             # Success — reset error counter and sleep the normal interval.
             consecutive_errors = 0
@@ -1025,6 +1102,10 @@ async def _async_runtime(
     # Hardware watchdog feeder — only task whose starvation is fatal.
     if wdt is not None:
         asyncio.create_task(_feed_watchdog(wdt))
+
+    # BtnA/G0 view toggle (chart <-> text log).  Guards its own hardware, so
+    # it is a silent no-op on hosts without an ESP32 GPIO0.
+    asyncio.create_task(_button_task(tft, status_lines))
 
     # Start the Reticulum event loop (job_loop + poll_loop for all interfaces)
     # This blocks until all tasks finish — send_task runs concurrently in
