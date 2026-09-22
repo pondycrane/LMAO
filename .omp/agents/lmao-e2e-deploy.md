@@ -76,6 +76,13 @@ After staging, VERIFY the live path and report evidence:
 - NEVER esptool on the Cardputer or the RNode - not even probe/inspect. Cardputer
   flashes only via `//cardputer_client:flash`/install_all raw REPL; the RNode is
   never flashed by you (it lives on tp4 and is web-flashed only).
+- **ALWAYS re-flash the client via `//tools:install_all`, never the bare
+  `//cardputer_client:flash` target** — `:flash` uploads the source `config.py`
+  (DEST_HASH=None) and silently disconnects the device from the server (log:
+  `No destination configured — not sending`). `install_all` injects the server
+  `DEST_HASH`. After any re-flash, verify the device sends again: the server pod
+  log shows `Message received — From:` from the Cardputer's hash within a poll
+  (~5 min), and the reply carries the new-format `DATA` line.
 - Leave the production Cardputer booted into the client (not raw REPL) when done.
 - If something needs a physical USB reseat or a K8s action you should not take
   unilaterally, STOP and report exactly what blocks you.
