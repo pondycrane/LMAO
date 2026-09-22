@@ -924,10 +924,15 @@ async def _periodic_send(
                 else:
                     _CHART_ON_SCREEN = True
                     # Serial-only (no tft) so the chart stays on the display.
+                    soil = chart_data["samples"]
+                    air_t = chart_data["temp"]
+                    air_h = chart_data["humidity"]
+                    soil_l = f"{soil[-1]}%" if soil else "--"
+                    air_t_l = f"{air_t[-1]:.0f}C" if air_t else "--"
+                    air_h_l = f"{air_h[-1]}%" if air_h else "--"
                     log(
-                        f"Chart: {chart_data['samples'][-1]}% "
-                        f"dry {chart_data['dry']} wet {chart_data['wet']} "
-                        f"n={len(chart_data['samples'])}"
+                        f"Chart: soil={soil_l} air={air_t_l}/{air_h_l} "
+                        f"dry {chart_data['dry']} wet {chart_data['wet']} n={len(soil)}"
                     )
 
             # Success — reset error counter and sleep the normal interval.
