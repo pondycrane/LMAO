@@ -1,0 +1,36 @@
+# ESP-IDF defaults for the Cardputer native client (ESP32-S3).
+# These get baked into sdkconfig on first idf.py build.
+
+CONFIG_IDF_TARGET="esp32s3"
+
+# Enable C++ exceptions — RTReticulum throws on a few error paths.
+CONFIG_COMPILER_CXX_EXCEPTIONS=y
+CONFIG_COMPILER_CXX_EXCEPTIONS_EMG_POOL_SIZE=0
+
+# Cardputer ADV uses native USB-Serial-JTAG on UART0; keep the default console
+# so esptool/idf.py flash and the serial monitor over /dev/ttyACM0 work.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+
+# FreeRTOS config — recursive mutexes are used by Transport.
+CONFIG_FREERTOS_USE_TIMERS=y
+CONFIG_FREERTOS_HZ=1000
+
+# Stack and task tuning. Reticulum loop is spawned with 8192 words of
+# stack from app_main.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+
+# Enable mbedTLS algorithms RTReticulum needs.
+CONFIG_MBEDTLS_HARDWARE_AES=y
+CONFIG_MBEDTLS_HARDWARE_SHA=y
+CONFIG_MBEDTLS_HKDF_C=y
+
+# Optimisation: -Os keeps flash usage down.
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y
+
+# Cardputer ADV has 8MB flash (W25Q64).
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="8MB"
+
+# Custom partition table (nvs + factory app).
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"

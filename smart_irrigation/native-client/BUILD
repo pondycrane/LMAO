@@ -11,9 +11,7 @@
 # Pure C++ (std::string/vector only) — no ESP-IDF, no RTReticulum deps.
 cc_library(
     name = "sprout_encoder",
-    srcs = ["firmware/main/lma_encoder.cpp"],
-    hdrs = ["firmware/main/lma_encoder.h"],
-    strip_include_prefix = "firmware/main",
+    deps = ["//firmware_common:lma_encoder"],
     visibility = ["//visibility:public"],
 )
 
@@ -70,10 +68,7 @@ cc_test(
 
 cc_library(
     name = "lxmf_send",
-    srcs = ["firmware/main/lxmf_send.cpp"],
-    hdrs = ["firmware/main/lxmf_send.h"],
-    strip_include_prefix = "firmware/main",
-    deps = ["@rtreticulum//:rtreticulum"],
+    deps = ["//firmware_common:lxmf_send"],
     visibility = ["//visibility:public"],
 )
 
@@ -135,7 +130,7 @@ filegroup(
         "firmware/sdkconfig.defaults",
         "firmware/partitions.csv",
         "firmware/README.md",
-    ]),
+    ]) + ["//firmware_common:shared_firmware_sources"],
     visibility = ["//visibility:public"],
 )
 

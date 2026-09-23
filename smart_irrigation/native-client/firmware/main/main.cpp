@@ -36,6 +36,7 @@
 #include "moisture.h"
 #include "control.h"
 #include "pump.h"
+#include "lma_identity.h"
 #include "lma_encoder.h"
 #include "lxmf_send.h"
 
@@ -70,15 +71,9 @@ static const char* DEST_HASH_HEX = "dad35b80164b25f7b1474be86e443702";
 // (#124) disables only the RH lockout clause instead of blocking watering.
 #define RH_STALE_MS 600000UL
 
-static std::string hexstr(const Bytes& b) {
-    static const char* H = "0123456789abcdef";
-    std::string s; s.reserve(b.size() * 2);
-    for (size_t i = 0; i < b.size(); ++i) {
-        s.push_back(H[b.data()[i] >> 4]);
-        s.push_back(H[b.data()[i] & 0x0f]);
-    }
-    return s;
-}
+// hexstr is provided by the shared lma_identity module (firmware_common) —
+// use the same one the Cardputer client uses (DRY, see firmware_common/).
+using lma_identity::hexstr;
 
 static SemaphoreHandle_t s_ident_lock = nullptr;
 static Identity s_server_identity;                 // learned from the server announce
@@ -205,37 +200,14 @@ void app_main() {
 
     // Persistent identity (NVS): keep the same RNS identity across boots so the
     // node is a stable mesh peer and can be whitelisted on the server (#130).
-    // TODO: seed with the old MicroPython key (61af0d5b...) for full continuity.
-    Identity identity;
-    {
-        nvs_handle_t nv = 0;
-        if (nvs_open("sprout", NVS_READWRITE, &nv) == ESP_OK) {
-            uint8_t key[64];
-            size_t len = sizeof(key);
-            if (nvs_get_blob(nv, "identity64", key, &len) == ESP_OK && len == 64) {
-                Identity loaded(false);
-                loaded.load_private_key(Bytes(key, 64));
-                identity = loaded;
-                ESP_LOGI(TAG, "loaded persisted identity from NVS");
-            } else {
-                identity = Identity(true);
-                Bytes pk = identity.get_private_key();
-                nvs_set_blob(nv, "identity64", pk.data(), pk.size());
-                nvs_commit(nv);
-                ESP_LOGI(TAG, "generated and persisted identity to NVS");
-            }
-            nvs_close(nv);
-        } else {
-            identity = Identity(true);
-        }
-    }
+    // Shared with the Cardputer client (firmware_common/lma_identity).
+    Identity identity = lma_identity::load_or_create("sprout");
     ESP_LOGI(TAG, "identity hash: %s", hexstr(identity.get_salt()).c_str());
     {
         // The server whitelists the sender's lxmf/delivery hash (what it logs
         // as "From:") — print ours now so it can be added to the server list.
-        Destination dm(identity, Type::Destination::OUT, Type::Destination::SINGLE,
-                       "lxmf", "delivery");
-        ESP_LOGI(TAG, "my lxmf/delivery hash: %s", hexstr(dm.hash()).c_str());
+        ESP_LOGI(TAG, "my lxmf/delivery hash: %s",
+                 lma_identity::delivery_hash(identity).c_str());
     }
 
     Destination dest(identity, Type::Destination::IN, Type::Destination::SINGLE,
