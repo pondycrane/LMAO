@@ -122,6 +122,19 @@ void LoraInterface::poll() {
     if (!g_packet_pending) return;
     g_packet_pending = false;
 
+    /* The DIO1 ISR only reports "an IRQ fired" — DIO1 also pulses for
+     * TX-done, CRC-error and RX/TX timeout.  Draining the RX FIFO on those
+     * events returns a stale length / RX-buffer offset (observed as the
+     * second split half being read one byte early), so gate the read on the
+     * actual RX_DONE flag — like microReticulum's LoRaInterface, which polls
+     * the IRQ rather than trusting the pin alone. */
+    const uint32_t irq = _radio->getIrqFlags();
+    if (!(irq & RADIOLIB_SX126X_IRQ_RX_DONE)) {
+        _radio->clearIrqFlags(RADIOLIB_SX126X_IRQ_ALL);
+        _radio->startReceive();
+        return;
+    }
+
     size_t len = _radio->getPacketLength();
     constexpr size_t MAX_FRAME = Type::Reticulum::MTU + 32;
     if (len == 0 || len > MAX_FRAME) {
@@ -141,8 +154,8 @@ void LoraInterface::poll() {
              * marginal link is visible (RSSI ≈ -100 dBm is unusable). */
             const float rx_rssi = _radio->getRSSI();
             const float rx_snr  = _radio->getSNR();
-            ESP_LOGI(TAG, "RX %u bytes on LoRa (RSSI=%.1f SNR=%.1f)",
-                     (unsigned)len, (double)rx_rssi, (double)rx_snr);
+            ESP_LOGI(TAG, "RX %u bytes on LoRa (RSSI=%.1f SNR=%.1f irq=0x%04x)",
+                     (unsigned)len, (double)rx_rssi, (double)rx_snr, (unsigned)irq);
             ESP_LOGV(TAG, "  hdr=0x%02x blen=%u", buf[0], (unsigned)(len - 1));
             if (len >= 9 && (len - 1) >= 12) {
                 ESP_LOGI(TAG, "  hdr=0x%02x seq=%02x blen=%u body[0:12]=%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x",
