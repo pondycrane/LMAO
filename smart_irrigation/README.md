@@ -142,6 +142,12 @@ daily cap never count doses that did not happen.
 
 ## Cardputer chart (viewing the Sprout data)
 
+> PR1 note: the Cardputer runs the native C sensor-node firmware (no display)
+> until the native chart lands (PR2). The chart described below is served by
+> the legacy MicroPython client — flash it with
+> `bazel run //tools:install_all -- --micropython-cardputer` if a display is
+> required today.
+
 The production Cardputer draws the Sprout soil-moisture series on its 240x135
 screen: the latest value in the header, a white trace, the plant profile's
 **dry** (red) and **wet** (cyan) threshold lines, and `dry/wet/n` in the footer.
@@ -173,10 +179,11 @@ Notes:
   chart talks to a small adapter in `cardputer_client/main.py` that converts
   RGB888 to the panel's colour depth.
 
-⚠️ **Flash the Cardputer with `bazel run //tools:install_all -- --skip-rnode`**,
-not `bazel run //cardputer_client:flash`: only `install_all` injects the
-server's `DEST_HASH`, and the plain flash target uploads the repo's
-`config.py` (where it is `None`) — which silently stops the node sending.
+⚠️ **Flash the Cardputer via `bazel run //tools:install_all -- --skip-rnode`**,
+not the bare `//cardputer_client:flash_firmware` target. The native default
+bakes the server's `DEST_HASH` at build time; the bare targets leave it unset
+(device logs "No destination configured — not sending") — the exact same
+silent-stops-sending gotcha as the old `//cardputer_client:flash` target.
 
 ## Safety (also in AGENTS.md)
 

@@ -89,6 +89,11 @@ spec:
             # PVC so replies keep working across pod restarts.
             - name: LMAO_RNS_TRANSPORT_PATH
               value: "/data/transport"
+            # Client allow-list (sender lxmf/delivery hash): native Cardputer
+            # (7b38fa21…) + Sprout (f5f05952…). The server default already
+            # includes these; the env keeps the live list explicit/idempotent.
+            - name: LMAO_ALLOWED_CLIENTS
+              value: "7b38fa21e75d8866c18de3da01540f2e,f5f05952392627393f067df8c9eaf6c6"
             # tp4's LAN is wlan0 — keep AutoInterface off the flannel/veth
             # CNI interfaces (multicast-echo errors, useless announces).
             - name: LMAO_AUTOIFACE_DEVICES

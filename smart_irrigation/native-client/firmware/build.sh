@@ -25,10 +25,16 @@ mkdir -p "$DEST"
 # Only remove our host-owned source dirs; the container (root) owns build/
 # and ninja rebuilds deltas in place.
 rm -rf "$DEST/main" "$DEST/components" 2>/dev/null || true
-cp -r "$APP/main" "$APP/components" "$DEST/"
+mkdir -p "$DEST/components"
+cp -r "$APP/main" "$DEST/main"
+# Shared firmware component (firmware_common/): the protocol core both Sprout
+# and the Cardputer client use (lma_encoder/lxmf_send/path_find/lma_identity)
+# + the RTReticulum wrapper. Single canonical copy — no per-tree duplication.
+cp -r "$APP/../../../firmware_common/lma_common" "$DEST/components/lma_common"
+cp -r "$APP/../../../firmware_common/rtreticulum" "$DEST/components/rtreticulum"
 cp "$APP/CMakeLists.txt" "$APP/sdkconfig.defaults" "$APP/partitions.csv" "$DEST/"
 echo "app staged in $DEST"
 
 docker run --rm -v "$RTR:/repo" -w /repo/firmware/sprout -e IDF_TARGET=esp32 \
-    "$IDF_IMG" bash -lc 'idf.py set-target esp32 && idf.py build' || exit 1
+    "$IDF_IMG" bash -lc 'git config --global --add safe.directory /repo; idf.py set-target esp32 && idf.py build' || exit 1
 echo "Built: $DEST/build/sprout_native.bin"

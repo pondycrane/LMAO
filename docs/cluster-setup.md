@@ -124,14 +124,15 @@ The LMAO server runs **in-cluster** as `deployment/lmao-server` (issue #93), pin
 - **Discovery is on demand** (issue #142) — the server sends a single LXMF
 delivery announce at startup and does **not** re-announce periodically; the
 old `LMAO_ANNOUNCE_INTERVAL` knob is retired. Clients discover the server via
-RNS path requests (Sprout native `path_find`, Cardputer µReticulum
-`ensure_path`), which the server answers as a leaf node (issue #135). The
+RNS path requests (Sprout native `path_find`, Cardputer native `path_find`),
+which the server answers as a leaf node (issue #135). The
 answer is deferred by `_PATH_REQUEST_ANSWER_DELAY` (1 s) so a half-duplex
 requester does not miss the PATH_RESPONSE in its own TX→RX turnaround window.
 - **Client allow-list (security)** — the server accepts LXMF messages only from
 known client identities (sender's `lxmf/delivery` destination hash, i.e. the
 `Source/From:` the server logs). Defaults are the Cardputer
-(`2026d6bbec2eecb2a4cc4e42a78bb16d`) and Sprout native
+(`7b38fa21e75d8866c18de3da01540f2e`, native C firmware, NVS-persisted
+identity, printed at boot as "my lxmf/delivery hash") and Sprout native
 (`f5f05952392627393f067df8c9eaf6c6`, NVS-persisted identity, printed at boot
 as "my lxmf/delivery hash"). Extend without a rebuild via
 `LMAO_ALLOWED_CLIENTS` (comma-separated hex). Add a new client: capture the

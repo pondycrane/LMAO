@@ -13,9 +13,13 @@ mesh (proven: RTReticulum `on_announce` <-> Python RNS, see `../host`).
   sets the LMAO mesh params (868/BW125/SF7/CR4:5/PPL24/syncword 0x1424/TX17),
   `AT+PSEND` hex TX (RX-off-before-TX), `+EVT:RXP2P` hex RX -> `handle_incoming`.
   Mirrors `smart_irrigation/firmware/lib/dtu/dtu_at.py` semantics.
-- `main/CMakeLists.txt`, `components/rtreticulum/` — ESP-IDF component wrapper for
-  the RTReticulum RNS library + `port/esp_idf/hal_esp_idf.c` (copied from the
-  upstream heltec_v3 firmware).
+- `firmware_common/` (repo root) — **shared** protocol component (DRY):
+  `lma_common/{lma_encoder,lxmf_send,path_find,lma_identity}` + the
+  `rtreticulum/` wrapper. Both the Sprout and Cardputer `build.sh` stage this
+  into their targeted `.rtreticulum/firmware/<name>/components/`, so neither
+  tree carries a private copy.
+- `main/CMakeLists.txt` — ESP-IDF component (device-specific sources; the RNS
+  lib + shared layers come from `firmware_common/`).
 - `sdkconfig.defaults` / `partitions.csv` — `esp32` target, 4 MB flash.
 
 ## Build (Docker ESP-IDF)

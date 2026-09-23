@@ -1,7 +1,10 @@
 # Alternative Client Firmware Options
 
-This document covers client firmware options beyond the default MicroPython
-`cardputer_client` setup described in the main [README](../README.md).
+This document covers client firmware options beyond the **native C Cardputer
+firmware** (the default, `cardputer_client/firmware/` — ESP-IDF + RTReticulum,
+see the main [README](../README.md)). The native firmware supersedes the old
+MicroPython `cardputer_client` runtime, which remains only as a documented
+fallback (`bazel run //tools:install_all -- --micropython-cardputer`).
 
 ## rsCardputer Native Firmware
 
@@ -15,6 +18,12 @@ esptool.py --chip esp32s3 --port /dev/ttyACM0 write-flash 0x0 rscardputer-full.b
 
 See [rsCardputer README](https://github.com/ratspeak/rsCardputer) for details.
 This firmware works with the LMAO server — both use the same Reticulum/LXMF protocol.
+
+> ⚠️ rsCardputer replaces the running firmware on the Cardputer (as does any
+> esptool write).  The sanctioned LMAO way back is `bazel run //tools:install_all`
+> (native firmware).  Also note rsCardputer generates its own Reticulum
+> identity — its `lxmf/delivery` hash must be added to the server's
+> `ALLOWED_CLIENTS` just like any client.
 
 ### Radio Parameter Compatibility
 

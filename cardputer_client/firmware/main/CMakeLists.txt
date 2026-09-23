@@ -1,10 +1,9 @@
 set(SRCS
     "main.cpp"
-    "uart_at_interface.cpp"
-    "sht30.cpp"
-    "moisture.cpp"
-    "control.cpp"
-    "pump.cpp"
+    "lora_interface.cpp"
+    "radiolib_esp_idf_hal.cpp"
+    "die_temp.cpp"
+    "dht20.cpp"
 )
 
 idf_component_register(
@@ -14,12 +13,14 @@ idf_component_register(
         lma_common
         rtreticulum
         driver
-        esp_driver_uart
         esp_driver_i2c
+        esp_driver_spi
+        esp_driver_tsens
         esp_timer
         esp_hw_support
         nvs_flash
         log
+        jgromes__RadioLib
 )
 
 # RTReticulum headers throw (Bytes bounds checks etc.); the default

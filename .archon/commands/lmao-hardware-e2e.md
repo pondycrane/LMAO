@@ -115,7 +115,7 @@ If `CARDPUTER=NONE` (the LoRa test also needs `RNODE`):
 > ⚠️ **WARNING**: No Cardputer/RNode was attached when this ran, so the
 > mandatory AGENTS.md hardware E2E tests did NOT execute. This change has
 > **no hardware verification**. Attach the devices and re-run
-> `bazel test //tests:test_cardputer_e2e //tests:test_cardputer_lora_e2e --test_output=all`
+> `bazel test //tests:test_cardputer_native_e2e --test_output=all`
 > before merging if the change touches the client, server, protocol, or flash tooling.
 ```
 
@@ -124,15 +124,22 @@ If `CARDPUTER=NONE` (the LoRa test also needs `RNODE`):
 
 ---
 
-## Phase 3: FLASH E2E (Cardputer)
+## Phase 3: FLASH E2E (Cardputer — native C firmware)
 
 ```bash
-bazel test //tests:test_cardputer_e2e --test_output=all --cache_test_results=no
+bazel test //tests:test_cardputer_native_e2e --test_output=all --cache_test_results=no
 ```
 
 - `--cache_test_results=no` is **required**: a cached pass never touched the hardware.
-- Flashing ~40 files over the raw REPL takes minutes — use a generous timeout (15 min). Do not interrupt a run in progress.
-- **If it FAILS**: read the output against the README troubleshooting table (wedged-device recovery is built into the flash tooling). Retry **once**. Still failing → write the artifact with `Status: FAIL` and STOP the workflow with a failing status. **No PR may be created with a red hardware gate.**
+- The native E2E builds the Cardputer firmware (Docker idf.py, ~3-4 min), flashes it via
+  `esptool` (the sanctioned path for native firmware — the MicroPython raw-REPL era is
+  over), monitors the serial for the boot banner + identity mint, asserts a SensorReport
+  with a real die temp lands in DuckDB (server-side), and restores the production build.
+- Flashing takes minutes — use a generous timeout (15 min). Do not interrupt a run.
+- **If it FAILS**: read the output against the README troubleshooting table (wedged
+  USB-Serial-JTAG needs a physical replug; G0 held at reset forces download mode). Retry
+  **once**. Still failing → write the artifact with `Status: FAIL` and STOP the workflow
+  with a failing status. **No PR may be created with a red hardware gate.**
 
 **Record result**: ✅ Pass / ❌ Fail
 
@@ -142,18 +149,22 @@ bazel test //tests:test_cardputer_e2e --test_output=all --cache_test_results=no
 
 ### Decision: Which path to take?
 
-- **If `RNODE != NONE`**: run the existing `bazel test //tests:test_cardputer_lora_e2e` against the local RNode (unchanged behavior — skip Phases 4a-4c, go directly to Phase 5).
+- **If `RNODE != NONE`**: run the existing native LoRa E2E against the local RNode
+  (see below — skip Phases 4a-4c, go directly to Phase 5).
 - **If `RNODE == NONE` but `CARDPUTER != NONE`**: run production-path verification (Phases 4a-4c below).
 - **If `CARDPUTER == NONE`**: this is handled by Phase 2 (both absent → loud SKIP). Phase 4 does not execute.
 
 ### PATH A: Local RNode Available
 
 ```bash
-bazel test //tests:test_cardputer_lora_e2e --test_output=all --cache_test_results=no
+bazel test //tests:test_cardputer_native_e2e --test_output=all --cache_test_results=no
 ```
 
-- Pass through `E2E_SENSOR_TYPE` if it is set in the environment (e.g. `E2E_SENSOR_TYPE=DHT20` when an external humidity sensor is attached).
-- Waits for real LoRa traffic (default interval 60 s) — generous timeout (15 min).
+- Same target as Phase 3 — with a local RNode it also exercises the full Cardputer → RNode
+  → server LoRa comms the native path (the sensor-node client reaches a real server).
+- Pass through `E2E_SENSOR_TYPE` if it is set in the environment (e.g. `E2E_SENSOR_TYPE=DHT20`
+  when an external humidity sensor is attached on the Grove port).
+- Waits for real LoRa traffic (default interval 300 s, min 10 s) — generous timeout (15 min).
 - Same handling: consult troubleshooting, retry once, then FAIL the node on persistent failure.
 
 **Record result**: ✅ Pass / ❌ Fail
@@ -358,10 +369,11 @@ Write to `$ARTIFACTS_DIR/hardware-e2e.md`:
 
 | Test | Result | Duration |
 |------|--------|----------|
-| `//tests:test_cardputer_e2e` (flash + boot) | ✅ PASS | {N}s |
-| `//tests:test_cardputer_lora_e2e` (LoRa comms) | ✅ PASS / ✅ PASS (production path) / ❌ FAIL (production path) / ⚠️ UNVERIFIABLE / ⏭ SKIP (no RNode) | {N}s |
+| `//tests:test_cardputer_native_e2e` (flash + boot) | ✅ PASS | {N}s |
+| `//tests:test_cardputer_native_e2e` (LoRa comms) | ✅ PASS / ✅ PASS (production path) / ❌ FAIL (production path) / ⚠️ UNVERIFIABLE / ⏭ SKIP (no RNode) | {N}s |
 
-Production client restored with server `DEST_HASH`: {yes}
+Production client restored with server `DEST_HASH`: {yes} (native production build,
+NVS identity preserved)
 
 ## Production LoRa Evidence (when RNODE absent — production path verified)
 
@@ -395,7 +407,9 @@ A FAIL here FAILS the node — do not report success, do not continue to PR crea
 ## Success Criteria
 
 - **DETECTED_OR_LOUD_SKIP**: hardware absence is written into the artifact and the output, never silent
-- **FLASH_E2E_PASS**: `//tests:test_cardputer_e2e` executed (not cached) and green when a Cardputer is attached
-- **LORA_E2E_PASS**: `//tests:test_cardputer_lora_e2e` executed (not cached) and green when both devices are attached
-- **NO_ESPTOOL**: no esptool or ad-hoc serial access was used
+- **FLASH_E2E_PASS**: `//tests:test_cardputer_native_e2e` executed (not cached) and green when a Cardputer is attached
+- **LORA_E2E_PASS**: `//tests:test_cardputer_native_e2e` executed (not cached) and green when both devices are attached
+- **FLASH_SANCTIONED**: Cardputer flashing happens only through the sanctioned native path
+  (`//tools:install_all` / `flash.sh` — idf.py/esptool), never ad-hoc probing; the old
+  raw-REPL-only rule is superseded (native firmware flashes via esptool, AGENTS.md)
 - **ARTIFACT_WRITTEN**: `$ARTIFACTS_DIR/hardware-e2e.md` contains the devices + results table
