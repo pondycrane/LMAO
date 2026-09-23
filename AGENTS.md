@@ -14,7 +14,9 @@ never duplicate it. The **single canonical copy** lives in
 `firmware_common/`:
 
 - `lma_common/lma_encoder.*`  — wire-compatible SensorReport/LMAOEnvelope encoder
+- `lma_common/lma_decode.*`   — LMAOEnvelope→TextMessage content decoder (receive side)
 - `lma_common/lxmf_send.*`    — send-only LXM body builder (RTReticulum)
+- `lma_common/lxm_recv.*`     — inbound LXM body parse + sender signature verify
 - `lma_common/lma_identity.*` — NVS identity persistence + hex/delivery helpers
 - `lma_common/path_find.*`    — on-demand RNS path request (ESP-IDF only)
 - `rtreticulum/CMakeLists.txt`— shared RNS lib wrapper for the ESP-IDF builds
@@ -22,9 +24,18 @@ never duplicate it. The **single canonical copy** lives in
 Both `build.sh` scripts stage `firmware_common/` into the targeted
 `.rtreticulum/firmware/<name>/components/` at build time, and the shared
 Bazel host-testable units are `//firmware_common:lma_encoder` /
+`//firmware_common:lma_decode` / `//firmware_common:lxm_recv` /
 `//firmware_common:lxmf_send` (the device sources pull ESP-IDF, so they build
 only via `build.sh`). Put any code that both devices need in `firmware_common/`
 first — copy-pasting into a device `main/` is a DRY violation.
+
+**Display/chart is NOT shared** (PR2): the Sprout native client has no display,
+so the ST7789 driver + chart renderer live device-side in
+`cardputer_client/firmware/main/{st7789,chart}.{h,cpp}` (chart is pure C++
+and host-tested at `//cardputer_client:chart_test`; st7789 is ESP-IDF-only).
+The receive *decode* is shared above; only the panel + rendering stay
+cardputer-local. Move them to `firmware_common/` only if Sprout ever grows a
+display.
 
 ## E2E flash verification
 

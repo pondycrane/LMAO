@@ -61,10 +61,21 @@ from dataclasses import dataclass, field
 _CARDCOMPUTER_FINGERPRINTS: tuple[tuple[int, int, dict[str, str]], ...] = (
     (
         0x303A,  # VID — Espressif (ESP32-S3 native USB-Serial-JTAG)
-        0x8120,  # PID — M5Stack UiFlow 2.0
+        0x8120,  # PID — M5Stack UiFlow 2.0 (M5Stack bootloader present)
         {
             "product":      "M5Stack UiFlow 2.0",
             "manufacturer": "M5Stack Technology Co., Ltd",
+        },
+    ),
+    (
+        0x303A,  # VID — Espressif (ESP32-S3)
+        0x1001,  # PID — plain ESP32-S3 native USB-Serial-JTAG (PR1 native
+                 # firmware — the M5Stack bootloader's 0x8120 descriptor is
+                 # erased by idf.py flash, so the device enumerates as the
+                 # generic Espressif USB "USB JTAG/serial debug unit").
+        {
+            "product":      "",
+            "manufacturer": "",
         },
     ),
 )

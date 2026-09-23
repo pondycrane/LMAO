@@ -47,6 +47,12 @@ namespace Cardputer {
         SX1262*     _radio   = nullptr;
         bool        _radio_on = false;
         RawRxCallback _raw_rx;
+
+        /* RNode/urns split-frame reassembly state (see poll()). */
+        uint8_t  _reasm_seq  = 0;
+        bool     _reasm_armed = false;
+        uint32_t _reasm_seen_ms = 0;
+        RNS::Bytes _reasm_buf;   // size capped by REASM_TIMEOUT below
     };
 
 }

@@ -58,11 +58,14 @@ def _find_cardputer_port():
         if serial.tools.list_ports.comports:
             for p in serial.tools.list_ports.comports():
                 # Cardputer ADV = M5Stack Stamp-S3A (VID 0x303A espressif),
-                # USB-Serial-JTAG console.  Also match description.
+                # USB-Serial-JTAG console.  Match by description keyword, or the
+                # M5Stack bootloader descriptor (0x8120) / the generic native
+                # ESP32-S3 USB-Serial-JTAG descriptor (0x1001) that idf.py flash
+                # leaves — both are this device depending on its firmware.
                 desc = (p.description or "").lower()
                 if "cardputer" in desc:
                     return p.device
-                if getattr(p, "vid", None) == 0x303A and getattr(p, "pid", None) == 0x8120:
+                if getattr(p, "vid", None) == 0x303A and getattr(p, "pid", None) in (0x8120, 0x1001):
                     return p.device
     except Exception as exc:
         _logger.warning("Cardputer port scan failed: %s", exc)
