@@ -107,6 +107,107 @@ class DeviceResult:
 # ---- Cardputer operations ----
 
 
+def _flash_cardputer_native(port: str, result: DeviceResult,
+                            inject_dest_hash: bool = True) -> None:
+    """Build + flash the native C Cardputer firmware (PR1 sensor node).
+
+    The firmware lives in cardputer_client/firmware/.  build.sh stages the app
+    into the shared RTReticulum checkout and runs the ESP-IDF Docker build;
+    flash.sh runs ``idf.py flash`` on *port*.  DEST_HASH is baked in at build
+    time via LMAO_DEST_HASH_HEX (the source tree is never modified), mirroring
+    how the MicroPython client had config.py patched at flash time.
+
+    Requires: Docker (espressif/idf:v5.3.1) on the host.  The Cardputer is
+    flashed in download mode via idf.py — superseding the raw-REPL-only rule
+    of the MicroPython era (the device no longer runs MicroPython).
+    """
+    import subprocess
+
+    firmware_dir = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "cardputer_client", "firmware"
+    )
+    build_sh = os.path.join(firmware_dir, "build.sh")
+    flash_sh = os.path.join(firmware_dir, "flash.sh")
+    for path, what in ((build_sh, "build script"), (flash_sh, "flash script")):
+        if not os.path.isfile(path):
+            result.fail(f"Missing {what}: {path}")
+            print(f"  FAIL: missing {what} {path}")
+            return
+
+    env = dict(os.environ)
+    env["PORT"] = port  # flash.sh maps --port to FLASH_PORT semantics below
+    if inject_dest_hash:
+        print("  Computing server DEST_HASH ...")
+        try:
+            dest_hash = ensure_delivery_destination_hash()
+            env["LMAO_DEST_HASH_HEX"] = dest_hash
+            print(f"    DEST_HASH = {dest_hash}")
+        except Exception as exc:
+            result.fail(f"DEST_HASH resolution failed: {exc}")
+            print(f"  FAIL: DEST_HASH resolution failed — {exc}")
+            return
+
+    print(f"\n--- Cardputer (native): building firmware on {port} ---")
+    try:
+        # Build with the baked-in DEST_HASH (build.sh stages + Docker idf.py).
+        proc = subprocess.run(
+            ["bash", build_sh],
+            env=env,
+            cwd=firmware_dir,
+            text=True,
+            stdout=subprocess.DEVNULL if not os.environ.get("LMAO_VERBOSE") else None,
+            stderr=subprocess.STDOUT,
+        )
+        if proc.returncode != 0:
+            result.fail(f"Native firmware build failed (exit {proc.returncode})")
+            print("  FAIL: native firmware build failed — run "
+                  "bazel run //cardputer_client:build_firmware for the full log")
+            return
+    except FileNotFoundError as exc:
+        result.fail(f"build.sh failed to run (bash? subprocess): {exc}")
+        print(f"  FAIL: {exc}")
+        return
+    except Exception as exc:
+        result.fail(f"Native firmware build error: {exc}")
+        print(f"  FAIL: {exc}")
+        return
+
+    print(f"--- Cardputer (native): flashing to {port} ---")
+    try:
+        # flash.sh: exec docker ... idf.py -p /dev/ttyACM0 -b BAUD flash
+        # FLASH_PORT selects the device so the script maps /dev/ttyACM0.
+        env["FLASH_PORT"] = port
+        env["FLASH_BAUD"] = env.get("FLASH_BAUD", "921600")
+        proc = subprocess.run(
+            ["bash", flash_sh, "--port", port],
+            env=env,
+            cwd=firmware_dir,
+            text=True,
+            stdout=subprocess.DEVNULL if not os.environ.get("LMAO_VERBOSE") else None,
+            stderr=subprocess.STDOUT,
+        )
+        if proc.returncode != 0:
+            result.fail(f"Native firmware flash failed (exit {proc.returncode})")
+            print(f"  FAIL: native firmware flash failed — run "
+                  f"bazel run //cardputer_client:flash_firmware -- --port {port} for the full log")
+            return
+    except FileNotFoundError as exc:
+        result.fail(f"flash.sh failed to run (bash? subprocess/docker): {exc}")
+        print(f"  FAIL: {exc}")
+        return
+    except Exception as exc:
+        result.fail(f"Native firmware flash error: {exc}")
+        print(f"  FAIL: {exc}")
+        return
+
+    if inject_dest_hash:
+        result.ok(f"Built + flashed native firmware on {port} (DEST_HASH baked)")
+        print(f"  OK: native firmware flashed on {port}, DEST_HASH baked in")
+    else:
+        result.ok(f"Built + flashed native firmware on {port} (no DEST_HASH — announce-only)")
+        print(f"  OK: native firmware flashed on {port} (no DEST_HASH — device will not send)")
+
+
 def _inject_dest_hash(ser, client_root: str) -> str:
     """Patch DEST_HASH in the Cardputer's config.py to the server's hash.
 
@@ -514,6 +615,13 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Skip injecting the server DEST_HASH into the Cardputer config "
         "(e.g. when the server runs on a different host).",
     )
+    parser.add_argument(
+        "--micropython-cardputer",
+        action="store_true",
+        help="Flash the legacy MicroPython client to the Cardputer instead of "
+        "the native C firmware (PR1 default).  Only needed to keep an older "
+        "chart/display-capable runtime or to fall back from native.",
+    )
     return parser.parse_args(argv)
 
 
@@ -545,19 +653,28 @@ def main(argv: list[str] | None = None) -> None:
         print("Cardputer: SKIP (--skip-cardputer)")
     else:
         client_root = args.client_root or find_client_root()
-        if not client_root:
-            cp_result.fail("Cannot locate cardputer_client/ directory. Specify with --client-root.")
-            print("Cardputer: FAIL — cannot locate cardputer_client/ directory")
-        else:
-            port = find_cardputer_port(args.cardputer_port)
-            if not port:
-                cp_result.skip("No Cardputer detected on USB")
-                print("Cardputer: SKIP — not detected on USB")
+        if not args.micropython_cardputer and not client_root:
+            # Native path does not need the MicroPython client source tree.
+            client_root = None
+        port = find_cardputer_port(args.cardputer_port)
+        if not port:
+            cp_result.skip("No Cardputer detected on USB")
+            print("Cardputer: SKIP — not detected on USB")
+        elif args.micropython_cardputer:
+            if not client_root:
+                cp_result.fail("Cannot locate cardputer_client/ directory. Specify with --client-root.")
+                print("Cardputer: FAIL — cannot locate cardputer_client/ directory")
             else:
                 _flash_cardputer_client(
                     port, client_root, cp_result,
                     inject_dest_hash=not args.skip_dest_hash,
                 )
+        else:
+            # PR1: native C firmware is the default Cardputer flash.
+            print("Cardputer: using native C firmware (--micropython-cardputer for legacy)")
+            _flash_cardputer_native(
+                port, cp_result, inject_dest_hash=not args.skip_dest_hash,
+            )
 
     # ── RNode ──
     rn_result = DeviceResult("RNode (Heltec)")

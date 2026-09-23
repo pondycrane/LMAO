@@ -48,9 +48,8 @@ idf_component_register(
 )
 
 # RTReticulum core uses C++ exceptions and RTTI in a few places (Identity
-# error paths, doctest test build). The library itself doesn't strictly
-# need exceptions on the embedded target, but enabling them avoids a
-# rewrite of every throw site for now.
+# error paths, doctest test build). Enabling exceptions avoids a rewrite of
+# every throw site.
 target_compile_options(${COMPONENT_LIB} PRIVATE
     -fexceptions
     -Wall

@@ -150,77 +150,83 @@ Listening for LXMF messages...
 
 ### 5. Configure and Flash the Cardputer
 
-**Before flashing**, edit `cardputer_client/config.py`:
-- Set `WIFI_SSID` and `WIFI_PASS` to match your local network (required for UDP interface)
-- `DEST_HASH` is injected **automatically** by `bazel run //tools:install_all`
-  (and by the E2E test): the tool loads or creates the server's persisted
-  identity at `~/.local/share/lmao_server/lxmf/identity`, derives the
-  `lxmf.delivery` destination hash, and uploads a patched `config.py` to the
-  device — the source tree is never modified. You only need to set it by
-  hand for fully manual flashing without the automated workflow. Obtain the
-  hash from the server startup log (`Delivery destination (client DEST_HASH): ...`).
-  Leave as `None` (default) to skip sending.
-- Optionally adjust `NODE_NAME` and `DEBUG` level
-- Optionally adjust `INTERVAL_SECONDS` (how often the Cardputer sends sensor data).
-  Default 300s = 1 reading per 5 minutes, matching the Sprout's telemetry
-  cadence (a shorter interval only spends LoRa airtime on unchanged data).
-  Minimum 10s (clamped automatically) to avoid LoRa congestion.
-- To attach an external Grove I2C humidity/temperature sensor (e.g., DHT20),
-  set `SENSOR_TYPE = "DHT20"` and `SENSOR_I2C_ADDR = 0x38`. Leave
-  `SENSOR_TYPE = None` (default) to send only the ESP32's internal die temperature.
+The Cardputer runs the **native C firmware** (`cardputer_client/firmware/`,
+ESP-IDF + RTReticulum) — the same native stack Sprout uses. MicroPython is
+dropped (PR1 = sensor node; the chart/display returns in a follow-up). The
+firmware serves the same LMAO wire contract the MicroPython client did:
+an LXMF `SensorReport` (die temp, optional DHT20 humidity) to the server's
+`lxmf.delivery` destination, discovered from the server's announce.
 
-**Option A — MicroPython + cardputer_client** (lighter weight, requires setup):
+The two native firmware trees share a **single canonical protocol component**
+in `firmware_common/` (DRY — no per-tree copies): `lma_common` holds the
+`lma_encoder`/`lxmf_send`/`path_find`/`lma_identity` sources and
+`rtreticulum/` holds the RNS wrapper; each `build.sh` stages it into the
+targeted `.rtreticulum/firmware/<name>/components/`. Add cross-device code
+there, never in a device `main/` (see AGENTS.md "DRY").
 
-**Using Bazel (recommended):**
+**Before flashing:**
+- `DEST_HASH` is baked in **automatically** by `bazel run //tools:install_all`
+  at build time: the tool loads/creates the server's persisted identity at
+  `~/.local/share/lmao_server/lxmf/identity`, derives the `lxmf.delivery`
+  destination hash, and passes it to the firmware build via
+  `LMAO_DEST_HASH_HEX` — the source tree is never modified (like the old
+  config.py injection). Leave it unset to run announce-only (no sends).
+- The native identity is **minted fresh in NVS on first boot**. Its
+  `lxmf/delivery` hash is printed on the serial console — add it to the
+  server's `ALLOWED_CLIENTS` (env `LMAO_ALLOWED_CLIENTS` in
+  `k8s/lmao-server.yaml`, see §5a) so the server accepts its reports.
+- Interval (default 300 s, minimum clamped 10 s), optional DHT20 sensor and
+  other settings are build-time defines (`LMAO_INTERVAL_SECONDS`,
+  `LMAO_SENSOR_TYPE`) — see `cardputer_client/firmware/build.sh`.
 
-```bash
-# Auto-detect Cardputer serial port and flash
-bazel run //cardputer_client:flash
-
-# Specify port explicitly
-bazel run //cardputer_client:flash -- --port /dev/ttyACM0
-
-# Verify connection without flashing
-bazel run //cardputer_client:flash -- --verify-only
-```
-
-**Or manually with ampy** (if you don't have Bazel):
+**Option A — Native C Cardputer firmware (default):**
 
 ```bash
-# Upload client files
-ampy --port /dev/ttyUSB1 put cardputer_client/config.py
-ampy --port /dev/ttyUSB1 put cardputer_client/lora_boards.py
-ampy --port /dev/ttyUSB1 put cardputer_client/main.py main.py
-ampy --port /dev/ttyUSB1 put cardputer_client/proto/lma_encoder.py proto/lma_encoder.py
+# Build the native firmware (Docker ESP-IDF) and flash it to /dev/ttyACM0
+bazel run //tools:install_all -- --skip-rnode          # builds + flashes + bakes DEST_HASH
 
-# Upload µReticulum library (urns port) to /lib/
-for f in $(find cardputer_client/lib -name '*.py' -o -name '*.mpy'); do
-  ampy --port /dev/ttyUSB1 put "$f" "${f#cardputer_client/}"
-done
-```
-> Pinout presets for different LoRa boards are defined in `cardputer_client/lora_boards.py`.
-> Add new presets there and reference them from `config.py` via the `board` key.
+# Or drive the steps directly (no DEST_HASH — announce-only)
+bazel run //cardputer_client:build_firmware
+bazel run //cardputer_client:flash_firmware -- --port /dev/ttyACM0
 
-The Cardputer will auto-run `main.py` on boot and display:
-
-```
-LMAO POC Ready
-ID: a1b2c3d4...
+# DEST_HASH baked at build time:
+LMAO_DEST_HASH_HEX=<32-hex> LMAO_INTERVAL_SECONDS=300 bazel run //cardputer_client:build_firmware
 ```
 
-**Option B — RNode LoRa bridge** (heavier, if you have an RNode):
+> ⚠️ Always use `bazel run //tools:install_all` (not the bare
+> `//cardputer_client:flash_firmware`) for any flash that must keep the
+> device talking to the server — only install_all bakes the server's current
+> `DEST_HASH`. The bare targets leave it unset (announce-only), exactly like
+> the old bare `:flash` target silently wiped DEST_HASH.
 
-If you're using an external RNode LoRa radio instead of the Cardputer's
-onboard SX1262, connect it via USB and configure the serial interface in
-``config.py``. The RNode will appear as a standard serial port and handles
-LoRa modulation independently.
+Boot log (serial `/dev/ttyACM0`, 115200 baud, USB-Serial-JTAG console):
 
-> For alternative client firmware options (e.g., rsCardputer), see
-> [docs/alternative-firmware.md](docs/alternative-firmware.md).
+```
+Cardputer native client starting (PR1 sensor node)
+identity hash: ...
+my lxmf/delivery hash: ... (add to server ALLOWED_CLIENTS)
+SX1262 listening on 868.0 MHz SF7 BW125
+```
+
+**Option B — Legacy MicroPython client (fallback, chart-era):**
+
+The raw-REPL MicroPython path still exists for running an older
+chart/display-capable client (until the native display lands):
+
+```bash
+# Flash the legacy MicroPython client to the Cardputer
+bazel run //cardputer_client:flash [-- --port /dev/ttyACM0]
+# or via install_all:
+bazel run //tools:install_all -- --micropython-cardputer --skip-rnode
+```
+
+> Pinout presets for the MicroPython LoRa boards are defined in
+> `cardputer_client/lora_boards.py`; the native firmware pins live in
+> `cardputer_client/firmware/main/cardputer_pins.h`.
 
 **Option C — Unified flash (install_all)**:
 
-Flash both Cardputer client and RNode firmware in a single command.
+Flash both Cardputer native firmware and RNode firmware in one command.
 
 ```bash
 # Auto-detect both devices and flash
@@ -232,9 +238,6 @@ bazel run //tools:install_all -- --cardputer-port /dev/ttyACM0 --rnode-port /dev
 # Skip one device type
 bazel run //tools:install_all -- --skip-cardputer
 bazel run //tools:install_all -- --skip-rnode
-
-# Custom client root path
-bazel run //tools:install_all -- --client-root /path/to/cardputer_client
 
 # Also deploy Pi server and K8s services
 # (internal services are released through the local Docker registry at
@@ -252,12 +255,11 @@ bazel run //tools:install_all -- --setup-registry --include-services
 bazel run //tools:install_all -- --skip-dest-hash
 ```
 
-The Cardputer flash automatically injects the server's `DEST_HASH`
-(destination hash of the server's persisted identity) into the on-device
-`config.py`. The identity is read from the local
-`~/.local/share/lmao_server/lxmf/identity` when present, or synced from
-the in-cluster server's PVC via `kubectl exec` when the server runs in
-Kubernetes (issue #93) — flashed clients keep working across server
+The Cardputer flash bakes the server's `DEST_HASH` (destination hash of the
+server's persisted identity) into the firmware at build time. The identity is
+read from the local `~/.local/share/lmao_server/lxmf/identity` when present,
+or synced from the in-cluster server's PVC via `kubectl exec` when the server
+runs in Kubernetes (issue #93) — flashed clients keep working across server
 restarts and redeploys (issue #70).
 
 Output shows a per-device summary table with OK/FAIL/SKIP status:
@@ -266,7 +268,7 @@ Output shows a per-device summary table with OK/FAIL/SKIP status:
 ============================================================
   INSTALL SUMMARY
 ============================================================
-  [OK]    Cardputer     — Flashed 42 file(s) to Cardputer
+  [OK]    Cardputer     — Built + flashed native firmware on /dev/ttyACM0 (DEST_HASH baked)
   [OK]    RNode (Heltec) — RNode firmware already installed
 ============================================================
   All detected devices processed successfully.
@@ -302,18 +304,22 @@ a **Cap LoRa-1262** module (SX1262) connected via the rear EXT 2.54-14P header.
 **Key ESP32-S3 considerations:**
 
 - **GPIO39 (MTCK) and GPIO40 (MTDO)** are JTAG pins on the ESP32-S3. The
-  internal USB JTAG controller claims them by default for debugging. The
-  LoRa interface driver creates `Pin()` objects for these pins **before**
-  SPI init to reclaim them for GPIO/SPI use. This is handled automatically
-  in `lib/urns/interfaces/lora.py`.
-- **SPI bus 2 (HSPI / SPI3_HOST)** is used for the LoRa radio, separate from
-  SPI bus 1 (FSPI / SPI2_HOST) used by the ST7789 display.
-- **TCXO startup**: The Cap LoRa-1262 module needs 5000us for the TCXO to
-  stabilize (configured via `dio3_tcxo_start_time_us` in `lora_boards.py`).
+  internal USB JTAG controller claims them by default for debugging. On the
+  native firmware, assigning them as SPI pins via the ESP-IDF GPIO matrix
+  (RadioLib-HAL in `cardputer_client/firmware/main/radiolib_esp_idf_hal.cpp`)
+  reclaims them automatically; the legacy MicroPython client did the same by
+  creating `Pin()` objects before SPI init (`lib/urns/interfaces/lora.py`).
+- **SPI bus HSPI (SPI3_HOST)** is used for the LoRa radio, separate from
+  the bus used by the ST7789 display (`CARDPUTER_LORA_SPI_HOST` in
+  `cardputer_client/firmware/main/cardputer_pins.h`).
+- **TCXO startup**: The Cap LoRa-1262 module needs its 1.8V TCXO on DIO3
+  (RadioLib `begin(..., tcxo=1.8f)`) and DIO2 as the RF TX/RX switch — both
+  configured in `cardputer_client/firmware/main/lora_interface.cpp`.
 - The module connects via BOTH the HY2.0-4P Grove port (power) and the
   EXT 14-pin header (SPI data signals). Both must be firmly seated.
 
-**Radio parameters** (must match server RNode config):
+**Radio parameters** (must match server RNode config; defined in
+`cardputer_client/firmware/main/cardputer_pins.h`):
 
 | Parameter | Value |
 |-----------|-------|
@@ -321,20 +327,31 @@ a **Cap LoRa-1262** module (SX1262) connected via the rear EXT 2.54-14P header.
 | Spreading Factor | 7 |
 | Bandwidth | 125 kHz |
 | Coding Rate | 4:5 |
-| TX Power | 14 dBm |
+| TX Power | 17 dBm |
 | Preamble | 24 symbols (must match RNode firmware's dynamic preamble — 8 symbols loses ~80% of RX packets) |
-| Syncword | 0x1424 (Reticulum default) |
+| Syncword | 0x1424 (Reticulum default, `RADIOLIB_SX126X_SYNC_WORD_PRIVATE`) |
 
-See `cardputer_client/lora_boards.py` for the `cardputer_adv` board preset
-and `cardputer_client/config.py` for the LoRa interface configuration.
+The native firmware pins live in `cardputer_client/firmware/main/cardputer_pins.h`
+(RadioLib SX1262 driver); the legacy MicroPython preset is in
+`cardputer_client/lora_boards.py` (`cardputer_adv`).
+
+**Frame size & split frames**: The SX1262 FIFO caps a single LoRa frame at
+255 bytes, so a full LXMF SensorReport (~275 B) is transmitted as **two
+back-to-back frames** using the RNode/urns split protocol — both carry the
+1-byte RNode header (random seq in the upper nibble, bit0 = `FLAG_SPLIT`) and
+the receiver reassembles them by seq (`lora_interface.cpp::send_outgoing`).
+This is the same framing the Sprout DTU path uses (`uart_at_interface.cpp`),
+so the server RNode handles it identically.
 
 ### 6. Test Communication
 
 An automated E2E test can verify the full LoRa communication path with
-both devices connected:
+both devices connected (native C firmware; the MicroPython-era
+`test_cardputer_e2e`/`test_cardputer_lora_e2e` targets remain only for the
+`--micropython-cardputer` fallback):
 
 ```bash
-bazel test //tests:test_cardputer_lora_e2e --test_output=all
+bazel test //tests:test_cardputer_native_e2e --test_output=all
 ```
 
 The test auto-skips when hardware is not detected.  See
@@ -343,10 +360,11 @@ The test auto-skips when hardware is not detected.  See
 Manual verification steps:
 
 1. Both devices powered on and within LoRa range
-2. Cardputer sends "Hello from Cardputer — seq 1" at the configured interval (default: 300s, configurable via `INTERVAL_SECONDS` in `config.py`, minimum: 10s)
-3. Server displays: `MSG from <hash>: Hello from Cardputer`
+2. Cardputer sends an LXMF `SensorReport` (die temp °C) at the configured
+   interval (default: 300s, build-time `LMAO_INTERVAL_SECONDS`, minimum: 10s)
+3. Server displays: `MSG from <hash>: SensorReport(seq=..., readings=N)`
 4. Server replies: `ACK from LMAO Server — received your message`
-5. Cardputer displays the reply on screen
+5. The received SensorReport is ingested into DuckDB (`sensor_readings`)
 
 ### 7. gRPC API (K8s Pod Integration)
 
@@ -790,19 +808,19 @@ bazel test //tests:all
 # Run a specific unit test
 bazel test //tests:test_lma_encoder --test_output=all
 
-# Run the E2E flash test (requires physical Cardputer hardware)
-bazel test //tests:test_cardputer_e2e --test_output=all
-
-# Run the LoRa E2E test (requires Cardputer + Heltec RNode)
-bazel test //tests:test_cardputer_lora_e2e --test_output=all
+# Run the E2E flash + LoRa test (requires physical Cardputer; RNode may be
+# on the cluster per issue #93 — the test then verifies the production path)
+bazel test //tests:test_cardputer_native_e2e --test_output=all
 ```
 
-The E2E flash test auto-skips when the required hardware is not
-detected. `test_cardputer_lora_e2e` auto-skips only the tests that need
+The E2E test auto-skips when the required hardware is not
+detected. `test_cardputer_native_e2e` auto-skips only the tests that need
 a **locally attached RNode**; when a Cardputer is attached but the RNode
 lives on the cluster (issue #93), it **actively verifies the production
 LoRa path** instead of silently skipping (see AGENTS.md "E2E flash
-verification").
+verification"). The MicroPython-era `test_cardputer_e2e` /
+`test_cardputer_lora_e2e` targets remain only for the
+`--micropython-cardputer` fallback.
 
 ### 11a. Archon Workflows (AI Feature-to-PR)
 
@@ -1138,7 +1156,7 @@ algorithm evaluation.
 | Server can't find RNode | Is ESP32 plugged in? Set `LMAO_RNODE_PORT` or check auto-detected port |
 | In-cluster pod can't find RNode after node reboot/replug | Device may have re-enumerated — `kubectl rollout restart deployment/lmao-server`; verify `/dev/ttyUSB0` exists on tp4 |
 | Server logs "Could not send reply (no source destination)" after a restart | The client identity cache was empty; the client re-announces on its next reboot. Persisted via `LMAO_RNS_TRANSPORT_PATH` on the PVC since issue #93 |
-| `test_cardputer_lora_e2e` skips | With the RNode on tp4 (issue #93), the local-RNode-specific tests auto-skip, but the test does **not** silently skip when a Cardputer is attached — it verifies the production LoRa path (server logs + JetStream `iot-ingest` consumer health) and reports PASS / FAIL / UNVERIFIABLE |
+| `test_cardputer_native_e2e` skips | With the RNode on tp4 (issue #93), the local-RNode-specific tests auto-skip, but the test does **not** silently skip when a Cardputer is attached — it verifies the production LoRa path (server logs + JetStream `iot-ingest` consumer health) and reports PASS / FAIL / UNVERIFIABLE |
 | Server hangs with no output | RNode port not found — the server now warns and starts in WiFi-only mode. Check `LMAO_RNODE_PORT`. |
 | No LoRa packets despite devices on same frequency | Check **all** radio parameters match: SF, BW, CR, and TXP (not just frequency) |
 | Cardputer has µReticulum firmware, not MicroPython | That's expected with rsCardputer firmware — it's a valid LXMF client. Use Option B above. |

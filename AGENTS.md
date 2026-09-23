@@ -7,17 +7,41 @@ The README is the single source of truth for project architecture, setup,
 usage, testing, and conventions. It covers everything from protocol design
 to hardware setup to deployment. Do not proceed without reading it first.
 
+## DRY — no copy-paste across the two native firmware trees
+
+The Sprout and Cardputer native clients share one firmware protocol stack;
+never duplicate it. The **single canonical copy** lives in
+`firmware_common/`:
+
+- `lma_common/lma_encoder.*`  — wire-compatible SensorReport/LMAOEnvelope encoder
+- `lma_common/lxmf_send.*`    — send-only LXM body builder (RTReticulum)
+- `lma_common/lma_identity.*` — NVS identity persistence + hex/delivery helpers
+- `lma_common/path_find.*`    — on-demand RNS path request (ESP-IDF only)
+- `rtreticulum/CMakeLists.txt`— shared RNS lib wrapper for the ESP-IDF builds
+
+Both `build.sh` scripts stage `firmware_common/` into the targeted
+`.rtreticulum/firmware/<name>/components/` at build time, and the shared
+Bazel host-testable units are `//firmware_common:lma_encoder` /
+`//firmware_common:lxmf_send` (the device sources pull ESP-IDF, so they build
+only via `build.sh`). Put any code that both devices need in `firmware_common/`
+first — copy-pasting into a device `main/` is a DRY violation.
+
 ## E2E flash verification
 
 Run the following as final verification before marking any feature complete or submitting a PR:
 
 ```bash
-# Flash verification (requires Cardputer)
-bazel test //tests:test_cardputer_e2e --test_output=all
+# Flash verification (requires Cardputer) — native C firmware
+bazel test //tests:test_cardputer_native_e2e --test_output=all
 
 # LoRa communication verification (requires Cardputer + Heltec RNode)
-bazel test //tests:test_cardputer_lora_e2e --test_output=all
+bazel test //tests:test_cardputer_native_e2e --test_output=all
 ```
+
+(The MicroPython-era `test_cardputer_e2e` / `test_cardputer_lora_e2e` targets
+still exist for the `--micropython-cardputer` fallback but are no longer the
+default gate — native firmware is flashed via `install_all`/`flash.sh`, i.e.
+idf.py/esptool, not the raw REPL.)
 
 Tests auto-skip only when no hardware is detected. Since issue #93 the RNode
 lives on the K8s node tp4, so on a dev machine with only the Cardputer
@@ -72,12 +96,12 @@ Notes:
 ### Humidity Sensor E2E Validation
 
 When an external humidity sensor (e.g., DHT20) is connected to the Cardputer,
-the E2E test (`test_cardputer_lora_e2e`) validates humidity readings in
+the E2E test (`test_cardputer_native_e2e`) validates humidity readings in
 addition to temperature. Set the following environment variable to configure
 the sensor type expected in the test:
 
 ```bash
-E2E_SENSOR_TYPE=DHT20 bazel test //tests:test_cardputer_lora_e2e --test_output=all
+E2E_SENSOR_TYPE=DHT20 bazel test //tests:test_cardputer_native_e2e --test_output=all
 ```
 
 When `E2E_SENSOR_TYPE` is not set (default), the test runs in single-reading
@@ -93,24 +117,39 @@ The RNode firmware responds to the standard RNode DETECT protocol (`0xc0 0x08 0x
 
 ## Cardputer
 
-**NEVER use esptool on the Cardputer.** It can only be flashed via:
-  1. The Bazel `//cardputer_client:flash` target (uploads MicroPython files via raw REPL)
-  2. The serial flash tool (for initial MicroPython firmware install, done via esptool in download mode with G0+RESET)
+Since PR1 the Cardputer runs **native C firmware** (ESP-IDF + RTReticulum, in
+`cardputer_client/firmware/`), like the Sprout native client — not MicroPython.
+Flashing is via the ESP-IDF toolchain (`idf.py flash`, esptool under the hood),
+NOT raw REPL.
 
-**Do NOT run `esptool ... chip_id` or any other esptool probing/inspection command on the Cardputer.** Doing so disconnects the USB-Serial-JTAG interface and requires a physical USB unplug/replug to recover.
+- **Flash only through the sanctioned tools**: `bazel run //tools:install_all`
+  (bakes the server's `DEST_HASH` at build time) or the manual
+  `bazel run //cardputer_client:flash_firmware` / `build_firmware` targets.
+  Do not run ad-hoc esptool probing/flashing on the Cardputer outside these
+  paths (USB-Serial-JTAG is fragile to careless reflashes; the raw-REPL era is
+  over). `esptool.py chip_id` type probes still disconnect the USB-Serial-JTAG
+  and need a physical unplug/replug to recover — avoid them.
+- The legacy MicroPython client (`cardputer_client/*.py`) is a **documented
+  fallback** only (chart/display era): `bazel run //tools:install_all --
+  --micropython-cardputer`. The native firmware's settings are build-time
+  defines in `cardputer_client/firmware/build.sh` (`LMAO_DEST_HASH_HEX`,
+  `LMAO_INTERVAL_SECONDS`, `LMAO_SENSOR_TYPE`) — there is no on-device
+  config.py anymore.
+- **DEST_HASH continuity is critical (#70, #93): always (re)flash the client
+  via `install_all`, not the bare `:flash_firmware` target.** The bare targets
+  build with `LMAO_DEST_HASH_HEX` unset (announce-only, device logs "No
+  destination configured — not sending"); only `//tools:install_all` resolves
+  the server's current delivery hash and bakes it in at build time.
+- The native identity is minted fresh in NVS on first boot; its
+  `lxmf/delivery` hash is printed on the serial console and must be added to
+  the server's `ALLOWED_CLIENTS` (env `LMAO_ALLOWED_CLIENTS` in
+  `k8s/lmao-server.yaml`) for the server to accept its reports (same flow as
+  Sprout's native hash).
 
-The Cardputer runs MicroPython (M5Stack Cardputer ADV firmware), not native firmware. All communication is via the MicroPython raw REPL over `/dev/ttyACM0`.
-
-**Vendored changes to flash.py:**
+**Vendored changes to flash.py (legacy MicroPython flash tool, fallback only):**
 - `DEVICE_PREFIX = "/flash"` — M5Stack firmware mounts flash at `/flash/`, not root
 - `boot.py` does `M5.begin()` then runs the LMAO client
 - `ucontextlib.py` must be in `lib/` (MicroPython needs `ucontextlib`, not `contextlib`)
-
-**First-time setup:** Erase + flash MicroPython firmware, then `bazel run //cardputer_client:flash` to upload client files.
-
-**⚠️ DEST_HASH clobbering — always (re)flash a client via `install_all`, not the bare `:flash` target.** The `//cardputer_client:flash` target uploads the *source* `config.py`, whose default `DEST_HASH = None` — so it silently wipes the injected server destination and the device logs `No destination configured — not sending` (it stops reaching the server/chart). Only `//tools:install_all` injects the server's `DEST_HASH` (and re-flashes the client with it). So: any flash that must keep the device talking to the server uses
-`bazel run //tools:install_all -- --skip-rnode --cardputer-port /dev/ttyACM0`
-(e.g. `install_all` also re-injects `DEST_HASH` when it changes). Use `:flash` only for a machine that is not expected to send (or re-inject afterward).
 
 ## Archon workflows (LMAO-specific)
 

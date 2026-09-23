@@ -67,6 +67,12 @@ def _patch_imports():
         "inject_dest_hash": patch.object(
             install_all, "_inject_dest_hash", return_value="a" * 32
         ),
+        "flash_cardputer_native": patch.object(
+            install_all, "_flash_cardputer_native",
+            side_effect=lambda port, result, inject_dest_hash=True: result.ok(
+                f"mocked native flash on {port}"
+            ),
+        ),
         "os_path_getsize": patch("os.path.getsize", return_value=100),
         "detect_serial_devices": patch.object(
             install_all, "detect_serial_devices", return_value=(None, None)
@@ -609,12 +615,28 @@ class TestMainPipeline:
         assert "[OK]" in captured
         assert "Cardputer" in captured
 
+    def test_native_firmware_is_default_cardputer_flash(self):
+        """Default Cardputer flash uses the native path, not MicroPython."""
+        self.mocks["find_cardputer_port"].return_value = "/dev/ttyACM0"
+        with pytest.raises(SystemExit) as exc_info:
+            install_all.main([])
+        assert exc_info.value.code == 0
+        self.mocks["flash_cardputer_native"].assert_called_once()
+
+    def test_micropython_flag_uses_legacy_flash(self):
+        """--micropython-cardputer routes to the legacy raw-REPL flash."""
+        self.mocks["find_cardputer_port"].return_value = "/dev/ttyACM0"
+        with pytest.raises(SystemExit) as exc_info:
+            install_all.main(["--micropython-cardputer"])
+        assert exc_info.value.code == 0
+        self.mocks["flash_cardputer_native"].assert_not_called()
+
     def test_cardputer_detected_and_flash_fails_exits_1(self, capsys):
-        """Cardputer detected + flash fails → exit 1."""
+        """Cardputer detected + MicroPython flash fails → exit 1."""
         self.mocks["find_cardputer_port"].return_value = "/dev/ttyACM0"
         self.mocks["upload_file"].return_value = False
         with pytest.raises(SystemExit) as exc_info:
-            install_all.main([])
+            install_all.main(["--micropython-cardputer"])
         assert exc_info.value.code == 1
         captured = capsys.readouterr().out
         assert "[FAIL]" in captured
@@ -629,18 +651,18 @@ class TestMainPipeline:
         self.mocks["find_cardputer_port"].assert_called_once()
 
     def test_cardputer_port_override_bypasses_auto_detection(self):
-        """--cardputer-port override bypasses auto-detection."""
+        """--cardputer-port override bypasses auto-detection (MicroPython path)."""
         with pytest.raises(SystemExit) as exc_info:
-            install_all.main(["--cardputer-port", "/dev/customACM0"])
+            install_all.main(["--micropython-cardputer", "--cardputer-port", "/dev/customACM0"])
         assert exc_info.value.code == 0
         # find_cardputer_port should have been called with the explicit port
         self.mocks["find_cardputer_port"].assert_called_once_with("/dev/customACM0")
 
     def test_client_root_override_passed_through(self):
-        """--client-root override is passed through to flash function."""
+        """--client-root override is passed through to the MicroPython flash function."""
         self.mocks["find_cardputer_port"].return_value = "/dev/ttyACM0"
         with pytest.raises(SystemExit) as exc_info:
-            install_all.main(["--client-root", "/custom/root"])
+            install_all.main(["--micropython-cardputer", "--client-root", "/custom/root"])
         assert exc_info.value.code == 0
         self.mocks["find_client_root"].assert_not_called()
 
@@ -787,9 +809,9 @@ class TestMainClientRootNotFound:
         _stop_patches(self._patches)
 
     def test_missing_client_root_reports_fail(self):
-        """When client_root is None, Cardputer should be marked FAIL."""
+        """When client_root is None, MicroPython Cardputer flash is marked FAIL."""
         with pytest.raises(SystemExit) as exc_info:
-            install_all.main([])
+            install_all.main(["--micropython-cardputer"])
         assert exc_info.value.code == 1
 
 

@@ -415,6 +415,30 @@ py_test(
     tags = ["e2e", "requires_hardware"],
 )
 
+py_test(
+    name = "test_cardputer_native_e2e",
+    srcs = [
+        "e2e/test_cardputer_native_e2e.py",
+        "e2e/e2e_helpers.py",
+    ],
+    main = "e2e/test_cardputer_native_e2e.py",
+    data = [
+        "//cardputer_client:firmware_sources",
+    ],
+    deps = [
+        "//lma_core",
+        "//lmao_server:server_lib",
+        "@lmao_pip//duckdb",
+        "@lmao_pip//lxmf",
+        "@lmao_pip//pyserial",
+        "@lmao_pip//pytest",
+        "@lmao_pip//rns",
+    ],
+    # E2E test requires the Cardputer flashed with the native firmware (PR1)
+    # AND a Heltec RNode connected via USB.  Auto-skips when not detected.
+    tags = ["e2e", "requires_hardware"],
+)
+
 
 py_test(
     name = "test_sprout_e2e",
