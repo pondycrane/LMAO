@@ -83,13 +83,15 @@ _NATS_SERVER = os.environ.get("NATS_SERVER", "nats://localhost:4222")
 # not the raw identity hash).
 #
 # Whitelist values:
-#   2026d6bbec2eecb2a4cc4e42a78bb16d  production Cardputer (verified on-air)
+#   7b38fa21e75d8866c18de3da01540f2e  production Cardputer (native C firmware,
+#                                     NVS-persisted identity; printed at boot
+#                                     as "my lxmf/delivery hash")
 #   f5f05952392627393f067df8c9eaf6c6  Sprout native client (NVS-persisted
 #                                     identity; printed at boot as
 #                                     "my lxmf/delivery hash")
 # Extend at deploy time via env LMAO_ALLOWED_CLIENTS (comma-separated hex).
 _DEFAULT_ALLOWED_CLIENTS = {
-    "2026d6bbec2eecb2a4cc4e42a78bb16d",  # Cardputer
+    "7b38fa21e75d8866c18de3da01540f2e",  # Cardputer (native C)
     "f5f05952392627393f067df8c9eaf6c6",  # Sprout native
 }
 

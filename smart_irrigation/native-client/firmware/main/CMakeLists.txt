@@ -1,19 +1,17 @@
 set(SRCS
     "main.cpp"
     "uart_at_interface.cpp"
-    "path_find.cpp"
     "sht30.cpp"
     "moisture.cpp"
     "control.cpp"
     "pump.cpp"
-    "lma_encoder.cpp"
-    "lxmf_send.cpp"
 )
 
 idf_component_register(
     SRCS ${SRCS}
     INCLUDE_DIRS "."
     REQUIRES
+        lma_common
         rtreticulum
         driver
         esp_driver_uart

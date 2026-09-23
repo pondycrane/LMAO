@@ -1,0 +1,10 @@
+dependencies:
+  # RadioLib via git (not registry): the idf-component-manager 3.x in the
+  # espressif/idf:v5.3.1 image fails to merge the dual registry mirror for
+  # jgromes/RadioLib ("Cannot merge different components").  A raw git source
+  # resolves cleanly and is identical once pinned.
+  RadioLib:
+    version: "7.0.0"
+    git: "https://github.com/jgromes/RadioLib.git"
+  idf:
+    version: ">=5.0"
