@@ -20,6 +20,29 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+# ── Host-testable: lower-side LMAOEnvelope decode (TextMessage content) ──
+# Pure std::string protobuf walking — no RTReticulum deps.
+cc_library(
+    name = "lma_decode",
+    srcs = ["lma_common/lma_decode.cpp"],
+    hdrs = ["lma_common/lma_decode.h"],
+    strip_include_prefix = "lma_common",
+    visibility = ["//visibility:public"],
+)
+
+# ── Host-testable: inbound LXMF body parse + signature check ──
+# The receive-side mirror of lxmf_send: parses the LXM body RTReticulum
+# delivers (after RNS E2E decrypt) into {src_hash, title, content} and can
+# verify the sender's Ed25519 signature (issue #149 follow-up / PR2).
+cc_library(
+    name = "lxm_recv",
+    srcs = ["lma_common/lxm_recv.cpp"],
+    hdrs = ["lma_common/lxm_recv.h"],
+    strip_include_prefix = "lma_common",
+    deps = ["@rtreticulum//:rtreticulum"],
+    visibility = ["//visibility:public"],
+)
+
 # ── Host-testable: send-only LXMF (RTReticulum-dependent) ──
 cc_library(
     name = "lxmf_send",

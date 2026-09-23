@@ -123,9 +123,10 @@ def _flash_cardputer_native(port: str, result: DeviceResult,
     """
     import subprocess
 
-    firmware_dir = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "cardputer_client", "firmware"
+    client_root = find_client_root() or os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "cardputer_client"
     )
+    firmware_dir = os.path.join(client_root, "firmware")
     build_sh = os.path.join(firmware_dir, "build.sh")
     flash_sh = os.path.join(firmware_dir, "flash.sh")
     for path, what in ((build_sh, "build script"), (flash_sh, "flash script")):

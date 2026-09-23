@@ -134,6 +134,51 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+# ── PR2 receive: inbound LXM parse + signature verify + envelope decode ──
+# Shared with the Sprout client (firmware_common — DRY), host-testable.
+cc_library(
+    name = "lxm_recv",
+    deps = ["//firmware_common:lxm_recv"],
+    visibility = ["//visibility:public"],
+)
+
+cc_test(
+    name = "lxm_recv_test",
+    srcs = ["firmware/tests/lxm_recv_test.cpp"],
+    deps = [":lxm_recv"],
+    tags = ["unit"],
+)
+
+cc_library(
+    name = "lma_decode",
+    deps = ["//firmware_common:lma_decode"],
+    visibility = ["//visibility:public"],
+)
+
+cc_test(
+    name = "lma_decode_test",
+    srcs = ["firmware/tests/lma_decode_test.cpp"],
+    deps = [":lma_decode"],
+    tags = ["unit"],
+)
+
+# ── PR2 chart: DATA-line parser + geometry + renderer (pure C++, no ESP-IDF).
+# Host-testable via a fake ChartDisplay; the same code the device compiles. ──
+cc_library(
+    name = "chart",
+    srcs = ["firmware/main/chart.cpp"],
+    hdrs = ["firmware/main/chart.h"],
+    strip_include_prefix = "firmware/main",
+    visibility = ["//visibility:public"],
+)
+
+cc_test(
+    name = "chart_test",
+    srcs = ["firmware/tests/chart_test.cpp"],
+    deps = [":chart"],
+    tags = ["unit"],
+)
+
 # ── Device/ESP-IDF firmware sources (built out-of-band by build.sh) ──
 filegroup(
     name = "firmware_sources",
