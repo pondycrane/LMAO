@@ -50,6 +50,7 @@ from cardputer_client.flash import (
     _mip_install,
     auto_discover_lib_files,
     disarm_watchdog,
+    deploy_mpy_bytecode,
     enter_raw_repl,
     exit_raw_repl,
     find_cardputer_port,
@@ -393,6 +394,15 @@ def _flash_cardputer_client(port: str, client_root: str, result: DeviceResult,
                 result.fail(f"DEST_HASH injection failed: {exc}")
                 print(f"  FAIL: DEST_HASH injection failed — {exc}")
                 return
+
+        # Ahead-of-time bytecode: UIFlow2's ~177 KB GC heap cannot hold the .py
+        # sources' bytecode (the LXMF send path dies with "MemoryError
+        # allocating 136 bytes"), so ship .mpy and drop the .py siblings that
+        # would shadow it.  No-op when mpy-cross is unavailable.
+        try:
+            deploy_mpy_bytecode(ser, client_root)
+        except Exception as exc:  # never fail the flash on the optimisation
+            print(f"  WARNING: .mpy deployment skipped: {exc}")
 
         # MicroPython dependencies (the SX1262 driver + contextlib) are vendored
         # in cardputer_client/lib/ and uploaded above, so a flash needs no

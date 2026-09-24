@@ -189,20 +189,30 @@ esptool.py --chip esp32s3 --port /dev/ttyACM0 --baud 1500000 \
 device — including any previously stored identity, which must then be
 re-allow-listed; a wedged USB-Serial-JTAG needs a physical unplug/replug.)
 
-**Heap note — ship the client as `.mpy` on UIFlow2.** The urns stack does not
+**Heap note — the client ships as `.mpy` on UIFlow2.** The urns stack does not
 fit that firmware's ~177 KB GC heap as `.py` sources: importing them compiles
 bytecode into RAM, and the send path then dies with
 `MemoryError … allocating 136 bytes` in `lxmf._find_active_link_for` (which
-lazily imports `urns.link`) and reset-loops. Compile the tree to bytecode so it
-is loaded from flash instead, and **delete the `.py` counterparts — a `.py`
-file shadows its `.mpy` sibling**:
+lazily imports `urns.link`) and reset-loops.
+
+`install_all`/`flash.py` handle this automatically when `mpy-cross` is on
+`PATH`: they compile `lib/**`, `proto/**`, `main.py`, `chart.py` and
+`lora_boards.py` to `.mpy`, upload them, and **delete the `.py` counterparts —
+a `.py` file shadows its `.mpy` sibling**, so the sources must go for the
+bytecode to load.  `boot.py` stays source (it is the boot script) and
+`config.py` stays source (`install_all` rewrites it with the DEST_HASH).
+
+> `mpy-cross` must emit the device's bytecode ABI — UIFlow2 2.5.2 is
+> MicroPython 1.27, whose ABI is mpy v6.3 (`mpy-cross --version`).  Without
+> `mpy-cross` the flash falls back to `.py` sources, which is what starves the
+> heap.
+
+By hand, that is:
 
 ```bash
-# host: mpy-cross must emit the device's ABI (UIFlow2 2.5.2 = MicroPython 1.27
-#       = mpy v6.3; check with `mpy-cross --version`)
 cd cardputer_client
-find lib -name '*.py' | while read -r f; do mpy-cross -o "/tmp/mpyout/${f%.py}.mpy" "$f"; done
-mpy-cross -o /tmp/mpyout/main.mpy main.py      # main.py/chart.py too
+find lib proto -name '*.py' | while read -r f; do mpy-cross -o "/tmp/mpyout/${f%.py}.mpy" "$f"; done
+for f in main.py chart.py lora_boards.py; do mpy-cross -o "/tmp/mpyout/${f%.py}.mpy" "$f"; done
 # then upload the .mpy tree over the raw REPL and delete /flash/**/*.py
 ```
 

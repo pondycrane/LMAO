@@ -10,6 +10,7 @@ Run with::
 
 import os
 import subprocess
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -72,6 +73,12 @@ def _patch_imports():
             side_effect=lambda port, result, inject_dest_hash=True: result.ok(
                 f"mocked native flash on {port}"
             ),
+        ),
+        # The .mpy deployment compiles the client with mpy-cross and then talks
+        # to the device (exec_raw) — far too slow per main() call, and it has
+        # its own unit test.
+        "deploy_mpy_bytecode": patch.object(
+            install_all, "deploy_mpy_bytecode", return_value=True
         ),
         "os_path_getsize": patch("os.path.getsize", return_value=100),
         "detect_serial_devices": patch.object(
@@ -352,6 +359,74 @@ class TestPrintSummary:
 # ── Flash cardputer client unit tests ───────────────────────────────
 
 
+class TestDeployMpyBytecode:
+    """`deploy_mpy_bytecode` ships bytecode and removes the shadowing sources.
+
+    MicroPython prefers a .py file over its .mpy sibling, so the sources must be
+    deleted for the compiled modules to load — that is the whole point of the
+    step on UIFlow2's small heap.
+    """
+
+    def test_uploads_compiled_modules_and_removes_their_sources(self, tmp_path, monkeypatch):
+        import cardputer_client.flash as flash_mod
+
+        root = tmp_path / "client"
+        (root / "lib" / "my").mkdir(parents=True)
+        (root / "lib" / "my" / "mod.py").write_text("VALUE = 1\n")
+        (root / "main.py").write_text("OTHER = 2\n")
+        (root / "config.py").write_text("KEEP = 3\n")   # rewritten at flash time
+        (root / "boot.py").write_text("BOOT = 4\n")     # the boot script
+
+        # The compiler is not on the Bazel sandbox PATH: fake it.
+        monkeypatch.setattr(
+            "shutil.which",
+            lambda name: "/usr/bin/mpy-cross" if name == "mpy-cross" else None,
+        )
+
+        def fake_run(cmd, **_kwargs):
+            out = cmd[cmd.index("-o") + 1]
+            os.makedirs(os.path.dirname(out), exist_ok=True)
+            with open(out, "wb") as fh:
+                fh.write(b"M\x06\x00")
+            return SimpleNamespace(returncode=0, stderr="")
+
+        monkeypatch.setattr("subprocess.run", fake_run)
+
+        uploads, scripts = [], []
+
+        def fake_upload(ser, local, remote, **_kwargs):
+            uploads.append((local, remote))
+            return True
+
+        def fake_exec(ser, script):
+            scripts.append(script)
+            return True, "OK"
+
+        monkeypatch.setattr(flash_mod, "upload_file", fake_upload)
+        monkeypatch.setattr(flash_mod, "exec_raw", fake_exec)
+
+        assert flash_mod.deploy_mpy_bytecode(object(), str(root)) is True
+
+        assert sorted(r for _l, r in uploads) == ["lib/my/mod.mpy", "main.mpy"]
+        assert scripts, "expected a shadow-cleanup script"
+        cleanup = scripts[-1]
+        assert "/flash/lib/my/mod.py" in cleanup
+        assert "/flash/main.py" in cleanup
+        assert "config.py" not in cleanup   # patched at flash time, stays source
+        assert "boot.py" not in cleanup     # the boot script, stays source
+
+    def test_reports_missing_compiler(self, tmp_path, monkeypatch):
+        """Without mpy-cross the step is skipped, not failed."""
+        import cardputer_client.flash as flash_mod
+
+        root = tmp_path / "client"
+        (root / "lib").mkdir(parents=True)
+        (root / "lib" / "mod.py").write_text("VALUE = 1\n")
+        monkeypatch.setattr("shutil.which", lambda _name: None)
+
+        assert flash_mod.deploy_mpy_bytecode(object(), str(root)) is False
+
+
 class TestFlashCardputerClient:
     """Direct unit tests for _flash_cardputer_client()."""
 
@@ -383,6 +458,12 @@ class TestFlashCardputerClient:
                 install_all, "auto_discover_lib_files", return_value=[]
             ),
             "mip_install": patch.object(install_all, "_mip_install", return_value=None),
+            # .mpy deployment compiles with mpy-cross and talks to the device;
+            # its own test class covers it, and here it would block on the
+            # mocked serial.
+            "deploy_mpy_bytecode": patch.object(
+                install_all, "deploy_mpy_bytecode", return_value=True
+            ),
             "inject_dest_hash": patch.object(
                 install_all, "_inject_dest_hash", return_value="a" * 32
             ),
