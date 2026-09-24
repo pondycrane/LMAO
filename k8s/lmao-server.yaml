@@ -90,10 +90,13 @@ spec:
             - name: LMAO_RNS_TRANSPORT_PATH
               value: "/data/transport"
             # Client allow-list (sender lxmf/delivery hash): native Cardputer
-            # (7b38fa21…) + Sprout (f5f05952…). The server default already
-            # includes these; the env keeps the live list explicit/idempotent.
+            # (7b38fa21…, opt-in runtime), Sprout (f5f05952…), and the
+            # MicroPython Cardputer client (277bf9fb… — minted fresh when the
+            # M5Stack UIFlow2 firmware was flashed, so it differs from the
+            # native build's NVS identity). The server default already includes
+            # these; the env keeps the live list explicit/idempotent.
             - name: LMAO_ALLOWED_CLIENTS
-              value: "7b38fa21e75d8866c18de3da01540f2e,f5f05952392627393f067df8c9eaf6c6"
+              value: "7b38fa21e75d8866c18de3da01540f2e,f5f05952392627393f067df8c9eaf6c6,277bf9fbfecf26b9eae91ba60f6c3597"
             # tp4's LAN is wlan0 — keep AutoInterface off the flannel/veth
             # CNI interfaces (multicast-echo errors, useless announces).
             - name: LMAO_AUTOIFACE_DEVICES
