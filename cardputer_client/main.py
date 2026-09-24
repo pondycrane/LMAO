@@ -936,11 +936,19 @@ async def _periodic_send(
                 content = make_poc_message(
                     identity_hex, hello_text, timestamp=int(time.time() * 1000)
                 )
-                # Send via urns LXMF router
+                # Send via urns LXMF router.  OPPORTUNISTIC delivery: it needs
+                # no link state — the Cardputer's UIFlow2 heap cannot afford an
+                # OutLink (the link lookup alone raised "MemoryError allocating
+                # 136 bytes"), and the LMAO server replies opportunistically
+                # anyway.  Collect first: Reticulum's startup churn otherwise
+                # leaves the heap too fragmented for the send path's lazy
+                # imports (urns.link / urns.transport).
+                gc.collect()
                 msg = router.send_message(
                     destination_hash=dest_hash,
                     content=content,
                     title="p:Envelope",
+                    desired_method=LXMessage.OPPORTUNISTIC,
                 )
                 if msg:
                     log(f"Sent: {hello_text}", tft, status_lines)
@@ -955,6 +963,7 @@ async def _periodic_send(
                             destination_hash=dest_hash,
                             content=sensor_content,
                             title="p:Envelope",
+                            desired_method=LXMessage.OPPORTUNISTIC,
                         )
                         if msg2:
                             log(f"Sensor: seq={seq}", tft, status_lines)

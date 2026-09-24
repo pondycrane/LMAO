@@ -460,7 +460,13 @@ class LXMRouter:
         """
         from .transport import Transport
 
-        have_link = self._find_active_link_for(destination_hash) is not None
+        # An OPPORTUNISTIC send needs no link at all: skip the probe, which
+        # lazily imports urns.link (OutgoingLink) and raised "MemoryError
+        # allocating 136 bytes" on the Cardputer's tight UIFlow2 heap —
+        # killing the send before the opportunistic path was ever reached.
+        have_link = False
+        if desired_method != LXMessage.OPPORTUNISTIC:
+            have_link = self._find_active_link_for(destination_hash) is not None
 
         # No route yet: solicit a path and defer the send. The retry re-enters
         # this method once the path (and the peer's identity, carried in the

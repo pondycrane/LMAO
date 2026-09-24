@@ -189,6 +189,29 @@ esptool.py --chip esp32s3 --port /dev/ttyACM0 --baud 1500000 \
 device — including any previously stored identity, which must then be
 re-allow-listed; a wedged USB-Serial-JTAG needs a physical unplug/replug.)
 
+**Heap note — ship the client as `.mpy` on UIFlow2.** The urns stack does not
+fit that firmware's ~177 KB GC heap as `.py` sources: importing them compiles
+bytecode into RAM, and the send path then dies with
+`MemoryError … allocating 136 bytes` in `lxmf._find_active_link_for` (which
+lazily imports `urns.link`) and reset-loops. Compile the tree to bytecode so it
+is loaded from flash instead, and **delete the `.py` counterparts — a `.py`
+file shadows its `.mpy` sibling**:
+
+```bash
+# host: mpy-cross must emit the device's ABI (UIFlow2 2.5.2 = MicroPython 1.27
+#       = mpy v6.3; check with `mpy-cross --version`)
+cd cardputer_client
+find lib -name '*.py' | while read -r f; do mpy-cross -o "/tmp/mpyout/${f%.py}.mpy" "$f"; done
+mpy-cross -o /tmp/mpyout/main.mpy main.py      # main.py/chart.py too
+# then upload the .mpy tree over the raw REPL and delete /flash/**/*.py
+```
+
+`main.py` additionally sends opportunistically
+(`desired_method=LXMessage.OPPORTUNISTIC`) and calls `gc.collect()` before each
+send; the vendored `urns/lxmf.py` skips its link probe for opportunistic sends.
+Without those, the send path's lazy import raises MemoryError on this heap even
+when the rest of the client boots.
+
 **Before flashing:**
 - `DEST_HASH` is injected **automatically** by `bazel run //tools:install_all`:
   the tool loads/creates the server's persisted identity at
