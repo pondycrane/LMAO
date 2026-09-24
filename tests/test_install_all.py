@@ -615,21 +615,36 @@ class TestMainPipeline:
         assert "[OK]" in captured
         assert "Cardputer" in captured
 
-    def test_native_firmware_is_default_cardputer_flash(self):
-        """Default Cardputer flash uses the native path, not MicroPython."""
+    def test_micropython_is_default_cardputer_flash(self):
+        """Default Cardputer flash uses the MicroPython raw-REPL path."""
         self.mocks["find_cardputer_port"].return_value = "/dev/ttyACM0"
         with pytest.raises(SystemExit) as exc_info:
             install_all.main([])
         assert exc_info.value.code == 0
+        self.mocks["flash_cardputer_native"].assert_not_called()
+        self.mocks["upload_file"].assert_called()
+
+    def test_native_cardputer_flag_uses_native_flash(self):
+        """--native-cardputer opts into the native C build/flash."""
+        self.mocks["find_cardputer_port"].return_value = "/dev/ttyACM0"
+        with pytest.raises(SystemExit) as exc_info:
+            install_all.main(["--native-cardputer"])
+        assert exc_info.value.code == 0
         self.mocks["flash_cardputer_native"].assert_called_once()
 
-    def test_micropython_flag_uses_legacy_flash(self):
-        """--micropython-cardputer routes to the legacy raw-REPL flash."""
+    def test_micropython_flag_still_selects_micropython(self):
+        """--micropython-cardputer keeps working (it is now the default)."""
         self.mocks["find_cardputer_port"].return_value = "/dev/ttyACM0"
         with pytest.raises(SystemExit) as exc_info:
             install_all.main(["--micropython-cardputer"])
         assert exc_info.value.code == 0
         self.mocks["flash_cardputer_native"].assert_not_called()
+        self.mocks["upload_file"].assert_called()
+
+    def test_both_cardputer_runtime_flags_rejected(self):
+        """--micropython-cardputer and --native-cardputer are mutually exclusive."""
+        with pytest.raises(SystemExit):
+            install_all.main(["--micropython-cardputer", "--native-cardputer"])
 
     def test_cardputer_detected_and_flash_fails_exits_1(self, capsys):
         """Cardputer detected + MicroPython flash fails → exit 1."""
