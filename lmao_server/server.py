@@ -402,9 +402,10 @@ class Server:
 
         The first copy is dispatched inline (the healthy-link case).  Any
         further copies are dispatched from a daemon thread, spaced by
-        ``_REPLY_REPEAT_DELAY_S``, so a copy lost on air is covered without
+        ``reply_repeat_delay_s``, so a copy lost on air is covered without
         blocking the LXMF delivery callback.  See the ``_REPLY_REPEATS``
-        comment for why a single transmission is not enough for this client.
+        module comment for why a single transmission is not enough for this
+        client.
         """
         self._transmit_reply(source_dest, source_hash, reply_text)
 
@@ -413,12 +414,15 @@ class Server:
             return
 
         def _repeat():
-            for _ in range(repeats):
+            for i in range(repeats):
                 time.sleep(self.reply_repeat_delay_s)
                 try:
                     self._transmit_reply(source_dest, source_hash, reply_text)
+                    logger.info("Reply repeat %d/%d sent.", i + 1, repeats)
                 except Exception:  # a failed repeat must not kill the thread
-                    logger.warning("Reply repeat failed", exc_info=True)
+                    logger.warning(
+                        "Reply repeat %d/%d failed", i + 1, repeats, exc_info=True
+                    )
 
         threading.Thread(
             target=_repeat, daemon=True, name="lmao-reply-repeat"
