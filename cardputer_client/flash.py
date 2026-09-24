@@ -854,11 +854,19 @@ def main():
                 disarm_watchdog(ser)
                 print("Resuming upload after recovery …")
 
-        # — Install dependencies via mip —
-        print("\nInstalling MicroPython dependencies …")
-        _mip_install(ser, "lora-sx126x")
-        _mip_install(ser, "lora-sync")
-        _mip_install(ser, "contextlib")
+        # — MicroPython dependencies —
+        # The SX1262 driver + contextlib are vendored in lib/ and uploaded by
+        # this tool, so flashing needs no network.  mip is only a fallback for
+        # a checkout that predates the vendored driver.
+        if os.path.isfile(
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib", "lora", "sx126x.py")
+        ):
+            print("\nMicroPython dependencies: vendored in lib/ (no network needed)")
+        else:
+            print("\nInstalling MicroPython dependencies via mip …")
+            _mip_install(ser, "lora-sx126x")
+            _mip_install(ser, "lora-sync")
+            _mip_install(ser, "contextlib")
 
         # — Soft reset —
         print("\nFlash complete. Soft-resetting Cardputer …")

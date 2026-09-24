@@ -394,11 +394,16 @@ def _flash_cardputer_client(port: str, client_root: str, result: DeviceResult,
                 print(f"  FAIL: DEST_HASH injection failed — {exc}")
                 return
 
-        # Install MicroPython dependencies (lora driver, contextlib).
-        print("  Installing MicroPython dependencies ...")
-        _mip_install(ser, "lora-sx126x")
-        _mip_install(ser, "lora-sync")
-        _mip_install(ser, "contextlib")
+        # MicroPython dependencies (the SX1262 driver + contextlib) are vendored
+        # in cardputer_client/lib/ and uploaded above, so a flash needs no
+        # network.  Only fall back to mip if the vendored driver is missing.
+        if os.path.isfile(os.path.join(client_root, "lib", "lora", "sx126x.py")):
+            print("  MicroPython dependencies: vendored in lib/ (no network needed)")
+        else:
+            print("  Installing MicroPython dependencies via mip ...")
+            _mip_install(ser, "lora-sx126x")
+            _mip_install(ser, "lora-sync")
+            _mip_install(ser, "contextlib")
 
         # Soft reset.
         print("  Soft-resetting Cardputer ...")

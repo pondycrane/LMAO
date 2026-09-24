@@ -157,6 +157,11 @@ no display/receive path — the chart needs the MicroPython client.
 - `DEVICE_PREFIX = "/flash"` — M5Stack firmware mounts flash at `/flash/`, not root
 - `boot.py` does `M5.begin()` then runs the LMAO client
 - `ucontextlib.py` must be in `lib/` (MicroPython needs `ucontextlib`, not `contextlib`)
+- `lib/lora/` (micropython-lib `lora` + `lora-sx126x` + `lora-sync`) and
+  `lib/contextlib.py` (python-stdlib) are **vendored**, so a flash needs no
+  network: the client's WiFi is off, which makes `mip install` fail
+  (`MIP_FAIL: -202`).  `install_all`/`flash.py` skip the mip step while the
+  vendored driver is present and only fall back to mip if it is missing.
 
 ## Archon workflows (LMAO-specific)
 
