@@ -32,11 +32,16 @@ def case_insensitive_contains(haystack: bytes, needle: str) -> bool:
     return needle.encode().lower() in haystack.lower()
 
 
-def find_rnode_port():
+def find_rnode_port(exclude=None):
     """Return the device path of a connected Heltec/ESP32 RNode, or *None*.
 
     RNode devices appear as USB serial (CP210x, CH340, or Espressif USB).
     Also checks for "rnode" in the description string.
+
+    Args:
+        exclude: Device path to ignore.  Pass the Cardputer's own console
+            port: it shares the Espressif VID (0x303A), so without this the
+            Cardputer is reported as an RNode when none is attached.
     """
     try:
         ports = serial.tools.list_ports.comports()
@@ -46,6 +51,8 @@ def find_rnode_port():
         return None
 
     for p in ports:
+        if exclude and getattr(p, "device", None) == exclude:
+            continue
         try:
             if p.vid in RNODE_VIDS:
                 return p.device

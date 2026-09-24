@@ -67,6 +67,30 @@ _CARDCOMPUTER_FINGERPRINTS: tuple[tuple[int, int, dict[str, str]], ...] = (
             "manufacturer": "M5Stack Technology Co., Ltd",
         },
     ),
+    (
+        0x303A,  # VID — Espressif (ESP32-S3)
+        0x816B,  # PID — Cardputer-ADV running M5Stack MicroPython (UiFlow2),
+                 # i.e. the default runtime for the Cardputer client
+        {
+            "product":      "Cardputer-ADV(UiFlow2)",
+            "manufacturer": "M5Stack",
+        },
+    ),
+    (
+        0x303A,  # VID — Espressif (ESP32-S3)
+        0x1001,  # PID — plain ESP32-S3 native USB-Serial-JTAG.  idf.py flash
+                 # erases the M5Stack bootloader descriptor (0x8120), so the
+                 # Cardputer under the opt-in native C firmware re-enumerates
+                 # as the generic Espressif "USB JTAG/serial debug unit" —
+                 # indistinguishable from any other ESP32-S3 board by VID/PID
+                 # alone, so this entry is "exact": both strings must match or
+                 # it is not a Cardputer.
+        {
+            "product":      "USB JTAG/serial debug unit",
+            "manufacturer": "Espressif",
+            "exact":        "1",
+        },
+    ),
 )
 
 _RNODE_FINGERPRINTS: tuple[tuple[int, int, dict[str, str]], ...] = (
@@ -204,6 +228,11 @@ def _match_fingerprint(
                      match exactly (or are unavailable on this OS).
     - ``"medium"`` — VID + PID match but product/manufacturer strings
                      are present and do NOT match the expected values.
+
+    A fingerprint entry may carry ``"exact": "1"`` to mean its VID/PID is
+    shared with unrelated devices (e.g. the generic ESP32-S3 USB-Serial-JTAG
+    ``0x1001``), so the strings must match — a mismatch is not this device and
+    yields no match at all.
     """
     if info.vid is None or info.pid is None:
         return ""
@@ -219,9 +248,11 @@ def _match_fingerprint(
         exp_manu = strings.get("manufacturer", "")
 
         # If product/manufacturer are both unavailable (e.g. platform
-        # doesn't expose USB strings), we can't downgrade confidence.
+        # doesn't expose USB strings), we can't downgrade confidence — but a
+        # generic-PID entry (see "exact" below) must not be accepted without
+        # its strings.
         if not prod and not manu:
-            return "high"
+            return "" if strings.get("exact") else "high"
 
         # If expected strings match (or are also empty), high confidence
         prod_match = (prod.lower() == exp_prod.lower()) or not exp_prod
@@ -229,6 +260,13 @@ def _match_fingerprint(
 
         if prod_match and manu_match:
             return "high"
+
+        # A fingerprint whose VID/PID is shared with unrelated devices (e.g.
+        # the generic ESP32-S3 USB-Serial-JTAG 0x1001) is marked "exact": a
+        # string mismatch means some other device shares this VID/PID, so
+        # there is no match at all rather than medium confidence.
+        if strings.get("exact"):
+            return ""
 
         # VID/PID matches but product/manufacturer differs → medium
         return "medium"

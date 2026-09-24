@@ -195,7 +195,9 @@ def find_cardputer_port(preferred=None):
     for p in ports:
         vid = getattr(p, "vid", None)
         pid = getattr(p, "pid", None)
-        if vid == 0x303A and pid == 0x8120:  # M5Stack Cardputer ADV (ESP32-S3)
+        # 0x816B: Cardputer-ADV running MicroPython/UiFlow2 (default runtime)
+        # 0x8120: M5Stack bootloader descriptor
+        if vid == 0x303A and pid in (0x816B, 0x8120):
             return p.device
 
     return None

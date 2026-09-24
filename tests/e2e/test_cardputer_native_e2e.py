@@ -69,8 +69,12 @@ def _find_cardputer_port():
     return None
 
 
-_RNODE_PORT = find_rnode_port() if HAS_PYSERIAL else None
+# The Cardputer is detected first: find_rnode_port() matches any Espressif
+# VID (0x303A), which is also the Cardputer's own USB console, so its port must
+# be excluded from the RNode scan — otherwise the local LoRa test runs with no
+# radio (it then crashes opening the port as an RNode).
 _CARDCOMPUTER_PORT = _find_cardputer_port() if HAS_PYSERIAL else None
+_RNODE_PORT = find_rnode_port(exclude=_CARDCOMPUTER_PORT) if HAS_PYSERIAL else None
 _HARDWARE_CHECKED = False
 _HARDWARE_READY = False
 _HARDWARE_REASON = None
