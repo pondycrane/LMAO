@@ -69,13 +69,16 @@ _CARDCOMPUTER_FINGERPRINTS: tuple[tuple[int, int, dict[str, str]], ...] = (
     ),
     (
         0x303A,  # VID — Espressif (ESP32-S3)
-        0x1001,  # PID — plain ESP32-S3 native USB-Serial-JTAG (PR1 native
-                 # firmware — the M5Stack bootloader's 0x8120 descriptor is
-                 # erased by idf.py flash, so the device enumerates as the
-                 # generic Espressif USB "USB JTAG/serial debug unit").
+        0x1001,  # PID — plain ESP32-S3 native USB-Serial-JTAG.  idf.py flash
+                 # erases the M5Stack bootloader descriptor (0x8120), so the
+                 # native Cardputer re-enumerates as the generic Espressif
+                 # "USB JTAG/serial debug unit" — indistinguishable from any
+                 # other ESP32-S3 board by VID/PID alone, so this entry is
+                 # "exact": both strings must match or it is not a Cardputer.
         {
-            "product":      "",
-            "manufacturer": "",
+            "product":      "USB JTAG/serial debug unit",
+            "manufacturer": "Espressif",
+            "exact":        "1",
         },
     ),
 )
@@ -215,6 +218,11 @@ def _match_fingerprint(
                      match exactly (or are unavailable on this OS).
     - ``"medium"`` — VID + PID match but product/manufacturer strings
                      are present and do NOT match the expected values.
+
+    A fingerprint entry may carry ``"exact": "1"`` to mean the VID/PID is
+    shared with unrelated devices (e.g. the generic ESP32-S3 USB-Serial-JTAG
+    ``0x1001``), so the strings must match — a mismatch is not this device
+    and yields no match at all.
     """
     if info.vid is None or info.pid is None:
         return ""
@@ -230,9 +238,10 @@ def _match_fingerprint(
         exp_manu = strings.get("manufacturer", "")
 
         # If product/manufacturer are both unavailable (e.g. platform
-        # doesn't expose USB strings), we can't downgrade confidence.
+        # doesn't expose USB strings), we can't downgrade confidence — but a
+        # generic-PID entry must not be accepted without its strings.
         if not prod and not manu:
-            return "high"
+            return "" if strings.get("exact") else "high"
 
         # If expected strings match (or are also empty), high confidence
         prod_match = (prod.lower() == exp_prod.lower()) or not exp_prod
@@ -240,6 +249,11 @@ def _match_fingerprint(
 
         if prod_match and manu_match:
             return "high"
+
+        # Generic VID/PID (see the "exact" note above): a string mismatch
+        # means some other device shares this VID/PID — not a match at all.
+        if strings.get("exact"):
+            return ""
 
         # VID/PID matches but product/manufacturer differs → medium
         return "medium"

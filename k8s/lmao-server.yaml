@@ -98,6 +98,14 @@ spec:
             # CNI interfaces (multicast-echo errors, useless announces).
             - name: LMAO_AUTOIFACE_DEVICES
               value: "wlan0"
+            # Repeat each reply (spaced) so a copy lost on the one-way, lossy
+            # LoRa link is covered.  The native client sends no LXMF delivery
+            # proof, so LXMF alone transmits once/twice then gives up.  Default
+            # is 3 / 2.0 s; set explicitly to make the live policy visible.
+            - name: LMAO_REPLY_REPEATS
+              value: "3"
+            - name: LMAO_REPLY_REPEAT_DELAY
+              value: "2.0"
           ports:
             - name: grpc
               containerPort: 50051

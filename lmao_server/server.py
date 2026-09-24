@@ -21,6 +21,7 @@ import asyncio
 import logging
 import os
 import random
+import threading
 import time
 
 from google.protobuf.message import DecodeError
@@ -193,6 +194,17 @@ _NATS_STREAM_SUBJECTS = ["lmao.messages.>"]
 _NATS_RECONNECT_BACKOFF_BASE = 5.0  # seconds
 _NATS_RECONNECT_BACKOFF_MAX = 300.0  # seconds
 
+# Reply delivery over the 868 MHz LoRa link is one-way and lossy: the reply is
+# a ~470 B split frame (LXMF adds ~235 B of dest/signature/msgpack framing, so
+# even an ACK-only reply is >254 B) and the native Cardputer client sends no
+# LXMF delivery proof — so LXMF transmits once (twice at most, back-to-back)
+# and then declares "Max delivery attempts reached", dropping the path.  A copy
+# lost on air is therefore never retried.  Transmit the reply a small,
+# configurable number of times, spaced out, so a lost copy is covered; the
+# content is idempotent (the client simply redraws the same chart).
+_REPLY_REPEATS = max(1, int(os.environ.get("LMAO_REPLY_REPEATS", "3")))
+_REPLY_REPEAT_DELAY_S = float(os.environ.get("LMAO_REPLY_REPEAT_DELAY", "2.0"))
+
 
 def _identity_to_destination(identity):
     """Wrap an RNS.Identity in an RNS.Destination for LXMF.
@@ -243,6 +255,10 @@ class Server:
         self._nats_reconnect_lock = None  # created lazily on the server loop
         self._nats_reconnect_failures = 0
         self._nats_next_reconnect_at = 0.0
+        # Reply repeat policy (see the _REPLY_REPEATS comment): per-instance so
+        # tests can pin it and operators can tune it via env.
+        self.reply_repeats = _REPLY_REPEATS
+        self.reply_repeat_delay_s = _REPLY_REPEAT_DELAY_S
 
     def register_grpc_subscriber(self, queue):
         """Register an asyncio.Queue for gRPC Subscribe streaming."""
@@ -365,6 +381,49 @@ class Server:
             logger.error("send_command: dispatch failed: %s", e, exc_info=True)
             return False
 
+    def _transmit_reply(self, source_dest, source_hash, reply_text):
+        """Build and dispatch one opportunistic reply LXMF message."""
+        reply_envelope = LMAOEnvelope()
+        reply_envelope.text.node_id = source_hash
+        reply_envelope.text.content = reply_text
+        reply_envelope.text.timestamp = int(time.time() * 1000)
+
+        reply_msg = LXMF.LXMessage(
+            destination=source_dest,
+            source=_identity_to_destination(self.server_identity),
+            content=reply_envelope.SerializeToString(),
+            title="p:Envelope",
+            desired_method=LXMF.LXMessage.OPPORTUNISTIC,
+        )
+        self.router.handle_outbound(reply_msg)
+
+    def _send_reply(self, source_dest, source_hash, reply_text):
+        """Send the reply, repeating it so it survives the lossy LoRa link.
+
+        The first copy is dispatched inline (the healthy-link case).  Any
+        further copies are dispatched from a daemon thread, spaced by
+        ``_REPLY_REPEAT_DELAY_S``, so a copy lost on air is covered without
+        blocking the LXMF delivery callback.  See the ``_REPLY_REPEATS``
+        comment for why a single transmission is not enough for this client.
+        """
+        self._transmit_reply(source_dest, source_hash, reply_text)
+
+        repeats = self.reply_repeats - 1
+        if repeats <= 0:
+            return
+
+        def _repeat():
+            for _ in range(repeats):
+                time.sleep(self.reply_repeat_delay_s)
+                try:
+                    self._transmit_reply(source_dest, source_hash, reply_text)
+                except Exception:  # a failed repeat must not kill the thread
+                    logger.warning("Reply repeat failed", exc_info=True)
+
+        threading.Thread(
+            target=_repeat, daemon=True, name="lmao-reply-repeat"
+        ).start()
+
     def handle_lxmf_delivery(self, message):
         """Decodes incoming content as a protobuf LMAOEnvelope. The protocol uses
         title="p:Envelope" as a convention, but the handler attempts protobuf
@@ -434,20 +493,7 @@ class Server:
             logger.info("Reply: %s", reply_text)
 
             if source_dest is not None and self.router is not None:
-                # Build protobuf envelope with TextMessage
-                reply_envelope = LMAOEnvelope()
-                reply_envelope.text.node_id = source_hash
-                reply_envelope.text.content = reply_text
-                reply_envelope.text.timestamp = int(time.time() * 1000)
-
-                reply_msg = LXMF.LXMessage(
-                    destination=source_dest,
-                    source=_identity_to_destination(self.server_identity),
-                    content=reply_envelope.SerializeToString(),
-                    title="p:Envelope",
-                    desired_method=LXMF.LXMessage.OPPORTUNISTIC,
-                )
-                self.router.handle_outbound(reply_msg)
+                self._send_reply(source_dest, source_hash, reply_text)
                 logger.info("Reply sent.")
             else:
                 logger.warning("Could not send reply (no source destination or router).")

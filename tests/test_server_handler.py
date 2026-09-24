@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import sys
+import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -42,6 +43,12 @@ def server_with_mocks():
     server_instance.router = MagicMock()
     server_instance.server_identity = MagicMock()
     server_instance.server_identity.hash = b"\x01" * 16
+
+    # Single-shot replies in tests: the default repeats (for the lossy LoRa
+    # link — see _send_reply) would otherwise spawn a background thread that
+    # fires after the test has already asserted.  The repeat path has its own
+    # test below.
+    server_instance.reply_repeats = 1
 
     yield server_instance
 
@@ -83,6 +90,29 @@ class TestHandleLXMFDelivery:
         reply_content = call_kwargs.get("content")
         assert reply_content is not None, "Reply must have content"
         assert len(reply_content) > 0, "Reply envelope must not be empty"
+
+    def test_reply_repeated_for_lossy_link(self, server_with_mocks):
+        """The reply is transmitted ``_REPLY_REPEATS`` times so a copy lost on
+        the one-way LoRa link is covered.  The native Cardputer client sends no
+        LXMF delivery proof, so LXMF on its own transmits once or twice
+        back-to-back and then declares "Max delivery attempts reached"."""
+        server = server_with_mocks
+        server.reply_repeats = 3
+        server.reply_repeat_delay_s = 0.01
+
+        msg = MagicMock()
+        msg.get_source.return_value = MagicMock()
+        msg.get_source.return_value.hash = b"\x0b" * 16
+        msg.content = b"repeat test"
+        msg.title_as_string.return_value = "p:Envelope"
+
+        server.handle_lxmf_delivery(msg)
+
+        # First copy is inline; the rest come from the repeat thread.
+        deadline = time.time() + 2.0
+        while server.router.handle_outbound.call_count < 3 and time.time() < deadline:
+            time.sleep(0.01)
+        assert server.router.handle_outbound.call_count == 3
 
     def test_no_reply_when_no_source(self, server_with_mocks):
         """Handle message with no source identity gracefully."""

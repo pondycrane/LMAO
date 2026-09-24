@@ -58,22 +58,41 @@ def _find_cardputer_port():
         if serial.tools.list_ports.comports:
             for p in serial.tools.list_ports.comports():
                 # Cardputer ADV = M5Stack Stamp-S3A (VID 0x303A espressif),
-                # USB-Serial-JTAG console.  Match by description keyword, or the
-                # M5Stack bootloader descriptor (0x8120) / the generic native
-                # ESP32-S3 USB-Serial-JTAG descriptor (0x1001) that idf.py flash
-                # leaves — both are this device depending on its firmware.
+                # USB-Serial-JTAG console.  Match by description keyword, the
+                # M5Stack bootloader descriptor (0x8120), or the generic
+                # ESP32-S3 USB-Serial-JTAG descriptor (0x1001) that idf.py
+                # flash leaves.  0x1001 is shared by every ESP32-S3 board, so
+                # its USB strings must match too (same rule as
+                # lma_core.device_detect).
                 desc = (p.description or "").lower()
                 if "cardputer" in desc:
                     return p.device
-                if getattr(p, "vid", None) == 0x303A and getattr(p, "pid", None) in (0x8120, 0x1001):
+                vid = getattr(p, "vid", None)
+                pid = getattr(p, "pid", None)
+                if vid == 0x303A and pid == 0x8120:
+                    return p.device
+                if (
+                    vid == 0x303A
+                    and pid == 0x1001
+                    and "jtag" in (getattr(p, "product", None) or "").lower()
+                    and "espressif" in (getattr(p, "manufacturer", None) or "").lower()
+                ):
                     return p.device
     except Exception as exc:
         _logger.warning("Cardputer port scan failed: %s", exc)
     return None
 
 
-_RNODE_PORT = find_rnode_port() if HAS_PYSERIAL else None
+# The Cardputer is detected first: find_rnode_port() matches any Espressif
+# VID (0x303A), which is also the native Cardputer's own USB-Serial-JTAG
+# console, so its port must be excluded from the RNode scan or the local LoRa
+# test runs with no radio.  Without a genuine RNode the local path cannot run
+# (loud skip); the production path is verified by the archon hardware gate —
+# see .archon/commands/lmao-hardware-e2e.md (Phase 4, PATH B).
 _CARDCOMPUTER_PORT = _find_cardputer_port() if HAS_PYSERIAL else None
+_RNODE_PORT = (
+    find_rnode_port(exclude=_CARDCOMPUTER_PORT) if HAS_PYSERIAL else None
+)
 _HARDWARE_CHECKED = False
 _HARDWARE_READY = False
 _HARDWARE_REASON = None
