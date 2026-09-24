@@ -31,17 +31,16 @@ first — copy-pasting into a device `main/` is a DRY violation.
 Run the following as final verification before marking any feature complete or submitting a PR:
 
 ```bash
-# Flash verification (requires Cardputer) — native C firmware
-bazel test //tests:test_cardputer_native_e2e --test_output=all
+# Flash verification (requires Cardputer) — MicroPython client (default runtime)
+bazel test //tests:test_cardputer_e2e --test_output=all
 
 # LoRa communication verification (requires Cardputer + Heltec RNode)
-bazel test //tests:test_cardputer_native_e2e --test_output=all
+bazel test //tests:test_cardputer_lora_e2e --test_output=all
 ```
 
-(The MicroPython-era `test_cardputer_e2e` / `test_cardputer_lora_e2e` targets
-still exist for the `--micropython-cardputer` fallback but are no longer the
-default gate — native firmware is flashed via `install_all`/`flash.sh`, i.e.
-idf.py/esptool, not the raw REPL.)
+These flash the MicroPython client over the raw REPL (`install_all`'s default
+path). The native C firmware is opt-in (`--native-cardputer`, idf.py/esptool)
+and its gate is `bazel test //tests:test_cardputer_native_e2e --test_output=all`.
 
 Tests auto-skip only when no hardware is detected. Since issue #93 the RNode
 lives on the K8s node tp4, so on a dev machine with only the Cardputer
@@ -96,12 +95,12 @@ Notes:
 ### Humidity Sensor E2E Validation
 
 When an external humidity sensor (e.g., DHT20) is connected to the Cardputer,
-the E2E test (`test_cardputer_native_e2e`) validates humidity readings in
-addition to temperature. Set the following environment variable to configure
-the sensor type expected in the test:
+the E2E test validates humidity readings in addition to temperature. Set the
+following environment variable to configure the sensor type expected in the
+test:
 
 ```bash
-E2E_SENSOR_TYPE=DHT20 bazel test //tests:test_cardputer_native_e2e --test_output=all
+E2E_SENSOR_TYPE=DHT20 bazel test //tests:test_cardputer_lora_e2e --test_output=all
 ```
 
 When `E2E_SENSOR_TYPE` is not set (default), the test runs in single-reading
@@ -117,36 +116,44 @@ The RNode firmware responds to the standard RNode DETECT protocol (`0xc0 0x08 0x
 
 ## Cardputer
 
-Since PR1 the Cardputer runs **native C firmware** (ESP-IDF + RTReticulum, in
-`cardputer_client/firmware/`), like the Sprout native client — not MicroPython.
-Flashing is via the ESP-IDF toolchain (`idf.py flash`, esptool under the hood),
-NOT raw REPL.
+The Cardputer runs the **MicroPython client** (`cardputer_client/*.py`,
+µReticulum + the micropython-lib `lora-sx126x` driver). That library stack is
+the maintained, field-proven path for this board — including the
+chart/display — and `install_all` flashes it by default. Flashing copies the
+client over the raw REPL.
+
+The **native C firmware** (`cardputer_client/firmware/`, ESP-IDF +
+RTReticulum, PR1) is **opt-in** (`--native-cardputer`) and reserved for
+hardware with a very tight heap; the **Sprout / Atom Lite** native client
+(`smart_irrigation/native-client`) is its primary user. On the Cardputer it has
+no display/receive path — the chart needs the MicroPython client.
 
 - **Flash only through the sanctioned tools**: `bazel run //tools:install_all`
-  (bakes the server's `DEST_HASH` at build time) or the manual
-  `bazel run //cardputer_client:flash_firmware` / `build_firmware` targets.
-  Do not run ad-hoc esptool probing/flashing on the Cardputer outside these
-  paths (USB-Serial-JTAG is fragile to careless reflashes; the raw-REPL era is
-  over). `esptool.py chip_id` type probes still disconnect the USB-Serial-JTAG
-  and need a physical unplug/replug to recover — avoid them.
-- The legacy MicroPython client (`cardputer_client/*.py`) is a **documented
-  fallback** only (chart/display era): `bazel run //tools:install_all --
-  --micropython-cardputer`. The native firmware's settings are build-time
+  injects the server's `DEST_HASH` and flashes the MicroPython client by
+  default (`--native-cardputer` selects the C firmware). The manual
+  `bazel run //cardputer_client:flash` (MicroPython) and
+  `//cardputer_client:flash_firmware` / `:build_firmware` (native) targets
+  exist but do **not** inject `DEST_HASH`. Do not run ad-hoc esptool
+  probing/flashing on the Cardputer outside these paths (USB-Serial-JTAG is
+  fragile to careless reflashes; `esptool.py chip_id`-style probes disconnect
+  it and need a physical unplug/replug). Installing the M5Stack MicroPython
+  firmware itself is a one-off esptool step — see README §5.
+- MicroPython-client settings (report interval, sensor type, DEST_HASH) live in
+  `cardputer_client/config.py`. The native firmware takes them as build-time
   defines in `cardputer_client/firmware/build.sh` (`LMAO_DEST_HASH_HEX`,
-  `LMAO_INTERVAL_SECONDS`, `LMAO_SENSOR_TYPE`) — there is no on-device
-  config.py anymore.
+  `LMAO_INTERVAL_SECONDS`, `LMAO_SENSOR_TYPE`) — it has no on-device config.
 - **DEST_HASH continuity is critical (#70, #93): always (re)flash the client
-  via `install_all`, not the bare `:flash_firmware` target.** The bare targets
-  build with `LMAO_DEST_HASH_HEX` unset (announce-only, device logs "No
-  destination configured — not sending"); only `//tools:install_all` resolves
-  the server's current delivery hash and bakes it in at build time.
-- The native identity is minted fresh in NVS on first boot; its
-  `lxmf/delivery` hash is printed on the serial console and must be added to
-  the server's `ALLOWED_CLIENTS` (env `LMAO_ALLOWED_CLIENTS` in
-  `k8s/lmao-server.yaml`) for the server to accept its reports (same flow as
-  Sprout's native hash).
+  via `install_all`, not the bare `:flash_firmware` target.** The bare native
+  targets build with `LMAO_DEST_HASH_HEX` unset (announce-only, device logs
+  "No destination configured — not sending"); only `//tools:install_all`
+  resolves the server's current delivery hash and injects it.
+- The client's identity is minted fresh on first boot (native: NVS;
+  MicroPython: on-device storage); its `lxmf/delivery` hash is printed on the
+  serial console and must be added to the server's `ALLOWED_CLIENTS` (env
+  `LMAO_ALLOWED_CLIENTS` in `k8s/lmao-server.yaml`) for the server to accept
+  its reports (same flow as Sprout's native hash).
 
-**Vendored changes to flash.py (legacy MicroPython flash tool, fallback only):**
+**Vendored changes to flash.py (the MicroPython flash tool — default Cardputer path):**
 - `DEVICE_PREFIX = "/flash"` — M5Stack firmware mounts flash at `/flash/`, not root
 - `boot.py` does `M5.begin()` then runs the LMAO client
 - `ucontextlib.py` must be in `lib/` (MicroPython needs `ucontextlib`, not `contextlib`)

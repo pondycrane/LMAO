@@ -150,40 +150,88 @@ Listening for LXMF messages...
 
 ### 5. Configure and Flash the Cardputer
 
-The Cardputer runs the **native C firmware** (`cardputer_client/firmware/`,
-ESP-IDF + RTReticulum) — the same native stack Sprout uses. MicroPython is
-dropped (PR1 = sensor node; the chart/display returns in a follow-up). The
-firmware serves the same LMAO wire contract the MicroPython client did:
-an LXMF `SensorReport` (die temp, optional DHT20 humidity) to the server's
-`lxmf.delivery` destination, discovered from the server's announce.
+The Cardputer runs the **MicroPython client** (`cardputer_client/*.py`,
+µReticulum + the micropython-lib `lora-sx126x` driver). That library stack is
+the maintained, field-proven path for this board (including the
+chart/display), and `install_all` flashes it by default. It serves the LMAO
+wire contract: an LXMF `SensorReport` (die temp, optional DHT20 humidity) to
+the server's `lxmf.delivery` destination, discovered from the server's
+announce, and decodes the server's `ACK` + `DATA` reply for the on-screen
+chart.
 
-The two native firmware trees share a **single canonical protocol component**
+The **native C firmware** (`cardputer_client/firmware/`, ESP-IDF +
+RTReticulum) is **opt-in** — `bazel run //tools:install_all -- --native-cardputer`.
+It is reserved for hardware with a very tight heap, where MicroPython does not
+fit; the **Sprout / Atom Lite** native client
+(`smart_irrigation/native-client`) is its primary user. Both native trees
+share a **single canonical protocol component**
 in `firmware_common/` (DRY — no per-tree copies): `lma_common` holds the
 `lma_encoder`/`lxmf_send`/`path_find`/`lma_identity` sources and
 `rtreticulum/` holds the RNS wrapper; each `build.sh` stages it into the
 targeted `.rtreticulum/firmware/<name>/components/`. Add cross-device code
 there, never in a device `main/` (see AGENTS.md "DRY").
 
-**Before flashing:**
-- `DEST_HASH` is baked in **automatically** by `bazel run //tools:install_all`
-  at build time: the tool loads/creates the server's persisted identity at
-  `~/.local/share/lmao_server/lxmf/identity`, derives the `lxmf.delivery`
-  destination hash, and passes it to the firmware build via
-  `LMAO_DEST_HASH_HEX` — the source tree is never modified (like the old
-  config.py injection). Leave it unset to run announce-only (no sends).
-- The native identity is **minted fresh in NVS on first boot**. Its
-  `lxmf/delivery` hash is printed on the serial console — add it to the
-  server's `ALLOWED_CLIENTS` (env `LMAO_ALLOWED_CLIENTS` in
-  `k8s/lmao-server.yaml`, see §5a) so the server accepts its reports.
-- Interval (default 300 s, minimum clamped 10 s), optional DHT20 sensor and
-  other settings are build-time defines (`LMAO_INTERVAL_SECONDS`,
-  `LMAO_SENSOR_TYPE`) — see `cardputer_client/firmware/build.sh`.
+**One-off: install M5Stack MicroPython (needed before the first client flash)**
 
-**Option A — Native C Cardputer firmware (default):**
+`install_all` copies the client over the raw REPL, so the device must already be
+running M5Stack MicroPython (UIFlow2). Per M5Stack that image is normally burnt
+with M5Burner; the equivalent headless route is the official release build
+(Cardputer **Adv** = `esp32s3-8mb-cardputeradv`):
+
+```bash
+curl -LO https://github.com/m5stack/uiflow-micropython/releases/download/2.5.2/\
+uiflow-587e134-esp32s3-8mb-cardputeradv-v2.5.2-20260831.bin
+esptool.py --chip esp32s3 --port /dev/ttyACM0 --baud 1500000 \
+  write_flash -z 0x0 uiflow-587e134-esp32s3-8mb-cardputeradv-v2.5.2-20260831.bin
+```
+
+(This is the one sanctioned esptool step for this board and it erases the
+device — including any previously stored identity, which must then be
+re-allow-listed; a wedged USB-Serial-JTAG needs a physical unplug/replug.)
+
+**Before flashing:**
+- `DEST_HASH` is injected **automatically** by `bazel run //tools:install_all`:
+  the tool loads/creates the server's persisted identity at
+  `~/.local/share/lmao_server/lxmf/identity`, derives the `lxmf.delivery`
+  destination hash, and passes it to the client — written into the
+  MicroPython client's on-device config, or baked into the native firmware via
+  `LMAO_DEST_HASH_HEX` at build time. Leave it unset to run announce-only.
+- The client's identity is **minted fresh on first boot** (native: NVS;
+  MicroPython: on-device storage). Its `lxmf/delivery` hash is printed on the
+  serial console — add it to the server's `ALLOWED_CLIENTS` (env
+  `LMAO_ALLOWED_CLIENTS` in `k8s/lmao-server.yaml`, see §5a) so the server
+  accepts its reports.
+- Report interval (default 300 s, minimum clamped 10 s), optional DHT20 sensor
+  and other MicroPython-client settings live in `cardputer_client/config.py`;
+  the native firmware takes them as build-time defines
+  (`LMAO_INTERVAL_SECONDS`, `LMAO_SENSOR_TYPE`) — see
+  `cardputer_client/firmware/build.sh`.
+
+**Option A — MicroPython client (default):**
+
+```bash
+# Copy the client to the Cardputer and inject the server's DEST_HASH
+bazel run //tools:install_all -- --skip-rnode
+
+# Or, once M5Stack MicroPython is already on the device:
+bazel run //cardputer_client:flash [-- --port /dev/ttyACM0]
+```
+
+> `--micropython-cardputer` selects this path explicitly; it is the default,
+> so the flag is only needed for compatibility with existing scripts. The
+> flash path copies `cardputer_client/*.py` over the raw REPL, so the device
+> must already be running M5Stack MicroPython (a fresh MicroPython firmware
+> install is an esptool step, outside install_all).
+
+**Option B — Native C Cardputer firmware (opt-in):**
+
+Reserved for hardware with a very tight heap (Sprout/Atom Lite). On the
+Cardputer it has no display/receive path, so it is only needed to exercise
+the native stack:
 
 ```bash
 # Build the native firmware (Docker ESP-IDF) and flash it to /dev/ttyACM0
-bazel run //tools:install_all -- --skip-rnode          # builds + flashes + bakes DEST_HASH
+bazel run //tools:install_all -- --native-cardputer --skip-rnode
 
 # Or drive the steps directly (no DEST_HASH — announce-only)
 bazel run //cardputer_client:build_firmware
@@ -196,10 +244,9 @@ LMAO_DEST_HASH_HEX=<32-hex> LMAO_INTERVAL_SECONDS=300 bazel run //cardputer_clie
 > ⚠️ Always use `bazel run //tools:install_all` (not the bare
 > `//cardputer_client:flash_firmware`) for any flash that must keep the
 > device talking to the server — only install_all bakes the server's current
-> `DEST_HASH`. The bare targets leave it unset (announce-only), exactly like
-> the old bare `:flash` target silently wiped DEST_HASH.
+> `DEST_HASH`. The bare targets leave it unset (announce-only).
 
-Boot log (serial `/dev/ttyACM0`, 115200 baud, USB-Serial-JTAG console):
+Native-firmware boot log (serial `/dev/ttyACM0`, 115200 baud):
 
 ```
 Cardputer native client starting (PR1 sensor node)
@@ -208,25 +255,14 @@ my lxmf/delivery hash: ... (add to server ALLOWED_CLIENTS)
 SX1262 listening on 868.0 MHz SF7 BW125
 ```
 
-**Option B — Legacy MicroPython client (fallback, chart-era):**
-
-The raw-REPL MicroPython path still exists for running an older
-chart/display-capable client (until the native display lands):
-
-```bash
-# Flash the legacy MicroPython client to the Cardputer
-bazel run //cardputer_client:flash [-- --port /dev/ttyACM0]
-# or via install_all:
-bazel run //tools:install_all -- --micropython-cardputer --skip-rnode
-```
-
-> Pinout presets for the MicroPython LoRa boards are defined in
+> Pinout presets for the MicroPython LoRa boards live in
 > `cardputer_client/lora_boards.py`; the native firmware pins live in
 > `cardputer_client/firmware/main/cardputer_pins.h`.
 
 **Option C — Unified flash (install_all)**:
 
-Flash both Cardputer native firmware and RNode firmware in one command.
+Flash the Cardputer runtime (MicroPython by default, `--native-cardputer` for
+the C firmware) and the RNode firmware in one command.
 
 ```bash
 # Auto-detect both devices and flash

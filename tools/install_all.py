@@ -615,12 +615,20 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Skip injecting the server DEST_HASH into the Cardputer config "
         "(e.g. when the server runs on a different host).",
     )
-    parser.add_argument(
+    cp_group = parser.add_mutually_exclusive_group()
+    cp_group.add_argument(
         "--micropython-cardputer",
         action="store_true",
-        help="Flash the legacy MicroPython client to the Cardputer instead of "
-        "the native C firmware (PR1 default).  Only needed to keep an older "
-        "chart/display-capable runtime or to fall back from native.",
+        help="Flash the MicroPython client to the Cardputer.  This is the "
+        "default; the flag is kept for compatibility with existing scripts.",
+    )
+    cp_group.add_argument(
+        "--native-cardputer",
+        action="store_true",
+        help="Flash the native C firmware (PR1 sensor node; no display/receive "
+        "path) instead of the MicroPython client.  The native stack is "
+        "reserved for tight-heap hardware (Sprout/Atom Lite native client), "
+        "so it is no longer the Cardputer default.",
     )
     return parser.parse_args(argv)
 
@@ -653,28 +661,31 @@ def main(argv: list[str] | None = None) -> None:
         print("Cardputer: SKIP (--skip-cardputer)")
     else:
         client_root = args.client_root or find_client_root()
-        if not args.micropython_cardputer and not client_root:
-            # Native path does not need the MicroPython client source tree.
+        if args.native_cardputer and not client_root:
+            # The native path does not need the MicroPython client source tree.
             client_root = None
         port = find_cardputer_port(args.cardputer_port)
         if not port:
             cp_result.skip("No Cardputer detected on USB")
             print("Cardputer: SKIP — not detected on USB")
-        elif args.micropython_cardputer:
+        elif args.native_cardputer:
+            print("Cardputer: using native C firmware (--native-cardputer)")
+            _flash_cardputer_native(
+                port, cp_result, inject_dest_hash=not args.skip_dest_hash,
+            )
+        else:
+            # MicroPython is the Cardputer's default runtime: its LoRa/MicroPython
+            # libraries are the maintained, field-proven path for this board.  The
+            # native C stack is reserved for tight-heap hardware (Sprout/Atom Lite).
             if not client_root:
                 cp_result.fail("Cannot locate cardputer_client/ directory. Specify with --client-root.")
                 print("Cardputer: FAIL — cannot locate cardputer_client/ directory")
             else:
+                print("Cardputer: using MicroPython client (default)")
                 _flash_cardputer_client(
                     port, client_root, cp_result,
                     inject_dest_hash=not args.skip_dest_hash,
                 )
-        else:
-            # PR1: native C firmware is the default Cardputer flash.
-            print("Cardputer: using native C firmware (--micropython-cardputer for legacy)")
-            _flash_cardputer_native(
-                port, cp_result, inject_dest_hash=not args.skip_dest_hash,
-            )
 
     # ── RNode ──
     rn_result = DeviceResult("RNode (Heltec)")
