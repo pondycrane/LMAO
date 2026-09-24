@@ -722,6 +722,89 @@ def _mip_install(ser, package):
 # ---- Main (entry-point for ``bazel run``) ----
 
 
+# ── Ahead-of-time bytecode ──────────────────────────────────────────────
+#
+# On M5Stack UIFlow2 (MicroPython 1.27, ~177 KB GC heap) importing the client's
+# .py sources compiles their bytecode into RAM, and the LXMF send path then dies
+# with "MemoryError allocating 136 bytes" (see README §5).  Ship the library
+# tree and the top-level client modules as .mpy so the bytecode is read from
+# flash instead.  boot.py stays source (it is the boot script) and config.py
+# stays source (install_all rewrites it with the server DEST_HASH).
+_MPY_TREES = ("lib", "proto")
+_MPY_TOP_LEVEL = ("main.py", "chart.py", "lora_boards.py")
+
+
+def deploy_mpy_bytecode(ser, client_root):
+    """Compile the client to .mpy, upload it, and drop the shadowing .py files.
+
+    MicroPython prefers a ``.py`` file over its ``.mpy`` sibling, so the sources
+    must be deleted for the bytecode to load.  Returns False when mpy-cross is
+    unavailable — the .py sources still work, but on UIFlow2 the import-time
+    bytecode exhausts the heap.
+
+    Args:
+        ser: Open serial connection in raw REPL mode.
+        client_root: Local ``cardputer_client/`` directory.
+
+    Returns:
+        True when .mpy bytecode is deployed, False when skipped or failed.
+    """
+    import shutil as _shutil
+    import subprocess as _subprocess
+    import tempfile as _tempfile
+
+    mpy_cross = _shutil.which("mpy-cross")
+    if not mpy_cross:
+        print("  mpy-cross not found — shipping .py sources "
+              "(UIFlow2's heap may be too small: see README §5)")
+        return False
+
+    out_root = _tempfile.mkdtemp(prefix="lmao_mpy_")
+    sources = []
+    for tree in _MPY_TREES:
+        for dirpath, _dirs, files in os.walk(os.path.join(client_root, tree)):
+            for name in sorted(files):
+                if name.endswith(".py"):
+                    local = os.path.join(dirpath, name)
+                    sources.append((local, os.path.relpath(local, client_root)))
+    for name in _MPY_TOP_LEVEL:
+        local = os.path.join(client_root, name)
+        if os.path.isfile(local):
+            sources.append((local, name))
+
+    compiled = []  # (local .mpy, remote relpath, shadowed .py relpath)
+    for local, rel in sources:
+        out = os.path.join(out_root, rel[:-3] + ".mpy")
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        proc = _subprocess.run(
+            [mpy_cross, "-o", out, local], capture_output=True, text=True
+        )
+        if proc.returncode != 0:
+            print(f"  mpy-cross failed for {rel}: {(proc.stderr or '').strip()[:120]}")
+            return False
+        compiled.append((out, rel[:-3] + ".mpy", rel))
+
+    for out, remote, _shadowed in compiled:
+        if upload_file(ser, out, remote) is False:
+            print(f"  .mpy upload failed: {remote}")
+            return False
+    print(f"  Uploaded {len(compiled)} .mpy module(s)")
+
+    # Remove the .py siblings — a .py file shadows its .mpy.
+    shadowed = [DEVICE_PREFIX + "/" + rel for _o, _r, rel in compiled]
+    exec_raw(
+        ser,
+        "import os\n"
+        "for _p in " + repr(shadowed) + ":\n"
+        "    try:\n"
+        "        os.remove(_p)\n"
+        "    except OSError:\n"
+        "        pass\n"
+        "print('mpy-deployed')\n",
+    )
+    return True
+
+
 DEVICE_PREFIX = "/flash"  # M5Stack firmware mounts flash at /flash
 
 
@@ -853,6 +936,12 @@ def main():
                 ser = new_ser
                 disarm_watchdog(ser)
                 print("Resuming upload after recovery …")
+
+        # — Ahead-of-time bytecode —
+        # UIFlow2's ~177 KB heap cannot hold the .py sources' bytecode; ship
+        # .mpy and remove the .py siblings so the bytecode is read from flash
+        # (README §5).
+        deploy_mpy_bytecode(ser, client_root)
 
         # — MicroPython dependencies —
         # The SX1262 driver + contextlib are vendored in lib/ and uploaded by
