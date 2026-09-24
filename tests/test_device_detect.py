@@ -419,6 +419,27 @@ class TestDetectDevicesNoCrossMatching:
         # Should not match Cardputer (wrong PID 0x1001 vs 0x8120)
         assert result.cardputer is None
 
+    def test_cardputer_adv_uiflow2_detected(self):
+        """A Cardputer-ADV running M5Stack MicroPython (UiFlow2) is detected.
+
+        This is the default runtime's USB descriptor — the identity
+        ``install_all`` must recognise to flash the MicroPython client.
+        """
+        cardputer = _make_port(
+            device="/dev/ttyACM0",
+            vid=0x303A,
+            pid=0x816B,
+            product="Cardputer-ADV(UiFlow2)",
+            manufacturer="M5Stack",
+            description="Cardputer-ADV(UiFlow2) - Cardputer-ADV(UiFlow2)",
+        )
+        with _mock_comports([cardputer]):
+            result = device_detect.detect_devices()
+
+        assert result.cardputer is not None
+        assert result.cardputer.port == "/dev/ttyACM0"
+        assert result.confidence["cardputer"] == "high"
+
     def test_ch340_not_cardputer(self):
         """A CH340 (VID 0x1A86) must NOT be matched as Cardputer — old keyword
         matching would falsely match on 'ch340'.
