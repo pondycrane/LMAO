@@ -20,6 +20,103 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+# ── Host-testable: LMAF attachment framing (pure C++) ──
+# Split/reassemble framing for payloads larger than one LXMF packet; the
+# canonical copy both device trees compile via components/lma_common.
+cc_library(
+    name = "lma_attachment",
+    srcs = ["lma_common/lma_attachment.cpp"],
+    hdrs = ["lma_common/lma_attachment.h"],
+    strip_include_prefix = "lma_common",
+    visibility = ["//visibility:public"],
+)
+
+# Golden bytes generated from proto/lma_messages.proto (see the test header):
+# the MCU encoder and the protobuf-generated server stubs must never drift.
+cc_test(
+    name = "lma_attachment_test",
+    srcs = ["tests/lma_attachment_test.cpp"],
+    deps = [":lma_attachment"],
+    tags = ["unit"],
+)
+
+# ── Host-testable: inbound LXMF payload reader (pure C++) ──
+cc_library(
+    name = "lma_lxm",
+    srcs = ["lma_common/lma_lxm.cpp"],
+    hdrs = ["lma_common/lma_lxm.h"],
+    strip_include_prefix = "lma_common",
+    visibility = ["//visibility:public"],
+)
+
+cc_test(
+    name = "lma_lxm_test",
+    srcs = ["tests/lma_lxm_test.cpp"],
+    deps = [":lma_lxm"],
+    tags = ["unit"],
+)
+
+# ── Host-testable: device-side LMAF receive glue ──
+# Manifest/chunk handling, digest verification and ack construction — the
+# device tree only feeds bytes in and transmits the returned envelope.
+cc_library(
+    name = "lma_lmaf_rx",
+    srcs = ["lma_common/lma_lmaf_rx.cpp"],
+    hdrs = ["lma_common/lma_lmaf_rx.h"],
+    strip_include_prefix = "lma_common",
+    deps = [
+        ":lma_attachment",
+        ":lma_lxm",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+cc_test(
+    name = "lma_lmaf_rx_test",
+    srcs = ["tests/lma_lmaf_rx_test.cpp"],
+    deps = [":lma_lmaf_rx"],
+    tags = ["unit"],
+)
+
+# ── Host-testable: outbound dead-letter queue (pure C++) ──
+# The sender's half of loss recovery: keep what was transmitted, re-send on the
+# shared RetryPolicy schedule until something proves delivery, then give up
+# loudly.  Used by the device clients and mirrored (same policy table) by the
+# server.
+cc_library(
+    name = "lma_tx_queue",
+    srcs = ["lma_common/lma_tx_queue.cpp"],
+    hdrs = ["lma_common/lma_tx_queue.h"],
+    strip_include_prefix = "lma_common",
+    deps = [":lma_attachment"],
+    visibility = ["//visibility:public"],
+)
+
+cc_test(
+    name = "lma_tx_queue_test",
+    srcs = ["tests/lma_tx_queue_test.cpp"],
+    deps = [":lma_tx_queue"],
+    tags = ["unit"],
+)
+
+# ── Host-testable: RNode wire framing / split reassembly (pure C++) ──
+# Keeps the fix for the measured regression: on a shared channel, fragments must
+# be keyed by their tag, or an interleaved frame destroys a half-built packet.
+cc_library(
+    name = "lma_rnode_framing",
+    srcs = ["lma_common/lma_rnode_framing.cpp"],
+    hdrs = ["lma_common/lma_rnode_framing.h"],
+    strip_include_prefix = "lma_common",
+    visibility = ["//visibility:public"],
+)
+
+cc_test(
+    name = "lma_rnode_framing_test",
+    srcs = ["tests/lma_rnode_framing_test.cpp"],
+    deps = [":lma_rnode_framing"],
+    tags = ["unit"],
+)
+
 # ── Host-testable: send-only LXMF (RTReticulum-dependent) ──
 cc_library(
     name = "lxmf_send",

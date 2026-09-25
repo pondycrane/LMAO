@@ -8,6 +8,8 @@
 #   LMAO_DEST_HASH_HEX     server delivery hash (32 hex) — baked into the app
 #   LMAO_INTERVAL_SECONDS  send interval (default 300, min clamped to 10)
 #   LMAO_SENSOR_TYPE       0 = none, 1 = DHT20
+#   LMAO_ANNOUNCE_INTERVAL_SECONDS  presence announce interval (default 30;
+#                          raise it to cut this node's airtime — see main.cpp)
 # These are written into a generated lmao_config.h in the *staged* copy (under
 # .rtreticulum/firmware/cardputer), mirroring how install_all used to patch a
 # temp config.py for the MicroPython client.
@@ -69,6 +71,9 @@ HDR="$DEST/main/lmao_config.h"
     echo '#endif'
     echo '#ifndef LMAO_SENSOR_TYPE'
     echo "#define LMAO_SENSOR_TYPE ${LMAO_SENSOR_TYPE:-0}"
+    echo '#endif'
+    echo '#ifndef LMAO_ANNOUNCE_INTERVAL_SECONDS'
+    echo "#define LMAO_ANNOUNCE_INTERVAL_SECONDS ${LMAO_ANNOUNCE_INTERVAL_SECONDS:-120}"
     echo '#endif'
 } > "$HDR"
 echo "generated $HDR"

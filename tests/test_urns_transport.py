@@ -247,3 +247,11 @@ class TestOutbound:
 
         result = Transport.outbound(pkt)
         assert result is False, "Outbound with no interfaces should return False"
+
+
+if __name__ == "__main__":
+    import sys
+
+    import pytest
+
+    sys.exit(pytest.main([__file__] + sys.argv[1:]))

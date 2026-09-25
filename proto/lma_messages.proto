@@ -11,9 +11,21 @@ message LMAOEnvelope {
     CommandRequest  command = 11;
     CommandAck      ack     = 12;
     TextMessage     text    = 20;
+    // Legacy inline single-packet payloads.  Kept for wire compatibility only;
+    // any payload that does not fit one packet (and all voice/audio/image/video
+    // traffic) goes through LMAF below — see AttachmentManifest/Chunk/Ack.
     AudioMessage    audio   = 21;
     ImageMessage    image   = 22;
     CallSignal      call    = 30;
+
+    // --- LMAF: LMAO Attachment Framing (any binary payload, any transport) ---
+    // Chunk sizes are per-transport policies; every LMAF message is sized to
+    // ride in a single opportunistic LXMF packet so no Reticulum link is ever
+    // required (LoRa leaf nodes have no link headroom).
+    AttachmentManifest manifest = 40;
+    AttachmentChunk    chunk    = 41;
+    AttachmentAck      att_ack  = 42;
+    Capability         caps     = 50;
   }
 }
 
@@ -104,4 +116,107 @@ message CallSignal {
   Signal signal        = 1;
   string sdp_or_ice    = 2;
   string media_type    = 3;
+}
+
+// ============================================================
+// LMAF — LMAO Attachment Framing
+// ============================================================
+//
+// Transport-agnostic split/reassemble framing for payloads that do not fit a
+// single LXMF packet: chart histories, voice notes, photos, audio, video.
+//
+// Invariants (do not break these — they are what keep LoRa leaf nodes working):
+//   1. Every LMAF message fits ONE opportunistic LXMF packet.  With RNS MTU
+//      500 / LXMF ENCRYPTED_PACKET_MAX_CONTENT 295, the packed content budget
+//      is 295 + TIMESTAMP_SIZE(8) + STRUCT_OVERHEAD(8) = 311 B msgpack total,
+//      i.e. ≈282 B for the LMAOEnvelope once the [ts,title,content,fields]
+//      array header/frame is paid.  Hence the 240 B transport-profile chunk.
+//   2. The last packet of a split RNode transmission is not always the last
+//      frame: senders must pace chunks (duty cycle) and receivers must
+//      tolerate loss — hence AttachmentAck.missing.
+//   3. `id` is the content address: the first 16 bytes of
+//      sha256(payload).  Re-sending the same payload is idempotent and
+//      resumable — no session negotiation handshake is needed.
+//   4. Repeated scalars are declared [packed = false] so the hand-written
+//      MCU encoder (cardputer_client/proto/lma_encoder.py,
+//      firmware_common/lma_common/lma_attachment.cpp) stays byte-compatible
+//      with the generated protobuf code.
+
+// What the payload is.  The framing is identical for every kind; the kind
+// only tells the receiver how to interpret (and whether to accept) it.
+enum AttachmentKind {
+  KIND_UNSPECIFIED = 0;
+  KIND_VOICE       = 1;  // real-time-grade codec, e.g. codec2:700C
+  KIND_AUDIO       = 2;  // higher-quality audio, e.g. opus
+  KIND_IMAGE       = 3;  // e.g. webp / jpeg
+  KIND_VIDEO       = 4;
+  KIND_FILE        = 5;
+  KIND_CHART       = 6;  // LMAO chart payload (the "DATA ..." series line)
+  KIND_SIGNAL      = 7;  // call signalling (SDP/ICE), no media
+}
+
+message AttachmentManifest {
+  // sha256(payload)[:16] — content address, used as the session key.
+  bytes  id             = 1;
+  // Full 32-byte sha256 of the payload, verified after reassembly.
+  bytes  payload_sha256 = 2;
+  AttachmentKind kind   = 3;
+  // Payload interpretation, e.g. "codec2:700C", "opus:lbw", "webp",
+  // "lmao:chart-line-v1".
+  string codec          = 4;
+  // Bytes of payload per chunk for THIS session (sender's transport profile
+  // decision: 240 B on LoRa opportunistic, larger on IP profiles).
+  uint32 chunk_size     = 5;
+  uint32 chunk_count    = 6;
+  uint64 total_bytes    = 7;
+  // Media descriptors (0 when not applicable).
+  uint32 sample_rate    = 8;
+  uint32 channels       = 9;
+  uint32 duration_ms    = 10;
+  uint32 width          = 11;
+  uint32 height         = 12;
+  // Origin + creation time (LXMF already carries a timestamp; this is the
+  // payload's own, which survives transcoding).
+  string node_id        = 13;
+  uint64 created_ms     = 14;
+  // Free-form extras: source_id, transcode, transcript, ...
+  map<string, string> meta = 15;
+}
+
+message AttachmentChunk {
+  bytes  id    = 1;  // session key (manifest.id)
+  uint32 index = 2;  // 0-based; payload offset = index * manifest.chunk_size
+  bytes  data  = 3;
+  fixed32 crc32 = 4; // CRC-32 of `data` (uzlib/zlib polynomial), 0 = unchecked
+}
+
+message AttachmentAck {
+  enum Status {
+    RECEIVING = 0;  // progress report; `missing` lists what is still needed
+    COMPLETE  = 1;  // whole payload reassembled and hash-verified
+    NEED      = 2;  // resend the chunks in `missing`
+    REJECTED  = 3;  // permanent refusal (too large, unsupported kind, ...)
+    ABORTED   = 4;  // receiver gave up (timeout, out of space)
+  }
+  bytes  id            = 1;
+  Status status        = 2;
+  uint32 have_count    = 3;  // chunks held so far
+  // Sparse NACK list — cheaper than a bitmap when loss is sparse, which is the
+  // LoRa case.  [packed=false]: MCU-friendly encoding, see header note.
+  repeated uint32 missing = 4 [packed = false];
+  string reason        = 5;
+  // Duty-cycle backpressure: sender must wait this long before the next packet.
+  uint32 retry_after_ms = 6;
+}
+
+// Advertised once per session so the sender picks a chunk size the receiver can
+// actually take (and never pushes a kind it will not store).
+message Capability {
+  uint32 lmaf_version       = 1;
+  repeated AttachmentKind kinds = 2 [packed = false];
+  repeated string codecs    = 3;
+  uint32 max_chunk_size     = 4;  // largest chunk data the receiver accepts
+  uint64 max_attachment_bytes = 5;
+  uint32 rx_window          = 6;  // chunks it will hold before ACKing
+  uint32 airtime_budget_bps = 7;  // 0 = unthrottled (IP); else byte/s budget
 }

@@ -16,8 +16,18 @@ rescue (see issue #89 for the full post-mortem of the #87 run).
 
 Both run entirely on pi routing to the in-house GX10 box — every node uses
 the local DeepSeek V4 Flash model (`gx10/deepseek-ai/DeepSeek-V4-Flash-0731`,
-such as `gx10-f156.local:8000/v1`, defined in `~/.pi/agent/models.json`). The
+such as `gx10-f156:8000/v1`, defined in `~/.pi/agent/models.json`). The
 cloud DeepSeek endpoint is no longer used by default. No Claude anywhere.
+
+The hostname resolves through the router's DHCP zone at `192.168.50.1`, not
+mDNS. A bare LAN name only resolves because
+`/etc/systemd/resolved.conf.d/10-lan-single-label.conf` sets
+`ResolveUnicastSingleLabel=yes` — systemd-resolved refuses to query the
+network for dotless names by default. The `/etc/nsswitch.conf` rule
+`hosts: files mdns4_minimal [NOTFOUND=return] dns` means a `.local` name can
+never fall back to DNS, so `gx10-f156.local` dies whenever avahi/mDNS is
+unhappy (symptom: `getaddrinfo ENOTFOUND`). If that drop-in is ever lost,
+every `gx10/*` model call in these workflows fails.
 
 ```bash
 cd /home/pondycrane/LMAO

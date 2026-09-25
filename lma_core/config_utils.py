@@ -17,6 +17,18 @@ Factory class:
 import os
 import tempfile
 
+# Reticulum log level for the generated config (see RnsConfig).  Default 4
+# (INFO); LMAO_RNS_LOGLEVEL raises it for link diagnosis.
+_DEFAULT_RNS_LOGLEVEL = 4
+
+
+def _rns_loglevel():
+    """RNS log level from LMAO_RNS_LOGLEVEL (clamped to RNS's 0..7 range)."""
+    try:
+        return max(0, min(7, int(os.environ.get("LMAO_RNS_LOGLEVEL", _DEFAULT_RNS_LOGLEVEL))))
+    except (TypeError, ValueError):
+        return _DEFAULT_RNS_LOGLEVEL
+
 
 def resolve_rnode_port():
     """Return the RNode serial port.
@@ -97,7 +109,11 @@ class RnsConfig:
         self._rnode_port = resolve_rnode_port()
 
         self._sections = {
-            "logging": {"loglevel": 4},
+            # Reticulum's own log level (0=critical .. 7=extreme).  Raised at
+            # deploy time for link diagnosis: LMAO_RNS_LOGLEVEL=6 shows the
+            # transport's path/send decisions, which is how you find out why a
+            # directed reply is or is not hitting the radio.
+            "logging": {"loglevel": _rns_loglevel()},
             "transport": {"path": transport_path},
         }
         # AutoInterface normally binds every multicast-capable interface.

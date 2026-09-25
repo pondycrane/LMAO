@@ -712,3 +712,11 @@ class TestNatsQueueConstants:
     def test_max_msg_size_set(self):
         """_MAX_MSG_SIZE should be 1 MiB."""
         assert NatsQueue._MAX_MSG_SIZE == 1_048_576
+
+
+if __name__ == "__main__":
+    import sys
+
+    import pytest
+
+    sys.exit(pytest.main([__file__] + sys.argv[1:]))

@@ -6,6 +6,7 @@
 #include "driver/spi_master.h"
 #include "esp_log.h"
 #include "esp_random.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
@@ -103,7 +104,15 @@ void LoraInterface::stop() {
 }
 
 void LoraInterface::poll() {
-    /* Drain TX queue first (from any task via send_outgoing). */
+    /* RX before TX.  The SX126x shares one 256-byte FIFO between receive and
+     * transmit, so a packet that finished receiving while a transmission was
+     * already queued would be destroyed by that transmission — and the DIO1
+     * flag, cleared when the frame goes out, is the only record it ever
+     * arrived.  Draining RX first recovers those packets; it costs one DIO1
+     * check per pass when nothing is pending. */
+    if (g_packet_pending) poll_rx();
+
+    /* Then drain the TX queue (filled from any task via send_outgoing). */
     TxItem item;
     while (g_tx_queue && xQueueReceive(g_tx_queue, &item, 0) == pdTRUE) {
         _radio->standby();
@@ -113,35 +122,84 @@ void LoraInterface::poll() {
         } else {
             ESP_LOGW(TAG, "transmit failed: %d", state);
         }
+        /* The transmit clobbered the RX FIFO, so any surviving flag is stale. */
         g_packet_pending = false;
         _radio->startReceive();
     }
+}
 
-    /* Then check for RX. */
-    if (!g_packet_pending) return;
+/* Drain one received frame (or a merged split pair) and hand it to Reticulum. */
+void LoraInterface::poll_rx() {
     g_packet_pending = false;
 
+    constexpr size_t MAX_FRAME = MAX_PACKET + 1;   /* RNode header + payload */
     size_t len = _radio->getPacketLength();
-    constexpr size_t MAX_FRAME = Type::Reticulum::MTU + 32;
-    if (len == 0 || len > MAX_FRAME) {
+    if (len == 0) {
+        /* A DIO1 with no payload — a CRC failure or an empty-payload IRQ.
+         * Logged, not swallowed: a frame dropped here is indistinguishable
+         * from one that never arrived, which is precisely the ambiguity that
+         * made "the device hears everything except packets for itself" so hard
+         * to read. */
+        ESP_LOGW(TAG, "RX frame with no payload (crc/irq) — dropped");
+        _radio->startReceive();
+        return;
+    }
+    if (len > MAX_FRAME) {
+        ESP_LOGW(TAG, "RX frame too large (%u B) — dropped", (unsigned)len);
         _radio->startReceive();
         return;
     }
     uint8_t buf[MAX_FRAME];
     int state = _radio->readData(buf, len);
-    if (state == RADIOLIB_ERR_NONE && len > 1) {
-        ESP_LOGI(TAG, "RX %u bytes on LoRa", (unsigned)len);
-        if (_raw_rx) {
-            float rssi = _radio->getRSSI();
-            float snr  = _radio->getSNR();
-            _raw_rx(buf + 1, len - 1, rssi, snr);
-        } else {
-            this->handle_incoming(Bytes(buf + 1, len - 1));
-        }
-    } else {
-        ESP_LOGW(TAG, "readData failed: %d", state);
+    if (state != RADIOLIB_ERR_NONE || len < 2) {
+        if (state != RADIOLIB_ERR_NONE) ESP_LOGW(TAG, "readData failed: %d", state);
+        _radio->startReceive();
+        return;
     }
+    /* Header of every accepted frame: size, split flag and tag.  Together with
+     * Reticulum's own `inbound ok ... dh=` line this pins down, per frame,
+     * whether what the radio heard became a packet for this node. */
+    ESP_LOGI(TAG, "RX frame %u B header=0x%02x split=%u tag=%02x",
+             (unsigned)len, (unsigned)buf[0], (unsigned)(buf[0] & 0x01),
+             (unsigned)(buf[0] & 0xF0));
+
+    const uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+
+    /* Reassemble by sequence tag (see lma_rnode_framing.h): a frame is only
+     * discarded when its partner genuinely never arrives, never because
+     * something else was transmitted in between — which is what silently ate
+     * the server's chart packets on a shared channel. */
+    const lma_attachment::RnodeFrame frame = lma_attachment::parse_rnode_frame(buf, len);
+    const auto assembled = _asm.push(frame, now_ms);
+
+    if (assembled.stale) {
+        ESP_LOGW(TAG, "dropping stale split fragment (%u B, seq=%02x)",
+                 (unsigned)assembled.stale_len, (unsigned)frame.seq);
+    }
+    if (assembled.dropped) {
+        ESP_LOGW(TAG, "split assembly refused (%u B limit)", (unsigned)MAX_PACKET);
+    }
+    if (assembled.complete) {
+        if (frame.split) {
+            ESP_LOGI(TAG, "RX %u bytes on LoRa (2 frames, seq=%02x)",
+                     (unsigned)assembled.data.size(), (unsigned)frame.seq);
+        } else {
+            ESP_LOGI(TAG, "RX %u bytes on LoRa", (unsigned)assembled.data.size());
+        }
+        deliver_packet((const uint8_t*)assembled.data.data(), assembled.data.size());
+    }
+
     _radio->startReceive();
+}
+
+/* Hand a fully reassembled RNS packet to Reticulum (the RNode header is
+ * stripped; Reticulum expects the bare frame). */
+void LoraInterface::deliver_packet(const uint8_t* data, size_t len) {
+    if (_raw_rx) {
+        _raw_rx(data, len, _radio->getRSSI(), _radio->getSNR());
+    } else {
+        this->handle_incoming(Bytes(data, len));
+    }
 }
 
 void LoraInterface::send_outgoing(const RNS::Bytes& data) {

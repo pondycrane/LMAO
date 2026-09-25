@@ -11,6 +11,11 @@
 idf_component_register(
     SRCS
         "lma_encoder.cpp"
+        "lma_attachment.cpp"
+        "lma_tx_queue.cpp"
+        "lma_rnode_framing.cpp"
+        "lma_lxm.cpp"
+        "lma_lmaf_rx.cpp"
         "lxmf_send.cpp"
         "path_find.cpp"
         "lma_identity.cpp"

@@ -16,7 +16,7 @@ iniconfig==2.3.0
 packaging==26.0
 pluggy==1.6.0
 pygments==2.19.2
-nats-py==0.2.0
+nats-py==2.16.0
 duckdb==1.4.3
 aiohttp==3.14.3
 aiohappyeyeballs==2.7.1

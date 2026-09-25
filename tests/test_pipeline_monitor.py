@@ -326,3 +326,11 @@ class TestPipelineMonitor:
 
         assert exc_info.value.code == 1  # silence still reported
         assert "Alert delivery FAILED" in caplog.text
+
+
+if __name__ == "__main__":
+    import sys
+
+    import pytest
+
+    sys.exit(pytest.main([__file__] + sys.argv[1:]))

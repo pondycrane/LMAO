@@ -126,7 +126,9 @@ The **native C firmware** (`cardputer_client/firmware/`, ESP-IDF +
 RTReticulum, PR1) is **opt-in** (`--native-cardputer`) and reserved for
 hardware with a very tight heap; the **Sprout / Atom Lite** native client
 (`smart_irrigation/native-client`) is its primary user. On the Cardputer it has
-no display/receive path — the chart needs the MicroPython client.
+no display — drawing the chart still needs the MicroPython client — but since
+PR2 the native client does receive the chart payload over LMAF (manifest +
+chunks, digest-verified and acknowledged; see `proto/lma_messages.proto`).
 
 - **Flash only through the sanctioned tools**: `bazel run //tools:install_all`
   injects the server's `DEST_HASH` and flashes the MicroPython client by
