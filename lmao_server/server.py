@@ -40,6 +40,7 @@ from lma_core.attachment import (
     decode_envelope,
     retry_delay_seconds,
 )
+from lma_core.contact_book import ContactBook
 from lma_core.message_utils import decode_lmao_message
 from lma_core.rns_di import LXMF, RNS
 from lma_core.rns_init import init_rns_and_lxmf as _shared_init
@@ -236,6 +237,50 @@ class LmafCapabilityCache:
 
 
 LMAF_CAPS = LmafCapabilityCache()
+
+# Central contact book (receiver directory).  Initialized in serve(); the
+# downlink sends to a known contact even if its ``caps`` broadcast never lands
+# (issue #151) — a registered device is definitionally on the LMAO network.
+CONTACTS: "ContactBook | None" = None  # noqa: F841 — assigned in serve()
+_CONTACTS_LOCK = threading.Lock()
+
+
+def _learn_contact(source_hash: str) -> None:
+    """Register/touch the contact book for a reporting device (issue #151).
+
+    The server keys the directory on the sender's ``lxmf/delivery`` hash (the
+    destination it addresses downlinks to).  A device is learned automatically
+    the first time it reports, so it is reachable before an operator names it;
+    :meth:`ContactBook.register` honors a later operator-set name/type.
+    """
+    book = CONTACTS
+    if book is None:
+        return
+    delivery_hash = source_hash.lower()
+    try:
+        pubkey_hex = None
+        try:
+            known = RNS.Identity.known_destinations.get(delivery_hash)
+            if known and len(known) > 1 and isinstance(known[1], bytes):
+                pubkey_hex = known[1].hex()
+        except Exception:
+            pubkey_hex = None
+        if not book.is_known(delivery_hash):
+            try:
+                book.register(
+                    delivery_hash=delivery_hash,
+                    device_type="device",
+                    pubkey_hex=pubkey_hex,
+                )
+                logger.info("Contact book: learned new device %s", delivery_hash[:12])
+            except Exception as e:
+                logger.warning("Contact book: register failed for %s: %s",
+                               delivery_hash[:12], e)
+        else:
+            book.touch(delivery_hash)
+    except Exception as e:  # the directory must never break delivery
+        logger.warning("Contact book update failed for %s: %s", source_hash[:12], e)
+
 
 
 def _warn_if_rnode_missing(rnode_port):
@@ -557,6 +602,10 @@ class Server:
                     source_hash,
                 )
                 return
+            # ── Contact book (issue #151): remember this device so the server
+            # can send it downlinks even before / without a caps broadcast. The
+            # book is the source of truth for "who is on the LMAO network".
+            _learn_contact(source_hash)
             content_bytes = message.content if hasattr(message, "content") else b""
             title = message.title_as_string() if hasattr(message, "title_as_string") else ""
 
@@ -641,7 +690,10 @@ class Server:
                 f"ACK from LMAO Server — received your message ({len(content_bytes)} bytes)"
             )
             chart_line = SPROUT_HISTORY.data_line()
-            lmaf_peer = LMAF_CAPS.chart_capable(source_hash)
+            lmaf_peer = (
+                LMAF_CAPS.chart_capable(source_hash)
+                or (CONTACTS is not None and CONTACTS.is_known(source_hash))
+            )
             if chart_line and lmaf_peer:
                 # An LMAF peer is not bound by the single-packet DATA-line cap,
                 # so it gets the full air rings — the depth this framing exists
@@ -1353,6 +1405,28 @@ async def async_main():
     # Use shared initialization helper (handles specific exception types)
     server_identity, router = _init_rns_and_lxmf(rnode_port)
 
+    # ── Central contact book (issue #151) ─────────────────────────
+    # SQLite receiver directory: the server learns devices as they report and
+    # sends them downlinks even before/without a caps broadcast.  Persists in
+    # the server's data directory next to the identity store.
+    global CONTACTS
+    contacts_db = os.environ.get("LMAO_CONTACTS_DB")
+    if contacts_db is None:
+        _id_dir = os.path.dirname(
+            os.environ.get(
+                "LMAO_SERVER_IDENTITY_PATH",
+                os.path.expanduser("~/.local/share/lmao_server/lxmf"),
+            )
+        )
+        contacts_db = os.path.join(_id_dir, "contacts.db")
+    try:
+        os.makedirs(os.path.dirname(contacts_db) or ".", exist_ok=True)
+        CONTACTS = ContactBook(contacts_db)
+        logger.info("Contact book ready at %s", contacts_db)
+    except Exception as e:
+        CONTACTS = None
+        logger.warning("Contact book unavailable (%s) — downlink requires caps", e)
+
     # Create Server instance (wraps router + identity)
     lmao_server = Server(config_dict=cfg_dict)
     lmao_server.server_identity = server_identity
@@ -1437,6 +1511,18 @@ async def async_main():
         logger.info("gRPC server started on 0.0.0.0:50051")
         print("gRPC server ready on 0.0.0.0:50051")
 
+    # ── Contacts API (receiver directory) ────────────────────────
+    contacts_runner = None
+    if CONTACTS is not None:
+        try:
+            from lma_core.contacts_api import start_contacts_server
+
+            contacts_runner = await start_contacts_server(
+                CONTACTS, port=int(os.environ.get("LMAO_CONTACTS_PORT", "8081"))
+            )
+        except Exception as e:
+            logger.warning("Contacts API unavailable (%s)", e)
+
     # Keep running until interrupted.  Discovery is on-demand: the server
     # answers client path requests (rns_init leaf-node patch) rather than
     # re-announcing periodically (issue #142 — no announce task to track).
@@ -1452,6 +1538,11 @@ async def async_main():
     finally:
         if grpc_server:
             await grpc_server.stop(5)
+        if contacts_runner is not None:
+            try:
+                await contacts_runner.cleanup()
+            except Exception:
+                pass
         lmaf_retry_task.cancel()
         if lmao_server:
             lmao_server.clear_grpc_subscribers()
