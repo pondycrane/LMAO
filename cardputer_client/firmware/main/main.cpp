@@ -77,10 +77,6 @@ static const uint32_t INTERVAL_SECONDS = LMAO_INTERVAL_SECONDS > 10 ? LMAO_INTER
 #define DHT20_SDA_PIN 21
 #define DHT20_SCL_PIN 22
 
-// How often to re-advertise LMAF receive capability while the server has not
-// yet proven it understood (see the announce block): flat, not backing off.
-#define CAPS_RETRY_MS 120000UL
-
 // Presence announces (lmao/cardputer + lxmf/delivery).  Two 168-byte frames per
 // interval is the largest single airtime cost this node has: at 30 s it is ~1.6%
 // duty on a 5.47 kbps channel, more than the whole payload budget.  The default
@@ -189,7 +185,6 @@ static lma_attachment::LmafReceiver make_receiver() {
 
 static lma_attachment::LmafReceiver s_rx = make_receiver();
 static std::string s_chart_line;                    // last `DATA ...` chart payload
-static volatile bool s_server_speaks_lmaf = false;  // set on first inbound LMAF
 
 // Outbound dead-letter queue.  A client has no delivery proofs to wait for, and
 // on a half-duplex link silence is ambiguous (our packet lost, or the reply to
@@ -236,7 +231,6 @@ static void on_lxmf_packet(const Bytes& plaintext, const Packet&) {
     switch (result) {
         case lma_attachment::LmafReceiver::Result::MANIFEST_ACCEPTED: {
             const auto& m = s_rx.manifest();
-            s_server_speaks_lmaf = true;
             ESP_LOGI(TAG, "LMAF manifest id=%s kind=%u chunks=%u bytes=%llu chunk_size=%u codec=%s",
                      hex8(m.id).c_str(), (unsigned)m.kind, (unsigned)m.chunk_count,
                      (unsigned long long)m.total_bytes, (unsigned)m.chunk_size,
@@ -299,22 +293,8 @@ static void on_lxmf_packet(const Bytes& plaintext, const Packet&) {
 // next retry.  Two minutes costs ~0.3 s of air per attempt (~0.25% duty), the
 // same order as an announce pair, and it means one dropped packet costs
 // 2 minutes instead of 10.
-// Capability advertisement: sent immediately before each report until the
-// server proves it understood (an inbound manifest/chunk).  Tied to the report
-// cadence rather than to a timer: the server's capability cache lives in
-// memory, so any server restart needs a fresh advertisement — one packet per
-// report interval costs ~nothing and guarantees the handshake recovers within
-// one interval, where a backing-off timer pushed it out to ten minutes.
-
-static bool send_capability() {
-    if (!send_envelope_to_server(s_rx.capability_envelope())) return false;
-    ESP_LOGI(TAG, "LMAF capability advertised (chunk=%u max=%u rx_window=%u)",
-             (unsigned)lma_attachment::LO_OPP_CHUNK_SIZE,
-             (unsigned)s_rx.config().max_payload_bytes, (unsigned)LMAF_RX_WINDOW);
-    return true;
-}
-
-
+// LMAF capabilities are learned by the server from its central contact book
+// (issue #151); the device no longer advertises them over the air.
 static void send_sensor_report(const Identity& my_identity, bool dht_ok) {
     if (DEST_HASH_HEX[0] == '\0') {
         ESP_LOGW(TAG, "No destination configured — not sending");
@@ -458,7 +438,6 @@ void app_main() {
 
     uint64_t last_send_ms = 0;
     uint32_t last_announce_ms = 0;
-    uint32_t last_caps_ms = 0;
 
     for (;;) {
         const uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
@@ -478,18 +457,10 @@ void app_main() {
             if (s_ident_lock) xSemaphoreGive(s_ident_lock);
             if (!have_srv) path_find::request(DEST_HASH_HEX);
 
-            // Advertise the LMAF receive path until the server proves it
-            // understood (an inbound manifest/chunk).  Flat 120 s retry rather
-            // than a backoff: the server's capability cache is in memory, so a
-            // server restart needs a fresh advertisement and two minutes beats
-            // the ten a backoff produced.  Background traffic only — it is
-            // never a precondition for reporting.
-            if (have_srv && !s_server_speaks_lmaf) {
-                if (last_caps_ms == 0 || now_ms - last_caps_ms >= CAPS_RETRY_MS) {
-                    if (send_capability()) last_caps_ms = now_ms;
-                }
-            }
-
+            // No LMAF capability broadcast (issue #151): the server maintains a
+            // central contact book and learns this device from its reports, so
+            // advertising receive capability on the air is pure bandwidth cost —
+            // retired in favor of the server-side receiver directory.
         }
 
         // Telemetry: first send immediately after boot, then every interval.

@@ -537,6 +537,16 @@ py_test(
 )
 
 py_test(
+    name = "test_contact_book",
+    srcs = ["test_contact_book.py"],
+    deps = [
+        "//lma_core",
+        "@lmao_pip//aiohttp",
+        "@lmao_pip//pytest",
+    ],
+)
+
+py_test(
     name = "test_human_client_config",
     srcs = ["test_human_client_config.py"],
     deps = [
