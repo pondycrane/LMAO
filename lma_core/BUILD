@@ -6,6 +6,8 @@ py_library(
         "__init__.py",
         "attachment.py",
         "config_utils.py",
+        "contact_book.py",
+        "contacts_api.py",
         "device_detect.py",
         "grpc_types.py",
         "message_utils.py",

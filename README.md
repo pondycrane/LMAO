@@ -481,6 +481,34 @@ print(f"Server: {identity.identity_hex}")
 
 See [`k8s-app/iot_ingest.py`](k8s-app/iot_ingest.py) for a complete example.
 
+### 7b. Contact book — receiver directory (HTTP)
+
+The server keeps a central **contact book** (a SQLite table
+`~/.local/share/lmao_server/contacts.db` persisted across restarts) of devices
+on the LMAO network: their delivery hash, public key, device type and name. A
+device is learned automatically the first time it reports, and can be
+renamed/retyped via the API below. This replaces the per-device on-air LMAF
+`caps` broadcast as the "who can I reach" signal — the server sends a downlink
+to any known contact directly (issue #151), saving the broadcast bandwidth.
+
+A small HTTP API is exposed on port **8081** (`LMAO_CONTACTS_PORT` to override)
+for clients to resolve a receiver:
+
+```bash
+# List every known device
+curl :8081/contacts
+# Find a receiver to send to — by friendly name, device type, or delivery hash
+curl ':8081/contacts/find?name=living-room'
+curl ':8081/contacts/find?type=cardputer'
+curl ':8081/contacts/find?hash=<delivery-hash>'
+# Register / rename / retype a device (upsert by delivery_hash)
+curl -X POST :8081/contacts -d '{"name":"living-room","type":"cardputer","delivery_hash":"<hash>"}'
+```
+
+The response for each contact carries `delivery_hash` (the destination to
+address downlinks to), `device_type`, `device_name`, `pubkey_hex`, and
+`last_seen`.
+
 ### 8. Docker Image
 
 The server Docker image is the release artifact for the in-cluster
