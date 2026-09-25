@@ -80,7 +80,9 @@ def create_app(book: Any) -> Any:  # aiohttp.web.Application
         )
         return aiohttp.web.json_response({"contact": entry}, status=201)
 
-    return aiohttp.web.Application(router=aiohttp.web.UrlDispatcher(routes))
+    app = aiohttp.web.Application()
+    app.add_routes(routes)
+    return app
 
 
 async def start_contacts_server(
