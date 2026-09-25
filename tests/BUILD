@@ -42,6 +42,17 @@ py_test(
 )
 
 py_test(
+    name = "test_lma_attachment",
+    srcs = ["test_lma_attachment.py"],
+    deps = [
+        "//lma_core",
+        "//proto:lma_messages_py_proto",
+        "@lmao_pip//protobuf",
+        "@lmao_pip//pytest",
+    ],
+)
+
+py_test(
     name = "test_server_handler",
     srcs = [
         "test_server_handler.py",
@@ -57,6 +68,24 @@ py_test(
         "@lmao_pip//protobuf",
         "@lmao_pip//pytest",
         "@lmao_pip//pytest_asyncio",
+    ],
+)
+
+py_test(
+    name = "test_server_attachment_reply",
+    srcs = [
+        "test_server_attachment_reply.py",
+        # conftest.py required in srcs for Bazel sandbox; pytest auto-discovery
+        # does not work because Bazel only exposes files explicitly listed.
+        "conftest.py",
+    ],
+    imports = ["."],
+    deps = [
+        "//lma_core",
+        "//lmao_server:server_lib",
+        "//proto:lma_messages_py_proto",
+        "@lmao_pip//protobuf",
+        "@lmao_pip//pytest",
     ],
 )
 
@@ -102,6 +131,14 @@ py_test(
         "//proto:lma_grpc_py_proto",
         "//proto:lma_messages_py_proto",
         "@lmao_pip//pytest",
+        # Both were missing while the target executed nothing: without
+        # pytest_asyncio its async tests were never awaited, and without nats-py
+        # the consumer-connect test could only skip.  The hub's lock pinned
+        # nats-py==0.2.0 — a version that does not exist on PyPI — so the
+        # dependency was unresolvable; it now matches the 2.16.0 production runs.
+        "@lmao_pip//pytest_asyncio",
+        "@lmao_pip//nats_py",
+        "@lmao_pip//duckdb",
     ],
 )
 
@@ -149,6 +186,24 @@ py_test(
     # E2E test requires physical Cardputer hardware connected via USB.
     # The test auto-skips when hardware is not detected.
     tags = ["e2e", "requires_hardware"],
+)
+
+# One schedule, three implementations (C++ core, Python codec, MicroPython
+# client): reads all three sources and fails on drift.  srcs needs the file
+# plus the sources it parses as data (Bazel sandboxes only expose declared
+# files), hence the data attribute below.
+py_test(
+    name = "test_retry_policy_parity",
+    srcs = ["test_retry_policy_parity.py"],
+    data = [
+        "//firmware_common:shared_firmware_sources",
+        "//lmao_server:server.py",
+    ],
+    deps = [
+        "//cardputer_client:main_lib",
+        "//lma_core",
+        "@lmao_pip//pytest",
+    ],
 )
 
 py_test(

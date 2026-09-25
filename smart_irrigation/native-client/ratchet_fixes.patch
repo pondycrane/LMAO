@@ -1,0 +1,355 @@
+diff --git a/include/rtreticulum/identity.h b/include/rtreticulum/identity.h
+index a8b760b..d1556bf 100644
+--- a/include/rtreticulum/identity.h
++++ b/include/rtreticulum/identity.h
+@@ -3,6 +3,7 @@
+ #include <map>
+ #include <memory>
+ #include <string>
++#include <vector>
+ 
+ #include "rtreticulum/bytes.h"
+ #include "rtreticulum/cryptography/ed25519.h"
+@@ -33,6 +34,12 @@ namespace RNS {
+         static IdentityTable _known_destinations;
+         static uint16_t      _known_destinations_maxsize;
+ 
++        /* Ratchets announced by *peers* (destination hash -> the peer's latest
++         * announced ratchet PUBLIC key).  Reference RNS keeps this in
++         * Identity.known_ratchets; the sender exchanges against the peer's
++         * ratchet instead of its base key once one is known. */
++        static std::map<Bytes, Bytes> _known_ratchets;
++
+     public:
+         Identity(bool create_keys = true);
+         Identity(Type::NoneConstructor) {}
+@@ -67,8 +74,29 @@ namespace RNS {
+         const Bytes& get_salt()    const { return _object->_hash; }
+         Bytes        get_context() const { return Bytes{Bytes::NONE}; }
+ 
++        /* Ratchet support (reference RNS 0.7/0.8 interoperability).  A
++         * destination that "owns" a ratchet announces its public key with the
++         * packet FLAG_SET flag; peers then exchange against that ratchet
++         * instead of the base key, and the holder decrypts with the ratchet
++         * private.  Encrypt/decrypt fall back to the base key when no ratchet
++         * is in play, so peers that never announce ratchets (and legacy
++         * traffic) still interoperate. */
++        static Bytes generate_ratchet_priv();                        // 32-byte X25519 private
++        static Bytes ratchet_public_from_private(const Bytes& prv);  // X25519 public of a ratchet private
++        static Bytes get_ratchet_id(const Bytes& ratchet_pub);       // full_hash(pub)[:NAME_HASH_LENGTH/8]
++        static Bytes get_ratchet(const Bytes& destination_hash);     // peer's announced ratchet pub or empty
++        static void  remember_ratchet(const Bytes& destination_hash, const Bytes& ratchet_pub);
++        static void  clear_ratchets();
++
+         Bytes encrypt(const Bytes& plaintext) const;
++        /* Encrypt to the given ratchet public key instead of the base key
++         * (empty pointer keeps the base key). */
++        Bytes encrypt(const Bytes& plaintext, const Bytes* ratchet_pub) const;
+         Bytes decrypt(const Bytes& ciphertext_token) const;
++        /* Decrypt trying the given ratchet private keys first (the local
++         * destination's retained ratchets), then the base key.  ``nullptr``
++         * keeps base-key-only behaviour. */
++        Bytes decrypt(const Bytes& ciphertext_token, const std::vector<Bytes>* ratchet_privs) const;
+         Bytes sign(const Bytes& message) const;
+         bool  validate(const Bytes& signature, const Bytes& message) const;
+ 
+diff --git a/include/rtreticulum/destination.h b/include/rtreticulum/destination.h
+index 815b0e3..6b3727e 100644
+--- a/include/rtreticulum/destination.h
++++ b/include/rtreticulum/destination.h
+@@ -64,6 +64,13 @@ namespace RNS {
+         Bytes decrypt(const Bytes& data) const;
+         Bytes sign(const Bytes& message) const;
+ 
++        /* Ratchet support (reference RNS 0.7/0.8): a destination with a
++         * retained ratchet announces its public key with FLAG_SET, and decrypts
++         * inbound with that ratchet private (falling back to the base key). */
++        void create_ratchet();
++        const std::vector<Bytes>& ratchets() const { return _object->_ratchets; }
++        Bytes latest_ratchet_id() const            { return _object->_latest_ratchet_id; }
++
+         /* Build (and optionally broadcast) an announce packet for this
+          * destination. Returns the packed raw frame. SINGLE / IN only. */
+         Bytes announce(const Bytes& app_data = Bytes{Bytes::NONE}, bool send = true) const;
+@@ -90,6 +97,10 @@ namespace RNS {
+             std::string                   _hexhash;
+             PacketCallback                _packet_callback;
+             std::map<Bytes, RequestHandler> _request_handlers;
++            /* Retained ratchet private keys (32-byte X25519).  The first is
++             * the active one and is announced with FLAG_SET. */
++            std::vector<Bytes>            _ratchets;
++            Bytes                         _latest_ratchet_id;
+         };
+         std::shared_ptr<Object> _object;
+     };
+diff --git a/include/rtreticulum/packet.h b/include/rtreticulum/packet.h
+index ef70bcf..9cb2582 100644
+--- a/include/rtreticulum/packet.h
++++ b/include/rtreticulum/packet.h
+@@ -25,7 +25,8 @@ namespace RNS {
+                const Bytes&       data,
+                Type::Packet::types         packet_type    = Type::Packet::DATA,
+                Type::Packet::context_types context        = Type::Packet::CONTEXT_NONE,
+-               Type::Transport::types      transport_type = Type::Transport::BROADCAST);
++               Type::Transport::types      transport_type = Type::Transport::BROADCAST,
++               Type::Packet::context_flags context_flag   = Type::Packet::FLAG_UNSET);
+ 
+         /* Incoming raw frame (decode side). After construction the caller
+          * invokes unpack() to populate header fields and ciphertext. */
+@@ -42,6 +43,9 @@ namespace RNS {
+         Type::Packet::context_flags context_flag()  const { return _object->_context_flag; }
+         Type::Packet::header_types  header_type()   const { return _object->_header_type; }
+         const Bytes&                destination_hash() const { return _object->_destination_hash; }
++        /* Set when a ratcheted packet was encrypted (bookkeeping only; the
++         * receiver finds the right ratchet by trying its retained privates). */
++        const Bytes&                ratchet_id()        const { return _object->_ratchet_id; }
+         const Bytes&                raw()           const { return _object->_raw; }
+         const Bytes&                data()          const { return _object->_data; }
+         uint8_t                     hops()          const { return _object->_hops; }
+@@ -59,6 +63,7 @@ namespace RNS {
+             Destination _destination = Destination{Type::NONE};
+             Bytes _destination_hash;
+             Bytes _transport_id;
++            Bytes _ratchet_id;
+             Bytes _data;
+             Bytes _raw;
+             Bytes _packet_hash;
+diff --git a/src/identity.cpp b/src/identity.cpp
+index d9a4d7d..98f2256 100644
+--- a/src/identity.cpp
++++ b/src/identity.cpp
+@@ -15,6 +15,33 @@ namespace RNS {
+ 
+ Identity::IdentityTable Identity::_known_destinations;
+ uint16_t                Identity::_known_destinations_maxsize = RNS_KNOWN_DESTINATIONS_MAX;
++std::map<Bytes, Bytes>  Identity::_known_ratchets;
++
++Bytes Identity::generate_ratchet_priv() {
++    return Cryptography::X25519PrivateKey::generate()->private_bytes();
++}
++
++Bytes Identity::ratchet_public_from_private(const Bytes& prv) {
++    return Cryptography::X25519PrivateKey::from_private_bytes(prv)->public_key()->public_bytes();
++}
++
++Bytes Identity::get_ratchet_id(const Bytes& ratchet_pub) {
++    return full_hash(ratchet_pub).left(Type::Identity::NAME_HASH_LENGTH / 8);
++}
++
++Bytes Identity::get_ratchet(const Bytes& destination_hash) {
++    auto it = _known_ratchets.find(destination_hash);
++    return it == _known_ratchets.end() ? Bytes{Bytes::NONE} : it->second;
++}
++
++void Identity::remember_ratchet(const Bytes& destination_hash, const Bytes& ratchet_pub) {
++    if (ratchet_pub.size() != Type::Identity::RATCHETSIZE / 8) return;
++    _known_ratchets[destination_hash] = ratchet_pub;
++}
++
++void Identity::clear_ratchets() {
++    _known_ratchets.clear();
++}
+ 
+ Identity::Identity(bool create_keys) : _object(std::make_shared<Object>()) {
+     if (create_keys) createKeys();
+@@ -108,12 +135,18 @@ Bytes Identity::recall_app_data(const Bytes& destination_hash) {
+ }
+ 
+ Bytes Identity::encrypt(const Bytes& plaintext) const {
++    return encrypt(plaintext, nullptr);
++}
++
++Bytes Identity::encrypt(const Bytes& plaintext, const Bytes* ratchet_pub) const {
+     if (!_object || !_object->_pub)
+         throw std::runtime_error("Encryption failed: no public key");
+ 
+     auto  ephemeral_key       = Cryptography::X25519PrivateKey::generate();
+     Bytes ephemeral_pub_bytes = ephemeral_key->public_key()->public_bytes();
+-    Bytes shared_key          = ephemeral_key->exchange(_object->_pub_bytes);
++    Bytes target_pub          = ratchet_pub && !ratchet_pub->empty() ? *ratchet_pub
++                                                                     : _object->_pub_bytes;
++    Bytes shared_key          = ephemeral_key->exchange(target_pub);
+     Bytes derived_key         = Cryptography::hkdf(Type::Identity::DERIVED_KEY_LENGTH,
+                                                    shared_key, get_salt(), get_context());
+     Cryptography::Token token(derived_key);
+@@ -121,19 +154,47 @@ Bytes Identity::encrypt(const Bytes& plaintext) const {
+ }
+ 
+ Bytes Identity::decrypt(const Bytes& ciphertext_token) const {
++    return decrypt(ciphertext_token, nullptr);
++}
++
++Bytes Identity::decrypt(const Bytes& ciphertext_token,
++                        const std::vector<Bytes>* ratchet_privs) const {
+     if (!_object || !_object->_prv)
+         throw std::runtime_error("Decryption failed: no private key");
+     if (ciphertext_token.size() <= Type::Identity::KEYSIZE / 8 / 2) {
+         DEBUGF("decrypt: token too short (%zu)", ciphertext_token.size());
+         return Bytes{Bytes::NONE};
+     }
++
++    Bytes peer_pub_bytes = ciphertext_token.left(Type::Identity::KEYSIZE / 8 / 2);
++    Bytes ciphertext     = ciphertext_token.mid(Type::Identity::KEYSIZE / 8 / 2);
++
++    // Ratchet holder first: each retained ratchet private is tried against the
++    // sender's ephemeral; on match the Fernet token decrypts (reference RNS
++    // Identity.decrypt does exactly this, silently skipping non-matching
++    // ratchets).
++    if (ratchet_privs) {
++        for (const auto& rpriv : *ratchet_privs) {
++            try {
++                if (rpriv.size() != Type::Identity::RATCHETSIZE / 8) continue;
++                auto ratchet_prv = Cryptography::X25519PrivateKey::from_private_bytes(rpriv);
++                Bytes shared_key = ratchet_prv->exchange(peer_pub_bytes);
++                Bytes derived_key = Cryptography::hkdf(Type::Identity::DERIVED_KEY_LENGTH,
++                                                       shared_key, get_salt(), get_context());
++                Cryptography::Token token(derived_key);
++                Bytes plaintext = token.decrypt(ciphertext);
++                if (!plaintext.empty()) return plaintext;
++            } catch (std::exception&) {
++                // Not this ratchet; try the next (or the base key below).
++            }
++        }
++    }
++
+     try {
+-        Bytes peer_pub_bytes = ciphertext_token.left(Type::Identity::KEYSIZE / 8 / 2);
+-        Bytes shared_key     = _object->_prv->exchange(peer_pub_bytes);
+-        Bytes derived_key    = Cryptography::hkdf(Type::Identity::DERIVED_KEY_LENGTH,
+-                                                  shared_key, get_salt(), get_context());
++        Bytes shared_key  = _object->_prv->exchange(peer_pub_bytes);
++        Bytes derived_key = Cryptography::hkdf(Type::Identity::DERIVED_KEY_LENGTH,
++                                               shared_key, get_salt(), get_context());
+         Cryptography::Token token(derived_key);
+-        Bytes ciphertext = ciphertext_token.mid(Type::Identity::KEYSIZE / 8 / 2);
+         return token.decrypt(ciphertext);
+     } catch (std::exception& e) {
+         DEBUGF("Decryption by %s failed: %s", toString().c_str(), e.what());
+diff --git a/src/destination.cpp b/src/destination.cpp
+index fccfc72..55b26c5 100644
+--- a/src/destination.cpp
++++ b/src/destination.cpp
+@@ -69,19 +69,37 @@ Bytes Destination::name_hash(const char* app_name, const char* aspects) {
+ Bytes Destination::encrypt(const Bytes& data) const {
+     if (!_object) return Bytes{Bytes::NONE};
+     if (_object->_type == TD::PLAIN) return data;
+-    if (_object->_type == TD::SINGLE && _object->_identity)
+-        return _object->_identity.encrypt(data);
++    if (_object->_type == TD::SINGLE && _object->_identity) {
++        /* Peers that announced a ratchet are encrypted against it (reference
++         * RNS Destination.encrypt selects the peer's stored ratchet). */
++        Bytes ratchet = Identity::get_ratchet(_object->_hash);
++        _object->_latest_ratchet_id =
++            ratchet.empty() ? Bytes{Bytes::NONE} : Identity::get_ratchet_id(ratchet);
++        return _object->_identity.encrypt(data, ratchet.empty() ? nullptr : &ratchet);
++    }
+     return data;
+ }
+ 
+ Bytes Destination::decrypt(const Bytes& data) const {
+     if (!_object) return Bytes{Bytes::NONE};
+     if (_object->_type == TD::PLAIN) return data;
+-    if (_object->_type == TD::SINGLE && _object->_identity)
+-        return _object->_identity.decrypt(data);
++    if (_object->_type == TD::SINGLE && _object->_identity) {
++        /* Try our retained ratchets first, then the base key. */
++        return _object->_identity.decrypt(
++            data, _object->_ratchets.empty() ? nullptr : &_object->_ratchets);
++    }
+     return Bytes{Bytes::NONE};
+ }
+ 
++void Destination::create_ratchet() {
++    if (!_object) return;
++    Bytes priv = Identity::generate_ratchet_priv();
++    _object->_ratchets.insert(_object->_ratchets.begin(), priv);
++    /* Retain a bounded number, like reference RNS Destination.RATCHET_COUNT. */
++    constexpr size_t kRetain = 6;
++    if (_object->_ratchets.size() > kRetain) _object->_ratchets.resize(kRetain);
++}
++
+ Bytes Destination::sign(const Bytes& message) const {
+     if (_object && _object->_type == TD::SINGLE && _object->_identity)
+         return _object->_identity.sign(message);
+@@ -98,11 +116,19 @@ Bytes Destination::announce(const Bytes& app_data, bool send) const {
+ 
+     Bytes random_hash = Cryptography::random(Type::Identity::RANDOM_HASH_LENGTH / 8);
+ 
++    /* A retained ratchet is announced as a 32-byte X25519 public key placed
++     * between the random hash and the signature, with the packet FLAG_SET
++     * (reference RNS Destination.announce + RATCHETSIZE layout). */
++    Bytes ratchet;  // empty unless this destination owns a ratchet
++    if (!_object->_ratchets.empty())
++        ratchet = Identity::ratchet_public_from_private(_object->_ratchets.front());
++
+     Bytes signed_data;
+     signed_data << _object->_hash
+                 << _object->_identity.get_public_key()
+                 << _object->_name_hash
+                 << random_hash;
++    if (!ratchet.empty()) signed_data << ratchet;
+     if (!app_data.empty()) signed_data << app_data;
+ 
+     Bytes signature = _object->_identity.sign(signed_data);
+@@ -110,11 +136,14 @@ Bytes Destination::announce(const Bytes& app_data, bool send) const {
+     Bytes announce_data;
+     announce_data << _object->_identity.get_public_key()
+                   << _object->_name_hash
+-                  << random_hash
+-                  << signature;
++                  << random_hash;
++    if (!ratchet.empty()) announce_data << ratchet;
++    announce_data << signature;
+     if (!app_data.empty()) announce_data << app_data;
+ 
+-    Packet announce_packet(*this, announce_data, Type::Packet::ANNOUNCE);
++    Packet announce_packet(*this, announce_data, Type::Packet::ANNOUNCE,
++                           Type::Packet::CONTEXT_NONE, Type::Transport::BROADCAST,
++                           ratchet.empty() ? Type::Packet::FLAG_UNSET : Type::Packet::FLAG_SET);
+     announce_packet.pack();
+     Bytes raw = announce_packet.raw();
+     if (send) Transport::broadcast(raw);
+diff --git a/src/packet.cpp b/src/packet.cpp
+index 7f73b88..6d5a624 100644
+--- a/src/packet.cpp
++++ b/src/packet.cpp
+@@ -10,12 +10,13 @@ namespace TP = Type::Packet;
+ 
+ Packet::Packet(const Destination& destination, const Bytes& data,
+                TP::types packet_type, TP::context_types context,
+-               Type::Transport::types transport_type)
++               Type::Transport::types transport_type, TP::context_flags context_flag)
+     : _object(std::make_shared<Object>()) {
+     _object->_destination    = destination;
+     _object->_packet_type    = packet_type;
+     _object->_context        = context;
+     _object->_transport_type = transport_type;
++    _object->_context_flag   = context_flag;
+     _object->_data           = data;
+     _object->_destination_type = destination.type();
+     if (_object->_data.size() > Type::Reticulum::MDU)
+@@ -58,6 +59,7 @@ void Packet::pack() {
+     Bytes ciphertext;
+     if (_object->_packet_type == TP::DATA) {
+         ciphertext = _object->_destination.encrypt(_object->_data);
++        _object->_ratchet_id = _object->_destination.latest_ratchet_id();
+     } else {
+         /* ANNOUNCE / LINKREQUEST / PROOF are not encrypted. Phase 4 fills
+          * in announce-specific signing logic. */
+diff --git a/src/transport.cpp b/src/transport.cpp
+index 1217201..45870b7 100644
+--- a/src/transport.cpp
++++ b/src/transport.cpp
+@@ -290,6 +290,12 @@ bool Transport::process_announce(const Packet& packet, const Interface& iface) {
+ 
+     Identity::remember(packet.get_hash(), packet.destination_hash(), public_key, app_data);
+ 
++    /* A FLAG_SET announce carries the peer's current ratchet public key: record
++     * it so outbound packets to this destination are encrypted against the
++     * ratchet (reference RNS Identity._remember_ratchet). */
++    if (!ratchet.empty())
++        Identity::remember_ratchet(packet.destination_hash(), ratchet);
++
+     auto via = iface.get() ? iface.get()->shared_from_this() : nullptr;
+     PathEntry entry;
+     entry.next_hop      = packet.destination_hash();

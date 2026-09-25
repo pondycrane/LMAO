@@ -151,15 +151,22 @@ class SproutHistory:
             values = values[-limit:]
         return [str(len(values))] + [str(int(round(v))) for v in values]
 
-    def data_line(self):
-        """The DATA line for the next reply, or "" when nothing is known yet."""
+    def data_line(self, air_limit=DATA_AIR_MAX_SAMPLES):
+        """The DATA line for the next reply, or "" when nothing is known yet.
+
+        ``air_limit`` caps the supplementary air series (temperature,
+        humidity); pass ``None`` for a peer that receives the chart over LMAF,
+        where the reply is no longer bound by the single-packet content limit
+        and the full rings are worth sending.  Soil moisture (the primary
+        chart) is never capped.
+        """
         if not (self._moisture or self._temp or self._humidity):
             return ""
         node = (self._node or "")[:8]
         dry = -1 if self._dry is None else int(round(self._dry))
         wet = -1 if self._wet is None else int(round(self._wet))
         tokens = [f"DATA {node} {dry} {wet}"]
-        tokens += self._series_tokens(self._temp, DATA_AIR_MAX_SAMPLES)
-        tokens += self._series_tokens(self._humidity, DATA_AIR_MAX_SAMPLES)
+        tokens += self._series_tokens(self._temp, air_limit)
+        tokens += self._series_tokens(self._humidity, air_limit)
         tokens += self._series_tokens(self._moisture, None)
         return " ".join(tokens)

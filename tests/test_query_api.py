@@ -59,61 +59,61 @@ class TestSqlGuard:
     # ── Rejected — DML / DDL ────────────────────────────────────
 
     def test_rejects_insert(self):
-        with pytest.raises(ValueError, match="not allowed"):
+        with pytest.raises(ValueError, match="not allowed|disallowed"):
             self._validate("INSERT INTO t VALUES (1)")
 
     def test_rejects_drop(self):
-        with pytest.raises(ValueError, match="not allowed"):
+        with pytest.raises(ValueError, match="not allowed|disallowed"):
             self._validate("DROP TABLE t")
 
     def test_rejects_delete(self):
-        with pytest.raises(ValueError, match="not allowed"):
+        with pytest.raises(ValueError, match="not allowed|disallowed"):
             self._validate("DELETE FROM t")
 
     def test_rejects_update(self):
-        with pytest.raises(ValueError, match="not allowed"):
+        with pytest.raises(ValueError, match="not allowed|disallowed"):
             self._validate("UPDATE t SET x=1")
 
     def test_rejects_truncate(self):
-        with pytest.raises(ValueError, match="not allowed"):
+        with pytest.raises(ValueError, match="not allowed|disallowed"):
             self._validate("TRUNCATE t")
 
     def test_rejects_grant(self):
-        with pytest.raises(ValueError, match="not allowed"):
+        with pytest.raises(ValueError, match="not allowed|disallowed"):
             self._validate("GRANT SELECT ON t TO u")
 
     def test_rejects_alter(self):
-        with pytest.raises(ValueError, match="not allowed"):
+        with pytest.raises(ValueError, match="not allowed|disallowed"):
             self._validate("ALTER TABLE t ADD COLUMN x INT")
 
     def test_rejects_create(self):
-        with pytest.raises(ValueError, match="not allowed"):
+        with pytest.raises(ValueError, match="not allowed|disallowed"):
             self._validate("CREATE TABLE t (x INT)")
 
     def test_rejects_pragma(self):
-        with pytest.raises(ValueError, match="not allowed"):
+        with pytest.raises(ValueError, match="not allowed|disallowed"):
             self._validate("PRAGMA database_list")
 
     # ── Rejected — DuckDB-specific ──────────────────────────────
 
     def test_rejects_attach(self):
-        with pytest.raises(ValueError, match="not allowed"):
+        with pytest.raises(ValueError, match="not allowed|disallowed"):
             self._validate("ATTACH 'file.db'")
 
     def test_rejects_copy(self):
-        with pytest.raises(ValueError, match="not allowed"):
+        with pytest.raises(ValueError, match="not allowed|disallowed"):
             self._validate("COPY t TO 'file.csv'")
 
     def test_rejects_export(self):
-        with pytest.raises(ValueError, match="not allowed"):
+        with pytest.raises(ValueError, match="not allowed|disallowed"):
             self._validate("EXPORT DATABASE 'dir'")
 
     def test_rejects_install(self):
-        with pytest.raises(ValueError, match="not allowed"):
+        with pytest.raises(ValueError, match="not allowed|disallowed"):
             self._validate("INSTALL httpfs")
 
     def test_rejects_load(self):
-        with pytest.raises(ValueError, match="not allowed"):
+        with pytest.raises(ValueError, match="not allowed|disallowed"):
             self._validate("LOAD httpfs")
 
     # ── Multi-statement / empty ─────────────────────────────────
@@ -422,3 +422,11 @@ class TestStartQueryServer:
         runner = await start_query_server(store, host="127.0.0.1", port=0)
         assert runner is not None
         await runner.cleanup()
+
+
+if __name__ == "__main__":
+    import sys
+
+    import pytest
+
+    sys.exit(pytest.main([__file__] + sys.argv[1:]))

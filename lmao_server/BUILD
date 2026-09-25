@@ -35,3 +35,7 @@ py_binary(
     visibility = ["//visibility:public"],
     deps = [":server_lib"],
 )
+
+# Read by //tests:test_retry_policy_parity (it parses the sources to pin the
+# LMAF retry schedule across all three implementations).
+exports_files(["server.py"])

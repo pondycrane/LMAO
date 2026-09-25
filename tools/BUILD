@@ -29,6 +29,9 @@ py_binary(
     main = "install_all.py",
     data = [
         "//cardputer_client:client_files",
+        # Native C firmware tree (+ firmware_common): needed by
+        # --native-cardputer, which builds/flashes cardputer_client/firmware.
+        "//cardputer_client:firmware_sources",
     ],
     visibility = ["//visibility:public"],
     deps = [":install_all_lib"],

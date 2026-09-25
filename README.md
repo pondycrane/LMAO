@@ -259,8 +259,10 @@ bazel run //cardputer_client:flash [-- --port /dev/ttyACM0]
 **Option B — Native C Cardputer firmware (opt-in):**
 
 Reserved for hardware with a very tight heap (Sprout/Atom Lite). On the
-Cardputer it has no display/receive path, so it is only needed to exercise
-the native stack:
+Cardputer it has no display, so it is only needed to exercise
+the native stack (it does receive the chart payload over LMAF — manifest +
+chunks, digest-verified and acknowledged — and logs the reassembled `DATA ...`
+series; drawing it still needs the MicroPython client):
 
 ```bash
 # Build the native firmware (Docker ESP-IDF) and flash it to /dev/ttyACM0
@@ -569,6 +571,37 @@ when running in Docker):
 | `QUERY_PORT` | `8080` | HTTP query API listen port (in-cluster) |
 | `QUERY_MAX_ROWS` | `1000` | Max rows returned by `POST /query` |
 | `QUERY_TIMEOUT` | `10` | Per-query statement timeout in seconds |
+| `LMAO_ANNOUNCE_INTERVAL_SECONDS` | `120` | Client presence announce interval (native client; two 168 B frames per tick — the largest single airtime cost) |
+| `LMAO_LMAF_PACING_SECONDS` | `1.0` | Gap between LMAF packets within a transfer (half-duplex turnaround) |
+| `LMAO_LMAF_TURNAROUND_SECONDS` | `1.5` | Delay before the first LMAF packet, so a peer finishing its own burst can hear it |
+| `LMAO_LMAF_MANIFEST_REPEATS` | `2` | Manifest sends per transfer (a lost manifest loses the whole transfer) |
+| `LMAO_LMAF_PATH_WAIT_SECONDS` | `1.0` | Wait per path request before handing a packet to the transport (costs no airtime) |
+| `LMAO_LMAF_MAX_RETRIES` | `3` | Dead-letter re-offers before a transfer is abandoned; `0` disables (schedule 30 s / 90 s / 270 s) |
+| `LMAO_LMAF_RETRY_TICK_SECONDS` | `5.0` | Dead-letter timer resolution |
+| `LMAO_DEDUP_WINDOW_SECONDS` | `900` | Window in which a byte-identical re-send is answered but not re-ingested |
+
+**LMAF reliability** (attachment transfers — charts, voice notes, images — over
+LoRa).  Opportunistic LXMF packets carry no delivery proof, and on a half-duplex
+link silence is ambiguous: the packet may be lost, or the reply to it.  So
+recovery is explicit and bounded at both ends:
+
+- the **receiver** drives repair: a `NEED` ack names the chunks it is missing, an
+  empty `NEED` asks for a lost manifest, and a transfer it already delivered is
+  re-acked rather than downloaded again;
+- the **sender** keeps a dead-letter queue: a client re-sends an unacknowledged
+  report, and the server re-offers an unacknowledged transfer's manifest, both on
+  the shared schedule (30 s / 90 s / 270 s, three attempts).  After the last
+  attempt the item is held for one further schedule step (810 s) — long enough
+  for a late `NEED` to still be served — and then abandoned with a warning, so a
+  transfer's whole lifetime is bounded at ~20 min rather than retrying forever on
+  a duty-cycled band;
+- the server **answers a byte-identical re-send but never re-ingests it** (chart
+  buffer, ingest pipeline, gRPC subscribers see it once).
+
+That schedule is one table, defined in
+`firmware_common/lma_common/lma_attachment.h` and mirrored by
+`lma_core/attachment.py` and `cardputer_client/main.py`;
+`//tests:test_retry_policy_parity` fails if they drift apart.
 
 ### 10. NATS JetStream — In-Cluster Durable Queueing
 

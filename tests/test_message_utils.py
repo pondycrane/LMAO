@@ -58,3 +58,11 @@ class TestDecodeLMAOMessage:
         with patch("lma_core.LMAOEnvelope", return_value=mock_envelope):
             result = decode_lmao_message(b"\xff\xfe\x00\x01")
             assert "<non-text: 4 bytes>" in result
+
+
+if __name__ == "__main__":
+    import sys
+
+    import pytest
+
+    sys.exit(pytest.main([__file__] + sys.argv[1:]))

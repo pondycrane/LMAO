@@ -124,9 +124,23 @@ def _flash_cardputer_native(port: str, result: DeviceResult,
     """
     import subprocess
 
-    firmware_dir = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "cardputer_client", "firmware"
-    )
+    # Prefer the real workspace: under `bazel run` this file lives in the
+    # runfiles tree, where build.sh's relative staging of
+    # firmware_common/ + the shared .rtreticulum checkout would not resolve
+    # (it would clone RTReticulum from the network at an unpinned revision).
+    # Same resolution the E2E tests use.
+    firmware_dir = None
+    workspace = os.environ.get("BUILD_WORKSPACE_DIRECTORY")
+    if workspace:
+        cand = os.path.join(workspace, "cardputer_client", "firmware")
+        if os.path.isfile(os.path.join(cand, "build.sh")):
+            firmware_dir = cand
+    if firmware_dir is None:
+        firmware_dir = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "cardputer_client",
+            "firmware",
+        )
     build_sh = os.path.join(firmware_dir, "build.sh")
     flash_sh = os.path.join(firmware_dir, "flash.sh")
     for path, what in ((build_sh, "build script"), (flash_sh, "flash script")):
@@ -171,6 +185,27 @@ def _flash_cardputer_native(port: str, result: DeviceResult,
     except Exception as exc:
         result.fail(f"Native firmware build error: {exc}")
         print(f"  FAIL: {exc}")
+        return
+
+    # The ESP-IDF build takes minutes (Docker + full reconfigure).  A
+    # USB-Serial-JTAG console does not reliably survive that window on this
+    # board: it can drop off the bus, or reappear on a different node.  The
+    # port was resolved before the build, so re-resolve it now — otherwise the
+    # flash dies with Docker's cryptic "error gathering device information ...
+    # no such file or directory" for a device that a replug would restore.
+    if not os.path.exists(port):
+        refreshed = find_cardputer_port()
+        if refreshed and refreshed != port:
+            print(f"  NOTE: Cardputer is now on {refreshed} (was {port})")
+            port = refreshed
+            env["PORT"] = port
+    if not os.path.exists(port):
+        result.fail(f"Cardputer not on USB after the build ({port})")
+        print(f"  FAIL: {port} disappeared during the build — replug the "
+              "Cardputer and re-run; the image is already built, so\n"
+              "        bazel run //cardputer_client:flash_firmware -- "
+              f"--port {port}\n"
+              "        flashes it without another build.")
         return
 
     print(f"--- Cardputer (native): flashing to {port} ---")
