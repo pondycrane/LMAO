@@ -1062,6 +1062,31 @@ class Server:
                     source_hash[:8],
                 )
                 return False
+            # Diagnostic (issue #151): capture the exact on-air token (eph +
+            # length) so it can be diffed against the device's received token
+            # bytes to isolate framing corruption from a device-side decrypt
+            # defect.  packet.raw is set by RNS.Packet.pack(); the token is the
+            # frame minus flags|hops|dest|context.  Header width depends on the
+            # header type (HEADER_2 carries a transport_id).
+            try:
+                raw = packet.raw if getattr(packet, "raw", None) else b""
+                if raw:
+                    hdr2 = (raw[0] & 0b01000000) >> 6
+                    dst = 20 if hdr2 else 10
+                    hdr_len = 2 + dst + 1
+                    token = raw[hdr_len:]
+                    eph = token[:32].hex()
+                    logger.info(
+                        "LMAF TX token dst=%s hdr=%s ratchet=%s token_len=%d eph=%s sha256=%s",
+                        source_hash[:8],
+                        "H2" if hdr2 else "H1",
+                        (dest.latest_ratchet_id or b"").hex()[:12],
+                        len(token),
+                        eph,
+                        hashlib.sha256(token).hexdigest(),
+                    )
+            except Exception:
+                pass  # diagnostics must never break a send
             return True
         except Exception as e:
             logger.error("LMAF packet send failed for %s: %s", source_hash, e, exc_info=True)
