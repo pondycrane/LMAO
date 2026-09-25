@@ -39,6 +39,7 @@ RUN pip install --no-cache-dir \
     grpcio-tools \
     nats-py \
     protobuf \
+    aiohttp==3.14.3 \
     rns==1.3.5 \
     lxmf==1.0.1
 
