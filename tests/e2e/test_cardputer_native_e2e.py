@@ -13,13 +13,16 @@ settings are build-time defines.
 """
 
 import asyncio
+import hashlib
 import logging
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
+import zlib
 
 import pytest
 
@@ -159,6 +162,62 @@ def flash_native(port):
     _run_script("flash.sh", env, port=port)
 
 
+# ── LMAF test sender ────────────────────────────────────────────────
+
+
+def _chart_payload(node8="7b38fa21", dry=30, wet=60, samples=30):
+    """A chart `DATA ...` line long enough to need more than one chunk.
+
+    Same format the MicroPython client's chart parser consumes
+    (lma_core/sprout_history.py), full air + soil rings: ~0.4 KB, i.e. two
+    240-byte LMAF chunks.
+    """
+    temps = [19 + (i % 7) for i in range(samples)]
+    hums = [40 + (i % 9) for i in range(samples)]
+    moist = [25 + (i % 5) for i in range(samples)]
+    parts = [f"DATA {node8} {dry} {wet}"]
+    for series in (temps, hums, moist):
+        parts.append(str(len(series)))
+        parts.extend(str(int(v)) for v in series)
+    return " ".join(parts).encode()
+
+
+def _lmaf_transfer(payload, kind=6, codec="lmao:chart-line-v1", chunk_size=240, node_id=""):
+    """Build an LMAF manifest + chunks with the generated protobuf stubs.
+
+    Deliberately independent of the server's own `lma_core.attachment`
+    implementation: this exercises the device against plain protobuf + zlib,
+    which is what any third-party sender would produce.
+    """
+    from lma_core import LMAOEnvelope
+
+    digest = hashlib.sha256(payload).digest()
+    ident = digest[:16]
+    count = (len(payload) + chunk_size - 1) // chunk_size
+
+    manifest = LMAOEnvelope()
+    manifest.manifest.id = ident
+    manifest.manifest.payload_sha256 = digest
+    manifest.manifest.kind = kind
+    manifest.manifest.codec = codec
+    manifest.manifest.chunk_size = chunk_size
+    manifest.manifest.chunk_count = count
+    manifest.manifest.total_bytes = len(payload)
+    manifest.manifest.node_id = node_id
+    envelopes = [manifest.SerializeToString()]
+
+    for index in range(count):
+        part = payload[index * chunk_size : (index + 1) * chunk_size]
+        chunk = LMAOEnvelope()
+        chunk.chunk.id = ident
+        chunk.chunk.index = index
+        chunk.chunk.data = part
+        chunk.chunk.crc32 = zlib.crc32(part) & 0xFFFFFFFF
+        envelopes.append(chunk.SerializeToString())
+
+    return ident, count, envelopes
+
+
 # ── tests ───────────────────────────────────────────────────────────
 
 
@@ -182,6 +241,11 @@ class TestNativeCardputerE2E:
         an in-process RNS+LXMF server, and verify a SensorReport (real die
         temp) arrives over the RNode and lands in DuckDB.
 
+        Then verify the receive path this firmware gained in PR2: the server
+        answers with a chart payload split into LMAF chunks (manifest + 2
+        chunks — larger than one LXMF packet), and the device must reassemble
+        it, verify its sha256, log the `DATA ...` series and acknowledge it.
+
         This is a SINGLE comprehensive test (RNS is a process-wide singleton).
         1. Start a temporary server with the Heltec RNode.
         2. Build + flash the native firmware with the test server's DEST_HASH
@@ -189,7 +253,9 @@ class TestNativeCardputerE2E:
         3. Monitor serial for the native boot banner.
         4. Assert the server received a SensorReport; validate die temp in the
            realistic ESP32 range and DuckDB ingestion.
-        5. Restore the production build (production DEST_HASH, 300s interval).
+        5. Answer with an LMAF chart transfer and assert the device reassembled
+           and acknowledged it.
+        6. Restore the production build (production DEST_HASH, 300s interval).
         """
         import LXMF
         import RNS
@@ -231,14 +297,53 @@ class TestNativeCardputerE2E:
 
             received_messages = []
             sensor_messages = []
+            lmaf_acks = []
+            lmaf_reply_sent = threading.Event()
+            lmaf_ack_event = threading.Event()
+            chart_payload = _chart_payload()
+            chart_ident, chart_chunks, chart_envelopes = _lmaf_transfer(chart_payload)
             store_failures = 0
-            message_event = __import__("threading").Event()
 
             db_fd, db_path = tempfile.mkstemp(suffix=".duckdb", prefix="lmao_native_e2e_")
             os.close(db_fd)
             os.unlink(db_path)  # DuckDB refuses an existing empty file
             store = DuckDbStore()
             store.initialize(db_path)
+
+            def _start_chart_reply(target):
+                """Send the chart to *target* as an LMAF transfer.
+
+                Paced like the server paces LoRa packets (one packet at a time,
+                half-duplex turnaround), and off the RNS callback thread.
+                """
+                server_source = RNS.Destination(
+                    identity,
+                    RNS.Destination.OUT,
+                    RNS.Destination.SINGLE,
+                    "lxmf",
+                    "delivery",
+                )
+
+                def worker():
+                    try:
+                        for envelope_bytes in chart_envelopes:
+                            reply = LXMF.LXMessage(
+                                destination=target,
+                                source=server_source,
+                                content=envelope_bytes,
+                                title="p:Envelope",
+                                desired_method=LXMF.LXMessage.OPPORTUNISTIC,
+                            )
+                            router.handle_outbound(reply)
+                            time.sleep(0.5)
+                        print(
+                            f"[Native E2E] LMAF chart sent: id={chart_ident.hex()[:8]} "
+                            f"chunks={chart_chunks} bytes={len(chart_payload)}"
+                        )
+                    except Exception as exc:
+                        _logger.warning("LMAF chart reply failed: %s", exc, exc_info=True)
+
+                threading.Thread(target=worker, daemon=True).start()
 
             def capture_delivery(message):
                 nonlocal store_failures
@@ -253,7 +358,19 @@ class TestNativeCardputerE2E:
                 except (google.protobuf.message.DecodeError, Exception):
                     display_text = content_bytes.decode("utf-8", errors="replace")
                 else:
-                    if envelope.HasField("sensor"):
+                    if envelope.HasField("att_ack"):
+                        lmaf_acks.append(
+                            {
+                                "status": int(envelope.att_ack.status),
+                                "have": int(envelope.att_ack.have_count),
+                                "missing": list(envelope.att_ack.missing),
+                            }
+                        )
+                        lmaf_ack_event.set()
+                        display_text = f"AttachmentAck(status={envelope.att_ack.status})"
+                    elif envelope.HasField("caps"):
+                        display_text = "Capability"
+                    elif envelope.HasField("sensor"):
                         display_text = (
                             f"SensorReport(seq={envelope.sensor.seq}, "
                             f"readings={len(envelope.sensor.readings)})"
@@ -267,6 +384,12 @@ class TestNativeCardputerE2E:
                                     "seq": envelope.sensor.seq,
                                 }
                             )
+                            # Answer with the chart on the LMAF path (the same
+                            # reply the production server sends once a peer has
+                            # advertised LMAF capability).
+                            if not lmaf_reply_sent.is_set():
+                                lmaf_reply_sent.set()
+                                _start_chart_reply(source)
                         except Exception:
                             store_failures += 1
                     elif envelope.HasField("text"):
@@ -276,7 +399,6 @@ class TestNativeCardputerE2E:
                 received_messages.append(
                     {"source": source_hash, "content": display_text, "raw": content_bytes}
                 )
-                message_event.set()
 
             router.register_delivery_callback(capture_delivery)
             router.announce(server_dest_hash_bytes)
@@ -289,10 +411,10 @@ class TestNativeCardputerE2E:
             printer(f"Flashing native firmware to {_CARDCOMPUTER_PORT} ...")
             flash_native(_CARDCOMPUTER_PORT)
 
-            # ── Monitor serial for the native boot banner ──
+            # ── Monitor serial for the native boot banner + LMAF exchange ──
             cardputer_output = b""
             found_banner = False
-            serial_deadline = time.time() + 75
+            serial_deadline = time.time() + 90
             last_announce = 0.0
 
             ser = serial.Serial(_CARDCOMPUTER_PORT, 115200, timeout=1, write_timeout=10)
@@ -332,12 +454,12 @@ class TestNativeCardputerE2E:
                     if b"Cardputer native client starting" in cardputer_output:
                         found_banner = True
 
-                    if message_event.is_set():
-                        remaining = serial_deadline - time.time()
-                        if found_banner and remaining < 5:
-                            break
-                        time.sleep(0.25)
-                        continue
+                    # The LMAF acknowledgement is the last step of the receive
+                    # path (sent only after the payload digest verified), so it
+                    # ends the window.
+                    if lmaf_ack_event.is_set() and found_banner:
+                        break
+
                     time.sleep(0.25)
             finally:
                 if ser is not None:
@@ -389,6 +511,45 @@ class TestNativeCardputerE2E:
             )
             print(f"\n✅ Native LoRa E2E passed: {len(sensor_messages)} SensorReport(s), "
                   f"{len(rows)} row(s) in DuckDB")
+
+            # ── LMAF receive path (first use case: chart data) ──
+            # The device acks COMPLETE only after its sha256 check passes, so the
+            # ack is the end-to-end integrity proof of the reassembled payload —
+            # stronger than grepping the (log-truncated) chart line.
+            assert chart_chunks >= 2, (
+                "test chart payload must require more than one LMAF chunk "
+                f"(got {chart_chunks})"
+            )
+            assert lmaf_reply_sent.is_set(), "test server never replied with the LMAF chart"
+            assert lmaf_ack_event.wait(timeout=30), (
+                "Cardputer did not acknowledge the LMAF transfer.\n"
+                f"Cardputer serial: {captured[-3000:]}"
+            )
+            complete = [a for a in lmaf_acks if a["status"] == 1]
+            assert complete, (
+                f"Cardputer never reported LMAF COMPLETE (acks: {lmaf_acks}).\n"
+                f"Cardputer serial: {captured[-3000:]}"
+            )
+            assert complete[0]["missing"] == [], (
+                f"LMAF COMPLETE with outstanding chunks: {complete[0]['missing']}"
+            )
+            assert "LMAF manifest" in captured, (
+                "Cardputer logged no LMAF manifest — inbound chunks are not being "
+                f"parsed.\nCardputer serial: {captured[-3000:]}"
+            )
+            assert f"LMAF complete id={chart_ident.hex()[:8]}" in captured, (
+                f"Cardputer completed a different transfer than the one sent "
+                f"(id {chart_ident.hex()[:8]}).\nCardputer serial: {captured[-3000:]}"
+            )
+            assert "chart: DATA " in captured, (
+                "Cardputer logged no reassembled chart payload.\n"
+                f"Cardputer serial: {captured[-3000:]}"
+            )
+            print(
+                f"\n✅ LMAF chart receive verified: id={chart_ident.hex()[:8]} "
+                f"chunks={chart_chunks} bytes={len(chart_payload)} "
+                f"acks={len(lmaf_acks)}"
+            )
 
             # ── Restore production build (production DEST_HASH + default interval) ──
             try:

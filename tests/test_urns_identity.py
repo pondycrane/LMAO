@@ -126,3 +126,11 @@ class TestSignValidate:
         message = b"cross-sign test"
         signature = id1.sign(message)
         assert id2.validate(signature, message) is False
+
+
+if __name__ == "__main__":
+    import sys
+
+    import pytest
+
+    sys.exit(pytest.main([__file__] + sys.argv[1:]))

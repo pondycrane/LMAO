@@ -305,3 +305,11 @@ class TestSensorDispatch:
         # Restore for other tests
         mock_dht20 = MagicMock()
         sys.modules["lib.sensors.dht20"] = mock_dht20
+
+
+if __name__ == "__main__":
+    import sys
+
+    import pytest
+
+    sys.exit(pytest.main([__file__] + sys.argv[1:]))
