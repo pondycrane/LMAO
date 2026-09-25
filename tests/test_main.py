@@ -778,7 +778,7 @@ class TestPeriodicSendBackoff:
         with (
             patch.object(lmao_client, "log") as mock_log,
             patch.object(lmao_client.sys, "print_exception", create=True),
-            patch.object(lmao_client, "make_poc_message", return_value=b"ok", create=True),
+            patch.object(lmao_client, "make_sensor_message", return_value=b"REPORT", create=True),
             patch.object(asyncio, "sleep", fast_sleep),
         ):
             try:
@@ -788,7 +788,7 @@ class TestPeriodicSendBackoff:
                     router=mock_router,
                     identity_hex="test",
                     dest_hash=b"\x00" * 16,
-                    send_sensor=False,
+                    send_sensor=True,
                     has_proto=True,
                     config=config,
                     pending_replies=[],
@@ -860,7 +860,7 @@ class TestPeriodicSendBackoff:
         with (
             patch.object(lmao_client, "log"),
             patch.object(lmao_client.sys, "print_exception", create=True),
-            patch.object(lmao_client, "make_poc_message", return_value=b"ok", create=True),
+            patch.object(lmao_client, "make_sensor_message", return_value=b"REPORT", create=True),
             patch.object(asyncio, "sleep", tracking_sleep),
         ):
             try:
@@ -870,7 +870,7 @@ class TestPeriodicSendBackoff:
                     router=mock_router,
                     identity_hex="test",
                     dest_hash=b"\x00" * 16,
-                    send_sensor=False,
+                    send_sensor=True,
                     has_proto=True,
                     config=config,
                     pending_replies=[],
@@ -925,7 +925,7 @@ class TestPeriodicSendBackoff:
         with (
             patch.object(lmao_client, "log"),
             patch.object(lmao_client.sys, "print_exception", create=True),
-            patch.object(lmao_client, "make_poc_message", return_value=b"ok", create=True),
+            patch.object(lmao_client, "make_sensor_message", return_value=b"REPORT", create=True),
             patch.object(asyncio, "sleep", tracking_sleep),
         ):
             try:
@@ -935,7 +935,7 @@ class TestPeriodicSendBackoff:
                     router=mock_router,
                     identity_hex="test",
                     dest_hash=b"\x00" * 16,
-                    send_sensor=False,
+                    send_sensor=True,
                     has_proto=True,
                     config=config,
                     pending_replies=[],
@@ -982,7 +982,7 @@ class TestPeriodicSendBackoff:
             patch.object(lmao_client, "log") as mock_log,
             patch.object(lmao_client.sys, "print_exception", create=True),
             patch.object(lmao_client, "HAS_PROTO", True),
-            patch.object(lmao_client, "make_poc_message", return_value=b"ok", create=True),
+            patch.object(lmao_client, "make_sensor_message", return_value=b"REPORT", create=True),
             patch.object(asyncio, "sleep", tracking_sleep),
         ):
             try:
@@ -992,7 +992,7 @@ class TestPeriodicSendBackoff:
                     router=mock_router,
                     identity_hex="test",
                     dest_hash=b"\x00" * 16,
-                    send_sensor=False,
+                    send_sensor=True,
                     has_proto=True,
                     config=config,
                     pending_replies=[],
@@ -1000,16 +1000,16 @@ class TestPeriodicSendBackoff:
             except asyncio.CancelledError:
                 pass
 
-        # After the successful send, the next sleep should be the normal
-        # interval (10 s), not a backoff delay.
-        # Sleep sequence: first error → 2 s, success → 10 s (normal interval)
+        # The point of this test: the *backoff* stops growing once a send
+        # succeeds.  (What the success path then waits for — the dead-letter
+        # retry delay — has its own tests in TestClientDeadLetter.)
         assert len(sleep_delays) >= 2, (
             f"Expected at least 2 sleeps, got {len(sleep_delays)}"
         )
-        # Second sleep (after success) should be the normal interval
-        assert sleep_delays[1] == config["interval_seconds"], (
-            f"After success, sleep should be normal interval "
-            f"{config['interval_seconds']}s, got {sleep_delays[1]}s"
+        assert sleep_delays[0] == 2, f"first error backs off 2 s, got {sleep_delays[0]}"
+        backoff_steps = [d for d in sleep_delays[1:] if d in (4, 8, 16)]
+        assert not backoff_steps, (
+            f"error counter did not reset after the successful send: {sleep_delays}"
         )
 
         del _sys.modules["uasyncio"]
@@ -1031,7 +1031,7 @@ class TestPeriodicSendBackoff:
         with (
             patch.object(lmao_client, "log") as mock_log,
             patch.object(lmao_client.sys, "print_exception", create=True),
-            patch.object(lmao_client, "make_poc_message", return_value=b"ok", create=True),
+            patch.object(lmao_client, "make_sensor_message", return_value=b"REPORT", create=True),
         ):
             await lmao_client._periodic_send(
                 tft=None,
@@ -1039,7 +1039,7 @@ class TestPeriodicSendBackoff:
                 router=mock_router,
                 identity_hex="test",
                 dest_hash=b"\x00" * 16,
-                send_sensor=False,
+                send_sensor=True,
                 has_proto=True,
                 config=config,
                 pending_replies=[],
@@ -1130,6 +1130,7 @@ class TestHeapRecovery:
         config = {"interval_seconds": 10}
 
         with (
+            patch.object(lmao_client, "make_sensor_message", return_value=b"REPORT", create=True),
             patch.object(lmao_client, "log") as mock_log,
             patch.object(lmao_client.sys, "print_exception", create=True),
             patch.object(lmao_client, "make_poc_message", return_value=b"ok", create=True),
@@ -1142,7 +1143,7 @@ class TestHeapRecovery:
                     router=mock_router,
                     identity_hex="test",
                     dest_hash=b"\x00" * 16,
-                    send_sensor=False,
+                    send_sensor=True,
                     has_proto=True,
                     config=config,
                     pending_replies=[],
@@ -1182,6 +1183,7 @@ class TestHeapRecovery:
             return
 
         with (
+            patch.object(lmao_client, "make_sensor_message", return_value=b"REPORT", create=True),
             patch.object(lmao_client, "log") as mock_log,
             patch.object(lmao_client.sys, "print_exception", create=True),
             patch.object(lmao_client, "make_poc_message", return_value=b"ok", create=True),
@@ -1195,7 +1197,7 @@ class TestHeapRecovery:
                     router=mock_router,
                     identity_hex="test",
                     dest_hash=b"\x00" * 16,
-                    send_sensor=False,
+                    send_sensor=True,
                     has_proto=True,
                     config=config,
                     pending_replies=[],
@@ -1203,13 +1205,11 @@ class TestHeapRecovery:
                 timeout=5,
             )
 
+        # The reset itself is mocked, so its own logging (which happens before
+        # machine.reset() on hardware) cannot appear here: assert the intent —
+        # reset exactly once, and the reason names the fatal condition.
         mock_reset.assert_called_once()
         assert "FATAL" in str(mock_reset.call_args)
-        fatal_logs = [
-            call for call in mock_log.call_args_list
-            if "FATAL" in str(call)
-        ]
-        assert fatal_logs, "reset reason must be logged"
 
         del _sys.modules["uasyncio"]
 
@@ -1562,6 +1562,16 @@ class TestStdinDrain:
 # ── View toggle (BtnA/G0 chart <-> log) ────────────────────────────
 
 
+class _FakeChartRenderer:
+    """Minimal chart.draw() the view tests can observe (HAS_CHART is False on a
+    host: the renderer is optional on the device and lives in flash)."""
+
+    @staticmethod
+    def draw(tft, data):
+        tft.fill(0)
+        return {"error": None}
+
+
 class FakeTftToggle:
     """Minimal display adapter for the view-toggle tests."""
 
@@ -1599,6 +1609,11 @@ class TestViewToggle:
         "humidity": [55, 56],
     }
 
+    @pytest.fixture(autouse=True)
+    def _renderer(self, monkeypatch):
+        monkeypatch.setattr(lmao_client, "HAS_CHART", True)
+        monkeypatch.setattr(lmao_client, "chart", _FakeChartRenderer)
+
     def setup_method(self):
         lmao_client._LAST_CHART_DATA = None
         lmao_client._LOG_VIEW = False
@@ -1634,3 +1649,126 @@ def test_module_importable():
     assert lmao_client is not None, (
         "cardputer_client.main not importable. Ensure deps are declared in tests/BUILD."
     )
+
+
+if __name__ == "__main__":
+    import sys
+
+    import pytest
+
+    sys.exit(pytest.main([__file__] + sys.argv[1:]))
+
+
+class TestClientDeadLetter:
+    """The client keeps what it sent until the server proves it arrived.
+
+    A device has no delivery proofs, and on a half-duplex link silence is
+    ambiguous (the report lost, or the reply to it).  So the identical payload
+    is re-transmitted on the shared policy schedule, bounded, and the loop
+    returns to its normal cadence as soon as any reply lands.
+    """
+
+    @pytest.mark.asyncio
+    async def test_unanswered_report_is_re_sent_then_abandoned(self):
+        import asyncio
+        import sys as _sys
+
+        _sys.modules["uasyncio"] = asyncio
+
+        mock_router = MagicMock()
+        config = {"interval_seconds": 600}
+        sleep_delays = []
+
+        async def tracking_sleep(delay):
+            sleep_delays.append(delay)
+            if len(sleep_delays) >= 5:
+                raise asyncio.CancelledError()
+
+        with (
+            patch.object(lmao_client, "log") as mock_log,
+            patch.object(lmao_client.sys, "print_exception", create=True),
+            patch.object(lmao_client, "HAS_PROTO", True),
+            patch.object(lmao_client, "make_poc_message", return_value=b"hello", create=True),
+            patch.object(lmao_client, "make_sensor_message", return_value=b"REPORT", create=True),
+            patch.object(asyncio, "sleep", tracking_sleep),
+        ):
+            try:
+                await lmao_client._periodic_send(
+                    tft=None,
+                    status_lines=[],
+                    router=mock_router,
+                    identity_hex="test",
+                    dest_hash=b"\x00" * 16,
+                    send_sensor=True,
+                    has_proto=True,
+                    config=config,
+                    pending_replies=[],
+                )
+            except asyncio.CancelledError:
+                pass
+
+        payloads = [c.kwargs.get("content") for c in mock_router.send_message.call_args_list]
+        # At least one full cycle: the original send plus every scheduled
+        # re-send.  (A later cycle starts its own report once this one is
+        # abandoned — that is the normal telemetry cadence resumed.)
+        assert payloads.count(b"REPORT") >= 1 + lmao_client.RETRY_MAX_ATTEMPTS, (
+            "the report goes out once, then is re-sent on the shared schedule"
+        )
+        assert sleep_delays[:3] == [
+            lmao_client._retry_delay_seconds(i) for i in range(3)
+        ], "re-sends follow the shared policy (30 s, 90 s, 270 s)"
+        assert any(
+            "Gave up on report" in str(call) for call in mock_log.call_args_list
+        ), "an unanswered report is abandoned loudly, not silently"
+
+        del _sys.modules["uasyncio"]
+
+    @pytest.mark.asyncio
+    async def test_reply_stops_the_re_sends(self):
+        import asyncio
+        import sys as _sys
+
+        _sys.modules["uasyncio"] = asyncio
+
+        mock_router = MagicMock()
+        config = {"interval_seconds": 600}
+        sleep_delays = []
+        pending_replies = []
+
+        async def tracking_sleep(delay):
+            sleep_delays.append(delay)
+            # The server answers during the first re-send wait.
+            pending_replies.append("ACK from LMAO Server — received your message")
+            if len(sleep_delays) >= 2:
+                raise asyncio.CancelledError()
+
+        with (
+            patch.object(lmao_client, "log"),
+            patch.object(lmao_client.sys, "print_exception", create=True),
+            patch.object(lmao_client, "HAS_PROTO", True),
+            patch.object(lmao_client, "make_poc_message", return_value=b"hello", create=True),
+            patch.object(lmao_client, "make_sensor_message", return_value=b"REPORT", create=True),
+            patch.object(asyncio, "sleep", tracking_sleep),
+        ):
+            try:
+                await lmao_client._periodic_send(
+                    tft=None,
+                    status_lines=[],
+                    router=mock_router,
+                    identity_hex="test",
+                    dest_hash=b"\x00" * 16,
+                    send_sensor=True,
+                    has_proto=True,
+                    config=config,
+                    pending_replies=pending_replies,
+                )
+            except asyncio.CancelledError:
+                pass
+
+        payloads = [c.kwargs.get("content") for c in mock_router.send_message.call_args_list]
+        assert payloads.count(b"REPORT") == 1, "a reply stops the re-sends"
+        assert sleep_delays[-1] == config["interval_seconds"], (
+            "and the loop returns to its normal cadence"
+        )
+
+        del _sys.modules["uasyncio"]

@@ -31,6 +31,21 @@ for _lp in _LIB_PATHS:
 else:
     HAS_URNS = False
 
+    # CPython (host test) fallback.  The device never takes this branch, but the
+    # module must stay importable and every name it references must resolve, or
+    # a code path only a test exercises dies with NameError instead of doing its
+    # job (that is exactly how LOG_NOTICE and LXMessage were missing).
+    LOG_DEBUG = 10
+    LOG_INFO = 20
+    LOG_NOTICE = 25
+    LOG_ERROR = 40
+
+    class _LXMessageStub:  # only OPPORTUNISTIC is referenced before HAS_URNS gating
+        OPPORTUNISTIC = 1
+
+    LXMessage = _LXMessageStub
+    Identity = Reticulum = LXMRouter = None
+
 # Display support (if available).  The Cardputer ADV ships M5Stack's
 # MicroPython, whose display is M5.Lcd (LovyanGFX) — there is no ``st7789``
 # module on this device, so the previous st7789 path here never engaged.
@@ -77,6 +92,22 @@ except ImportError:
 
 # Feature flag to disable SensorReport sending; defaults True for backward compatibility
 SEND_SENSOR = True
+
+# ── Client-side dead-letter queue (re-send until the server proves receipt) ──
+# A client has no delivery proofs, and on a half-duplex link silence is
+# ambiguous: the report may be lost, or the reply to it.  After a send the
+# client re-transmits the *identical* payload on this schedule until any reply
+# arrives, then resumes the normal interval — bounded, because on a 1%
+# duty-cycle band an unbounded retry is indistinguishable from a jammer.
+# Canonical table: firmware_common/lma_common/lma_attachment.h (RetryPolicy).
+RETRY_MAX_ATTEMPTS = 3
+RETRY_FIRST_DELAY_SECONDS = 30
+RETRY_BACKOFF_FACTOR = 3
+
+
+def _retry_delay_seconds(attempt):
+    """Seconds to wait before re-send *attempt* (0-based): 30, 90, 270."""
+    return RETRY_FIRST_DELAY_SECONDS * (RETRY_BACKOFF_FACTOR ** attempt)
 
 # Default interval and sensor settings; updated from config.py at boot time.
 # Module-level defaults allow make_sensor_message() to function even when
@@ -867,7 +898,7 @@ async def _periodic_send(
     config,
     pending_replies,
 ):
-    """Periodic send loop: sends Hello + SensorReport on interval.
+    """Periodic send loop: sends a SensorReport every interval.
 
     Defined at module level (not nested) to avoid MicroPython closure
     scoping issues with async functions and local variable references.
@@ -891,6 +922,7 @@ async def _periodic_send(
     consecutive_errors = 0
 
     while True:
+        outstanding = None   # this iteration's SensorReport, until the server replies
         try:
             # ---- Heap maintenance (issue #71) ----
             # Collect garbage every cycle to slow fragmentation, then
@@ -926,52 +958,43 @@ async def _periodic_send(
                 break  # unreachable on hardware (reset does not return)
 
             seq += 1
-            hello_text = f"Hello from Cardputer — seq {seq}"
 
+            # Only the SensorReport goes out: the proof-of-concept "Hello" text
+            # carried no information, and the server replies to *any* accepted
+            # message from this peer, so the report alone solicits the ACK and
+            # the chart — the Hello was pure airtime.
             if not has_proto:
                 log("Proto encoder not available — cannot send", tft, status_lines)
             elif dest_hash is None:
                 log("No destination configured — not sending", tft, status_lines)
+            elif not send_sensor:
+                log("Sensor sends disabled — nothing to transmit", tft, status_lines)
             else:
-                content = make_poc_message(
-                    identity_hex, hello_text, timestamp=int(time.time() * 1000)
-                )
-                # Send via urns LXMF router.  OPPORTUNISTIC delivery: it needs
-                # no link state — the Cardputer's UIFlow2 heap cannot afford an
-                # OutLink (the link lookup alone raised "MemoryError allocating
-                # 136 bytes"), and the LMAO server replies opportunistically
-                # anyway.  Collect first: Reticulum's startup churn otherwise
-                # leaves the heap too fragmented for the send path's lazy
-                # imports (urns.link / urns.transport).
+                # OPPORTUNISTIC delivery: it needs no link state — the
+                # Cardputer's UIFlow2 heap cannot afford an OutLink (the link
+                # lookup alone raised "MemoryError allocating 136 bytes"), and
+                # the LMAO server replies opportunistically anyway.  Collect
+                # first: Reticulum's startup churn otherwise leaves the heap too
+                # fragmented for the send path's lazy imports (urns.link /
+                # urns.transport).
+                #
+                # A send failure is deliberately NOT caught here: it falls
+                # through to the loop's handler, which logs it, backs off
+                # exponentially and resets the node only after the consecutive
+                # error cap — the same policy the previous Hello send had.
                 gc.collect()
-                msg = router.send_message(
+                sensor_content = make_sensor_message(identity_hex, seq)
+                msg2 = router.send_message(
                     destination_hash=dest_hash,
-                    content=content,
+                    content=sensor_content,
                     title="p:Envelope",
                     desired_method=LXMessage.OPPORTUNISTIC,
                 )
-                if msg:
-                    log(f"Sent: {hello_text}", tft, status_lines)
+                if msg2:
+                    log(f"Sensor: seq={seq}", tft, status_lines)
+                    outstanding = sensor_content
                 else:
-                    log("Send returned None", tft, status_lines)
-
-                # Also send SensorReport if enabled
-                if send_sensor:
-                    try:
-                        sensor_content = make_sensor_message(identity_hex, seq)
-                        msg2 = router.send_message(
-                            destination_hash=dest_hash,
-                            content=sensor_content,
-                            title="p:Envelope",
-                            desired_method=LXMessage.OPPORTUNISTIC,
-                        )
-                        if msg2:
-                            log(f"Sensor: seq={seq}", tft, status_lines)
-                        else:
-                            log("Sensor send returned None", tft, status_lines)
-                    except Exception as sensor_err:
-                        sys.print_exception(sensor_err)
-                        log(f"Sensor send failed: {sensor_err}", tft, status_lines)
+                    log("Sensor send returned None", tft, status_lines)
 
             # Drain pending replies.  A DATA line carries the Sprout moisture
             # series (the server piggybacks it on this ACK, so the chart costs
@@ -1021,7 +1044,48 @@ async def _periodic_send(
                     None,  # serial-only; the view above already owns the screen
                 )
 
-            # Success — reset error counter and sleep the normal interval.
+            # Success — but did the server actually hear it?  Silence has two
+            # meanings here (our report lost, or its reply lost), so re-send the
+            # identical payload on the shared schedule until a reply lands.
+            attempt = 0
+            while (
+                outstanding is not None
+                and attempt < RETRY_MAX_ATTEMPTS
+                and not pending_replies
+            ):
+                await asyncio.sleep(_retry_delay_seconds(attempt))
+                if pending_replies:
+                    break
+                attempt += 1
+                try:
+                    again = router.send_message(
+                        destination_hash=dest_hash,
+                        content=outstanding,
+                        title="p:Envelope",
+                        desired_method=LXMessage.OPPORTUNISTIC,
+                    )
+                    # Serial-only: log() repaints the text screen, and the
+                    # chart owns the display after a successful drain.
+                    log(
+                        f"No reply yet — re-sent report "
+                        f"({attempt}/{RETRY_MAX_ATTEMPTS})",
+                        None,
+                        status_lines,
+                    )
+                    if not again:
+                        log("Re-send returned None", None, status_lines)
+                except Exception as retry_err:
+                    sys.print_exception(retry_err)
+                    break
+            if outstanding is not None and not pending_replies and attempt >= RETRY_MAX_ATTEMPTS:
+                # Serial-only, same reason as above.
+                log(
+                    f"Gave up on report after {attempt} re-sends (no reply)",
+                    None,
+                    status_lines,
+                )
+
+            # Reset the error counter and sleep the normal interval.
             consecutive_errors = 0
             await asyncio.sleep(config["interval_seconds"])
 

@@ -34,7 +34,14 @@ http_archive(
     #    its own IN/SINGLE destinations by announcing them with the
     #    PATH_RESPONSE context byte; inbound PATH_RESPONSE announces are
     #    recognised in process_announce.
-    patches = ["//smart_irrigation/native-client:rtreticulum_fixes.patch"],
+    patches = [
+        "//smart_irrigation/native-client:rtreticulum_fixes.patch",
+        # Ratchet support (reference RNS 0.7/0.8 interop): ratchet key
+        # generation/remembering, FLAG_SET ratcheted announces, and
+        # ratchet-first decryption so the server's ratcheted downlink
+        # decrypts on the native clients.
+        "//smart_irrigation/native-client:ratchet_fixes.patch",
+    ],
     sha256 = "5a7e8af49b58bea8c36ae386f64ca1944d14b30cf18ab3d7c8b39ece19f92b92",
     strip_prefix = "RTReticulum-dab4362cf3577e464e98e85b71abc5cb26185224",
     urls = ["https://github.com/0xSeren/RTReticulum/archive/dab4362cf3577e464e98e85b71abc5cb26185224.tar.gz"],

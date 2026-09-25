@@ -24,7 +24,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x12lma_messages.proto\x12\x03lma\"\x91\x02\n\x0cLMAOEnvelope\x12#\n\x06sensor\x18\n \x01(\x0b\x32\x11.lma.SensorReportH\x00\x12&\n\x07\x63ommand\x18\x0b \x01(\x0b\x32\x13.lma.CommandRequestH\x00\x12\x1e\n\x03\x61\x63k\x18\x0c \x01(\x0b\x32\x0f.lma.CommandAckH\x00\x12 \n\x04text\x18\x14 \x01(\x0b\x32\x10.lma.TextMessageH\x00\x12\"\n\x05\x61udio\x18\x15 \x01(\x0b\x32\x11.lma.AudioMessageH\x00\x12\"\n\x05image\x18\x16 \x01(\x0b\x32\x11.lma.ImageMessageH\x00\x12\x1f\n\x04\x63\x61ll\x18\x1e \x01(\x0b\x32\x0f.lma.CallSignalH\x00\x42\t\n\x07payload\"c\n\x0cSensorReport\x12\x0f\n\x07node_id\x18\x01 \x01(\t\x12\x0b\n\x03seq\x18\x02 \x01(\r\x12\x0f\n\x07\x62\x61ttery\x18\x03 \x01(\x02\x12$\n\x08readings\x18\x04 \x03(\x0b\x32\x12.lma.SensorReading\"U\n\rSensorReading\x12\x11\n\tsensor_id\x18\x01 \x01(\r\x12\r\n\x05value\x18\x02 \x01(\x02\x12\x0c\n\x04unit\x18\x03 \x01(\t\x12\x14\n\x0ctimestamp_ms\x18\x04 \x01(\x04\"\xc7\x01\n\x0e\x43ommandRequest\x12\x0e\n\x06\x63md_id\x18\x01 \x01(\t\x12\x0e\n\x06target\x18\x02 \x01(\t\x12\x0e\n\x06\x61\x63tion\x18\x03 \x01(\t\x12/\n\x06params\x18\x04 \x03(\x0b\x32\x1f.lma.CommandRequest.ParamsEntry\x12\x11\n\tissued_ms\x18\x05 \x01(\x04\x12\x12\n\nexpires_ms\x18\x06 \x01(\x04\x1a-\n\x0bParamsEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\"O\n\nCommandAck\x12\x0e\n\x06\x63md_id\x18\x01 \x01(\t\x12\x0f\n\x07node_id\x18\x02 \x01(\t\x12\x0f\n\x07success\x18\x03 \x01(\x08\x12\x0f\n\x07message\x18\x04 \x01(\t\"B\n\x0bTextMessage\x12\x0f\n\x07node_id\x18\x01 \x01(\t\x12\x0f\n\x07\x63ontent\x18\x02 \x01(\t\x12\x11\n\ttimestamp\x18\x03 \x01(\x04\"j\n\x0c\x41udioMessage\x12\x0f\n\x07node_id\x18\x01 \x01(\t\x12\x12\n\naudio_data\x18\x02 \x01(\x0c\x12\r\n\x05\x63odec\x18\x03 \x01(\t\x12\x13\n\x0b\x64uration_ms\x18\x04 \x01(\r\x12\x11\n\ttimestamp\x18\x05 \x01(\x04\"u\n\x0cImageMessage\x12\x0f\n\x07node_id\x18\x01 \x01(\t\x12\x12\n\nimage_data\x18\x02 \x01(\x0c\x12\x0e\n\x06\x66ormat\x18\x03 \x01(\t\x12\r\n\x05width\x18\x04 \x01(\r\x12\x0e\n\x06height\x18\x05 \x01(\r\x12\x11\n\ttimestamp\x18\x06 \x01(\x04\"\xa1\x01\n\nCallSignal\x12&\n\x06signal\x18\x01 \x01(\x0e\x32\x16.lma.CallSignal.Signal\x12\x12\n\nsdp_or_ice\x18\x02 \x01(\t\x12\x12\n\nmedia_type\x18\x03 \x01(\t\"C\n\x06Signal\x12\t\n\x05OFFER\x10\x00\x12\n\n\x06\x41NSWER\x10\x01\x12\x07\n\x03ICE\x10\x02\x12\n\n\x06HANGUP\x10\x03\x12\r\n\tKEEPALIVE\x10\x04\x62\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x12lma_messages.proto\x12\x03lma\"\xad\x03\n\x0cLMAOEnvelope\x12#\n\x06sensor\x18\n \x01(\x0b\x32\x11.lma.SensorReportH\x00\x12&\n\x07\x63ommand\x18\x0b \x01(\x0b\x32\x13.lma.CommandRequestH\x00\x12\x1e\n\x03\x61\x63k\x18\x0c \x01(\x0b\x32\x0f.lma.CommandAckH\x00\x12 \n\x04text\x18\x14 \x01(\x0b\x32\x10.lma.TextMessageH\x00\x12\"\n\x05\x61udio\x18\x15 \x01(\x0b\x32\x11.lma.AudioMessageH\x00\x12\"\n\x05image\x18\x16 \x01(\x0b\x32\x11.lma.ImageMessageH\x00\x12\x1f\n\x04\x63\x61ll\x18\x1e \x01(\x0b\x32\x0f.lma.CallSignalH\x00\x12+\n\x08manifest\x18( \x01(\x0b\x32\x17.lma.AttachmentManifestH\x00\x12%\n\x05\x63hunk\x18) \x01(\x0b\x32\x14.lma.AttachmentChunkH\x00\x12%\n\x07\x61tt_ack\x18* \x01(\x0b\x32\x12.lma.AttachmentAckH\x00\x12\x1f\n\x04\x63\x61ps\x18\x32 \x01(\x0b\x32\x0f.lma.CapabilityH\x00\x42\t\n\x07payload\"c\n\x0cSensorReport\x12\x0f\n\x07node_id\x18\x01 \x01(\t\x12\x0b\n\x03seq\x18\x02 \x01(\r\x12\x0f\n\x07\x62\x61ttery\x18\x03 \x01(\x02\x12$\n\x08readings\x18\x04 \x03(\x0b\x32\x12.lma.SensorReading\"U\n\rSensorReading\x12\x11\n\tsensor_id\x18\x01 \x01(\r\x12\r\n\x05value\x18\x02 \x01(\x02\x12\x0c\n\x04unit\x18\x03 \x01(\t\x12\x14\n\x0ctimestamp_ms\x18\x04 \x01(\x04\"\xc7\x01\n\x0e\x43ommandRequest\x12\x0e\n\x06\x63md_id\x18\x01 \x01(\t\x12\x0e\n\x06target\x18\x02 \x01(\t\x12\x0e\n\x06\x61\x63tion\x18\x03 \x01(\t\x12/\n\x06params\x18\x04 \x03(\x0b\x32\x1f.lma.CommandRequest.ParamsEntry\x12\x11\n\tissued_ms\x18\x05 \x01(\x04\x12\x12\n\nexpires_ms\x18\x06 \x01(\x04\x1a-\n\x0bParamsEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\"O\n\nCommandAck\x12\x0e\n\x06\x63md_id\x18\x01 \x01(\t\x12\x0f\n\x07node_id\x18\x02 \x01(\t\x12\x0f\n\x07success\x18\x03 \x01(\x08\x12\x0f\n\x07message\x18\x04 \x01(\t\"B\n\x0bTextMessage\x12\x0f\n\x07node_id\x18\x01 \x01(\t\x12\x0f\n\x07\x63ontent\x18\x02 \x01(\t\x12\x11\n\ttimestamp\x18\x03 \x01(\x04\"j\n\x0c\x41udioMessage\x12\x0f\n\x07node_id\x18\x01 \x01(\t\x12\x12\n\naudio_data\x18\x02 \x01(\x0c\x12\r\n\x05\x63odec\x18\x03 \x01(\t\x12\x13\n\x0b\x64uration_ms\x18\x04 \x01(\r\x12\x11\n\ttimestamp\x18\x05 \x01(\x04\"u\n\x0cImageMessage\x12\x0f\n\x07node_id\x18\x01 \x01(\t\x12\x12\n\nimage_data\x18\x02 \x01(\x0c\x12\x0e\n\x06\x66ormat\x18\x03 \x01(\t\x12\r\n\x05width\x18\x04 \x01(\r\x12\x0e\n\x06height\x18\x05 \x01(\r\x12\x11\n\ttimestamp\x18\x06 \x01(\x04\"\xa1\x01\n\nCallSignal\x12&\n\x06signal\x18\x01 \x01(\x0e\x32\x16.lma.CallSignal.Signal\x12\x12\n\nsdp_or_ice\x18\x02 \x01(\t\x12\x12\n\nmedia_type\x18\x03 \x01(\t\"C\n\x06Signal\x12\t\n\x05OFFER\x10\x00\x12\n\n\x06\x41NSWER\x10\x01\x12\x07\n\x03ICE\x10\x02\x12\n\n\x06HANGUP\x10\x03\x12\r\n\tKEEPALIVE\x10\x04\"\x86\x03\n\x12\x41ttachmentManifest\x12\n\n\x02id\x18\x01 \x01(\x0c\x12\x16\n\x0epayload_sha256\x18\x02 \x01(\x0c\x12!\n\x04kind\x18\x03 \x01(\x0e\x32\x13.lma.AttachmentKind\x12\r\n\x05\x63odec\x18\x04 \x01(\t\x12\x12\n\nchunk_size\x18\x05 \x01(\r\x12\x13\n\x0b\x63hunk_count\x18\x06 \x01(\r\x12\x13\n\x0btotal_bytes\x18\x07 \x01(\x04\x12\x13\n\x0bsample_rate\x18\x08 \x01(\r\x12\x10\n\x08\x63hannels\x18\t \x01(\r\x12\x13\n\x0b\x64uration_ms\x18\n \x01(\r\x12\r\n\x05width\x18\x0b \x01(\r\x12\x0e\n\x06height\x18\x0c \x01(\r\x12\x0f\n\x07node_id\x18\r \x01(\t\x12\x12\n\ncreated_ms\x18\x0e \x01(\x04\x12/\n\x04meta\x18\x0f \x03(\x0b\x32!.lma.AttachmentManifest.MetaEntry\x1a+\n\tMetaEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\"I\n\x0f\x41ttachmentChunk\x12\n\n\x02id\x18\x01 \x01(\x0c\x12\r\n\x05index\x18\x02 \x01(\r\x12\x0c\n\x04\x64\x61ta\x18\x03 \x01(\x0c\x12\r\n\x05\x63rc32\x18\x04 \x01(\x07\"\xe3\x01\n\rAttachmentAck\x12\n\n\x02id\x18\x01 \x01(\x0c\x12)\n\x06status\x18\x02 \x01(\x0e\x32\x19.lma.AttachmentAck.Status\x12\x12\n\nhave_count\x18\x03 \x01(\r\x12\x13\n\x07missing\x18\x04 \x03(\rB\x02\x10\x00\x12\x0e\n\x06reason\x18\x05 \x01(\t\x12\x16\n\x0eretry_after_ms\x18\x06 \x01(\r\"J\n\x06Status\x12\r\n\tRECEIVING\x10\x00\x12\x0c\n\x08\x43OMPLETE\x10\x01\x12\x08\n\x04NEED\x10\x02\x12\x0c\n\x08REJECTED\x10\x03\x12\x0b\n\x07\x41\x42ORTED\x10\x04\"\xbf\x01\n\nCapability\x12\x14\n\x0clmaf_version\x18\x01 \x01(\r\x12&\n\x05kinds\x18\x02 \x03(\x0e\x32\x13.lma.AttachmentKindB\x02\x10\x00\x12\x0e\n\x06\x63odecs\x18\x03 \x03(\t\x12\x16\n\x0emax_chunk_size\x18\x04 \x01(\r\x12\x1c\n\x14max_attachment_bytes\x18\x05 \x01(\x04\x12\x11\n\trx_window\x18\x06 \x01(\r\x12\x1a\n\x12\x61irtime_budget_bps\x18\x07 \x01(\r*\x96\x01\n\x0e\x41ttachmentKind\x12\x14\n\x10KIND_UNSPECIFIED\x10\x00\x12\x0e\n\nKIND_VOICE\x10\x01\x12\x0e\n\nKIND_AUDIO\x10\x02\x12\x0e\n\nKIND_IMAGE\x10\x03\x12\x0e\n\nKIND_VIDEO\x10\x04\x12\r\n\tKIND_FILE\x10\x05\x12\x0e\n\nKIND_CHART\x10\x06\x12\x0f\n\x0bKIND_SIGNAL\x10\x07\x62\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -33,26 +33,46 @@ if not _descriptor._USE_C_DESCRIPTORS:
   DESCRIPTOR._loaded_options = None
   _globals['_COMMANDREQUEST_PARAMSENTRY']._loaded_options = None
   _globals['_COMMANDREQUEST_PARAMSENTRY']._serialized_options = b'8\001'
+  _globals['_ATTACHMENTMANIFEST_METAENTRY']._loaded_options = None
+  _globals['_ATTACHMENTMANIFEST_METAENTRY']._serialized_options = b'8\001'
+  _globals['_ATTACHMENTACK'].fields_by_name['missing']._loaded_options = None
+  _globals['_ATTACHMENTACK'].fields_by_name['missing']._serialized_options = b'\020\000'
+  _globals['_CAPABILITY'].fields_by_name['kinds']._loaded_options = None
+  _globals['_CAPABILITY'].fields_by_name['kinds']._serialized_options = b'\020\000'
+  _globals['_ATTACHMENTKIND']._serialized_start=2282
+  _globals['_ATTACHMENTKIND']._serialized_end=2432
   _globals['_LMAOENVELOPE']._serialized_start=28
-  _globals['_LMAOENVELOPE']._serialized_end=301
-  _globals['_SENSORREPORT']._serialized_start=303
-  _globals['_SENSORREPORT']._serialized_end=402
-  _globals['_SENSORREADING']._serialized_start=404
-  _globals['_SENSORREADING']._serialized_end=489
-  _globals['_COMMANDREQUEST']._serialized_start=492
-  _globals['_COMMANDREQUEST']._serialized_end=691
-  _globals['_COMMANDREQUEST_PARAMSENTRY']._serialized_start=646
-  _globals['_COMMANDREQUEST_PARAMSENTRY']._serialized_end=691
-  _globals['_COMMANDACK']._serialized_start=693
-  _globals['_COMMANDACK']._serialized_end=772
-  _globals['_TEXTMESSAGE']._serialized_start=774
-  _globals['_TEXTMESSAGE']._serialized_end=840
-  _globals['_AUDIOMESSAGE']._serialized_start=842
-  _globals['_AUDIOMESSAGE']._serialized_end=948
-  _globals['_IMAGEMESSAGE']._serialized_start=950
-  _globals['_IMAGEMESSAGE']._serialized_end=1067
-  _globals['_CALLSIGNAL']._serialized_start=1070
-  _globals['_CALLSIGNAL']._serialized_end=1231
-  _globals['_CALLSIGNAL_SIGNAL']._serialized_start=1164
-  _globals['_CALLSIGNAL_SIGNAL']._serialized_end=1231
+  _globals['_LMAOENVELOPE']._serialized_end=457
+  _globals['_SENSORREPORT']._serialized_start=459
+  _globals['_SENSORREPORT']._serialized_end=558
+  _globals['_SENSORREADING']._serialized_start=560
+  _globals['_SENSORREADING']._serialized_end=645
+  _globals['_COMMANDREQUEST']._serialized_start=648
+  _globals['_COMMANDREQUEST']._serialized_end=847
+  _globals['_COMMANDREQUEST_PARAMSENTRY']._serialized_start=802
+  _globals['_COMMANDREQUEST_PARAMSENTRY']._serialized_end=847
+  _globals['_COMMANDACK']._serialized_start=849
+  _globals['_COMMANDACK']._serialized_end=928
+  _globals['_TEXTMESSAGE']._serialized_start=930
+  _globals['_TEXTMESSAGE']._serialized_end=996
+  _globals['_AUDIOMESSAGE']._serialized_start=998
+  _globals['_AUDIOMESSAGE']._serialized_end=1104
+  _globals['_IMAGEMESSAGE']._serialized_start=1106
+  _globals['_IMAGEMESSAGE']._serialized_end=1223
+  _globals['_CALLSIGNAL']._serialized_start=1226
+  _globals['_CALLSIGNAL']._serialized_end=1387
+  _globals['_CALLSIGNAL_SIGNAL']._serialized_start=1320
+  _globals['_CALLSIGNAL_SIGNAL']._serialized_end=1387
+  _globals['_ATTACHMENTMANIFEST']._serialized_start=1390
+  _globals['_ATTACHMENTMANIFEST']._serialized_end=1780
+  _globals['_ATTACHMENTMANIFEST_METAENTRY']._serialized_start=1737
+  _globals['_ATTACHMENTMANIFEST_METAENTRY']._serialized_end=1780
+  _globals['_ATTACHMENTCHUNK']._serialized_start=1782
+  _globals['_ATTACHMENTCHUNK']._serialized_end=1855
+  _globals['_ATTACHMENTACK']._serialized_start=1858
+  _globals['_ATTACHMENTACK']._serialized_end=2085
+  _globals['_ATTACHMENTACK_STATUS']._serialized_start=2011
+  _globals['_ATTACHMENTACK_STATUS']._serialized_end=2085
+  _globals['_CAPABILITY']._serialized_start=2088
+  _globals['_CAPABILITY']._serialized_end=2279
 # @@protoc_insertion_point(module_scope)

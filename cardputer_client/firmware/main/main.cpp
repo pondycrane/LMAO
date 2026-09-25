@@ -7,10 +7,18 @@
 // and every INTERVAL sends a SensorReport (die temp always; DHT20 humidity
 // when a Grove sensor is attached) as a send-only LXMF message to the server.
 //
-// The chart/display receive path lands in a follow-up (PR2).
+// Receive path (PR2, first use case): the server answers with an LMAF transfer
+// (manifest + chunks) carrying the chart payload — larger than one LXMF packet,
+// so it cannot ride a plain opportunistic reply.  This client advertises its
+// LMAF capability, reassembles the transfer (verifying the payload sha256),
+// logs the `DATA ...` chart series, and acknowledges it.  See
+// firmware_common/lma_common/lma_attachment.* for the framing and
+// proto/lma_messages.proto for the wire format.
 #include <cstdio>
+#include <cstring>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -20,12 +28,16 @@
 #include "freertos/task.h"
 #include "freertos/semphr.h"
 
+#include "rtreticulum/cryptography/hashes.h"
 #include "rtreticulum/identity.h"
 #include "rtreticulum/destination.h"
 #include "rtreticulum/transport.h"
 #include "rtreticulum/reticulum.h"
 #include "lora_interface.h"
+#include "lma_attachment.h"
 #include "lma_identity.h"
+#include "lma_lmaf_rx.h"
+#include "lma_tx_queue.h"
 #include "lma_encoder.h"
 #include "lxmf_send.h"
 #include "die_temp.h"
@@ -65,10 +77,31 @@ static const uint32_t INTERVAL_SECONDS = LMAO_INTERVAL_SECONDS > 10 ? LMAO_INTER
 #define DHT20_SDA_PIN 21
 #define DHT20_SCL_PIN 22
 
-// Asset announces every 30 s (unchanged from the uReticulum client).
-#define ANNOUNCE_INTERVAL_MS 30000UL
+// How often to re-advertise LMAF receive capability while the server has not
+// yet proven it understood (see the announce block): flat, not backing off.
+#define CAPS_RETRY_MS 120000UL
 
-#define TICK_MS 1000UL
+// Presence announces (lmao/cardputer + lxmf/delivery).  Two 168-byte frames per
+// interval is the largest single airtime cost this node has: at 30 s it is ~1.6%
+// duty on a 5.47 kbps channel, more than the whole payload budget.  The default
+// is 120 s (~0.4%): peers still discover this node on demand via path requests
+// (path_find, issue #135) and Reticulum paths live for hours, so the only cost
+// is discovery latency.  Override with LMAO_ANNOUNCE_INTERVAL_SECONDS.
+#ifndef LMAO_ANNOUNCE_INTERVAL_SECONDS
+#define LMAO_ANNOUNCE_INTERVAL_SECONDS 120
+#endif
+static const uint32_t ANNOUNCE_INTERVAL_MS =
+    (LMAO_ANNOUNCE_INTERVAL_SECONDS > 5 ? LMAO_ANNOUNCE_INTERVAL_SECONDS : 5) * 1000UL;
+
+// Radio poll cadence.  This is NOT a housekeeping tick: RNode (and urns) split
+// packets >254 B into two back-to-back LoRa frames, and the SX1262 FIFO holds a
+// single packet.  Polling at 1 Hz (the original value) meant the second frame
+// overwrote the first before poll() drained it — every server reply larger than
+// one frame (chart payloads, LMAF manifests) was lost, showing up as
+// "dropping stale split fragment" / "split seq mismatch".  The MicroPython
+// client polls at 20 Hz for the same reason.  All periodic work below is gated
+// on elapsed milliseconds, so a fast tick costs one DIO1 flag check per pass.
+#define TICK_MS 20UL
 
 // hexstr is provided by the shared lma_identity module (firmware_common) —
 // the same one the Sprout client uses (DRY, see firmware_common/).
@@ -77,6 +110,7 @@ using lma_identity::hexstr;
 static SemaphoreHandle_t s_ident_lock = nullptr;
 static Identity s_server_identity;                 // learned from the server announce
 static bool s_have_server = false;
+static Identity s_my_identity;                     // this node's persisted identity
 
 static void on_announce_cb(const Bytes& dh, const Identity& peer, const Bytes&) {
     ESP_LOGI(TAG, "<< announce dest=%s id=%s", hexstr(dh).c_str(),
@@ -91,14 +125,206 @@ static void on_announce_cb(const Bytes& dh, const Identity& peer, const Bytes&) 
     }
 }
 
+// ── LXMF send helper ───────────────────────────────────────────────
+
+// Opportunistic LXMF send of an LMAOEnvelope to the server's delivery
+// destination (the same path SensorReports take): the 16-byte destination hash
+// is dropped from the body because the RNS packet header already carries it.
+// Returns false when no destination is configured or the server identity has
+// not been learned yet.
+static bool send_envelope_to_server(const std::string& envelope) {
+    if (DEST_HASH_HEX[0] == '\0') return false;
+    if (s_ident_lock) xSemaphoreTake(s_ident_lock, portMAX_DELAY);
+    const bool    have = s_have_server;
+    const Identity srv = s_server_identity;
+    if (s_ident_lock) xSemaphoreGive(s_ident_lock);
+    if (!have) return false;
+
+    Destination my_delivery(s_my_identity, Type::Destination::OUT, Type::Destination::SINGLE,
+                            "lxmf", "delivery");
+    Destination server_delivery(srv, Type::Destination::OUT, Type::Destination::SINGLE,
+                                "lxmf", "delivery");
+    const uint64_t unix_s = 946684800ULL + (uint64_t)(esp_timer_get_time() / 1000000ULL);
+    Bytes body = lxmf_send::build_body(my_delivery, server_delivery, s_my_identity,
+                                       Bytes(envelope), Bytes("p:Envelope"), unix_s);
+    Bytes frame = lxmf_send::opportunistic_frame(server_delivery, body);
+    if (frame.empty()) return false;
+    Transport::broadcast(frame, nullptr);
+    return true;
+}
+
+// ── LMAF receive path ───────────────────────────────────────────────
+//
+// The server splits payloads larger than one opportunistic LXMF packet into a
+// manifest plus chunks.  The framing, reassembly, digest check and ack
+// construction all live in the shared, host-tested core
+// (firmware_common/lma_common/lma_lmaf_rx.*) — this file only feeds inbound
+// bytes in and transmits what comes back.  Chunks land in a bounded buffer
+// here; the flash-backed sink arrives with voice notes, which are orders of
+// magnitude larger than a chart history and must never sit in RAM.
+#define LMAF_MAX_PAYLOAD_BYTES 4096
+#define LMAF_RX_WINDOW         4
+
+// Whole-payload digest check, injected so the framing core stays free of
+// crypto (see lma_attachment::VerifyFn).
+static bool lmaf_verify(const std::string& payload, const std::string& expected) {
+    const Bytes got = Cryptography::sha256(
+        Bytes((const uint8_t*)payload.data(), payload.size()));
+    if (got.size() != expected.size()) return false;
+    return expected.empty() ? false
+                            : memcmp(got.data(), expected.data(), expected.size()) == 0;
+}
+
+static lma_attachment::LmafReceiver make_receiver() {
+    lma_attachment::LmafRxConfig cfg;
+    cfg.max_payload_bytes = LMAF_MAX_PAYLOAD_BYTES;
+    cfg.max_chunk_size    = lma_attachment::LO_OPP_CHUNK_SIZE * 4;  // tolerate a richer
+                                                                    // sender profile
+    cfg.max_sessions      = 2;
+    cfg.rx_window         = LMAF_RX_WINDOW;
+    cfg.ttl_seconds       = 300.0;
+    return lma_attachment::LmafReceiver(
+        cfg, lmaf_verify, []() { return (double)(esp_timer_get_time() / 1000000); });
+}
+
+static lma_attachment::LmafReceiver s_rx = make_receiver();
+static std::string s_chart_line;                    // last `DATA ...` chart payload
+static volatile bool s_server_speaks_lmaf = false;  // set on first inbound LMAF
+
+// Outbound dead-letter queue.  A client has no delivery proofs to wait for, and
+// on a half-duplex link silence is ambiguous (our packet lost, or the reply to
+// it lost), so the rule is: *any* inbound message from the server confirms the
+// oldest outstanding send — the server only answers what it accepted — and
+// anything that never gets a reply is re-sent on the shared RetryPolicy
+// schedule, then abandoned loudly rather than retried forever in a 1%
+// duty-cycle band (firmware_common/lma_common/lma_tx_queue.h).
+static uint32_t s_report_seq = 0;   // monotonic: see send_sensor_report
+static const uint32_t TX_KIND_REPORT = 1;   // state-like: newest supersedes
+static lma_attachment::TxQueue s_tx(
+    lma_attachment::TxQueueConfig{},
+    []() { return (double)(esp_timer_get_time() / 1000000); });
+
+static std::string hex8(const std::string& raw) {
+    return hexstr(raw.data(), raw.size() < 8 ? raw.size() : 8);
+}
+
+// Send back whatever the receive core decided the sender needs to hear.
+static void lmaf_send_pending_ack() {
+    if (!s_rx.has_ack()) return;
+    const bool sent = send_envelope_to_server(s_rx.ack_envelope());
+    ESP_LOGI(TAG, "LMAF ack id=%s status=%u missing=%u sent=%d",
+             hex8(s_rx.ack_id()).c_str(), (unsigned)s_rx.ack_status(),
+             (unsigned)s_rx.ack_missing().size(), (int)sent);
+}
+
+// Inbound LXMF to our lxmf/delivery destination (Reticulum has already
+// decrypted it).  Runs on the Reticulum task: the work here is bounded
+// (bounded payload, no waiting), and Transport's mutex is recursive while the
+// LoRa TX path only enqueues, so the ack broadcast cannot stall inbound
+// processing.
+static void on_lxmf_packet(const Bytes& plaintext, const Packet&) {
+    const std::string body((const char*)plaintext.data(), plaintext.size());
+    const auto result = s_rx.feed(body);
+
+    // The server answers only what it accepted, so any inbound message is proof
+    // that the oldest queued send arrived — even one this receiver ignores.
+    if (s_tx.confirm_oldest()) {
+        ESP_LOGI(TAG, "TX confirmed by inbound reply (outstanding=%u)",
+                 (unsigned)s_tx.size());
+    }
+
+    switch (result) {
+        case lma_attachment::LmafReceiver::Result::MANIFEST_ACCEPTED: {
+            const auto& m = s_rx.manifest();
+            s_server_speaks_lmaf = true;
+            ESP_LOGI(TAG, "LMAF manifest id=%s kind=%u chunks=%u bytes=%llu chunk_size=%u codec=%s",
+                     hex8(m.id).c_str(), (unsigned)m.kind, (unsigned)m.chunk_count,
+                     (unsigned long long)m.total_bytes, (unsigned)m.chunk_size,
+                     m.codec.c_str());
+            break;
+        }
+        case lma_attachment::LmafReceiver::Result::CHUNK_ACCEPTED:
+            ESP_LOGD(TAG, "LMAF chunk stored");
+            break;
+        case lma_attachment::LmafReceiver::Result::CHUNK_DUPLICATE:
+            break;
+        case lma_attachment::LmafReceiver::Result::COMPLETE: {
+            const auto& m = s_rx.manifest();
+            ESP_LOGI(TAG, "LMAF complete id=%s kind=%u bytes=%u chunks=%u",
+                     hex8(m.id).c_str(), (unsigned)m.kind,
+                     (unsigned)s_rx.payload().size(), (unsigned)m.chunk_count);
+            if (m.kind == lma_attachment::KIND_CHART) {
+                s_chart_line = s_rx.payload();
+                // Same `DATA ...` series line the MicroPython client parses, so
+                // the chart format keeps a single owner (lma_core.sprout_history).
+                ESP_LOGI(TAG, "chart: %s", s_chart_line.c_str());
+            } else {
+                ESP_LOGW(TAG, "LMAF kind %u not handled yet — payload dropped", (unsigned)m.kind);
+            }
+            lmaf_send_pending_ack();
+            break;
+        }
+        case lma_attachment::LmafReceiver::Result::NEED_ACK:
+            ESP_LOGW(TAG, "LMAF chunk rejected — requesting retransmit");
+            lmaf_send_pending_ack();
+            break;
+        case lma_attachment::LmafReceiver::Result::MANIFEST_REJECTED:
+            ESP_LOGW(TAG, "LMAF manifest/chunk framing rejected");
+            lmaf_send_pending_ack();
+            break;
+        case lma_attachment::LmafReceiver::Result::HASH_MISMATCH:
+            ESP_LOGE(TAG, "LMAF payload digest mismatch — transfer aborted");
+            lmaf_send_pending_ack();
+            break;
+        case lma_attachment::LmafReceiver::Result::IO_ERROR:
+            ESP_LOGE(TAG, "LMAF local store refused a chunk — transfer aborted");
+            lmaf_send_pending_ack();
+            break;
+        case lma_attachment::LmafReceiver::Result::NO_SESSION:
+            // The manifest (first packet of a transfer) never arrived, so the
+            // offset of this chunk is unknown.  Chart payloads refresh every
+            // report interval; larger payloads get a manifest resend with P2.
+            ESP_LOGW(TAG, "LMAF chunk for an unknown session — manifest lost, dropping");
+            break;
+        case lma_attachment::LmafReceiver::Result::IGNORED:
+            ESP_LOGD(TAG, "inbound LXMF without an LMAF payload");
+            break;
+    }
+}
+
+// Advertise what this node can receive so the server can pick a chunk size and
+// a payload ceiling it will actually store.  Retried until the server proves it
+// understands (an inbound manifest/chunk): a lost advertisement or a server
+// restart would otherwise leave the node unable to receive charts until the
+// next retry.  Two minutes costs ~0.3 s of air per attempt (~0.25% duty), the
+// same order as an announce pair, and it means one dropped packet costs
+// 2 minutes instead of 10.
+// Capability advertisement: sent immediately before each report until the
+// server proves it understood (an inbound manifest/chunk).  Tied to the report
+// cadence rather than to a timer: the server's capability cache lives in
+// memory, so any server restart needs a fresh advertisement — one packet per
+// report interval costs ~nothing and guarantees the handshake recovers within
+// one interval, where a backing-off timer pushed it out to ten minutes.
+
+static bool send_capability() {
+    if (!send_envelope_to_server(s_rx.capability_envelope())) return false;
+    ESP_LOGI(TAG, "LMAF capability advertised (chunk=%u max=%u rx_window=%u)",
+             (unsigned)lma_attachment::LO_OPP_CHUNK_SIZE,
+             (unsigned)s_rx.config().max_payload_bytes, (unsigned)LMAF_RX_WINDOW);
+    return true;
+}
+
+
 static void send_sensor_report(const Identity& my_identity, bool dht_ok) {
     if (DEST_HASH_HEX[0] == '\0') {
         ESP_LOGW(TAG, "No destination configured — not sending");
         return;
     }
     uint64_t now_ms = (uint64_t)(esp_timer_get_time() / 1000);
-    uint64_t unix_s = 946684800ULL + (uint64_t)(esp_timer_get_time() / 1000000ULL); // ~2000-epoch offset
-    uint32_t seq = (uint32_t)(now_ms % 100000U);
+    // Monotonic: the previous `now_ms % 100000` wrapped every 100 s, so reports
+    // 300 s apart carried *identical* seq values — indistinguishable on the
+    // wire, and useless for telling a re-send from fresh telemetry.
+    uint32_t seq = ++s_report_seq;
 
     std::vector<std::string> readings;
 
@@ -130,26 +356,16 @@ static void send_sensor_report(const Identity& my_identity, bool dht_ok) {
     ESP_LOGI(TAG, "SensorReport env=%uB readings=%u",
              (unsigned)envelope.size(), (unsigned)readings.size());
 
-    Destination my_delivery(my_identity, Type::Destination::OUT, Type::Destination::SINGLE,
-                            "lxmf", "delivery");
-    if (s_ident_lock) xSemaphoreTake(s_ident_lock, portMAX_DELAY);
-    bool have = s_have_server;
-    Identity srv = s_server_identity;
-    if (s_ident_lock) xSemaphoreGive(s_ident_lock);
-    if (!have) {
+    if (!send_envelope_to_server(envelope)) {
         ESP_LOGW(TAG, "server identity not learned yet — skipping LXMF send (awaiting server announce)");
         return;
     }
-    Destination server_delivery(srv, Type::Destination::OUT, Type::Destination::SINGLE,
-                                "lxmf", "delivery");
-    ESP_LOGI(TAG, "server delivery hash=%s", hexstr(server_delivery.hash()).c_str());
-
-    Bytes body = lxmf_send::build_body(my_delivery, server_delivery, my_identity,
-                                       Bytes(envelope), Bytes("p:Envelope"), unix_s);
-    Bytes frame = lxmf_send::opportunistic_frame(server_delivery, body);
-    if (frame.empty()) { ESP_LOGW(TAG, "no opportunistic frame"); return; }
-    ESP_LOGI(TAG, "TX LXMF frame %uB -> server", (unsigned)frame.size());
-    Transport::broadcast(frame, nullptr);
+    // Keep it until the server proves it arrived: a report lost on air — or one
+    // whose reply was lost — is re-sent rather than silently gone.  A newer
+    // report supersedes the pending one, so only one is ever in flight.
+    s_tx.sent("report-" + std::to_string(seq), envelope, TX_KIND_REPORT, /*supersede=*/true);
+    ESP_LOGI(TAG, "SensorReport awaiting delivery proof (outstanding=%u)",
+             (unsigned)s_tx.size());
 }
 
 extern "C" void app_main(void);
@@ -171,7 +387,9 @@ void app_main() {
     // hash must be added to the server's ALLOWED_CLIENTS (like Sprout's).
     // Shared with the Sprout client (firmware_common/lma_identity).
     Identity identity = lma_identity::load_or_create("cardputer");
+    s_my_identity = identity;
     ESP_LOGI(TAG, "identity hash: %s", hexstr(identity.get_salt()).c_str());
+    ESP_LOGI(TAG, "identity pubkey: %s", hexstr(identity.get_public_key()).c_str());
     {
         // The server allow-lists the sender's lxmf/delivery hash — print ours
         // so it can be added to ALLOWED_CLIENTS / LMAO_ALLOWED_CLIENTS.
@@ -206,7 +424,25 @@ void app_main() {
 
     Destination delivery(identity, Type::Destination::IN, Type::Destination::SINGLE,
                          "lxmf", "delivery");
+    /* Own a ratchet: the announce below then carries it with FLAG_SET, the
+     * server encrypts the downlink against it, and decrypt here tries the
+     * ratchet private before the base key.  Reference RNS 0.7/0.8 interop. */
+    delivery.create_ratchet();
+    {
+        /* Device-side ratchet pub as announced. Correlate against the server's
+         * stored known_ratchets for this delivery hash to confirm the server
+         * encrypts with THIS pub (no stale/poisoned key race). */
+        const auto& del_rv = delivery.ratchets();
+        if (!del_rv.empty()) {
+            Bytes rpub = Identity::ratchet_public_from_private(del_rv.front());
+            ESP_LOGI(TAG, "delivery ratchet pub: %s id=%s", hexstr(rpub).c_str(),
+                     hexstr(Identity::get_ratchet_id(rpub)).c_str());
+        }
+    }
     Transport::register_destination(delivery);
+    // Inbound LXMF (the server's LMAF chart transfer, future downlink commands)
+    // arrives on this destination's packet callback.
+    delivery.set_packet_callback(on_lxmf_packet);
     ESP_LOGI(TAG, "delivery dest hash: %s", hexstr(delivery.hash()).c_str());
 
     Transport::on_announce(on_announce_cb);
@@ -216,11 +452,13 @@ void app_main() {
         return;
     }
 
-    ESP_LOGI(TAG, "send interval: %us, DEST_HASH: %s",
-             (unsigned)INTERVAL_SECONDS, DEST_HASH_HEX[0] ? "configured" : "none (no sends)");
+    ESP_LOGI(TAG, "send interval: %us, DEST_HASH: %s, lmaf rx: %u B max",
+             (unsigned)INTERVAL_SECONDS, DEST_HASH_HEX[0] ? "configured" : "none (no sends)",
+             (unsigned)LMAF_MAX_PAYLOAD_BYTES);
 
     uint64_t last_send_ms = 0;
     uint32_t last_announce_ms = 0;
+    uint32_t last_caps_ms = 0;
 
     for (;;) {
         const uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
@@ -239,9 +477,24 @@ void app_main() {
             const bool have_srv = s_have_server;
             if (s_ident_lock) xSemaphoreGive(s_ident_lock);
             if (!have_srv) path_find::request(DEST_HASH_HEX);
+
+            // Advertise the LMAF receive path until the server proves it
+            // understood (an inbound manifest/chunk).  Flat 120 s retry rather
+            // than a backoff: the server's capability cache is in memory, so a
+            // server restart needs a fresh advertisement and two minutes beats
+            // the ten a backoff produced.  Background traffic only — it is
+            // never a precondition for reporting.
+            if (have_srv && !s_server_speaks_lmaf) {
+                if (last_caps_ms == 0 || now_ms - last_caps_ms >= CAPS_RETRY_MS) {
+                    if (send_capability()) last_caps_ms = now_ms;
+                }
+            }
+
         }
 
         // Telemetry: first send immediately after boot, then every interval.
+        // Deliberately unconditional — reporting is this node's whole job, so
+        // nothing else belongs on this path.
         if (last_send_ms == 0 || now_ms - last_send_ms >= (uint64_t)INTERVAL_SECONDS * 1000) {
             last_send_ms = now_ms;
             send_sensor_report(identity, dht_ok);
@@ -249,6 +502,20 @@ void app_main() {
 
         // Radio poll must stay on the main task (single-threaded SPI).
         lora->poll();
+
+        // Dead-letter: re-send anything the server has not proven it received,
+        // on the shared schedule, and give up loudly when the budget is spent.
+        std::string tx_key, tx_env;
+        const auto tx_action = s_tx.next_due(&tx_key, &tx_env);
+        if (tx_action == lma_attachment::TxQueue::Action::RESEND) {
+            const bool ok = send_envelope_to_server(tx_env);
+            ESP_LOGW(TAG, "TX re-send key=%s sent=%d (no reply yet, outstanding=%u)",
+                     tx_key.c_str(), (int)ok, (unsigned)s_tx.size());
+        } else if (tx_action == lma_attachment::TxQueue::Action::ABANDON) {
+            ESP_LOGE(TAG, "TX abandoned key=%s after %u attempts, no reply (total abandoned=%u)",
+                     tx_key.c_str(), (unsigned)s_tx.config().policy.max_attempts,
+                     (unsigned)s_tx.abandoned());
+        }
 
         vTaskDelay(pdMS_TO_TICKS(TICK_MS));
     }
