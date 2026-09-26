@@ -19,6 +19,7 @@ degradation — the server starts and operates without them.
 
 import asyncio
 import hashlib
+import json
 import logging
 import os
 import random
@@ -45,7 +46,7 @@ from lma_core.message_utils import decode_lmao_message
 from lma_core.rns_di import LXMF, RNS
 from lma_core.rns_init import init_rns_and_lxmf as _shared_init
 from lma_core.rns_init import warn_if_rnode_missing
-from lma_core.sprout_history import SproutHistory
+from lma_core.sprout_history import DATA_AIR_MAX_SAMPLES, SproutHistory
 
 # Local imports
 from lmao_server import config
@@ -127,6 +128,118 @@ ALLOWED_CLIENTS = _build_allowed_clients()
 # the ingest pod owns DuckDB, and the chart needs no extra airtime because the
 # client already round-trips a message every interval.
 SPROUT_HISTORY = SproutHistory()
+
+# ── DB-backed Sprout chart (always-have history) ──────────────────
+# The chart is sourced from the ingest pod's DuckDB (service ``iot-query``,
+# the read-only SQL query API) rather than only the in-memory buffer above:
+# that buffer only sees reports the server happens to have decoded live and
+# can go stale (dedup, restarts), whereas DuckDB holds the full Sprout
+# history, so a downlink can always be answered.  The in-memory buffer stays
+# as an offline fallback when the query API is unreachable.
+DB_SPROUT_HISTORY = SproutHistory()
+_DB_HISTORY_LOADED = False  # True once the poll task has filled DB_SPROUT_HISTORY
+_DB_HISTORY_LOCK = threading.Lock()
+
+# The ingest pod serves the read-only SQL API on the ``iot-query`` K8s
+# service (port 8080).  Overridable for local/diagnostic runs via env.
+IOT_QUERY_URL = os.environ.get(
+    "LMAO_IOT_QUERY_URL", "http://iot-query:8080/query"
+)
+# How often to re-query DuckDB for the Sprout chart history.
+DB_HISTORY_INTERVAL = float(os.environ.get("LMAO_DB_HISTORY_INTERVAL", "15"))
+
+# Sensor ids the Sprout chart series are built from (matches lma_core).
+DB_HISTORY_SENSOR_IDS = (2, 3, 4, 10, 11)  # humidity, air temp, soil moisture, dry, wet
+
+# Read-only SELECT over the Sprout (any node that reports soil moisture — the
+# DuckDB store keys reports by node_id + seq).  Bounded to the row cap.
+_DB_HISTORY_SQL = (
+    "SELECT node_id, seq, sensor_id, value FROM sensor_readings "
+    "WHERE sensor_id IN (2,3,4,10,11) "
+    "AND node_id IN (SELECT DISTINCT node_id FROM sensor_readings WHERE sensor_id = 4) "
+    "ORDER BY timestamp_ms DESC, seq DESC"
+)
+
+
+def _chart_data_line(air_limit=DATA_AIR_MAX_SAMPLES):
+    """The Sprout chart DATA line for the next reply.
+
+    Prefers the DB-backed history (full DuckDB history, always available);
+    falls back to the live in-memory buffer when the query API has never
+    produced a line.  ``air_limit=None`` = unbounded air rings (an LMAF peer);
+    the default caps them to ``DATA_AIR_MAX_SAMPLES`` (a legacy/piggybacked
+    single-packet peer).
+    """
+    with _DB_HISTORY_LOCK:
+        if _DB_HISTORY_LOADED:
+            line = DB_SPROUT_HISTORY.data_line(air_limit)
+            if line:
+                return line
+    return SPROUT_HISTORY.data_line(air_limit)
+
+
+def _refresh_db_sprout_history() -> None:
+    """Synchronously re-query DuckDB and rebuild DB_SPROUT_HISTORY.
+
+    Best-effort: any failure leaves the previous DB-backed line in place, so a
+    transient query-API outage cannot blank the chart.  Runs on a background
+    task, never on the RNS delivery thread.
+    """
+    global _DB_HISTORY_LOADED
+    try:
+        import urllib.request
+
+        body = json.dumps({"sql": _DB_HISTORY_SQL}).encode()
+        req = urllib.request.Request(
+            IOT_QUERY_URL, data=body, headers={"Content-Type": "application/json"}
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            payload = json.loads(resp.read().decode())
+    except Exception as exc:  # noqa: BLE001 — best-effort poll
+        if not _DB_HISTORY_LOADED:
+            logger.warning("DuckDB chart history unavailable (%s).", exc)
+        return
+
+    rows = payload.get("rows")
+    if not rows:
+        return
+    cols = payload.get("columns") or []
+    try:
+        i_node = cols.index("node_id")
+        i_seq = cols.index("seq")
+        i_sid = cols.index("sensor_id")
+        i_val = cols.index("value")
+    except ValueError:
+        logger.warning("DuckDB chart history: unexpected query schema.")
+        return
+
+    folded_rows = [
+        (r[i_node], r[i_seq], int(r[i_sid]), float(r[i_val])) for r in rows
+    ]
+    # The query API caps rows and the SQL orders newest-first; reverse so the
+    # ring folds oldest→newest within the newest window (update_db_rows keeps
+    # the newest reports and `data_line` emits oldest-first).
+    folded_rows.reverse()
+    probe = SproutHistory()
+    probe.update_db_rows(folded_rows)
+    if not (probe.samples or probe.temp or probe.humidity):
+        return
+    with _DB_HISTORY_LOCK:
+        DB_SPROUT_HISTORY.reset()
+        DB_SPROUT_HISTORY.update_db_rows(folded_rows)
+        _DB_HISTORY_LOADED = True
+
+
+async def _db_history_poll() -> None:
+    """Background task keeping DB_SPROUT_HISTORY fresh from DuckDB."""
+    while True:
+        try:
+            await asyncio.get_event_loop().run_in_executor(
+                None, _refresh_db_sprout_history
+            )
+        except Exception:  # noqa: BLE001 — never let the poll die
+            logger.exception("DuckDB chart history poll failed.")
+        await asyncio.sleep(DB_HISTORY_INTERVAL)
 
 # ── LMAF (LMAO Attachment Framing) — capability cache + chart delivery ───
 # A peer that advertises ``KIND_CHART`` with ``lmaf_version >= 1`` gets the
@@ -689,7 +802,7 @@ class Server:
             reply_text = (
                 f"ACK from LMAO Server — received your message ({len(content_bytes)} bytes)"
             )
-            chart_line = SPROUT_HISTORY.data_line()
+            chart_line = _chart_data_line()
             lmaf_peer = (
                 LMAF_CAPS.chart_capable(source_hash)
                 or (CONTACTS is not None and CONTACTS.is_known(source_hash))
@@ -699,7 +812,7 @@ class Server:
                 # so it gets the full air rings — the depth this framing exists
                 # to carry (the line is sent as manifest + chunks, never folded
                 # into the ACK text).
-                chart_line = SPROUT_HISTORY.data_line(air_limit=None)
+                chart_line = _chart_data_line(air_limit=None)
             elif chart_line:
                 # Piggyback the chart payload on the reply the client already
                 # solicits — no extra frames, no query protocol.
@@ -1128,14 +1241,22 @@ class Server:
                     hdr_len = 2 + dst + 1
                     token = raw[hdr_len:]
                     eph = token[:32].hex()
+                    try:
+                        _salt = dest.identity.get_salt().hex()
+                        _rat = (dest.latest_ratchet_id or b"").hex()[:12]
+                    except Exception:
+                        _salt = "?"
+                        _rat = "?"
                     logger.info(
-                        "LMAF TX token dst=%s hdr=%s ratchet=%s token_len=%d eph=%s sha256=%s",
+                        "LMAF TX token dst=%s hdr=%s salt=%s ratchet=%s token_len=%d eph=%s sha256=%s token=%s",
                         source_hash[:8],
                         "H2" if hdr2 else "H1",
-                        (dest.latest_ratchet_id or b"").hex()[:12],
+                        _salt,
+                        _rat,
                         len(token),
                         eph,
                         hashlib.sha256(token).hexdigest(),
+                        token.hex(),
                     )
             except Exception:
                 pass  # diagnostics must never break a send
@@ -1440,6 +1561,11 @@ async def async_main():
     # Dead-letter retries ride the event loop: a transfer whose peer never
     # replied at all is re-offered (bounded) instead of silently dropped.
     lmaf_retry_task = asyncio.create_task(lmao_server._lmaf_retry_loop())
+
+    # Keep the DB-backed Sprout chart (always-have history) fresh from
+    # DuckDB so a downlink can always be answered even when the in-memory
+    # buffer is stale/empty (dedup, restarts).
+    db_history_task = asyncio.create_task(_db_history_poll())
 
     # Register the delivery callback
     router.register_delivery_callback(lmao_server.handle_lxmf_delivery)
