@@ -1,6 +1,10 @@
 [workspace]
 resolver = "2"
 members = ["host/interop"]
+# Vendor mirrors are standalone upstream crates; keeping them out of the
+# workspace lets `cargo build/test` run inside each vendor/<crate> (their own
+# Cargo.lock + the shared tests/fixtures), mirroring upstream layouts.
+exclude = ["vendor/rns-core", "vendor/rns-crypto", "vendor/rns-net", "vendor/lxmf-core", "vendor/lxmf"]
 
 [workspace.package]
 version = "0.1.0"
