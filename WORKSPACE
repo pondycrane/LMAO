@@ -46,3 +46,10 @@ http_archive(
     strip_prefix = "RTReticulum-dab4362cf3577e464e98e85b71abc5cb26185224",
     urls = ["https://github.com/0xSeren/RTReticulum/archive/dab4362cf3577e464e98e85b71abc5cb26185224.tar.gz"],
 )
+
+# ── Rust client: pinned RNS/LXMF protocol crates (PR #168) ─────────────────
+# The five protocol crates are fetched from crates.io by SHA-256 (the source
+# of-record pin record is rust-client/UPSTREAM.md). This replaces a committed
+# vendor/ copy — no upstream Rust source is stored in this repo.
+load("//rust-client:repositories.bzl", "lmao_rust_client_repositories")
+lmao_rust_client_repositories()

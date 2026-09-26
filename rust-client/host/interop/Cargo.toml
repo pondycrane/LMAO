@@ -1,0 +1,22 @@
+# T0 DECISION-GATE harness: std desktop Rust node interop with Python RNS.
+#
+# Establishes a Link to a Python RNS peer and exchanges an RNS `Resource` in
+# both directions over a shared mesh, verifying chunk reassembly + digest and
+# completion proof — the substance of design §2 / ticket T0.
+[package]
+name = "lmao-t0-interop"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rns-core = "0.1.17"
+rns-crypto = "0.1.10"
+rns-net = "0.7.2"
+log = "0.4"
+env_logger = "0.11"
+serde_json = "1"
+futures = "0.3"
+
+[features]
+# rns-net's interface features are additive; keep the default set the firmware
+# can share. 'iface-backbone' is only for host scale-out, not needed here.

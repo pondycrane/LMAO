@@ -1,0 +1,4 @@
+# Host (T0) toolchain. Firmware targets (espup nightly + xtensa) are added later
+# in T1 once the decision gate passes; T0 is a std host spike.
+[toolchain]
+channel = "stable"
