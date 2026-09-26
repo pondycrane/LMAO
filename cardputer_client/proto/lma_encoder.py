@@ -585,6 +585,8 @@ def parse_poc_message(data):
     try:
         text = data.decode("utf-8")
         return text
-    except UnicodeDecodeError as e:
+    except Exception as e:
+        # MicroPython builds may not surface UnicodeDecodeError as a builtin
+        # name, so catch broadly here (this is the last-resort fallback).
         print(f"ERROR: parse_poc_message — both protobuf and UTF-8 decode failed: {e}")
         return None
