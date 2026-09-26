@@ -23,13 +23,32 @@ i=0
 while [ "$i" -lt "${#args[@]}" ]; do
   case "${args[$i]}" in
     --) : ;;
-    --python) PY="${args[$((i + 1))]}" ; i=$((i + 1)) ;;
+    --python)
+      if [ $((i + 1)) -lt "${#args[@]}" ]; then
+        PY="${args[$((i + 1))]}"; i=$((i + 1))
+      else
+        echo "[t0-gate] error: --python requires an interpreter path" >&2
+        exit 2
+      fi
+      ;;
     --python=*) PY="${args[$i]#--python=}" ;;
     *) ;;
   esac
   i=$((i + 1))
 done
 [ -n "$PY" ] || PY="python3"
+
+# cargo lives in ~/.cargo/bin (rustup); self-heal if it is not on PATH yet so
+# `bazel run` (strict-ish env) and CI both find it.
+if ! command -v cargo >/dev/null 2>&1; then
+  for c in "$HOME/.cargo/bin/cargo" /usr/local/cargo/bin/cargo; do
+    [ -x "$c" ] && PATH="$PATH:$(dirname "$c")" && break
+  done
+fi
+if ! command -v cargo >/dev/null 2>&1; then
+  echo "[t0-gate] error: cargo not found on PATH (rustup not set up?)" >&2
+  exit 2
+fi
 
 if ! LMAO_PYTHON="$PY" cargo run -q -p lmao-t0-interop; then
   echo "[t0-gate] FAIL — see interop log above" >&2

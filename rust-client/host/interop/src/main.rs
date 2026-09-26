@@ -9,11 +9,15 @@
 //! it proves the exact protocol stack the production `lmao-server` runs
 //! (Python RNS) talks to the Rust protocol core bidirectionally — announce →
 //! path → link → resource. The production RF-live leg additionally needs a
-//! radio (see `--rnode`).
+//! radio.
 //!
 //! Usage:
-//!   LMAO_PYTHON=<python-with-rns-1.3.5> lmao-t0-interop          # TCP interop gate
-//!   lmao-t0-interop --rnode /dev/ttyUSB0 [868.0]                # live RNode radio session
+//!   LMAO_PYTHON=<python-with-rns-1.3.5> lmao-t0-interop   # TCP interop gate
+//!
+//! The RF-live leg (a live RNode radio session) is not implementable on this
+//! host — the only RNode is the `lmao-server` pod's hostPath device on K8s node
+//! tp4, with no second radio available. `--rnode` is a placeholder that exits
+//! 2 (hardware unavailable) until the radio/interface work lands in T3/T4.
 //!
 //! Exit: 0 = gate PASS, 1 = gate FAIL, 2 = hardware/usage unavailable.
 

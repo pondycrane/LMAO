@@ -1,4 +1,6 @@
 # Rust toolchain + build output (host spike; firmware toolchain pinned in
 # rust-toolchain.toml when the T0 gate passes).
 /target/
+# vendor/ crates are independent workspaces — their build output nests too
+target/
 *.venv/

@@ -22,7 +22,8 @@ filegroup(
     srcs = glob(
         ["**"],
         exclude = [
-            "target/**",  # cargo build output — never part of the Bazel graph
+            "target/**",     # cargo build output — never part of the Bazel graph
+            "**/target/**",  # ... incl. the nested vendor/<crate> workspaces
         ],
     ),
     visibility = ["//visibility:public"],

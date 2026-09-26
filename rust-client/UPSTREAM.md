@@ -44,6 +44,46 @@ ways → **Resource RX** (Python→Rust, 100000 B, chunk/hash-map reassembly +
 content verify) → **Resource TX** (Rust→Python, digest verified on the Python
 side + Rust receives the completion proof).
 
+## Interop vector fixtures (git-only — vendored separately)
+
+Each pinned crate's `tests/interop.rs`-style suites consume a shared JSON
+vector corpus (`announce_vectors.json`, `packet_vectors.json`,
+`resource/*_vectors.json`, `crypto/*_vectors.json`, `conformance_*/*.json`, …)
+that **crates.io tarballs do not ship** — `{*.crate}` strips `tests/fixtures/`,
+so the corpus is **git-only** upstream. A bare `cargo vendor` of the five crates
+therefore cannot run its own wire-compliance suites.
+
+The corpus is checked in at **`vendor/tests/fixtures/`** (fetched from upstream
+at the recorded publish commits — the rns-rs set at `70deb22`, the lxmf-rs set
+at `0f18526`; both are the same fixture snapshot rns-core 0.1.17 / rns-crypto
+0.1.10 were published against, verified passing):
+
+| Crate | Upstream publish commit (`.cargo_vcs_info.json`) |
+|---|---|
+| rns-core `0.1.17`, rns-crypto `0.1.10` | `c0f9110e6…` (rns-rs) |
+| rns-net `0.7.2` | `70deb224b…` (rns-rs) |
+| lxmf-core `0.1.5` | `0f1852694…` (lxmf-rs) |
+| lxmf `0.11.0` | `346deedac…` (lxmf-rs; note this SHA is not a GitHub API-resolvable commit — fixtures sourced from the lxmf-core commit) |
+
+Run the vector suites (all pass with the vendored corpus):
+
+```bash
+cd rust-client
+cargo test --manifest-path vendor/rns-core/Cargo.toml    # 655 unit + 12+9+9+26 interop/integration
+cargo test --manifest-path vendor/rns-crypto/Cargo.toml  # 73 + 11 + 11
+cargo test --manifest-path vendor/lxmf-core/Cargo.toml   # 62 interop
+# rns-net fixture suites (self-contained; skip its live-mesh integration tests):
+cargo test --manifest-path vendor/rns-net/Cargo.toml \
+  --test resource_streaming_vectors --test reticulum_138_fixtures \
+  --test reticulum_139_fixtures --test reticulum_140_fixtures
+```
+
+`vendor/` is excluded from the workspace root `Cargo.toml` (`exclude = […]`) so
+each crate builds/tests standalone with its own `Cargo.lock`. When bumping a
+pin, re-fetch the matching fixture snapshot from the crate's recorded commit
+(`git archive --remote` / raw file download of `tests/fixtures/`) and re-verify
+the suites above.
+
 ## Toolchain
 
 - Host (T0): `rustup` `stable` (recorded in `rust-toolchain.toml`).
