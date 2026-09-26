@@ -62,31 +62,25 @@ class SproutHistory:
         self._wet = None
         self._node = None
 
-    def update(self, sensor_report):
-        """Fold one SensorReport into the history.  Returns True if it held data.
+    def fold_samples(self, node, samples):
+        """Fold one report's ``(sensor_id, value)`` samples into the history.
 
-        ``sensor_report`` is a protobuf SensorReport (anything exposing
-        ``node_id`` and ``readings`` with ``sensor_id``/``value`` works).
-        Unknown ids are ignored, so new node sensors cannot break this.
+        Returns True if the sample set carried a soil-moisture reading.
 
         A report only contributes if it actually carries a soil-moisture
         sample — otherwise every other node on the mesh (e.g. the Cardputer's
         own temperature/humidity reports, whose humidity shares the Sprout's
         sensor_id 2) would adopt the history and stamp the DATA line with its
-        own id and pollute the air series.
+        own id and pollute the air series.  Unknown ids are ignored, so new
+        node sensors cannot break this.
         """
-        node = getattr(sensor_report, "node_id", "") or ""
+        node = node or ""
         moisture_seen = False
         air_temp = None
         air_humidity = None
         dry = None
         wet = None
-        for reading in getattr(sensor_report, "readings", None) or []:
-            try:
-                sensor_id = int(reading.sensor_id)
-                value = float(reading.value)
-            except (AttributeError, TypeError, ValueError):
-                continue
+        for sensor_id, value in samples:
             if sensor_id == SENSOR_SOIL_MOISTURE:
                 self._push(self._moisture, value)
                 moisture_seen = True
@@ -112,6 +106,51 @@ class SproutHistory:
             if wet is not None:
                 self._wet = wet
         return moisture_seen
+
+    def update(self, sensor_report):
+        """Fold one SensorReport into the history.  Returns True if it held data.
+
+        ``sensor_report`` is a protobuf SensorReport (anything exposing
+        ``node_id`` and ``readings`` with ``sensor_id``/``value`` works).
+        """
+        node = getattr(sensor_report, "node_id", "") or ""
+        samples = []
+        for reading in getattr(sensor_report, "readings", None) or []:
+            try:
+                samples.append((int(reading.sensor_id), float(reading.value)))
+            except (AttributeError, TypeError, ValueError):
+                continue
+        return self.fold_samples(node, samples)
+
+    def update_db_rows(self, rows, recent=200):
+        """Fold DuckDB ``sensor_readings`` rows into the history.
+
+        ``rows`` is an iterable of ``(node_id, seq, sensor_id, value)`` tuples
+        ordered chronologically (the server's query API sorts by report
+        timestamp).  Readings of one SensorReport share a ``seq``, so rows are
+        grouped by ``(node_id, seq)`` and each group is folded like a report,
+        letting the same soil-moisture ownership rule keep a Cardputer's
+        reports (temp/humidity, no moisture) out of the Sprout chart.
+
+        Only the ``recent`` oldest-set (i.e. newest) reports are folded — the
+        rings already cap at ``DEFAULT_MAXLEN``, and the wire caps the air
+        series, so older reports cannot add anything once the ring is full.
+
+        Returns the number of reports folded.
+        """
+        ordered_keys = []
+        reports = {}
+        for node, seq, sensor_id, value in rows:
+            key = (node or "", seq)
+            reports.setdefault(key, []).append((sensor_id, value))
+            if not ordered_keys or ordered_keys[-1] != key:
+                ordered_keys.append(key)
+        folded = 0
+        for key in ordered_keys[-recent:]:
+            node, _seq = key
+            if self.fold_samples(node, reports[key]):
+                folded += 1
+        return folded
 
     def _push(self, ring, value):
         ring.append(value)

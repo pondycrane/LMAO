@@ -162,3 +162,36 @@ if __name__ == "__main__":
     import pytest
 
     sys.exit(pytest.main([__file__] + sys.argv[1:]))
+
+
+class TestDbRowFolding:
+    def test_round_table_db_rows_build_the_same_line(self):
+        # A Cardputer (no moisture) report interleaved with Sprout reports must
+        # not adopt the chart; only the moisture-bearing Sprout reports fold.
+        rows = [
+            # (node_id, seq, sensor_id, value) chronological
+            ("e6123f02754eff7f574da49ef2819b14", 1, 2, 30.0),  # cardputer humidity
+            ("e6123f02754eff7f574da49ef2819b14", 1, 3, 24.0),  # cardputer temp
+            ("e824ad2da00d2c8a45c2db6e700c989b", 1, 2, 55.0),  # sprout
+            ("e824ad2da00d2c8a45c2db6e700c989b", 1, 3, 26.0),
+            ("e824ad2da00d2c8a45c2db6e700c989b", 1, 4, 46.0),
+            ("e824ad2da00d2c8a45c2db6e700c989b", 1, 10, 37.0),
+            ("e824ad2da00d2c8a45c2db6e700c989b", 1, 11, 53.0),
+            ("e824ad2da00d2c8a45c2db6e700c989b", 2, 4, 45.0),
+        ]
+        history = SproutHistory()
+        assert history.update_db_rows(rows) == 2  # two Sprout reports folded
+        # Cardputer data excluded, node/dry/wet from the Sprout report.  The
+        # second sprout report contributes moisture only (no air), so the air
+        # series show seq=1's values.
+        assert history.data_line() == "DATA e824ad2d 37 53 1 26 1 55 2 46 45"
+
+    def test_db_rows_ring_stays_bounded(self):
+        rows = []
+        for i in range(DEFAULT_MAXLEN + 20):
+            rows.append(("e824ad2da00d2c8a45c2db6e700c989b", i, 4, float(i)))
+        history = SproutHistory()
+        history.update_db_rows(rows)
+        assert len(history.samples) == DEFAULT_MAXLEN
+        history.reset()
+        assert history.data_line() == ""
