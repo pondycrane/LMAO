@@ -248,6 +248,10 @@ resource.
 
 ## 10. Ticket plan (dependency graph + acceptance gates)
 
+> **Tracked as GitHub issues.** Epic **#157**; T0–T9 = **#158–#167** (see
+> `#157` for the full graph + the two standing mandates: Cardputer E2E rig, and
+> keep the MicroPython `urns` stack until the Rust stack is working E2E).
+
 Sequencing: **T0 gates everything device-related.** T1–T4 bring up the no_std
 core + **link capability**. T5 is the LXMF control path (SensorReport). **T6 is
 the new critical milestone: Resource over Link on the leaf.** T7 is
@@ -261,7 +265,7 @@ T0 (host spike: announce/path + LINK + RESOURCE interop) ──► gates ─► 
 Stretch / deferred: T8 (rebuild LMAF on Resource), T9 (power/duty-cycle)
 ```
 
-### T0 — Wire-compat + Link/Resource spike (HOST; DECISION GATE)
+### T0 (#158) — Wire-compat + Link/Resource spike (HOST; DECISION GATE)
 Vendor + pin `rns-rs`/`lxmf-rs`. Build a **std desktop** Rust node (`rns-net` +
 `lxmf`) against the **live production mesh** (RNode + Python server): join +
 announce + path-request; then **establish a Link to the Python server and run an
@@ -272,37 +276,37 @@ server in both directions, exactly like the reference implementation. **If fail:
 stop — review the FreeTAKTeam fork, or terminate.** This is the fuse for
 everything device-related.
 
-### T1 — no_std toolchain + blink/boot (Atom Lite)
+### T1 (#159) — no_std toolchain + blink/boot (Cardputer)
 espup nightly + `xtensa-esp32s3-none-elf`; `rust-toolchain.toml`; esp-hal no_std
 binary boots on the **Cardputer**; `espflash` via a Bazel target.
 **Accept:** boots, logs chip/mac; `cargo-size` snapshot (minimal).
 
-### T2 — RNS identity + persistence
+### T2 (#160) — RNS identity + persistence
 Port `lma_identity` to Rust: mint/store identity in NVS, print the
 `lxmf.delivery` hash (add to server `ALLOWED_CLIENTS`).
 **Accept:** host unit test derives `DEST` == the hash the C client prints;
 identity survives reset; `cargo-size` snapshot.
 
-### T3 — Radio Interface (esp-hal) + framing
+### T3 (#161) — Radio Interface (esp-hal) + framing
 Implement `rns_core::Interface` over the **Cardputer SX1262 (SPI/HSPI)** with
 RF params (868/BW125/SF7/CR4:5/pre24/syncword 0x1424) + duty pacing; port stays
 radio-generic for a future UART-AT DTU/Sprout profile.
 **Accept:** host-test the frame RX/TX demux against `lma_rnode_framing` vectors;
 on-device radio loopback.
 
-### T4 — RNS leaf transport + LINK capability
+### T4 (#162) — RNS leaf transport + LINK capability
 Register the interface + rns-core transport; inbound transport processing; then
 **Link support on the leaf**: establish a link, and **serve inbound link
 requests** from the gateway, holding link state.
 **Accept:** with a host std peer the leaf announces, answers a path request, and
 **establishes + sustains a Link**; link window scheduling in place.
 
-### T5 — SensorReport TX (LXMF control path)
+### T5 (#163) — SensorReport TX (LXMF control path)
 prost-generate `SensorReport`; pack + sign with `lxmf-core` + `rns-crypto`
 identity; send to the discovered delivery destination (path_find analog).
 **Accept (E2E):** report lands in the server's DuckDB pipeline like the C client.
 
-### T6 — Resource over Link on the leaf (CRITICAL MILESTONE)
+### T6 (#164) — Resource over Link on the leaf (CRITICAL MILESTONE)
 `leaf-resource`: RNS **Resource RX** over the T4 link — stream chunks to flash,
 hash-map, verify, ACK completion — plus **Resource TX** from the leaf, plus a
 **resume queue** so an interrupted/large transfer completes across link windows
@@ -312,18 +316,18 @@ hash-map, verify, ACK completion — plus **Resource TX** from the leaf, plus a
 reassembled on the leaf, digest-verified, and completed; a leaf-originated
 resource is received by the server — both matching the reference wire/interop.
 
-### T7 — Integration + packaging + E2E
+### T7 (#165) — Integration + packaging + E2E
 Crate layout finalized per §5; `bazel test //rust-client:...` host + hardware
 gate; flash + full **E2E on the Cardputer** against RNode + server.
 **Accept:** **stable RSS Resource transfer on the Rust stack** (the named
 milestone) demonstrated end-to-end on the Cardputer and documented in README.
 
-### T8 (deferred per directive) — rebuild LMAF / successor on Resource
+### T8 (#166, deferred per directive) — rebuild LMAF / successor on Resource
 Apply the new transfer framing **on top of** the stable T6/T7 Resource substrate
 (still protobuf-schema'd + vector-tested per §6). Not started until T6/T7 gates
 pass.
 
-### T9 (stretch) — Power/duty-cycle polish
+### T9 (#167, stretch) — Power/duty-cycle polish
 Deep sleep between link windows, watchdog + heap-fragmentation guard (from
 `cardputer_client` #71/#74), RSSI reporting.
 
