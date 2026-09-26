@@ -803,10 +803,12 @@ class Server:
                 f"ACK from LMAO Server — received your message ({len(content_bytes)} bytes)"
             )
             chart_line = _chart_data_line()
-            lmaf_peer = (
-                LMAF_CAPS.chart_capable(source_hash)
-                or (CONTACTS is not None and CONTACTS.is_known(source_hash))
-            )
+            # Only a peer that actually advertised the LMAF ``caps`` capability
+            # receives the chart as a manifest+chunk transfer.  A known legacy
+            # client (contact book, no caps) still gets its downlink — but as
+            # the inline DATA line on the ACK text, which is the transport it
+            # knows how to receive.
+            lmaf_peer = LMAF_CAPS.chart_capable(source_hash)
             if chart_line and lmaf_peer:
                 # An LMAF peer is not bound by the single-packet DATA-line cap,
                 # so it gets the full air rings — the depth this framing exists
