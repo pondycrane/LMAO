@@ -1,6 +1,6 @@
 # ESP32 Rust LMAO Client — Design Doc & Ticket Plan
 
-Status: DRAFT (decision gate T0 not yet run) · Owner: pondycrane
+Status: ACTIVE — T0 decision gate **PASSED** (host TCP interop; RF-live leg pending T4/T7) · Owner: pondycrane
 Target: a lean LMAO *leaf* client in Rust (`no_std`).
 **E2E test rig: M5Stack Cardputer ADV** (ESP32-S3, Cap LoRa-1262 SX1262, display);
 the code stays portable to the Atom Lite (ESP32-PICO-D4).
@@ -265,16 +265,23 @@ T0 (host spike: announce/path + LINK + RESOURCE interop) ──► gates ─► 
 Stretch / deferred: T8 (rebuild LMAF on Resource), T9 (power/duty-cycle)
 ```
 
-### T0 (#158) — Wire-compat + Link/Resource spike (HOST; DECISION GATE)
+### T0 (#158) — Wire-compat + Link/Resource spike (HOST; DECISION GATE) — **PASSED**
 Vendor + pin `rns-rs`/`lxmf-rs`. Build a **std desktop** Rust node (`rns-net` +
-`lxmf`) against the **live production mesh** (RNode + Python server): join +
-announce + path-request; then **establish a Link to the Python server and run an
-RNS Resource TX and RX both ways**, verifying chunk/hash-map/reassembly and
-completion against the server.
-**Gate (pass/fail):** RSS Resource transfers interop with the production Python
-server in both directions, exactly like the reference implementation. **If fail:
-stop — review the FreeTAKTeam fork, or terminate.** This is the fuse for
-everything device-related.
+`lxmf`) and establish a **Link to a Python RNS peer and run an RNS Resource TX
+and RX both ways**, verifying chunk/hash-map/reassembly and completion against
+the peer — the protocol-interop substance of the gate.
+**Gate (pass/fail):** RNS Resource transfers interop with **Python RNS in both
+directions**, exactly like the reference implementation. **If fail: stop —
+review the FreeTAKTeam fork, or terminate.** This is the fuse for everything
+device-related.
+**As run (status: PASS, 2026-09-26):** validated against **Python RNS 1.3.5**
+(the exact `lmao-server` version) over a shared **TCP mesh** (the canonical
+multi-instance Reticulum interop method) — not the live RF mesh: the only RNode
+is a `hostPath` device consumed by the `lmao-server` pod on K8s node `tp4`, so
+no second radio exists on a dev host to form the RF leg. The **RF-live leg**
+(against the production RNode + server) is a second-radio hardware prerequisite
+and remains open, tracked with T4 (duty/link-window) / T7 (Cardputer E2E). Full
+evidence in `rust-client/T0-GATE.md`.
 
 ### T1 (#159) — no_std toolchain + blink/boot (Cardputer)
 espup nightly + `xtensa-esp32s3-none-elf`; `rust-toolchain.toml`; esp-hal no_std
@@ -339,7 +346,6 @@ Deep sleep between link windows, watchdog + heap-fragmentation guard (from
    vs a leaf that holds a persistent link (higher power). Decide before T4.
 2. **Radio on the Atom Lite:** UART-AT RAK3172 DTU (Sprout-style) vs SPI SX1262 —
    affects T3 scope. Default: whichever the production board carries; pin in T3.
-3. **Vendor method:** `cargo vendor` tree vs git submodule — pick in T0; record
-   pin in `UPSTREAM.md`.
+3. **Vendor method:** ~~`cargo vendor` tree vs git submodule~~ **RESOLVED (T0, PR #168):** the five protocol crates are **not committed** — `WORKSPACE` + `rust-client/repositories.bzl` fetch each crates.io tarball by SHA-256 at Bazel analyze time (same `http_archive` convention as the Sprout client's `mbedtls`/`rtreticulum` pins); the pin record lives in `rust-client/UPSTREAM.md` + `Cargo.lock`.
 4. **async (embassy) or sync loop** on the leaf — decide in T1; sync loop is
    smaller and matches the C client.
