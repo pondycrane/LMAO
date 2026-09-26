@@ -1,34 +1,62 @@
 # UPSTREAM — pinned protocol sources & interop baseline
 
-This is the equivalent of the C side's `.rtreticulum` vendoring for the Rust
-client: exact, recorded pins of the protocol core so wire-compatible builds are
-reproducible. The **authoritative version selection** lives in `Cargo.lock`
-(committed); this file records *why/where* each protocol crate comes from, and
-the **checked-in copies in `vendor/` are the source-of-record mirror** of those
-pinned versions.
+This is the Rust client's record of where the protocol core comes from and how
+it is pinned — the equivalent of the C side's `.rtreticulum` vendoring and of
+the Sprout client's `http_archive` pins (`mbedtls`, `rtreticulum` in
+`WORKSPACE`). The **authoritative version selection** lives in `Cargo.lock`
+(committed; `#[crates.io]`-resolved by the out-of-band `cargo` build). The five
+protocol crates are **not committed to this repo**: `WORKSPACE` +
+`rust-client/repositories.bzl` fetch each crates.io tarball at Bazel analyze
+time, pinned by SHA-256 below, and `rust-client/crate.BUILD` exposes each as
+`@<name>//:sources` in the Bazel graph. The sha256 rows below were validated
+against `static.crates.io` on 2026-09-26.
 
 ## Direct protocol crate pins (T0)
 
-These five crates are the borrowed protocol core (design §3 primary = lelloman
-`rns-rs` / `lxmf-rs`). Source-of-record copies are checked in under `vendor/`.
-`Cargo.lock` pins every transitive dependency at the same resolutions.
-
-| Crate | Version | Role | SHA-256 (`.crate` tarball) | Vendor path |
+| Crate | Version | Role | SHA-256 (`.crate` tarball) | Bazel repo |
 |---|---|---|---|---|
-| `rns-core` | 0.1.17 | wire protocol, transport, **Link / Resource**, holepunch (`no_std`, zero-dep) | `4da568d23a40b8a59a25ffa080e9fdef5d381143eb8b219dd1beb0e57bf20848` | `vendor/rns-core/` |
-| `rns-crypto` | 0.1.10 | X25519/Ed25519/AES/SHA/HMAC/HKDF/Identity | `9b7e1dea60e8fb459df3d7f0a018c62f868480d4159ba48d28d6f4c37a0a1200` | `vendor/rns-crypto/` |
-| `rns-net` | 0.7.2 | reference host interfaces (RNode/KISS/TCP/serial); porting + T0 host node | `3593611d6d7472694306170ba5e8a552467a57140688c6ff75b9f62c8817a270` | `vendor/rns-net/` |
-| `lxmf-core` | 0.1.5 | LXMF control message pack/unpack + stamping (`no_std`) — T5 control path | `e15e5558bf39a437777d114458cf961590a2479d6a44398549374e9ad6ca3d42` | `vendor/lxmf-core/` |
-| `lxmf` | 0.11.0 | full `std` LXMF router — **host T0/T5 harness only**, never on the leaf | `bfb5dd3d40e5b8cd9c0b02f7aec9e780cfcdd788bdfa8d04b60003bd4c1f74ca` | `vendor/lxmf/` |
+| `rns-core` | 0.1.17 | wire protocol, transport, **Link / Resource**, holepunch (`no_std`, zero-dep) | `4da568d23a40b8a59a25ffa080e9fdef5d381143eb8b219dd1beb0e57bf20848` | `@rns_core` |
+| `rns-crypto` | 0.1.10 | X25519/Ed25519/AES/SHA/HMAC/HKDF/Identity | `9b7e1dea60e8fb459df3d7f0a018c62f868480d4159ba48d28d6f4c37a0a1200` | `@rns_crypto` |
+| `rns-net` | 0.7.2 | reference host interfaces (RNode/KISS/TCP/serial); porting + T0 host node | `3593611d6d7472694306170ba5e8a552467a57140688c6ff75b9f62c8817a270` | `@rns_net` |
+| `lxmf-core` | 0.1.5 | LXMF control message pack/unpack + stamping (`no_std`) — T5 control path | `e15e5558bf39a437777d114458cf961590a2479d6a44398549374e9ad6ca3d42` | `@lxmf_core` |
+| `lxmf` | 0.11.0 | full `std` LXMF router — **host T0/T5 harness only**, never on the leaf | `bfb5dd3d40e5b8cd9c0b02f7aec9e780cfcdd788bdfa8d04b60003bd4c1f74ca` | `@lxmf` |
 
 Upstream: `https://github.com/lelloman/rns-rs` (and its `lelloman/lxmf-rs`
-sibling). Versions above match the published crates.io releases; re-vendor via:
+sibling). Pinning + fetch:
 
 ```bash
-# update a pin, then refresh the vendor mirror + checksums:
+# bump a crate, record the new checksum, and verify the Bazel fetch is stable:
 cargo update -p <crate>
-cargo vendor /tmp/vendor-tmp   # confirm the five crates' versions unchanged/desired
-rm -rf vendor/<crate> && cp -R /tmp/vendor-tmp/<crate> vendor/<crate>
+# update the version + sha256 row in repositories.bzl and this table
+# (get the new sha256:  sha256sum <downloaded .crate>  or  crates.io API)
+bazel build //rust-client:rust_sources   # re-fetches by the new pin
+```
+
+## Vector fixtures (git-only — fetch on demand)
+
+The pinned crates' `tests/interop.rs`-style suites consume a shared JSON vector
+corpus (`protocol/*.json`, `resource/*.json`, `crypto/*.json`,
+`conformance_*/runtime_vectors.json`, …) that **crates.io tarballs do not ship**
+— `{*.crate}` strips `tests/fixtures/`, so the corpus is **git-only** upstream
+(lelloman/rns-rs at repo-root `tests/fixtures/`; lelloman/lxmf-rs likewise).
+Neither the committed tree nor the Bazel-fetched crates carry it, so the
+wire-compliance vector suites are **fetch-on-demand**, not part of the build or
+the T0 gate (the gate generates its own payloads and does not need them).
+
+The corpus was validated against the pinned crates on 2026-09-26 and passing:
+rns-core 0.1.17 (655 unit + 12 interop + 9 link + 9 resource + 26 transport),
+rns-crypto 0.1.10 (73 + 11 + 11), lxmf-core 0.1.5 (62), rns-net 0.7.2 fixture
+bins. Recorded upstream publish commits (`.cargo_vcs_info.json`): rns-core /
+rns-crypto `c0f9110e6…`, rns-net `70deb224b…`, lxmf-core `0f1852694…`,
+lxmf `346deedac…` (not a GitHub-API-resolvable commit; use the lxmf-core
+commit's fixtures).
+
+```bash
+# fetch the corpus for the recorded commit into a scratch dir, then test:
+git clone --depth 1 https://github.com/lelloman/rns-rs /tmp/rns-rs   # or the commit above
+# copy /tmp/rns-rs/tests/fixtures -> <crate-dir>/../tests/fixtures  (crate dir = Bazel
+# external repo or a fresh `cargo registry` extract), then:
+cargo test --manifest-path vendor/rns-core/Cargo.toml   # inside a local crate checkout
 ```
 
 ## Interop wire baseline (T0 DECISION GATE)
@@ -43,46 +71,6 @@ normal packet both ways → **Link** (serve inbound, hold state) → link data b
 ways → **Resource RX** (Python→Rust, 100000 B, chunk/hash-map reassembly +
 content verify) → **Resource TX** (Rust→Python, digest verified on the Python
 side + Rust receives the completion proof).
-
-## Interop vector fixtures (git-only — vendored separately)
-
-Each pinned crate's `tests/interop.rs`-style suites consume a shared JSON
-vector corpus (`announce_vectors.json`, `packet_vectors.json`,
-`resource/*_vectors.json`, `crypto/*_vectors.json`, `conformance_*/*.json`, …)
-that **crates.io tarballs do not ship** — `{*.crate}` strips `tests/fixtures/`,
-so the corpus is **git-only** upstream. A bare `cargo vendor` of the five crates
-therefore cannot run its own wire-compliance suites.
-
-The corpus is checked in at **`vendor/tests/fixtures/`** (fetched from upstream
-at the recorded publish commits — the rns-rs set at `70deb22`, the lxmf-rs set
-at `0f18526`; both are the same fixture snapshot rns-core 0.1.17 / rns-crypto
-0.1.10 were published against, verified passing):
-
-| Crate | Upstream publish commit (`.cargo_vcs_info.json`) |
-|---|---|
-| rns-core `0.1.17`, rns-crypto `0.1.10` | `c0f9110e6…` (rns-rs) |
-| rns-net `0.7.2` | `70deb224b…` (rns-rs) |
-| lxmf-core `0.1.5` | `0f1852694…` (lxmf-rs) |
-| lxmf `0.11.0` | `346deedac…` (lxmf-rs; note this SHA is not a GitHub API-resolvable commit — fixtures sourced from the lxmf-core commit) |
-
-Run the vector suites (all pass with the vendored corpus):
-
-```bash
-cd rust-client
-cargo test --manifest-path vendor/rns-core/Cargo.toml    # 655 unit + 12+9+9+26 interop/integration
-cargo test --manifest-path vendor/rns-crypto/Cargo.toml  # 73 + 11 + 11
-cargo test --manifest-path vendor/lxmf-core/Cargo.toml   # 62 interop
-# rns-net fixture suites (self-contained; skip its live-mesh integration tests):
-cargo test --manifest-path vendor/rns-net/Cargo.toml \
-  --test resource_streaming_vectors --test reticulum_138_fixtures \
-  --test reticulum_139_fixtures --test reticulum_140_fixtures
-```
-
-`vendor/` is excluded from the workspace root `Cargo.toml` (`exclude = […]`) so
-each crate builds/tests standalone with its own `Cargo.lock`. When bumping a
-pin, re-fetch the matching fixture snapshot from the crate's recorded commit
-(`git archive --remote` / raw file download of `tests/fixtures/`) and re-verify
-the suites above.
 
 ## Toolchain
 
