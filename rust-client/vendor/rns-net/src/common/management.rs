@@ -1,0 +1,546 @@
+//! Remote management destinations for the Reticulum transport node.
+//!
+//! Implements the server-side handlers for:
+//! - `/status` on `rnstransport.remote.management` destination
+//! - `/path` on `rnstransport.remote.management` destination
+//! - `/list` on `rnstransport.info.blackhole` destination
+//!
+//! Python reference: Transport.py:220-241, 2591-2643, 3243-3249
+
+use rns_core::constants;
+use rns_core::destination::destination_hash;
+use rns_core::hash::truncated_hash;
+use rns_core::msgpack::{self, Value};
+use rns_core::transport::types::{InterfaceId, InterfaceInfo};
+use rns_core::transport::TransportEngine;
+
+use super::interface_stats::InterfaceStats;
+use super::time;
+
+/// View trait for interface status, decoupling management from InterfaceEntry.
+pub trait InterfaceStatusView {
+    fn id(&self) -> InterfaceId;
+    fn info(&self) -> &InterfaceInfo;
+    fn online(&self) -> bool;
+    fn stats(&self) -> &InterfaceStats;
+    fn tx_drops(&self) -> u64 {
+        0
+    }
+    fn tx_dropped_bytes(&self) -> u64 {
+        0
+    }
+    fn tx_stalled(&self) -> bool {
+        false
+    }
+    fn tx_buffered(&self) -> usize {
+        0
+    }
+}
+
+/// Get the path hash for "/status".
+pub fn status_path_hash() -> [u8; 16] {
+    truncated_hash(b"/status")
+}
+
+/// Get the path hash for "/path".
+pub fn path_path_hash() -> [u8; 16] {
+    truncated_hash(b"/path")
+}
+
+/// Get the path hash for "/list".
+pub fn list_path_hash() -> [u8; 16] {
+    truncated_hash(b"/list")
+}
+
+/// Check if a path hash matches a known management path.
+pub fn is_management_path(path_hash: &[u8; 16]) -> bool {
+    *path_hash == status_path_hash()
+        || *path_hash == path_path_hash()
+        || *path_hash == list_path_hash()
+}
+
+/// Compute the remote management destination hash.
+///
+/// Destination: `rnstransport.remote.management` with transport identity.
+pub fn management_dest_hash(transport_identity_hash: &[u8; 16]) -> [u8; 16] {
+    destination_hash(
+        "rnstransport",
+        &["remote", "management"],
+        Some(transport_identity_hash),
+    )
+}
+
+/// Compute the blackhole info destination hash.
+///
+/// Destination: `rnstransport.info.blackhole` with transport identity.
+pub fn blackhole_dest_hash(transport_identity_hash: &[u8; 16]) -> [u8; 16] {
+    destination_hash(
+        "rnstransport",
+        &["info", "blackhole"],
+        Some(transport_identity_hash),
+    )
+}
+
+/// Compute the probe responder destination hash.
+///
+/// Destination: `rnstransport.probe` with transport identity.
+pub fn probe_dest_hash(transport_identity_hash: &[u8; 16]) -> [u8; 16] {
+    destination_hash("rnstransport", &["probe"], Some(transport_identity_hash))
+}
+
+/// Build an announce packet for the probe responder destination.
+///
+/// Returns raw packet bytes ready for `engine.handle_outbound()`.
+pub fn build_probe_announce(
+    identity: &rns_crypto::identity::Identity,
+    rng: &mut dyn rns_crypto::Rng,
+) -> Option<Vec<u8>> {
+    let identity_hash = *identity.hash();
+    let dest_hash = probe_dest_hash(&identity_hash);
+    let name_hash = rns_core::destination::name_hash("rnstransport", &["probe"]);
+    let mut random_hash = [0u8; 10];
+    rng.fill_bytes(&mut random_hash);
+
+    let (announce_data, _has_ratchet) = rns_core::announce::AnnounceData::pack(
+        identity,
+        &dest_hash,
+        &name_hash,
+        &random_hash,
+        None,
+        None,
+    )
+    .ok()?;
+
+    let flags = rns_core::packet::PacketFlags {
+        header_type: constants::HEADER_1,
+        context_flag: constants::FLAG_UNSET,
+        transport_type: constants::TRANSPORT_BROADCAST,
+        destination_type: constants::DESTINATION_SINGLE,
+        packet_type: constants::PACKET_TYPE_ANNOUNCE,
+    };
+
+    let packet = rns_core::packet::RawPacket::pack(
+        flags,
+        0,
+        &dest_hash,
+        None,
+        constants::CONTEXT_NONE,
+        &announce_data,
+    )
+    .ok()?;
+
+    Some(packet.raw)
+}
+
+/// Management configuration.
+#[derive(Debug, Clone, Default)]
+pub struct ManagementConfig {
+    /// Enable remote management destination.
+    pub enable_remote_management: bool,
+    /// Identity hashes allowed to query management.
+    pub remote_management_allowed: Vec<[u8; 16]>,
+    /// Enable blackhole list publication.
+    pub publish_blackhole: bool,
+}
+
+/// Handle a `/status` request.
+///
+/// Request data: msgpack([include_lstats, include_profiling]) where both are bool.
+/// Response: msgpack([interface_stats_dict, link_count?, profiling_results?])
+/// matching Python format.
+pub fn handle_status_request(
+    data: &[u8],
+    engine: &TransportEngine,
+    interfaces: &[&dyn InterfaceStatusView],
+    started: f64,
+    probe_responder_hash: Option<[u8; 16]>,
+) -> Option<Vec<u8>> {
+    // Decode request data
+    let (include_lstats, include_profiling) = match msgpack::unpack_exact(data) {
+        Ok(Value::Array(arr)) if !arr.is_empty() => (
+            arr[0].as_bool().unwrap_or(false),
+            arr.get(1).and_then(Value::as_bool).unwrap_or(false),
+        ),
+        _ => (false, false),
+    };
+
+    // Build interface stats
+    let mut iface_list = Vec::new();
+    let mut total_rxb: u64 = 0;
+    let mut total_txb: u64 = 0;
+    let mut total_rxpps = 0.0;
+    let mut total_txpps = 0.0;
+    let mut total_arxb: u64 = 0;
+    let mut total_atxb: u64 = 0;
+    let mut total_arxc: u64 = 0;
+    let mut total_atxc: u64 = 0;
+    let mut total_prxb: u64 = 0;
+    let mut total_ptxb: u64 = 0;
+    let mut total_prxc: u64 = 0;
+    let mut total_ptxc: u64 = 0;
+    let mut total_rxs = 0.0;
+    let mut total_txs = 0.0;
+    let mut total_arxs = 0.0;
+    let mut total_atxs = 0.0;
+    let mut total_prxs = 0.0;
+    let mut total_ptxs = 0.0;
+    let mut total_arxf = 0.0;
+    let mut total_atxf = 0.0;
+    let mut total_prxf = 0.0;
+    let mut total_ptxf = 0.0;
+
+    for entry in interfaces {
+        let id = entry.id();
+        let info = entry.info();
+        let stats = entry.stats();
+
+        if !info.is_local_client {
+            total_rxb += stats.rxb;
+            total_txb += stats.txb;
+            total_rxpps += stats.traffic_rates.rxpps;
+            total_txpps += stats.traffic_rates.txpps;
+            total_arxb += stats.arxb;
+            total_atxb += stats.atxb;
+            total_arxc += stats.arxc;
+            total_atxc += stats.atxc;
+            total_prxb += stats.prxb;
+            total_ptxb += stats.ptxb;
+            total_prxc += stats.prxc;
+            total_ptxc += stats.ptxc;
+            total_rxs += stats.traffic_rates.rxs;
+            total_txs += stats.traffic_rates.txs;
+            total_arxs += stats.traffic_rates.arxs;
+            total_atxs += stats.traffic_rates.atxs;
+            total_prxs += stats.traffic_rates.prxs;
+            total_ptxs += stats.traffic_rates.ptxs;
+            total_arxf += stats.incoming_announce_freq();
+            total_atxf += stats.outgoing_announce_freq();
+            total_prxf += stats.incoming_path_request_freq();
+            total_ptxf += stats.outgoing_path_request_freq();
+        }
+
+        let mut ifstats: Vec<(&str, Value)> = vec![
+            ("name", Value::Str(info.name.clone())),
+            ("short_name", Value::Str(info.name.clone())),
+            ("status", Value::Bool(entry.online())),
+            ("mode", Value::UInt(info.mode as u64)),
+            ("rxb", Value::UInt(stats.rxb)),
+            ("txb", Value::UInt(stats.txb)),
+            ("txdrp", Value::UInt(entry.tx_drops())),
+            ("txdrb", Value::UInt(entry.tx_dropped_bytes())),
+            ("txstalled", Value::Bool(entry.tx_stalled())),
+            ("txbuffered", Value::UInt(entry.tx_buffered() as u64)),
+            ("rxs", Value::Float(stats.traffic_rates.rxs)),
+            ("txs", Value::Float(stats.traffic_rates.txs)),
+            ("arxb", Value::UInt(stats.arxb)),
+            ("atxb", Value::UInt(stats.atxb)),
+            ("arxc", Value::UInt(stats.arxc)),
+            ("atxc", Value::UInt(stats.atxc)),
+            ("arxs", Value::Float(stats.traffic_rates.arxs)),
+            ("atxs", Value::Float(stats.traffic_rates.atxs)),
+            ("prxb", Value::UInt(stats.prxb)),
+            ("ptxb", Value::UInt(stats.ptxb)),
+            ("prxc", Value::UInt(stats.prxc)),
+            ("ptxc", Value::UInt(stats.ptxc)),
+            ("prxs", Value::Float(stats.traffic_rates.prxs)),
+            ("ptxs", Value::Float(stats.traffic_rates.ptxs)),
+            (
+                "protocol_violations",
+                Value::UInt(stats.protocol_violations),
+            ),
+            ("ifac_violations", Value::UInt(stats.ifac_violations)),
+            ("packet_filter_hits", Value::UInt(stats.packet_filter_hits)),
+        ];
+        if let Some(br) = info.bitrate {
+            ifstats.push(("bitrate", Value::UInt(br)));
+        } else {
+            ifstats.push(("bitrate", Value::Nil));
+        }
+        ifstats.push((
+            "incoming_announce_freq",
+            Value::Float(stats.incoming_announce_freq()),
+        ));
+        ifstats.push((
+            "outgoing_announce_freq",
+            Value::Float(stats.outgoing_announce_freq()),
+        ));
+        ifstats.push((
+            "held_announces",
+            Value::UInt(engine.held_announce_count(&id) as u64),
+        ));
+
+        // IFAC info
+        ifstats.push(("ifac_signature", Value::Nil));
+        ifstats.push((
+            "ifac_size",
+            if info.bitrate.is_some() {
+                Value::UInt(0)
+            } else {
+                Value::Nil
+            },
+        ));
+        ifstats.push(("ifac_netname", Value::Nil));
+
+        // Unused by Rust but expected by Python clients
+        ifstats.push(("clients", Value::Nil));
+        ifstats.push(("announce_queue", Value::Nil));
+
+        // Build as map
+        let map = ifstats
+            .into_iter()
+            .map(|(k, v)| (Value::Str(k.into()), v))
+            .collect();
+        iface_list.push(Value::Map(map));
+    }
+
+    // Build top-level stats dict
+    let mut stats: Vec<(&str, Value)> = vec![
+        ("interfaces", Value::Array(iface_list)),
+        ("rxb", Value::UInt(total_rxb)),
+        ("txb", Value::UInt(total_txb)),
+        ("rxpps", Value::Float(total_rxpps)),
+        ("txpps", Value::Float(total_txpps)),
+        ("rxs", Value::Float(total_rxs)),
+        ("txs", Value::Float(total_txs)),
+        ("arxb", Value::UInt(total_arxb)),
+        ("atxb", Value::UInt(total_atxb)),
+        ("arxc", Value::UInt(total_arxc)),
+        ("atxc", Value::UInt(total_atxc)),
+        ("arxs", Value::Float(total_arxs)),
+        ("atxs", Value::Float(total_atxs)),
+        ("prxb", Value::UInt(total_prxb)),
+        ("ptxb", Value::UInt(total_ptxb)),
+        ("prxc", Value::UInt(total_prxc)),
+        ("ptxc", Value::UInt(total_ptxc)),
+        ("prxs", Value::Float(total_prxs)),
+        ("ptxs", Value::Float(total_ptxs)),
+        ("arxf", Value::Float(total_arxf)),
+        ("atxf", Value::Float(total_atxf)),
+        ("prxf", Value::Float(total_prxf)),
+        ("ptxf", Value::Float(total_ptxf)),
+    ];
+
+    if let Some(identity_hash) = engine.config().identity_hash {
+        stats.push(("transport_id", Value::Bin(identity_hash.to_vec())));
+        stats.push(("transport_uptime", Value::Float(time::now() - started)));
+    }
+    stats.push((
+        "probe_responder",
+        match probe_responder_hash {
+            Some(hash) => Value::Bin(hash.to_vec()),
+            None => Value::Nil,
+        },
+    ));
+    stats.push(("rss", Value::Nil));
+
+    let stats_map = stats
+        .into_iter()
+        .map(|(k, v)| (Value::Str(k.into()), v))
+        .collect();
+
+    // Build response: [stats_dict] or [stats_dict, link_count]
+    let mut response = vec![Value::Map(stats_map)];
+    if include_lstats {
+        let link_count = engine.link_table_count();
+        response.push(Value::UInt(link_count as u64));
+    }
+    if include_profiling {
+        response.push(crate::profiling::results_msgpack());
+    }
+
+    Some(msgpack::pack(&Value::Array(response)))
+}
+
+/// Handle a `/path` request.
+///
+/// Request data: msgpack([command, destination_hash?, max_hops?])
+/// - command = "table" → returns path table entries
+/// - command = "rates" → returns rate table entries
+pub fn handle_path_request(data: &[u8], engine: &TransportEngine) -> Option<Vec<u8>> {
+    let arr = match msgpack::unpack_exact(data) {
+        Ok(Value::Array(arr)) if !arr.is_empty() => arr,
+        _ => return None,
+    };
+
+    let command = match &arr[0] {
+        Value::Str(s) => s.as_str(),
+        _ => return None,
+    };
+
+    let dest_filter: Option<[u8; 16]> = if arr.len() > 1 {
+        match &arr[1] {
+            Value::Bin(b) if b.len() == 16 => {
+                let mut h = [0u8; 16];
+                h.copy_from_slice(b);
+                Some(h)
+            }
+            _ => None,
+        }
+    } else {
+        None
+    };
+
+    let max_hops: Option<u8> = if arr.len() > 2 {
+        arr[2].as_uint().map(|v| v as u8)
+    } else {
+        None
+    };
+
+    match command {
+        "table" => {
+            let paths = engine.get_path_table(max_hops);
+            let mut entries = Vec::new();
+            for p in &paths {
+                if let Some(ref filter) = dest_filter {
+                    if p.0 != *filter {
+                        continue;
+                    }
+                }
+                // p = (dest_hash, timestamp, next_hop, hops, expires, interface)
+                let entry = vec![
+                    (Value::Str("hash".into()), Value::Bin(p.0.to_vec())),
+                    (Value::Str("timestamp".into()), Value::Float(p.1)),
+                    (Value::Str("via".into()), Value::Bin(p.2.to_vec())),
+                    (Value::Str("hops".into()), Value::UInt(p.3 as u64)),
+                    (Value::Str("expires".into()), Value::Float(p.4)),
+                    (Value::Str("interface".into()), Value::Str(p.5.clone())),
+                ];
+                entries.push(Value::Map(entry));
+            }
+            Some(msgpack::pack(&Value::Array(entries)))
+        }
+        "rates" => {
+            let rates = engine.get_rate_table();
+            let mut entries = Vec::new();
+            for r in &rates {
+                if let Some(ref filter) = dest_filter {
+                    if r.0 != *filter {
+                        continue;
+                    }
+                }
+                // r = (dest_hash, last, rate_violations, blocked_until, timestamps)
+                let timestamps: Vec<Value> = r.4.iter().map(|t| Value::Float(*t)).collect();
+                let entry = vec![
+                    (Value::Str("hash".into()), Value::Bin(r.0.to_vec())),
+                    (Value::Str("last".into()), Value::Float(r.1)),
+                    (
+                        Value::Str("rate_violations".into()),
+                        Value::UInt(r.2 as u64),
+                    ),
+                    (Value::Str("blocked_until".into()), Value::Float(r.3)),
+                    (Value::Str("timestamps".into()), Value::Array(timestamps)),
+                ];
+                entries.push(Value::Map(entry));
+            }
+            Some(msgpack::pack(&Value::Array(entries)))
+        }
+        _ => None,
+    }
+}
+
+/// Handle a `/list` (blackhole list) request.
+///
+/// Returns the blackholed_identities dict as msgpack.
+pub fn handle_blackhole_list_request(engine: &TransportEngine) -> Option<Vec<u8>> {
+    let blackholed = engine.get_blackholed();
+    let mut map_entries = Vec::new();
+    for (hash, created, expires, reason) in &blackholed {
+        let mut entry = vec![
+            (Value::Str("created".into()), Value::Float(*created)),
+            (Value::Str("expires".into()), Value::Float(*expires)),
+        ];
+        if let Some(r) = reason {
+            entry.push((Value::Str("reason".into()), Value::Str(r.clone())));
+        }
+        map_entries.push((Value::Bin(hash.to_vec()), Value::Map(entry)));
+    }
+    Some(msgpack::pack(&Value::Map(map_entries)))
+}
+
+/// Build an announce packet for the management destination.
+///
+/// Returns raw packet bytes ready for `engine.handle_outbound()`.
+pub fn build_management_announce(
+    identity: &rns_crypto::identity::Identity,
+    rng: &mut dyn rns_crypto::Rng,
+) -> Option<Vec<u8>> {
+    let identity_hash = *identity.hash();
+    let dest_hash = management_dest_hash(&identity_hash);
+    let name_hash = rns_core::destination::name_hash("rnstransport", &["remote", "management"]);
+    let mut random_hash = [0u8; 10];
+    rng.fill_bytes(&mut random_hash);
+
+    let (announce_data, _has_ratchet) = rns_core::announce::AnnounceData::pack(
+        identity,
+        &dest_hash,
+        &name_hash,
+        &random_hash,
+        None, // no ratchet
+        None, // no app_data
+    )
+    .ok()?;
+
+    let flags = rns_core::packet::PacketFlags {
+        header_type: constants::HEADER_1,
+        context_flag: constants::FLAG_UNSET,
+        transport_type: constants::TRANSPORT_BROADCAST,
+        destination_type: constants::DESTINATION_SINGLE,
+        packet_type: constants::PACKET_TYPE_ANNOUNCE,
+    };
+
+    let packet = rns_core::packet::RawPacket::pack(
+        flags,
+        0,
+        &dest_hash,
+        None,
+        constants::CONTEXT_NONE,
+        &announce_data,
+    )
+    .ok()?;
+
+    Some(packet.raw)
+}
+
+/// Build an announce packet for the blackhole info destination.
+///
+/// Returns raw packet bytes ready for `engine.handle_outbound()`.
+pub fn build_blackhole_announce(
+    identity: &rns_crypto::identity::Identity,
+    rng: &mut dyn rns_crypto::Rng,
+) -> Option<Vec<u8>> {
+    let identity_hash = *identity.hash();
+    let dest_hash = blackhole_dest_hash(&identity_hash);
+    let name_hash = rns_core::destination::name_hash("rnstransport", &["info", "blackhole"]);
+    let mut random_hash = [0u8; 10];
+    rng.fill_bytes(&mut random_hash);
+
+    let (announce_data, _has_ratchet) = rns_core::announce::AnnounceData::pack(
+        identity,
+        &dest_hash,
+        &name_hash,
+        &random_hash,
+        None,
+        None,
+    )
+    .ok()?;
+
+    let flags = rns_core::packet::PacketFlags {
+        header_type: constants::HEADER_1,
+        context_flag: constants::FLAG_UNSET,
+        transport_type: constants::TRANSPORT_BROADCAST,
+        destination_type: constants::DESTINATION_SINGLE,
+        packet_type: constants::PACKET_TYPE_ANNOUNCE,
+    };
+
+    let packet = rns_core::packet::RawPacket::pack(
+        flags,
+        0,
+        &dest_hash,
+        None,
+        constants::CONTEXT_NONE,
+        &announce_data,
+    )
+    .ok()?;
+
+    Some(packet.raw)
+}

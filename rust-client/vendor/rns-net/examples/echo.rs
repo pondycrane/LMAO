@@ -1,0 +1,377 @@
+//! Echo example: demonstrates the application-facing API.
+//!
+//! Runs a server and client in the same process, connected via TCP loopback.
+//! The server creates a destination, announces it, and auto-proves all packets.
+//! The client discovers the server, sends an echo request, and receives a proof.
+//!
+//! Usage: cargo run --example echo
+
+use std::sync::mpsc;
+use std::time::Duration;
+
+use rns_crypto::identity::Identity;
+use rns_crypto::OsRng;
+
+use rns_net::{
+    AnnouncedIdentity, Callbacks, DestHash, Destination, IdentityHash, InterfaceConfig,
+    InterfaceId, NodeConfig, PacketHash, ProofStrategy, RnsNode, TcpClientConfig, TcpServerConfig,
+    MODE_FULL,
+};
+
+const APP_NAME: &str = "example_utilities";
+
+// ─── Server Callbacks ───────────────────────────────────────────────────────
+
+struct ServerCallbacks {
+    delivery_tx: mpsc::Sender<(DestHash, Vec<u8>)>,
+}
+
+impl Callbacks for ServerCallbacks {
+    fn on_announce(&mut self, announced: AnnouncedIdentity) {
+        log::info!(
+            "[server] Announce: dest={} hops={}",
+            announced.dest_hash,
+            announced.hops
+        );
+    }
+
+    fn on_path_updated(&mut self, dest_hash: DestHash, hops: u8) {
+        log::debug!("[server] Path updated: dest={} hops={}", dest_hash, hops);
+    }
+
+    fn on_local_delivery(&mut self, dest_hash: DestHash, data: Vec<u8>, packet_hash: PacketHash) {
+        log::info!(
+            "[server] Received packet: dest={} size={} hash={}",
+            dest_hash,
+            data.len(),
+            packet_hash
+        );
+        let _ = self.delivery_tx.send((dest_hash, data));
+    }
+}
+
+// ─── Client Callbacks ───────────────────────────────────────────────────────
+
+struct ClientCallbacks {
+    announce_tx: mpsc::Sender<AnnouncedIdentity>,
+    proof_tx: mpsc::Sender<(DestHash, PacketHash, f64)>,
+}
+
+impl Callbacks for ClientCallbacks {
+    fn on_announce(&mut self, announced: AnnouncedIdentity) {
+        log::info!(
+            "[client] Announce: dest={} identity={} hops={}",
+            announced.dest_hash,
+            announced.identity_hash,
+            announced.hops
+        );
+        let _ = self.announce_tx.send(announced);
+    }
+
+    fn on_path_updated(&mut self, dest_hash: DestHash, hops: u8) {
+        log::debug!("[client] Path updated: dest={} hops={}", dest_hash, hops);
+    }
+
+    fn on_local_delivery(&mut self, dest_hash: DestHash, _data: Vec<u8>, _hash: PacketHash) {
+        log::debug!("[client] Local delivery: dest={}", dest_hash);
+    }
+
+    fn on_proof(&mut self, dest_hash: DestHash, packet_hash: PacketHash, rtt: f64) {
+        log::info!(
+            "[client] Proof received: dest={} hash={} rtt={:.3}s",
+            dest_hash,
+            packet_hash,
+            rtt
+        );
+        let _ = self.proof_tx.send((dest_hash, packet_hash, rtt));
+    }
+}
+
+fn find_free_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
+fn main() {
+    env_logger::init();
+
+    let port = find_free_port();
+    log::info!("Using TCP port {}", port);
+
+    // ─── Server Setup ───────────────────────────────────────────────────
+
+    let server_identity = Identity::new(&mut OsRng);
+    let identity_hash = IdentityHash(*server_identity.hash());
+
+    // Create inbound SINGLE destination with PROVE_ALL
+    let server_dest = Destination::single_in(APP_NAME, &["echo", "request"], identity_hash)
+        .set_proof_strategy(ProofStrategy::ProveAll);
+
+    log::info!("Server destination: {}", server_dest.hash);
+
+    let (delivery_tx, delivery_rx) = mpsc::channel();
+
+    let server_node = RnsNode::start(
+        NodeConfig {
+            panic_on_interface_error: false,
+            transport_enabled: false,
+            static_transport_identity: false,
+            local_hops_delta: false,
+            identity: Some(Identity::from_private_key(
+                &server_identity.get_private_key().unwrap(),
+            )),
+            interfaces: vec![InterfaceConfig {
+                name: String::new(),
+                type_name: "TCPServerInterface".to_string(),
+                config_data: Box::new(TcpServerConfig {
+                    name: "Echo Server TCP".into(),
+                    listen_ip: "127.0.0.1".into(),
+                    listen_port: port,
+                    interface_id: InterfaceId(1),
+                    max_connections: None,
+                    ..TcpServerConfig::default()
+                }),
+                mode: MODE_FULL,
+                gravity: 0,
+                recursive_prs: false,
+                announces_from_internal: true,
+                announces_to_internal: None,
+                ingress_control: rns_core::transport::types::IngressControlConfig::enabled(),
+                ifac: None,
+                discovery: None,
+            }],
+            share_instance: false,
+            instance_name: "default".into(),
+            shared_instance_port: 37428,
+            rpc_port: 0,
+            cache_dir: None,
+            ratchet_store: None,
+            ratchet_expiry: std::time::Duration::from_secs(rns_core::constants::RATCHET_EXPIRY),
+            management: Default::default(),
+            probe_port: None,
+            probe_addrs: vec![],
+            probe_protocol: rns_core::holepunch::ProbeProtocol::Rnsp,
+            direct_connect_policy: Default::default(),
+            device: None,
+            underlay_mark: None,
+            hooks: Vec::new(),
+            discover_interfaces: false,
+            autoconnect_interface_mode: None,
+            autoconnect_interface_gravity: 0,
+            autoconnect_announces_to_internal: false,
+            discovery_required_value: None,
+            respond_to_probes: false,
+            prefer_shorter_path: false,
+            max_paths_per_destination: 1,
+            packet_hashlist_max_entries: rns_core::constants::HASHLIST_MAXSIZE,
+            packet_hashlist_allocation: rns_core::transport::types::PacketHashlistAllocation::Eager,
+            max_discovery_pr_tags: rns_core::constants::MAX_PR_TAGS,
+            max_path_destinations: usize::MAX,
+            max_tunnel_destinations_total: usize::MAX,
+            known_destinations_ttl: std::time::Duration::from_secs(48 * 60 * 60),
+            known_destinations_max_entries: 8192,
+            announce_table_ttl: std::time::Duration::from_secs(
+                rns_core::constants::ANNOUNCE_TABLE_TTL as u64,
+            ),
+            announce_table_max_bytes: rns_core::constants::ANNOUNCE_TABLE_MAX_BYTES,
+            driver_event_queue_capacity: rns_net::event::DEFAULT_EVENT_QUEUE_CAPACITY,
+            interface_writer_queue_capacity:
+                rns_net::interface::DEFAULT_ASYNC_WRITER_QUEUE_CAPACITY,
+            announce_rate_defaults: rns_net::AnnounceRateDefaults::default(),
+            ingress_control_defaults: rns_core::transport::types::IngressControlConfig::enabled(),
+            #[cfg(feature = "iface-backbone")]
+            backbone_peer_pool: None,
+            announce_sig_cache_enabled: true,
+            announce_sig_cache_max_entries: rns_core::constants::ANNOUNCE_SIG_CACHE_MAXSIZE,
+            announce_sig_cache_ttl: std::time::Duration::from_secs(
+                rns_core::constants::ANNOUNCE_SIG_CACHE_TTL as u64,
+            ),
+            registry: None,
+            #[cfg(feature = "hooks")]
+            provider_bridge: None,
+        },
+        Box::new(ServerCallbacks { delivery_tx }),
+    )
+    .expect("Failed to start server");
+
+    // Register the destination with proof strategy
+    let signing_key = server_identity.get_private_key().unwrap();
+    server_node
+        .register_destination_with_proof(&server_dest, Some(signing_key))
+        .expect("Failed to register destination");
+
+    // ─── Client Setup ───────────────────────────────────────────────────
+
+    let (announce_tx, announce_rx) = mpsc::channel();
+    let (proof_tx, proof_rx) = mpsc::channel();
+
+    let client_node = RnsNode::start(
+        NodeConfig {
+            panic_on_interface_error: false,
+            transport_enabled: false,
+            static_transport_identity: false,
+            local_hops_delta: false,
+            identity: None,
+            interfaces: vec![InterfaceConfig {
+                name: String::new(),
+                type_name: "TCPClientInterface".to_string(),
+                config_data: Box::new(TcpClientConfig {
+                    name: "Echo Client TCP".into(),
+                    target_host: "127.0.0.1".into(),
+                    target_port: port,
+                    ..Default::default()
+                }),
+                mode: MODE_FULL,
+                gravity: 0,
+                recursive_prs: false,
+                announces_from_internal: true,
+                announces_to_internal: None,
+                ingress_control: rns_core::transport::types::IngressControlConfig::enabled(),
+                ifac: None,
+                discovery: None,
+            }],
+            share_instance: false,
+            instance_name: "default".into(),
+            shared_instance_port: 37428,
+            rpc_port: 0,
+            cache_dir: None,
+            ratchet_store: None,
+            ratchet_expiry: std::time::Duration::from_secs(rns_core::constants::RATCHET_EXPIRY),
+            management: Default::default(),
+            probe_port: None,
+            probe_addrs: vec![],
+            probe_protocol: rns_core::holepunch::ProbeProtocol::Rnsp,
+            direct_connect_policy: Default::default(),
+            device: None,
+            underlay_mark: None,
+            hooks: Vec::new(),
+            discover_interfaces: false,
+            autoconnect_interface_mode: None,
+            autoconnect_interface_gravity: 0,
+            autoconnect_announces_to_internal: false,
+            discovery_required_value: None,
+            respond_to_probes: false,
+            prefer_shorter_path: false,
+            max_paths_per_destination: 1,
+            packet_hashlist_max_entries: rns_core::constants::HASHLIST_MAXSIZE,
+            packet_hashlist_allocation: rns_core::transport::types::PacketHashlistAllocation::Eager,
+            max_discovery_pr_tags: rns_core::constants::MAX_PR_TAGS,
+            max_path_destinations: usize::MAX,
+            max_tunnel_destinations_total: usize::MAX,
+            known_destinations_ttl: std::time::Duration::from_secs(48 * 60 * 60),
+            known_destinations_max_entries: 8192,
+            announce_table_ttl: std::time::Duration::from_secs(
+                rns_core::constants::ANNOUNCE_TABLE_TTL as u64,
+            ),
+            announce_table_max_bytes: rns_core::constants::ANNOUNCE_TABLE_MAX_BYTES,
+            driver_event_queue_capacity: rns_net::event::DEFAULT_EVENT_QUEUE_CAPACITY,
+            interface_writer_queue_capacity:
+                rns_net::interface::DEFAULT_ASYNC_WRITER_QUEUE_CAPACITY,
+            announce_rate_defaults: rns_net::AnnounceRateDefaults::default(),
+            ingress_control_defaults: rns_core::transport::types::IngressControlConfig::enabled(),
+            #[cfg(feature = "iface-backbone")]
+            backbone_peer_pool: None,
+            announce_sig_cache_enabled: true,
+            announce_sig_cache_max_entries: rns_core::constants::ANNOUNCE_SIG_CACHE_MAXSIZE,
+            announce_sig_cache_ttl: std::time::Duration::from_secs(
+                rns_core::constants::ANNOUNCE_SIG_CACHE_TTL as u64,
+            ),
+            registry: None,
+            #[cfg(feature = "hooks")]
+            provider_bridge: None,
+        },
+        Box::new(ClientCallbacks {
+            announce_tx,
+            proof_tx,
+        }),
+    )
+    .expect("Failed to start client");
+
+    // Wait for client to connect before announcing
+    std::thread::sleep(Duration::from_secs(1));
+
+    // Announce the server destination
+    server_node
+        .announce(&server_dest, &server_identity, Some(b"Rust Echo Server"))
+        .expect("Failed to announce");
+
+    log::info!("Server announced");
+
+    // ─── Wait for Announce ──────────────────────────────────────────────
+
+    log::info!("Waiting for server announce...");
+    let announced = announce_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("Timed out waiting for announce");
+
+    log::info!(
+        "Discovered server: dest={} app_data={}",
+        announced.dest_hash,
+        announced
+            .app_data
+            .as_ref()
+            .and_then(|d| std::str::from_utf8(d).ok())
+            .unwrap_or("<none>")
+    );
+
+    // Verify destination hash matches
+    assert_eq!(announced.dest_hash, server_dest.hash);
+
+    // ─── Send Echo Request ──────────────────────────────────────────────
+
+    // Create outbound destination from the announced identity
+    let client_dest = Destination::single_out(APP_NAME, &["echo", "request"], &announced);
+
+    let message = b"Hello from Rust echo client!";
+    log::info!("Sending echo request: {:?}", std::str::from_utf8(message));
+
+    let packet_hash = client_node
+        .send_packet(&client_dest, message)
+        .expect("Failed to send packet");
+
+    log::info!("Sent packet: hash={}", packet_hash);
+
+    // ─── Wait for Delivery (server side) ────────────────────────────────
+
+    log::info!("Waiting for server to receive packet...");
+    match delivery_rx.recv_timeout(Duration::from_secs(10)) {
+        Ok((dest, data)) => {
+            log::info!(
+                "Server received: dest={} data={:?}",
+                dest,
+                std::str::from_utf8(&data)
+            );
+        }
+        Err(_) => {
+            log::warn!("Timed out waiting for server delivery (proof may still work)");
+        }
+    }
+
+    // ─── Wait for Proof (client side) ───────────────────────────────────
+
+    log::info!("Waiting for proof...");
+    match proof_rx.recv_timeout(Duration::from_secs(10)) {
+        Ok((dest, hash, rtt)) => {
+            log::info!(
+                "Proof confirmed! dest={} hash={} RTT={:.3}s",
+                dest,
+                hash,
+                rtt
+            );
+            assert_eq!(hash, packet_hash);
+            println!("Echo successful! RTT: {:.3}s", rtt);
+        }
+        Err(_) => {
+            println!("No proof received (echo may have still been delivered)");
+        }
+    }
+
+    // ─── Cleanup ────────────────────────────────────────────────────────
+
+    client_node.shutdown();
+    server_node.shutdown();
+    log::info!("Done.");
+}
