@@ -1,0 +1,7 @@
+# T1 firmware toolchain — the esp nightly fork (installed via `espup install
+# --targets esp32s3`, exposed as the rustup toolchain named `esp`). The
+# xtensa-esp32s3-none-elf target is built from `rust-src` via `-Z build-std`
+# (see .cargo/config.toml); it is not a rustup-managed component, so no
+# `targets` list is set here. Host workspace keeps `stable` in ../rust-toolchain.toml.
+[toolchain]
+channel = "esp"

@@ -1,0 +1,27 @@
+# T1 firmware — ESP32-S3 (Cardputer) no_std boot/blink (design ticket T1).
+#
+# This is its OWN Cargo workspace (independent of the host workspace at
+# rust-client/../): the firmware cross-compiles for xtensa-esp32s3-none-elf
+# with the esp nightly toolchain (see rust-toolchain.toml + .cargo/config.toml),
+# while the host interop harness pins `stable`. Cargo resolves a package's
+# toolchain by the nearest rust-toolchain.toml, so a separate workspace keeps
+# them isolated.
+[workspace]
+resolver = "2"
+
+[package]
+name = "lmao-firmware-t1"
+version = "0.1.0"
+edition = "2021"
+description = "ESP32-S3 no_std boot test for the LMAO Rust client (T1)"
+
+[dependencies]
+esp-hal = { version = "1.2.2", features = ["esp32s3"] }
+esp-println = { version = "0.18.0", default-features = false, features = ["esp32s3", "jtag-serial"] }
+
+[profile.release]
+opt-level = "s"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+overflow-checks = false

@@ -47,3 +47,32 @@ sh_binary(
     data = [":rust_sources"],
     tags = ["manual"],
 )
+
+# ── T1 firmware (ESP32-S3 / Cardputer, no_std esp-hal) ────────────────
+# Builds out-of-band via cargo + the esp nightly toolchain (no rules_rust, and
+# the xtensa target is outside Bazel) — same convention as native-client.
+# `flash_firmware` REPLACES the Cardputer runtime (hardware; restore MicroPython
+# with `bazel run //cardputer_client:flash`). Never pulled into test runs.
+
+filegroup(
+    name = "firmware_sources",
+    srcs = glob(
+        ["firmware/**"],
+        exclude = ["firmware/target/**"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+sh_binary(
+    name = "build_firmware",
+    srcs = ["build_firmware.sh"],
+    data = [":firmware_sources"],
+    tags = ["manual"],
+)
+
+sh_binary(
+    name = "flash_firmware",
+    srcs = ["flash_firmware.sh"],
+    data = [":firmware_sources"],
+    tags = ["manual"],
+)

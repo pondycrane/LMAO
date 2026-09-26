@@ -1,4 +1,6 @@
-# Rust toolchain + build output (host spike; firmware toolchain pinned in
-# rust-toolchain.toml when the T0 gate passes).
+# Rust toolchain + build output. Host (T0/harness) and firmware (T1) are separate
+# workspaces; both `target/` trees are gitignored. Toolchain pins in
+# rust-toolchain.toml (host `stable`) and firmware/rust-toolchain.toml (`esp`).
 /target/
+/firmware/target/
 *.venv/

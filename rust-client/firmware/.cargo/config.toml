@@ -1,0 +1,21 @@
+# T1 firmware cargo config — Xtensa ESP32-S3 no_std build + espflash runner.
+#
+# The channel here must match the esp nightly installed by `espup` (see
+# rust-toolchain.toml). esp-hal on Xtensa needs build-std (no precompiled std
+# for xtensa-esp32s3-none-elf) + the esp-rs Xtensa rustc + the chip linker
+# script, which esp-hal's build.rs exposes via OUT_DIR + `-L` (INCLUDE/-T
+# resolve through it, so the missing -T was the link failure).
+[build]
+target = "xtensa-esp32s3-none-elf"
+
+# Xtensa target config mirrors the canonical esp-hal examples
+# (xtensa = GNU LD).
+[target.'cfg(target_arch = "xtensa")']
+runner = "espflash flash --monitor"
+rustflags = [
+  "-C", "link-arg=-Wl,-Tlinkall.x",
+  "-C", "link-arg=-nostartfiles",
+]
+
+[unstable]
+build-std = ["core", "alloc"]
