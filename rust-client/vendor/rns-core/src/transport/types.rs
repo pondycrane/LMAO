@@ -1,0 +1,406 @@
+use alloc::string::String;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
+
+use super::RxMetadata;
+use crate::constants;
+
+pub const DEFAULT_MAX_PATH_DESTINATIONS: usize = 8192;
+
+pub type PacketBytes = Arc<[u8]>;
+
+/// Opaque identifier for a network interface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct InterfaceId(pub u64);
+
+/// Packet airtime model for interfaces where payload transmit time is not
+/// accurately represented by payload bits divided by a raw bit rate.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum AirtimeProfile {
+    Lora {
+        bandwidth: u32,
+        spreading_factor: u8,
+        coding_rate: u8,
+        preamble_symbols: u16,
+        explicit_header: bool,
+        crc: bool,
+    },
+}
+
+impl AirtimeProfile {
+    pub fn transmit_time_secs(&self, payload_len: usize) -> f64 {
+        match *self {
+            AirtimeProfile::Lora {
+                bandwidth,
+                spreading_factor,
+                coding_rate,
+                preamble_symbols,
+                explicit_header,
+                crc,
+            } => lora_airtime_secs(
+                payload_len,
+                bandwidth,
+                spreading_factor,
+                coding_rate,
+                preamble_symbols,
+                explicit_header,
+                crc,
+            ),
+        }
+    }
+}
+
+fn lora_airtime_secs(
+    payload_len: usize,
+    bandwidth: u32,
+    spreading_factor: u8,
+    coding_rate: u8,
+    preamble_symbols: u16,
+    explicit_header: bool,
+    crc: bool,
+) -> f64 {
+    if bandwidth == 0 || spreading_factor == 0 {
+        return 0.0;
+    }
+
+    let sf = spreading_factor as f64;
+    let symbol_time = libm::pow(2f64, (spreading_factor as i32) as f64) / bandwidth as f64;
+    let low_data_rate_optimize = spreading_factor >= 11 && bandwidth <= 125_000;
+    let de = if low_data_rate_optimize { 1.0 } else { 0.0 };
+    let ih = if explicit_header { 0.0 } else { 1.0 };
+    let crc = if crc { 1.0 } else { 0.0 };
+    let denominator = 4.0 * (sf - 2.0 * de);
+    if denominator <= 0.0 {
+        return 0.0;
+    }
+
+    let numerator = 8.0 * payload_len as f64 - 4.0 * sf + 28.0 + 16.0 * crc - 20.0 * ih;
+    let payload_symbols = 8.0 + libm::ceil(numerator / denominator).max(0.0) * coding_rate as f64;
+    let preamble_time = (preamble_symbols as f64 + 4.25) * symbol_time;
+    let payload_time = payload_symbols * symbol_time;
+    preamble_time + payload_time
+}
+
+/// Per-interface ingress-control configuration.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct IngressControlConfig {
+    pub enabled: bool,
+    pub egress_enabled: bool,
+    pub max_held_announces: usize,
+    pub burst_freq_new: f64,
+    pub burst_freq: f64,
+    pub pr_burst_freq_new: f64,
+    pub pr_burst_freq: f64,
+    pub egress_pr_freq: f64,
+    pub new_time: f64,
+    pub burst_hold: f64,
+    pub burst_penalty: f64,
+    pub held_release_interval: f64,
+}
+
+impl IngressControlConfig {
+    pub fn enabled() -> Self {
+        Self {
+            enabled: true,
+            ..Self::default()
+        }
+    }
+
+    pub fn disabled() -> Self {
+        Self {
+            enabled: false,
+            ..Self::default()
+        }
+    }
+}
+
+impl Default for IngressControlConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            egress_enabled: false,
+            max_held_announces: constants::IC_MAX_HELD_ANNOUNCES,
+            burst_freq_new: constants::IC_BURST_FREQ_NEW,
+            burst_freq: constants::IC_BURST_FREQ,
+            pr_burst_freq_new: constants::IC_PR_BURST_FREQ_NEW,
+            pr_burst_freq: constants::IC_PR_BURST_FREQ,
+            egress_pr_freq: constants::EC_PR_FREQ,
+            new_time: constants::IC_NEW_TIME,
+            burst_hold: constants::IC_BURST_HOLD,
+            burst_penalty: constants::IC_BURST_PENALTY,
+            held_release_interval: constants::IC_HELD_RELEASE_INTERVAL,
+        }
+    }
+}
+
+/// Metadata about a network interface.
+#[derive(Debug, Clone)]
+pub struct InterfaceInfo {
+    pub id: InterfaceId,
+    pub name: String,
+    pub mode: u8,
+    /// Signed interface preference used by path selection.
+    pub gravity: i64,
+    pub recursive_prs: bool,
+    pub announces_from_internal: bool,
+    /// Allow announces received here to propagate to internal-mode interfaces.
+    pub announces_to_internal: Option<bool>,
+    pub out_capable: bool,
+    pub in_capable: bool,
+    pub bitrate: Option<u64>,
+    pub airtime_profile: Option<AirtimeProfile>,
+    pub announce_rate_target: Option<f64>,
+    pub announce_rate_grace: u32,
+    pub announce_rate_penalty: f64,
+    /// Announce bandwidth cap (fraction of bitrate). Default 0.02 (2%).
+    pub announce_cap: f64,
+    /// Whether this interface is a local shared-instance client.
+    pub is_local_client: bool,
+    /// Whether this interface wants tunnel synthesis on connect.
+    pub wants_tunnel: bool,
+    /// Tunnel ID associated with this interface, if any.
+    pub tunnel_id: Option<[u8; 32]>,
+    /// Maximum transmission unit for this interface in bytes.
+    ///
+    /// The interface selects this before registration; the transport core does
+    /// not recalculate or log MTU choices while processing packets.
+    pub mtu: u32,
+    /// Ingress control behavior for this interface.
+    pub ingress_control: IngressControlConfig,
+    /// Current incoming announce frequency (announces/sec), synced from driver.
+    pub ia_freq: f64,
+    /// Current incoming path request frequency (requests/sec), synced from driver.
+    pub ip_freq: f64,
+    /// Current outgoing path request frequency (requests/sec), synced from driver.
+    pub op_freq: f64,
+    /// Current outgoing path request sample count, synced from driver.
+    pub op_samples: usize,
+    /// When this interface was started (epoch seconds).
+    pub started: f64,
+}
+
+/// Actions produced by TransportEngine for the caller to execute.
+#[derive(Debug, Clone)]
+pub enum TransportAction {
+    /// Send raw bytes on a specific interface.
+    SendOnInterface {
+        interface: InterfaceId,
+        raw: PacketBytes,
+    },
+    /// Broadcast raw bytes on all OUT-capable interfaces, optionally excluding one.
+    BroadcastOnAllInterfaces {
+        raw: PacketBytes,
+        exclude: Option<InterfaceId>,
+    },
+    /// Deliver a packet to a local destination.
+    DeliverLocal {
+        destination_hash: [u8; 16],
+        raw: PacketBytes,
+        packet_hash: [u8; 32],
+        receiving_interface: InterfaceId,
+    },
+    /// An announce was received and validated.
+    AnnounceReceived {
+        destination_hash: [u8; 16],
+        identity_hash: [u8; 16],
+        public_key: [u8; 64],
+        name_hash: [u8; 10],
+        random_hash: [u8; 10],
+        ratchet: Option<[u8; 32]>,
+        app_data: Option<Vec<u8>>,
+        hops: u8,
+        receiving_interface: InterfaceId,
+        rx: RxMetadata,
+    },
+    /// A path was updated in the path table.
+    PathUpdated {
+        destination_hash: [u8; 16],
+        hops: u8,
+        next_hop: [u8; 16],
+        interface: InterfaceId,
+    },
+    /// Forward raw bytes to all local client interfaces (excluding one).
+    ForwardToLocalClients {
+        raw: PacketBytes,
+        exclude: Option<InterfaceId>,
+    },
+    /// Forward a PLAIN/GROUP broadcast between local and external interfaces.
+    ForwardPlainBroadcast {
+        raw: PacketBytes,
+        to_local: bool,
+        exclude: Option<InterfaceId>,
+    },
+    /// Cache an announce packet to disk.
+    CacheAnnounce {
+        packet_hash: [u8; 32],
+        raw: PacketBytes,
+    },
+    /// Tunnel synthesis: send synthesis data on an interface.
+    TunnelSynthesize {
+        interface: InterfaceId,
+        data: Vec<u8>,
+        dest_hash: [u8; 16],
+    },
+    /// A tunnel was established or reattached.
+    TunnelEstablished {
+        tunnel_id: [u8; 32],
+        interface: InterfaceId,
+    },
+    /// An announce is being retransmitted (for hook notification).
+    AnnounceRetransmit {
+        destination_hash: [u8; 16],
+        hops: u8,
+        interface: Option<InterfaceId>,
+    },
+    /// A link request was received and is being forwarded (transport relay).
+    LinkRequestReceived {
+        link_id: [u8; 16],
+        destination_hash: [u8; 16],
+        receiving_interface: InterfaceId,
+    },
+    /// A link was established via LRPROOF validation (transport relay).
+    LinkEstablished {
+        link_id: [u8; 16],
+        interface: InterfaceId,
+    },
+    /// A link entry expired and was removed from the link table.
+    LinkClosed { link_id: [u8; 16] },
+    /// A malformed or cryptographically invalid packet was rejected.
+    ProtocolViolation { interface: InterfaceId },
+}
+
+/// A blackholed identity entry.
+#[derive(Debug, Clone)]
+pub struct BlackholeEntry {
+    /// When this entry was created.
+    pub created: f64,
+    /// When this entry expires (0.0 = never).
+    pub expires: f64,
+    /// Optional reason for blackholing.
+    pub reason: Option<String>,
+}
+
+/// Configuration for TransportEngine.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum PacketHashlistAllocation {
+    /// Touch every payload slot during construction.
+    #[default]
+    Eager,
+    /// Reserve fixed-capacity payload storage without touching its pages.
+    Lazy,
+}
+
+#[derive(Debug, Clone)]
+pub struct TransportConfig {
+    pub transport_enabled: bool,
+    pub identity_hash: Option<[u8; 16]>,
+    /// Non-zero hop byte used to mask local zero-hop origination.
+    pub local_hops_delta: u8,
+    /// Accept an announce with strictly fewer hops even when the random_blob
+    /// is a duplicate of the existing path entry.  Default `false` preserves
+    /// Python-compatible anti-replay behaviour.
+    pub prefer_shorter_path: bool,
+    /// Maximum number of alternative paths stored per destination.
+    /// When >1, failover to the next-best path happens automatically
+    /// when the primary becomes unresponsive.  Default 1 (single path,
+    /// backward-compatible with Python Reticulum behaviour).
+    pub max_paths_per_destination: usize,
+    /// Maximum number of packet hashes retained for duplicate suppression.
+    pub packet_hashlist_max_entries: usize,
+    /// Startup allocation policy for packet-hash payload storage.
+    pub packet_hashlist_allocation: PacketHashlistAllocation,
+    /// Maximum number of discovery path-request tags remembered for duplicate suppression.
+    pub max_discovery_pr_tags: usize,
+    /// Maximum number of destination hashes retained in the live path table.
+    pub max_path_destinations: usize,
+    /// Maximum number of destination hashes retained across all tunnel entries.
+    pub max_tunnel_destinations_total: usize,
+    /// Retention timeout for tunnel-known destinations, in seconds.
+    pub destination_timeout_secs: f64,
+    /// Retention timeout for announce retransmission state, in seconds.
+    pub announce_table_ttl_secs: f64,
+    /// Maximum retained bytes across announce retransmission state maps.
+    pub announce_table_max_bytes: usize,
+    /// Whether the announce signature verification cache is enabled.
+    pub announce_sig_cache_enabled: bool,
+    /// Maximum entries in the announce signature verification cache.
+    pub announce_sig_cache_max_entries: usize,
+    /// TTL for announce signature cache entries, in seconds.
+    pub announce_sig_cache_ttl_secs: f64,
+    /// Maximum entries in the async announce verification queue.
+    pub announce_queue_max_entries: usize,
+    /// Maximum number of interface-scoped announce queues retained.
+    pub announce_queue_max_interfaces: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_interface_id_ordering() {
+        let a = InterfaceId(1);
+        let b = InterfaceId(2);
+        assert!(a < b);
+        assert_eq!(a, InterfaceId(1));
+    }
+
+    #[test]
+    fn test_transport_config_defaults() {
+        let cfg = TransportConfig {
+            transport_enabled: false,
+            identity_hash: None,
+            local_hops_delta: 0,
+            prefer_shorter_path: false,
+            max_paths_per_destination: 1,
+            packet_hashlist_max_entries: crate::constants::HASHLIST_MAXSIZE,
+            packet_hashlist_allocation: crate::transport::types::PacketHashlistAllocation::Eager,
+            max_discovery_pr_tags: crate::constants::MAX_PR_TAGS,
+            max_path_destinations: DEFAULT_MAX_PATH_DESTINATIONS,
+            max_tunnel_destinations_total: usize::MAX,
+            destination_timeout_secs: crate::constants::DESTINATION_TIMEOUT,
+            announce_table_ttl_secs: crate::constants::ANNOUNCE_TABLE_TTL,
+            announce_table_max_bytes: crate::constants::ANNOUNCE_TABLE_MAX_BYTES,
+            announce_sig_cache_enabled: true,
+            announce_sig_cache_max_entries: crate::constants::ANNOUNCE_SIG_CACHE_MAXSIZE,
+            announce_sig_cache_ttl_secs: crate::constants::ANNOUNCE_SIG_CACHE_TTL,
+            announce_queue_max_entries: 256,
+            announce_queue_max_interfaces: 1024,
+        };
+        assert!(!cfg.transport_enabled);
+        assert!(cfg.identity_hash.is_none());
+        assert_eq!(cfg.local_hops_delta, 0);
+        assert!(!cfg.prefer_shorter_path);
+        assert_eq!(cfg.max_paths_per_destination, 1);
+        assert_eq!(
+            cfg.packet_hashlist_max_entries,
+            crate::constants::HASHLIST_MAXSIZE
+        );
+        assert_eq!(cfg.max_discovery_pr_tags, crate::constants::MAX_PR_TAGS);
+        assert_eq!(cfg.max_path_destinations, DEFAULT_MAX_PATH_DESTINATIONS);
+        assert_eq!(cfg.max_tunnel_destinations_total, usize::MAX);
+        assert_eq!(
+            cfg.destination_timeout_secs,
+            crate::constants::DESTINATION_TIMEOUT
+        );
+        assert_eq!(
+            cfg.announce_table_ttl_secs,
+            crate::constants::ANNOUNCE_TABLE_TTL
+        );
+        assert_eq!(
+            cfg.announce_table_max_bytes,
+            crate::constants::ANNOUNCE_TABLE_MAX_BYTES
+        );
+        assert!(cfg.announce_sig_cache_enabled);
+        assert_eq!(
+            cfg.announce_sig_cache_max_entries,
+            crate::constants::ANNOUNCE_SIG_CACHE_MAXSIZE
+        );
+        assert_eq!(
+            cfg.announce_sig_cache_ttl_secs,
+            crate::constants::ANNOUNCE_SIG_CACHE_TTL
+        );
+        assert_eq!(cfg.announce_queue_max_entries, 256);
+        assert_eq!(cfg.announce_queue_max_interfaces, 1024);
+    }
+}

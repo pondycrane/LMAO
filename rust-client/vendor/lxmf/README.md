@@ -1,0 +1,145 @@
+# LXMF-rs — Reticulum and LXMF in Rust
+
+[![Latest release](https://img.shields.io/github/v/release/FreeTAKTeam/LXMF-rs?sort=semver)](https://github.com/FreeTAKTeam/LXMF-rs/releases/latest)
+[![Crates.io](https://img.shields.io/crates/v/lxmf)](https://crates.io/crates/lxmf)
+[![Documentation](https://docs.rs/lxmf/badge.svg)](https://docs.rs/lxmf)
+[![License](https://img.shields.io/badge/license-EPL--2.0-blue.svg)](LICENSE)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/FreeTAKTeam/LXMF-rs)
+
+LXMF-rs is a Rust implementation of the
+[Reticulum](https://reticulum.network/) networking stack and the
+[LXMF](https://github.com/markqvist/LXMF) messaging stack. The workspace
+provides reusable libraries, a typed SDK, host daemons and command-line tools,
+plus embedded and FFI surfaces.
+
+<!-- performance-summary:start -->
+## Measured performance
+
+Release dataset: `v0.10.1` at `25a976945cb335dff3be692981151c8741a5fdeb`; Python Reticulum `ea98db4f53dc` and LXMF `727830cefda8`.
+
+| Matched workload | Rust p50 | Python p50 | Rust/Python |
+|---|---:|---:|---:|
+| LXMF message decode | 225 ns | 7.99 ms | 35459.28x |
+| LXMF message encode | 385 ns | 2.10 ms | 5450.73x |
+| LXMF large message decode | 370 ns | 7.96 ms | 21536.64x |
+| LXMF large message encode | 773 ns | 2.12 ms | 2743.59x |
+
+These are matched-workload comparisons, not a claim of whole-system superiority. See [methodology, complete results, variability, and limitations](docs/performance.md).
+<!-- performance-summary:end -->
+
+
+## Current status
+
+The current release train is
+[`v0.11.0`](https://github.com/FreeTAKTeam/LXMF-rs/releases/tag/v0.11.0),
+based on the reviewed RNode repair merged as
+`56ea9f06c474426b2245739e9cb5e2c325cdb1e2`. It keeps the v0.10.1 RNS 1.5.2
+compatibility baseline while tightening BLE/RNode read ownership, KISS
+fragmentation, and firmware queue admission. The v0.10.1 release remains the
+previous stable evidence boundary.
+
+The compatibility surface targets Python Reticulum 1.5.2 at
+`ea98db4f53dcf0defc0e71a16e60d28b1229c4e6` for the next release candidate;
+that canonical pin remains unchanged in v0.11.0.
+
+| Area | Current position |
+| --- | --- |
+| Reticulum software parity | 1,857 applicable entries complete, 0 partial, 0 unmapped, and 1 provenance-backed not-applicable entry |
+| LXMF software parity | All seven tracked software scenarios complete |
+| Rust/Python interoperability | Direct, link, channel, paper, propagation, and daemon scenarios exercised against pinned references |
+| Independent interoperability | Versioned rns-rs and Reticulum-Go evidence published separately for `v0.10.1`; v0.11.0 evidence is qualified by its tag workflows |
+| Hardware and external clients | Physical devices, public networks, and third-party clients remain separate evidence tracks and are not claimed by the software-parity result |
+
+Read the [current roadmap](docs/status/current-roadmap.md) for the authoritative
+project posture, the [v0.11.0 release notes](docs/release-notes-v0.11.0.md),
+[v0.11.0 migration guide](docs/migrations/v0.11.0-rnode.md), and the previous
+[v0.10.1 release ledger](docs/status/v0.10.1-release.md), and the
+[Reticulum](docs/status/reticulum-parity-matrix.md) and
+[LXMF](docs/status/lxmf-parity-matrix.md) parity matrices for row-level detail.
+
+## Start here
+
+| Goal | Documentation |
+| --- | --- |
+| Install, build, or run the tools | [Getting started](docs/getting-started.md) |
+| Integrate the Rust SDK | [SDK guide](docs/sdk/README.md) and [quickstart](docs/sdk/quickstart.md) |
+| Understand the crates and binaries | [Workspace and package guide](docs/project-layout.md) |
+| Deploy a daemon | [`lxmd` systemd guide](docs/runbooks/lxmd-systemd.md) or [`reticulumd` operations](docs/runbooks/reticulumd-operational-deployment.md) |
+| Review compatibility claims | [Compatibility contract](docs/contracts/compatibility-contract.md) and [current roadmap](docs/status/current-roadmap.md) |
+| Contribute | [Contributor guide](CONTRIBUTING.md) and [checked examples](docs/examples.md) |
+| Browse all maintained documentation | [Documentation map](docs/README.md) |
+
+## Quick start
+
+Bootstrap a source checkout and run the local daemon:
+
+```bash
+make bootstrap
+cargo run -p reticulumd --bin reticulumd
+```
+
+In another terminal, inspect the available tools:
+
+```bash
+cargo run -p lxmf-cli --bin lxmf -- --help
+cargo run -p rns-tools --bin rnstatus-rs -- --help
+```
+
+Library consumers can start with the umbrella crates:
+
+```toml
+[dependencies]
+lxmf = "0.11.0"
+reticulum-rs = "0.11.0"
+```
+
+See [Getting started](docs/getting-started.md) for release downloads, checksum
+verification, component crates, and additional run commands.
+
+## Main packages
+
+| Package group | Purpose | Links |
+| --- | --- | --- |
+| `lxmf`, `lxmf-sdk`, `lxmf-wire` | LXMF wire types and high-level client APIs | [crates.io](https://crates.io/crates/lxmf), [docs.rs](https://docs.rs/lxmf), [SDK guide](docs/sdk/README.md) |
+| `reticulum-rs`, `reticulum-rs-core`, `reticulum-rs-transport`, `reticulum-rs-rpc` | Reticulum primitives, transport, interfaces, resources, and RPC | [crates.io](https://crates.io/crates/reticulum-rs), [docs.rs](https://docs.rs/reticulum-rs), [API overview](docs/lxmf-rs-api.md) |
+| `lxmf-cli`, `reticulumd`, `rns-tools` | LXMF, daemon, diagnostic, and operator binaries | [CLI reference](docs/lxmf-cli.md), [examples](docs/examples.md) |
+| Embedded crates | `no_std`, managed runtime, mini-node, and C ABI integration | [Package guide](docs/project-layout.md#embedded-libraries), [FFI guide](crates/libs/rns-embedded-ffi/README.md) |
+
+The complete workspace inventory and dependency-boundary rules live in the
+[workspace and package guide](docs/project-layout.md). The root
+[`Cargo.toml`](Cargo.toml) remains the source of truth for active members.
+
+## Validation
+
+Use focused checks while developing and broaden them as the change requires:
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features --no-deps -- -D warnings
+cargo test --workspace --tests
+tools/scripts/check-boundaries.sh
+```
+
+Release-facing changes should also pass:
+
+```bash
+cargo run -p xtask -- architecture-checks
+cargo xtask release-check
+```
+
+See the [release-readiness runbook](docs/runbooks/release-readiness.md) for the
+full gate and evidence boundaries.
+
+## Evidence and project policy
+
+- [Current roadmap and parity posture](docs/status/current-roadmap.md)
+- [Reticulum parity matrix](docs/status/reticulum-parity-matrix.md)
+- [LXMF parity matrix](docs/status/lxmf-parity-matrix.md)
+- [Independent implementation evidence](docs/interop/README.md)
+- [Performance methodology and results](docs/performance.md)
+- [Support and LTS policy](docs/contracts/support-policy.md)
+- [Security policy](SECURITY.md)
+
+## License
+
+LXMF-rs is licensed under the [Eclipse Public License 2.0](LICENSE).
