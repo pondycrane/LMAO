@@ -346,7 +346,6 @@ Deep sleep between link windows, watchdog + heap-fragmentation guard (from
    vs a leaf that holds a persistent link (higher power). Decide before T4.
 2. **Radio on the Atom Lite:** UART-AT RAK3172 DTU (Sprout-style) vs SPI SX1262 —
    affects T3 scope. Default: whichever the production board carries; pin in T3.
-3. **Vendor method:** `cargo vendor` tree vs git submodule — pick in T0; record
-   pin in `UPSTREAM.md`.
+3. **Vendor method:** ~~`cargo vendor` tree vs git submodule~~ **RESOLVED (T0, PR #168):** the five protocol crates are **not committed** — `WORKSPACE` + `rust-client/repositories.bzl` fetch each crates.io tarball by SHA-256 at Bazel analyze time (same `http_archive` convention as the Sprout client's `mbedtls`/`rtreticulum` pins); the pin record lives in `rust-client/UPSTREAM.md` + `Cargo.lock`.
 4. **async (embassy) or sync loop** on the leaf — decide in T1; sync loop is
    smaller and matches the C client.

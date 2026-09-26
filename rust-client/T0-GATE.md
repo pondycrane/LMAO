@@ -82,4 +82,5 @@ is in the Bazel graph and driven from Bazel:
 
 - Rust `stable` via rustup (host); firmware `nightly` + xtensa deferred to T1.
 - rns-core 0.1.17 / rns-crypto 0.1.10 / rns-net 0.7.2 pinned in `Cargo.lock`;
-  protocol-source mirrors in `vendor/`; pin record in `UPSTREAM.md`.
+  Bazel fetches the pinned crates.io tarballs by SHA-256 (`repositories.bzl`);
+  pin record in `UPSTREAM.md`.
