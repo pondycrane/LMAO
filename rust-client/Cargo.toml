@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["host/interop"]
+members = ["host/interop", "crates/lma-identity"]
 
 [workspace.package]
 version = "0.1.0"

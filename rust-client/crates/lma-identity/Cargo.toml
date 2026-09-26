@@ -1,0 +1,12 @@
+[package]
+name = "lma-identity"
+version.workspace = true
+edition.workspace = true
+description = "LMAO leaf identity: mint/load RNS Identity + lxmf/delivery DEST (T2)"
+
+[dependencies]
+rns-core = "0.1.17"
+rns-crypto = "0.1.10"
+
+[dev-dependencies]
+rand = "0.8"
