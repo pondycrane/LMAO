@@ -75,8 +75,15 @@ side + Rust receives the completion proof).
 ## Toolchain
 
 - Host (T0): `rustup` `stable` (recorded in `rust-toolchain.toml`).
-- Firmware (T1+): espup **nightly** + `xtensa-esp32s3-none-elf`; pinned in
-  `rust-toolchain.toml` when the decision gate passes.
+- Firmware (T1): `espup install --targets esp32s3` → the Xtensa esp nightly
+  fork exposed as the rustup toolchain **`esp`** (Xtensa Rust 1.97.0.0;
+  xtensa-esp-elf 15.2.0 + esp-clang). Pinned in
+  `rust-client/firmware/rust-toolchain.toml` (`channel = "esp"`). The host and
+  firmware are separate Cargo workspaces so each carries its own toolchain.
+  esp-hal 1.2.2 is cross-compiled with `build-std = ["core","alloc"]` and the
+  chip linker script (`-Wl,-Tlinkall.x -nostartfiles`; scripts exposed by
+  esp-hal's build.rs via `OUT_DIR` link-search). `cargo`/`espflash` env from
+  `source ~/export-esp.sh`. Build + size snapshot recorded in `T1-GATE.md`.
 
 ## How to run the gate
 
