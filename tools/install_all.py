@@ -30,6 +30,7 @@ Prerequisites:
 """
 
 import argparse
+import contextlib
 import os
 import re
 import sys
@@ -148,6 +149,19 @@ def _flash_cardputer_native(port: str, result: DeviceResult,
             print(f"  FAIL: DEST_HASH resolution failed — {exc}")
             return
 
+    # Pin the canonical client identity (no-drift, lma_core/client_identity.py):
+    # the same 64-byte private key the MicroPython client uses is baked into the
+    # native build via LMAO_NODE_IDENTITY_HEX, so both runtimes of this board
+    # share one delivery hash that survives re-flashes and NVS erases.
+    print("  Pinning client identity (native) ...")
+    try:
+        env["LMAO_NODE_IDENTITY_HEX"] = _canonical_client_private_key_hex()
+        print("    native node identity pinned to the canonical client identity")
+    except Exception as exc:
+        result.fail(f"Client identity resolution failed: {exc}")
+        print(f"  FAIL: client identity resolution failed — {exc}")
+        return
+
     print(f"\n--- Cardputer (native): building firmware on {port} ---")
     try:
         # Build with the baked-in DEST_HASH (build.sh stages + Docker idf.py).
@@ -252,10 +266,8 @@ def _inject_dest_hash(ser, client_root: str) -> str:
             raise RuntimeError("Failed to upload patched config.py")
     finally:
         if tmp_path is not None:
-            try:
+            with contextlib.suppress(OSError):
                 os.unlink(tmp_path)
-            except OSError:
-                pass
 
     # Verify the hash landed on the device (bypass the sys.modules cache
     # in case main.py already imported the stale config).
@@ -276,6 +288,127 @@ def _inject_dest_hash(ser, client_root: str) -> str:
         )
 
     return dest_hash
+
+
+# ---- Client identity pinning (no-ID-drift, lma_core/client_identity.py) ----
+
+
+_DEVICE_IDENTITY_PATH = "/flash/rns/identity"
+
+
+def _read_device_identity_hex(ser):
+    """Read the µReticulum identity file from the device, or *None*.
+
+    Returns the hex-encoded raw identity file bytes when the device has
+    one, otherwise ``None`` (file absent / not parseable).
+    """
+    from cardputer_client.flash import exec_raw
+
+    script = (
+        "import ubinascii\n"
+        "try:\n"
+        "    _f = open('/flash/rns/identity', 'rb')\n"
+        "    print('IDENT ' + ubinascii.hexlify(_f.read()).decode())\n"
+        "    _f.close()\n"
+        "except Exception:\n"
+        "    pass\n"
+    )
+    ok, out = exec_raw(ser, script, timeout=10)
+    if not ok:
+        return None
+    idx = out.find("IDENT ")
+    if idx < 0:
+        return None
+    return out[idx + len("IDENT "):].splitlines()[0].strip() or None
+
+
+def _write_device_identity(ser, identity_bytes) -> None:
+    """Write the pinned identity file to ``/flash/rns/identity`` and verify.
+
+    Creates ``/flash/rns`` when missing.  Raises ``RuntimeError`` on any
+    failure (including a read-back mismatch) so a flash never silently
+    proceeds with a drifted identity.
+    """
+    from cardputer_client.flash import exec_raw
+
+    hexbytes = identity_bytes.hex()
+    script = (
+        "import os, binascii\n"
+        "try:\n"
+        "    os.mkdir('/flash/rns')\n"
+        "except Exception:\n"
+        "    pass\n"
+        "try:\n"
+        "    _f = open('/flash/rns/identity', 'wb')\n"
+        f"    _f.write(binascii.unhexlify('{hexbytes}'))\n"
+        "    _f.close()\n"
+        "    print('WRITE_OK')\n"
+        "except Exception as _e:\n"
+        "    print('WRITE_FAIL', _e)\n"
+    )
+    ok, out = exec_raw(ser, script, timeout=10)
+    if not ok or "WRITE_OK" not in out:
+        raise RuntimeError(f"Could not write identity to device: {out[:200]}")
+
+    readback = _read_device_identity_hex(ser)
+    if readback != hexbytes:
+        raise RuntimeError(
+            "Identity write verification failed — device reports a different "
+            "file; refusing to proceed with a drifted identity."
+        )
+
+
+def _inject_client_identity(ser) -> str:
+    """Pin the LMAO client identity onto the Cardputer (no-drift scheme).
+
+    The canonical client identity lives on the host at
+    ``~/.local/share/lmao_client/lxmf/identity`` (lma_core/client_identity.py).
+    On the *first* install under this scheme an existing on-device identity is
+    adopted so the currently allow-listed hash keeps working; thereafter the
+    canonical identity file is written to ``/flash/rns/identity`` on every
+    flash — so a wiped device comes back with the same ``lxmf/delivery`` hash
+    instead of drifting into needing a fresh ALLOWED_CLIENTS entry.
+
+    Returns the pinned delivery hash (hex) to compare against the server's
+    allow-list.  Raises on any failure.
+    """
+    from lma_core.client_identity import (
+        adopt_client_identity_bytes,
+        ensure_client_identity,
+        identity_file_path,
+    )
+    from lma_core.server_identity import delivery_destination_hash_hex
+
+    canonical_path = identity_file_path()
+    if not os.path.isfile(canonical_path):
+        device_hex = _read_device_identity_hex(ser)
+        if device_hex:
+            try:
+                device_bytes = bytes.fromhex(device_hex)
+            except (ValueError, TypeError):
+                device_bytes = None
+            if device_bytes is not None and adopt_client_identity_bytes(device_bytes) is not None:
+                print("    adopted existing on-device identity as canonical (no drift)")
+
+    identity, path = ensure_client_identity()
+    with open(path, "rb") as f:
+        canonical_bytes = f.read()
+    _write_device_identity(ser, canonical_bytes)
+    return delivery_destination_hash_hex(identity)
+
+
+def _canonical_client_private_key_hex() -> str:
+    """64-byte private-key hex of the canonical client identity (native bake).
+
+    The native Cardputer firmware bakes this as ``LMAO_NODE_IDENTITY_HEX`` so
+    it uses the *same* pinned identity as the MicroPython client of this board
+    — one delivery hash for both runtimes, hence one allow-list entry that
+    never drifts across firmware types.
+    """
+    from lma_core.client_identity import ensure_client_identity
+
+    identity, _ = ensure_client_identity()
+    return identity.get_private_key().hex()
 
 
 def _flash_cardputer_client(port: str, client_root: str, result: DeviceResult,
@@ -378,6 +511,20 @@ def _flash_cardputer_client(port: str, client_root: str, result: DeviceResult,
         if failed > 0:
             result.fail(f"{failed} of {total} file(s) failed to upload")
             print(f"  FAIL: {failed}/{total} files failed")
+            return
+
+        # Pin the LMAO client identity (no-drift, lma_core/client_identity.py).
+        # The canonical identity is written to /flash/rns/identity so a re-flash
+        # never changes the device's lxmf/delivery hash (a wiped device used to
+        # mint a fresh identity and require a new ALLOWED_CLIENTS entry).
+        print("  Pinning client identity ...")
+        try:
+            client_hash = _inject_client_identity(ser)
+            print(f"    client lxmf/delivery hash = {client_hash} "
+                  "(keep in server ALLOWED_CLIENTS)")
+        except Exception as exc:
+            result.fail(f"Client identity pinning failed: {exc}")
+            print(f"  FAIL: client identity pinning failed — {exc}")
             return
 
         # Inject the server's delivery destination hash so the Cardputer
