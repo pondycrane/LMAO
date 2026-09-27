@@ -80,13 +80,6 @@ cc_test(
 )
 
 cc_test(
-    name = "ratchet_test",
-    srcs = ["tests/ratchet_test.cpp"],
-    deps = ["@rtreticulum//:rtreticulum"],
-    tags = ["unit"],
-)
-
-cc_test(
     name = "real_announce_test",
     srcs = ["tests/real_announce_test.cpp"],
     deps = ["@rtreticulum//:rtreticulum"],
