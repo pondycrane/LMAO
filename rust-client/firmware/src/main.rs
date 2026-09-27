@@ -12,6 +12,10 @@
 use esp_hal::{efuse::InterfaceMacAddress, main, Config};
 use esp_println::println;
 
+// espflash 4.x requires an ESP-IDF app descriptor in the ELF; the canonical
+// esp-hal example wires it via this macro.
+esp_bootloader_esp_idf::esp_app_desc!();
+
 // ESP32-S3 vectored-interrupt dispatch table is bound to no-op stubs until a
 // peripheral actually claims an interrupt (T3+). See interrupt_stubs.rs.
 include!("interrupt_stubs.rs");
