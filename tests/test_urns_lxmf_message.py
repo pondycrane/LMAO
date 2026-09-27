@@ -127,11 +127,3 @@ class TestLXMessageRoundTrip:
         except Exception:
             result = None
         assert result is None
-
-
-if __name__ == "__main__":
-    import sys
-
-    import pytest
-
-    sys.exit(pytest.main([__file__] + sys.argv[1:]))
