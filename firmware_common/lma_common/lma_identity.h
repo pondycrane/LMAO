@@ -12,7 +12,14 @@ namespace lma_identity {
 
     // Load the persisted identity from NVS namespace *ns*, or mint + persist a
     // fresh one on first boot.  NVS must have been initialized by app_main.
-    RNS::Identity load_or_create(const char* ns);
+    //
+    // When *baked_private_hex* is a 64-byte private-key hex string (the LMAO
+    // no-drift scheme: install_all injects the canonical client identity as
+    // LMAO_NODE_IDENTITY_HEX), that identity always wins over NVS and is
+    // persisted back into NVS — so a re-flash or NVS erase can never change
+    // the node's lxmf/delivery hash (see lma_core/client_identity.py).  Pass
+    // nullptr to keep the NVS load-or-mint behaviour.
+    RNS::Identity load_or_create(const char* ns, const char* baked_private_hex = nullptr);
 
     // Hex-encode a byte range (lowercase).  Shared hexstr for log lines.
     std::string hexstr(const void* data, size_t len);
