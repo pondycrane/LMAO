@@ -18,6 +18,7 @@ description = "ESP32-S3 no_std boot test for the LMAO Rust client (T1)"
 [dependencies]
 esp-hal = { version = "1.2.2", features = ["esp32s3"] }
 esp-println = { version = "0.18.0", default-features = false, features = ["esp32s3", "jtag-serial"] }
+esp-bootloader-esp-idf = { version = "0.6", features = ["esp32s3"] }
 
 [profile.release]
 opt-level = "s"

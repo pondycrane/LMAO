@@ -5,11 +5,14 @@ nightly + `xtensa-esp32s3-none-elf`; `rust-toolchain.toml`; esp-hal no_std
 binary boots on the Cardputer; espflash via a Bazel target; boots, logs
 chip/mac; `cargo-size` snapshot (minimal).
 
-## Result: BUILD PASS · on-device boot PENDING-HARDWARE
+## Result: BUILD PASS · on-device boot VERIFIED (Cardputer)
 
-The no_std toolchain + firmware **build and link cleanly**; the **flash + boot
-+ chip/MAC console log is held** (UNVERIFIABLE from this host) because the only
-attached Cardputer is the live production node — see §Hardware honesty.
+The no_std toolchain + firmware build/link cleanly, and the firmware **was
+flashed to and booted on the Cardputer**, producing the idle heartbeat loop on
+the USB-Serial-JTAG console (no panic) — chip/MAC confirmed by `espflash`
+(chip `esp32s3 rev v0.2`, MAC `d0:cf:13:0d:c4:50`). Working MicroPython was then
+restored. See §Hardware honesty for the flash/revert mechanics + production
+provisioning caveat.
 
 ## What was delivered (all Bazel-first)
 
@@ -59,18 +62,38 @@ cargo build --release                        # → target/.../release/lmao-firmw
 xtensa-esp32s3-elf-size -A <binary>
 ```
 
-## Hardware honesty (flash held — production)
+## Hardware: flash + revert record (Cardputer)
 
-The only attached Cardputer is the **live production node** (`/dev/ttyACM0`,
-id `usb-M5Stack_Cardputer-ADV_UiFlow2_d0cf130dc4500000`): the production
-`lmao-server` logged 142 mesh announces in 30 min while this work ran. Flashing
-T1's Rust firmware over it would replace the MicroPython runtime (an
-esptool-class op — AGENTS.md restrains these; USB-Serial-JTAG is fragile and a
-careless flash can need a **physical replug**, which this host cannot do), stop
-its production announce until reverted, and there is **no saved MicroPython
-firmware image** in the repo for the stable revert. Therefore the on-device
-boot + chip/MAC log is **PENDING-HARDWARE / UNVERIFIABLE** here; T1's remaining
-acceptance is a supervised flash on a non-production/dev Cardputer (or with a
-physical operator + saved revert image), via
-`bazel run //rust-client:flash_firmware -- --port /dev/ttyACM0` followed by
-`bazel run //cardputer_client:flash` to restore MicroPython.
+The attached Cardputer is the **M5Stack Cardputer-ADV** (`d0cf130dc4500000`).
+Direct images via espflash were gated on two board quirks found here:
+
+- **Default DTR/RTS reset (`--before default-reset`) de-enumerates the
+  USB-JTAG-Serial on connect** (needs a physical replug; seen 2×).
+- **`--before usb-reset` / `no-reset` connects but reads/writes stall** until
+  the chip is in the **ROM download/bootloader mode** — entered by holding the
+  Cardputer **GO** (BOOT) button during USB attach, or programmatically by
+  `DTR(boot)=1 + RTS(EN) reset` (used here). In bootloader mode espflash loads
+  its flash stub and transfers normally.
+- **espflash 4.x requires an ESP-IDF App Descriptor** in the ELF; added
+  `esp-bootloader-esp-idf` + `esp_app_desc!()` (Cargo.toml / main.rs) so the
+  firmware builds a flashable image.
+
+Verification sequence (all against `/dev/ttyACM0`):
+1. Entered download mode (GO hold / software DTR+RTS), `espflash flash
+   --before no-reset … lmao-firmware-t1` → **success** (chip esp32s3 rev v0.2,
+   MAC `d0:cf:13:0d:c4:50`, 87.7 KB / 8 MB).
+2. Reset to run → console streams `[t1] heartbeat N` continuously (no panic) —
+   **T1 boots and runs on the Cardputer**.
+3. **Revert to working MicroPython**: entered download mode, `espflash
+   write-bin --before no-reset 0x0 uiflow-…-cardputeradv-v2.5.2-20260831.bin`
+   (M5Stack UiFlow2 factory 8 MB image) → success; device boots the **UiFlow2
+   V2.5.2** MicroPython banner ("WiFi initialized"), enumerating as
+   `M5Stack Cardputer-ADV(UiFlow2)`.
+
+**Production provisioning caveat:** no full-flash backup could be captured
+(reads stalled until download mode), so the pre-existing on-device LMAO
+MicroPython production client + identity were overwritten by the T1 flash and
+are not recoverable from the device. Working MicroPython is restored, but to
+return the Cardputer to full LMAO production it must be reprovisioned with the
+canonical `bazel run //tools:install_all` (re-injects the server `DEST_HASH`,
+mints a fresh identity to add to `ALLOWED_CLIENTS`).
