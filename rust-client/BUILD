@@ -48,6 +48,31 @@ sh_binary(
     tags = ["manual"],
 )
 
+# ── T2 identity crate (leaf-rns) ────────────────────────────────────
+# Host-testable core: mint/load RNS Identity + lxmf/delivery DEST + persistence
+# trait (NVS backend plugs in on the firmware side). Pinned RNS crates come
+# from repositories.bzl; `cargo test -p lma-identity` cross-checks the delivery
+# DEST against Python RNS 1.3.5 goldens (see crates/lma-identity/tests).
+
+filegroup(
+    name = "identity_sources",
+    srcs = glob(
+        ["crates/lma-identity/**"],
+        exclude = ["crates/**/target/**"],
+    ) + [
+        "@rns_core//:sources",
+        "@rns_crypto//:sources",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+sh_binary(
+    name = "test_lma_identity",
+    srcs = ["test_identity.sh"],
+    data = [":identity_sources"],
+    tags = ["manual"],
+)
+
 # ── T1 firmware (ESP32-S3 / Cardputer, no_std esp-hal) ────────────────
 # Builds out-of-band via cargo + the esp nightly toolchain (no rules_rust, and
 # the xtensa target is outside Bazel) — same convention as native-client.
