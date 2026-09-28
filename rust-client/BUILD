@@ -179,6 +179,19 @@ sh_binary(
     tags = ["manual"],
 )
 
+# ── T7 host E2E — the composed leaf pipeline (design §5 data-flow, minus RF) ──
+# Runs the whole leaf on the host: identity + LXMF SensorReport control path
+# (lma-identity/lma-wire/lma-lxmf) + an RNS Resource over the held link paced
+# by link windows (leaf-rns) and reassembled hash-verified (leaf-resource).
+# The RF leg (radio-interface over a real RNode) is the on-device T7 half.
+
+sh_binary(
+    name = "run_leaf_e2e",
+    srcs = ["run_leaf_e2e.sh"],
+    data = [":rust_sources"],
+    tags = ["manual"],
+)
+
 # ── T1 firmware (ESP32-S3 / Cardputer, no_std esp-hal) ────────────────
 # Builds out-of-band via cargo + the esp nightly toolchain (no rules_rust, and
 # the xtensa target is outside Bazel) — same convention as native-client.

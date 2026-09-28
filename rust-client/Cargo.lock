@@ -692,6 +692,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "lmao-leaf-e2e"
+version = "0.1.0"
+dependencies = [
+ "leaf-resource",
+ "leaf-rns",
+ "lma-identity",
+ "lma-lxmf",
+ "lma-wire",
+ "prost",
+ "rns-core",
+ "rns-crypto",
+]
+
+[[package]]
 name = "lmao-t0-interop"
 version = "0.1.0"
 dependencies = [
