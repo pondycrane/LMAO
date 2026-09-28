@@ -1,0 +1,10 @@
+[package]
+name = "leaf-power"
+version.workspace = true
+edition.workspace = true
+description = "T9: leaf power/duty-cycle polish — deep sleep between link windows, watchdog, heap-fragmentation guard"
+
+[dependencies]
+
+[dev-dependencies]
+leaf-rns = { path = "../leaf-rns" }
