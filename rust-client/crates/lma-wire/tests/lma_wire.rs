@@ -6,7 +6,7 @@
 //!   node_id="testnode", seq=7, battery=3.3f32,
 //!   readings=[{sensor_id:1, value:32.5f32, unit:"C", timestamp_ms:1700000000123}].
 
-use lma_wire::{reading, sensor_envelope, SensorReport, LmaoEnvelope};
+use lma_wire::{lmao_envelope, reading, rssi_reading, sensor_envelope, LmaoEnvelope, SensorReport};
 use prost::Message;
 
 fn hex(b: &[u8]) -> String {
@@ -57,4 +57,26 @@ fn roundtrip_report_decode_matches() {
     assert_eq!(back.readings[0].timestamp_ms, 1700000000123);
     // float exactness: 32.5 is exactly representable
     assert_eq!(back.readings[0].value, 32.5);
+}
+
+#[test]
+fn rssi_reading_matches_python_golden() {
+    // sensor_id 9 = RSSI (dBm); a leaf stamps the radio RSSI on each frame (T9).
+    let env = sensor_envelope("node1", 1, 3.3, vec![rssi_reading(-75.0, 1700000000123)]);
+    let mut buf = Vec::new();
+    env.encode(&mut buf).unwrap();
+    assert_eq!(
+        hex(&buf),
+        "52230a056e6f64653110011d333353402213080915000096c21a0364426d20fbd095ffbc31"
+    );
+
+    let back = LmaoEnvelope::decode(&buf[..]).unwrap();
+    let r = match back.payload {
+        Some(lmao_envelope::Payload::Sensor(s)) => s.readings,
+        _ => panic!("expected Sensor"),
+    };
+    assert_eq!(r.len(), 1);
+    assert_eq!(r[0].sensor_id, 9);
+    assert_eq!(r[0].unit, "dBm");
+    assert_eq!(r[0].value, -75.0); // f32 -75.0 exact
 }

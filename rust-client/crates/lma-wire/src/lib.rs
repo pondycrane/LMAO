@@ -39,3 +39,9 @@ pub fn reading(sensor_id: u32, value: f32, unit: &str, timestamp_ms: u64) -> Sen
         timestamp_ms,
     }
 }
+
+/// RSSI measurement in dBm — sensor_id 9 per the proto registry (T9 “RSSI
+/// reporting”; the leaf stamps the radio's RSSI on each received frame).
+pub fn rssi_reading(value: f32, timestamp_ms: u64) -> SensorReading {
+    reading(9, value, "dBm", timestamp_ms)
+}
