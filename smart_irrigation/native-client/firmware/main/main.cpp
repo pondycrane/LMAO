@@ -11,14 +11,26 @@
 // from its announce (single-hop RNode path).
 // Step 6 (2026-09-18): the irrigation control engine (control.h/.cpp) runs on a
 // 1 s tick — plant-profile hysteresis on the soil probe with pulse dosing and
-// the hard safety overrides evaluated last.  Pump actuation is gated by
-// PUMP_ACTUATION_ENABLED (pump.h): 0 until the #119 hardware pull-down is
-// fitted and verified, so the node runs DRY RUN and reports no sensor_id 6/7.
+// the hard safety overrides evaluated last.  Pump actuation was originally a
+// compile-time macro; since Step 8 it is runtime (pump.h) — the node always
+// boots dry-run and reports no sensor_id 6/7 until actuation is armed.
+// Step 7 (2026-09-26): one client, two device classes, chosen at flashing time
+// (device_config.h <- build.sh/flash.sh --mode/--plant):
+//   * sprout  — everything above (radio + ENV III + upload).
+//   * sprout-lite — Atom Lite + Watering Unit only (no DTU/LoRa, no ENV III):
+//     soil-moisture-only controller that just waters when the soil is too dry;
+//     no temp/humidity sensing and no data upload.  The plant profile is baked
+//     from SPROUT_PLANT, so each device is configured per plant at flashing.
+// Step 8 (2026-09-27): pump actuation is now RUNTIME, not compile-time.  Every
+// boot starts dry-run; on the Atom Lite the G39 button arms it (2 s hold, red
+// LED on) / disarms it (quick tap) per session — never persisted, so a reset
+// always drops back to dry-run (pump.h, button_led.h).
 #include <cstdio>
 #include <memory>
 #include <string>
 
 #include "esp_log.h"
+#include "esp_system.h"
 #include "esp_timer.h"
 #include "nvs_flash.h"
 #include "nvs.h"
@@ -31,11 +43,13 @@
 #include "rtreticulum/transport.h"
 #include "rtreticulum/reticulum.h"
 #include "uart_at_interface.h"
+#include "device_config.h"
 #include "path_find.h"
 #include "sht30.h"
 #include "moisture.h"
 #include "control.h"
 #include "pump.h"
+#include "button_led.h"
 #include "lma_identity.h"
 #include "lma_encoder.h"
 #include "lxmf_send.h"
@@ -43,8 +57,10 @@
 using namespace RNS;
 static const char* TAG = "sprout";
 
+#if !SPROUT_LITE
 // Server LXMF delivery destination hash (issue #127 / install_all DEST_HASH).
 static const char* DEST_HASH_HEX = "dad35b80164b25f7b1474be86e443702";
+#endif
 
 // Sensor bundle cadence.  5 min per the Phase 0 algorithm evaluation: the
 // ML dataset batches 6 x 5-min samples; 60 s pushes just added LoRa/DuckDB
@@ -75,6 +91,7 @@ static const char* DEST_HASH_HEX = "dad35b80164b25f7b1474be86e443702";
 // use the same one the Cardputer client uses (DRY, see firmware_common/).
 using lma_identity::hexstr;
 
+#if !SPROUT_LITE
 static SemaphoreHandle_t s_ident_lock = nullptr;
 static Identity s_server_identity;                 // learned from the server announce
 static bool s_have_server = false;
@@ -169,11 +186,30 @@ static void send_sensor_report(const Identity& my_identity, const Sht30Reading& 
              (unsigned)frame.size());
     Transport::broadcast(frame, nullptr);
 }
+#endif  // !SPROUT_LITE
 
 extern "C" void app_main(void);
 
 void app_main() {
+    // Diagnose HOW this boot started.  A pump in-rush on a shared 5 V rail
+    // shows BROWN-OUT; a software fault would show PANIC.  Lets us tell a
+    // post-watering reboot (power) apart from a firmware bug (panic) on the
+    // next boot after the red LED vanishes.
+    switch (esp_reset_reason()) {
+        case ESP_RST_POWERON:  ESP_LOGW(TAG, "boot cause: power-on"); break;
+        case ESP_RST_BROWNOUT: ESP_LOGE(TAG, "boot cause: BROWN-OUT (pump in-rush on the 5 V rail?) — pump needs its own supply (#119 wiring)"); break;
+        case ESP_RST_SW:       ESP_LOGW(TAG, "boot cause: software reset"); break;
+        case ESP_RST_PANIC:    ESP_LOGE(TAG, "boot cause: PANIC — software fault"); break;
+        case ESP_RST_WDT:      ESP_LOGW(TAG, "boot cause: watchdog"); break;
+        default:               ESP_LOGW(TAG, "boot cause: other");
+    }
+
+#if SPROUT_LITE
+    ESP_LOGI(TAG, "Sprout LITE: moisture-only controller (no LoRa, no ENV III) — "
+                  "plant profile '%s' baked at flashing", SPROUT_PLANT);
+#else
     ESP_LOGI(TAG, "Sprout native client starting");
+#endif
 
     // SAFETY (#119): drive the watering-unit pump enable LOW (OFF) as the very
     // FIRST action — never leave the pump control line floating.
@@ -187,6 +223,12 @@ void app_main() {
         nvs_flash_init();
     }
 
+    // Boot ALWAYS starts dry-run (the armed state is never persisted): the G39
+    // button arms actuation for the current session only (button_led.h/pump.h).
+    pump_set_actuation(false);
+    button_led_init();
+
+#if !SPROUT_LITE
     s_ident_lock = xSemaphoreCreateMutex();
 
     auto dt = std::make_shared<UartAtInterface>();
@@ -231,6 +273,7 @@ void app_main() {
         ESP_LOGE(TAG, "Reticulum::start failed");
         return;
     }
+#endif  // !SPROUT_LITE
 
     // Irrigation control engine (docs/algorithm-evaluation.md §1.3 + the §1.4
     // amendment).  Persisted: the daily totaliser plus any pending lockout /
@@ -240,20 +283,35 @@ void app_main() {
     {
         sprout::ControlState st{};
         size_t len = sizeof(st);
-        char prof[16] = {0};
-        size_t plen = sizeof(prof);
         bool have_state = false;
         nvs_handle_t nv = 0;
         if (nvs_open("sprout", NVS_READONLY, &nv) == ESP_OK) {
             have_state = (nvs_get_blob(nv, "ctl_state", &st, &len) == ESP_OK &&
                           len == sizeof(st));
-            nvs_get_str(nv, "profile", prof, &plen);  // absent => default profile
             nvs_close(nv);
         }
         control.begin(have_state ? &st : nullptr,
                       (uint32_t)(esp_timer_get_time() / 1000));
-        const int idx = sprout::profile_index_by_name(prof);
-        control.set_profile_index(idx >= 0 ? idx : sprout::default_profile_index());
+#if SPROUT_LITE
+        // Sprout lite: the plant is fixed at flashing time (SPROUT_PLANT) —
+        // no server/display to switch it, so NVS never overrides the flash.
+        int idx = sprout::profile_index_by_name(SPROUT_PLANT);
+#else
+        // Full sprout: a profile already written in NVS (set at an earlier
+        // flash or via future remote switching) wins; SPROUT_PLANT is only the
+        // boot default.  The persist loop writes the active name to NVS, so
+        // the deployed plant stays stable across re-flashes of the same code.
+        char prof[16] = {0};
+        size_t plen = sizeof(prof);
+        if (nvs_open("sprout", NVS_READONLY, &nv) == ESP_OK) {
+            nvs_get_str(nv, "profile", prof, &plen);
+            nvs_close(nv);
+        }
+        int idx = sprout::profile_index_by_name(prof);
+        if (idx < 0) idx = sprout::profile_index_by_name(SPROUT_PLANT);
+#endif
+        if (idx < 0) idx = sprout::default_profile_index();
+        control.set_profile_index(idx);
         ESP_LOGI(TAG, "control profile '%s': target %d%% +/- %d%% (dry %d%% / wet %d%%)",
                  control.profile().name, control.profile().target_pct,
                  control.profile().hyst_pct,
@@ -265,20 +323,23 @@ void app_main() {
                  (unsigned)control.profile().max_pulses,
                  (unsigned)(control.profile().max_daily_ms / 1000),
                  have_state ? "restored" : "fresh",
-                 PUMP_ACTUATION_ENABLED ? "ENABLED" : "dry run");
+                 pump_actuation_enabled() ? "ENABLED" : "dry run");
     }
 
+    uint32_t last_persist_ms = 0;
+    bool probe_implausible_logged = false;
+#if !SPROUT_LITE
     uint64_t last_send_ms = 0;
     uint32_t last_announce_ms = 0;
-    uint32_t last_persist_ms = 0;
     sprout::q8 rh_q8_cached = sprout::q8_from_pct(50);
     bool rh_ok_cached = false;
     uint32_t rh_ms = 0;
-    bool probe_implausible_logged = false;
+#endif
 
     for (;;) {
         const uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
 
+#if !SPROUT_LITE
         if (last_announce_ms == 0 || now_ms - last_announce_ms >= ANNOUNCE_INTERVAL_MS) {
             last_announce_ms = now_ms;
             dest.announce(Bytes(), true);
@@ -294,6 +355,7 @@ void app_main() {
             if (s_ident_lock) xSemaphoreGive(s_ident_lock);
             if (!have_srv) path_find::request(DEST_HASH_HEX);
         }
+#endif  // !SPROUT_LITE
 
         // ── Control engine tick (non-blocking; the pulse train needs only 1 s
         //    resolution, the decision itself runs on the moisture band) ──
@@ -303,13 +365,28 @@ void app_main() {
         cin.now_ms = now_ms;
         cin.moisture_q8 = moisture_q8;
         cin.moisture_ok = probe_ok;
+#if SPROUT_LITE
+        // No ENV III on a sprout lite: no air-RH input, so the RH lockout
+        // clause stays disabled (the engine only consults it when rh_ok).
+        cin.rh_q8 = 0;
+        cin.rh_ok = false;
+#else
         cin.rh_q8 = rh_q8_cached;
         cin.rh_ok = rh_ok_cached && (now_ms - rh_ms < RH_STALE_MS);
+#endif
         const sprout::Outputs eng = control.tick(cin);
+
+        // Apply any button-toggled actuation change (hold to arm, tap to
+        // disarm).  The armed state is not persisted — a reset drops to dry-run.
+        if (button_led_take_pending_change()) {
+            pump_set_actuation(button_led_armed());
+            ESP_LOGI(TAG, "actuation set from button: %s",
+                     button_led_armed() ? "ENABLED" : "dry run");
+        }
 
         if (!eng.pump_on) {
             pump_set(false);
-        } else if (PUMP_ACTUATION_ENABLED) {
+        } else if (pump_actuation_enabled()) {
             pump_set(true);
         } else if (eng.pump_changed) {
             ESP_LOGW(TAG, "DRY RUN: would energise pump (profile=%s pulse %u/%u state=%s)",
@@ -340,7 +417,7 @@ void app_main() {
         // and otherwise at most every PERSIST_INTERVAL_MS.  Dry run is skipped
         // entirely: those doses never happened, so they must not become
         // persisted history that the daily cap counts after actuation is on.
-        if (PUMP_ACTUATION_ENABLED && control.dirty() &&
+        if (pump_actuation_enabled() && control.dirty() &&
             (eng.pump_changed || now_ms - last_persist_ms >= PERSIST_INTERVAL_MS)) {
             last_persist_ms = now_ms;
             nvs_handle_t nv = 0;
@@ -355,7 +432,10 @@ void app_main() {
         }
 
         // ── Telemetry: 5-min cadence plus an immediate report when a session
-        //    ends, so the watering event is timestamped between samples ──
+        //    ends, so the watering event is timestamped between samples.
+        //    Sprout lite has no ENV III and no LoRa uplink — the moisture
+        //    controller does not send anything, so this block is compiled out.
+#if !SPROUT_LITE
         if (last_send_ms == 0 || now_ms - last_send_ms >= SEND_INTERVAL_MS ||
             eng.session_ended) {
             last_send_ms = now_ms;
@@ -372,10 +452,11 @@ void app_main() {
             // keep the series' cadence.
             const float moisture_pct =
                 (float)(eng.moisture_usable ? eng.moisture_q8 : moisture_q8) / 256.0f;
-            send_sensor_report(identity, air, air_ok, PUMP_ACTUATION_ENABLED != 0,
+            send_sensor_report(identity, air, air_ok, pump_actuation_enabled(),
                                pump_take_interval_ms() / 1000, pump_is_on(),
                                moisture_pct, probe_ok, control.profile());
         }
+#endif  // !SPROUT_LITE
 
         vTaskDelay(pdMS_TO_TICKS(TICK_MS));
     }

@@ -146,9 +146,12 @@ filegroup(
 # these wrap the documented Docker build (build.sh) and flash (README) so the
 # whole loop is driven from Bazel:
 #   bazel run //smart_irrigation/native-client:build_firmware
+#   bazel run //smart_irrigation/native-client:build_firmware -- --mode sprout-lite --plant monstera
 #   bazel run //smart_irrigation/native-client:flash_firmware [-- --port X]
+#   bazel run //smart_irrigation/native-client:flash_firmware -- --mode sprout-lite --plant monstera
 # Both are manual: they require Docker (and the device for flash) and are never
-# pulled into `bazel test` runs.
+# pulled into `bazel test` runs.  --mode/--plant bake the device class + plant
+# into the image at build time (device_config.h); see firmware/README.md.
 
 sh_binary(
     name = "build_firmware",
