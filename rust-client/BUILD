@@ -179,6 +179,29 @@ sh_binary(
     tags = ["manual"],
 )
 
+# ── T8 lma-framing crate (LMAF/successor framing on the Resource substrate) ──
+# Receiver-side reassembler over the shared proto's LmafManifest/Chunk/Ack
+# (prost-generated in lma-wire): CRC-32 per chunk + whole-payload SHA-256 verify,
+# NEED/COMPLETE ack, carried by an RNS Resource. The framing wire itself lives in
+# proto/lma_messages.proto (design §6c) and is vector-tested against the native
+# C++ lma_attachment encoding in lma-wire's tests.
+
+filegroup(
+    name = "lma_framing_sources",
+    srcs = glob(
+        ["crates/lma-framing/**"],
+        exclude = ["crates/**/target/**"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+sh_binary(
+    name = "test_lma_framing",
+    srcs = ["test_lma_framing.sh"],
+    data = [":lma_framing_sources"],
+    tags = ["manual"],
+)
+
 # ── T7 host E2E — the composed leaf pipeline (design §5 data-flow, minus RF) ──
 # Runs the whole leaf on the host: identity + LXMF SensorReport control path
 # (lma-identity/lma-wire/lma-lxmf) + an RNS Resource over the held link paced
