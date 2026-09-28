@@ -9,6 +9,7 @@ members = [
     "crates/lma-wire",
     "crates/lma-lxmf",
     "crates/leaf-resource",
+    "crates/lma-framing",
 ]
 
 [workspace.package]
