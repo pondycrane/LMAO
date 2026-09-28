@@ -1,0 +1,14 @@
+[package]
+name = "lma-wire"
+version.workspace = true
+edition.workspace = true
+description = "LMAO control wire: prost-generated LMAOEnvelope/SensorReport (T5, design §5/§6b)"
+
+[dependencies]
+prost = "0.13"
+
+[build-dependencies]
+prost-build = "0.13"
+
+# protoc is required at build time (prost-build). Set PROTOC=… or have protoc on
+# PATH. The doc in UPSTREAM/T5-GATE notes the pinned version used in CI.
