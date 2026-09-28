@@ -1,6 +1,11 @@
 [workspace]
 resolver = "2"
-members = ["host/interop", "crates/lma-identity", "crates/radio-interface"]
+members = [
+    "host/interop",
+    "crates/lma-identity",
+    "crates/leaf-rns",
+    "crates/radio-interface",
+]
 
 [workspace.package]
 version = "0.1.0"

@@ -73,6 +73,27 @@ sh_binary(
     tags = ["manual"],
 )
 
+# ── T4 leaf-rns crate (duty-cycle link-window scheduling) ──────────
+# Resolves design §11 #1 (how a duty-cycled leaf holds a Link): scheduled
+# gateway->leaf link windows + a resume queue; the link is held across dormant
+# gaps (sustain) rather than torn down. Host-testable scheduler.
+
+filegroup(
+    name = "leaf_rns_sources",
+    srcs = glob(
+        ["crates/leaf-rns/**"],
+        exclude = ["crates/**/target/**"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+sh_binary(
+    name = "test_leaf_rns",
+    srcs = ["test_leaf_rns.sh"],
+    data = [":leaf_rns_sources"],
+    tags = ["manual"],
+)
+
 # ── T3 radio interface crate (frame demux / RF-framing) ────────────
 # Host-testable RNode LoRa RF framing port (lma_rnode_framing) + fixed SX1262
 # RF params. On-device SX1262 SPI loopback is the T3 hardware leg (manual).
