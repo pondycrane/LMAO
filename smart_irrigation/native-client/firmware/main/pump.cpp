@@ -8,10 +8,19 @@ static const char* TAG = "pump";
 
 static bool     g_inited = false;
 static bool     g_on = false;
+static bool     g_actuation = false;    // boot dry-run; armed by button_led (G39 hold)
 static bool     g_refused_logged = false;
 static uint32_t g_last_on_ms = 0;       // esp_timer ms when the pin went ON
 static uint32_t g_on_ms_total = 0;      // since boot
 static uint32_t g_interval_ms = 0;      // since pump_take_interval_ms()
+
+void pump_set_actuation(bool enabled) {
+    g_actuation = enabled;
+    g_refused_logged = false;
+    ESP_LOGI(TAG, "actuation %s", enabled ? "ENABLED" : "DISABLED (dry run)");
+}
+
+bool pump_actuation_enabled(void) { return g_actuation; }
 
 bool pump_init(void) {
     gpio_config_t io = {};
@@ -32,17 +41,17 @@ bool pump_init(void) {
     g_on = false;
     g_inited = true;
     ESP_LOGI(TAG, "pump enable G%d driven LOW (OFF), actuation %s", PUMP_GPIO,
-             PUMP_ACTUATION_ENABLED ? "ENABLED" : "DISABLED (dry run)");
+             g_actuation ? "ENABLED" : "DISABLED (dry run)");
     return true;
 }
 
 void pump_set(bool on) {
     if (!g_inited && !pump_init()) return;
-    if (on && !PUMP_ACTUATION_ENABLED) {
+    if (on && !g_actuation) {
         if (!g_refused_logged) {
             ESP_LOGW(TAG,
-                     "refusing to energise G%d: PUMP_ACTUATION_ENABLED=0 "
-                     "(#119 hardware pull-down not verified)",
+                     "refusing to energise G%d: actuation not armed "
+                     "(hold the G39 button 2 s to arm; #119 pull-down first)",
                      PUMP_GPIO);
             g_refused_logged = true;
         }

@@ -19,10 +19,18 @@ const PlantProfile kProfiles[] = {
     {"tomato",         55,  10,    5000,  120000,     3, 1200000UL,  90000UL},
     {"succulent",      20,   6,    5000,  120000,     1, 7200000UL,  30000UL},
     {"generic",        40,   8,    5000,   90000,     1, 1800000UL,  60000UL},
+    // Monstera deliciosa (Swiss cheese plant): wants consistently moist (never
+    // soggy) soil, so a moist band with a longer soak + a second confirming
+    // pulse before the dose cap, like a large-leaf houseplant with a deep pot.
+    // Seed values — re-fit from the logged decay curves (evaluation §4).
+    {"monstera",       50,   8,    5000,  120000,     2, 1800000UL,  90000UL},
 };
 constexpr int kProfileCount = (int)(sizeof(kProfiles) / sizeof(kProfiles[0]));
 
-// Default = kale: the plant the rig is currently installed on (Kale, 2026-09-18).
+// Default = kale: the plant the original rig is installed on (2026-09-18).
+// This is the table-wide fallback only — the boot code in main.cpp prefers the
+// flash-time plant from device_config.h (SPROUT_PLANT), so a device is
+// configured per plant at flashing time without reordering this table.
 constexpr int kDefaultProfile = 0;
 
 }  // namespace
