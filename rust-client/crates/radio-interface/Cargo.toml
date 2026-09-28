@@ -2,6 +2,7 @@
 name = "radio-interface"
 version.workspace = true
 edition.workspace = true
-description = "LMAO leaf radio-interface: RNode LoRa RF frame demux/TX framing (T3)"
+description = "LMAO leaf radio-interface: RNode LoRa RF frame demux/TX framing (T3) + the leaf Interface contract (ticket RF-leg)"
 
 [dependencies]
+rns-core = "0.1.17"
