@@ -156,6 +156,29 @@ sh_binary(
     tags = ["manual"],
 )
 
+# ── T6 leaf-resource crate (RNS Resource over Link on the leaf) ──────────────
+# Wraps rns-core's ResourceReceiver/Sender for the leaf: RX (advertisement →
+# parts → hash-verified assemble → completion proof), TX (leaf-originated),
+# a Store seam (flash persistence boundary), and resume across a dormant link
+# window (T4 sustain). Host tests cross-verify resource/map hashes against the
+# Python RNS 1.3.5 server goldens (design §6b).
+
+filegroup(
+    name = "leaf_resource_sources",
+    srcs = glob(
+        ["crates/leaf-resource/**"],
+        exclude = ["crates/**/target/**"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+sh_binary(
+    name = "test_leaf_resource",
+    srcs = ["test_leaf_resource.sh"],
+    data = [":leaf_resource_sources"],
+    tags = ["manual"],
+)
+
 # ── T1 firmware (ESP32-S3 / Cardputer, no_std esp-hal) ────────────────
 # Builds out-of-band via cargo + the esp nightly toolchain (no rules_rust, and
 # the xtensa target is outside Bazel) — same convention as native-client.

@@ -630,6 +630,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "leaf-resource"
+version = "0.1.0"
+dependencies = [
+ "rns-core",
+ "rns-crypto",
+]
+
+[[package]]
 name = "leaf-rns"
 version = "0.1.0"
 dependencies = [
