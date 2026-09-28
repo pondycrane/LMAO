@@ -229,7 +229,10 @@ written against. The default-OFF requirement is implemented in `pump.cpp`:
   substitute for the 10 kΩ hardware pull-down).
 - Verified on hardware 2026-09-18: the boot log's **second line** is
   `pump: pump enable G26 driven LOW (OFF), actuation DISABLED (dry run)`.
-- `pump_set(true)` is additionally refused while `PUMP_ACTUATION_ENABLED` is `0`.
+- `pump_set(true)` is additionally refused while actuation is not armed
+  (runtime gate, `pump_actuation_enabled()` — see `pump.h`).  Every boot starts
+  disarmed (DRY RUN); on the Atom Lite the G39 button holds-to-arm / taps to
+  disarm per session, and the armed state is never persisted.
 
 **Observation (user-witnessed, 2026-09-18):** during a supervised `idf.py flash`
 the ESP sits in download mode with G26 floating for ~1 minute, and the pump
