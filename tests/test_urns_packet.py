@@ -183,11 +183,3 @@ class TestPacketPacking:
         pkt.raw = b"\xff" * (2 + 16 + 1 + 1)
         result = pkt.unpack()
         assert result is True or result is False
-
-
-if __name__ == "__main__":
-    import sys
-
-    import pytest
-
-    sys.exit(pytest.main([__file__] + sys.argv[1:]))
