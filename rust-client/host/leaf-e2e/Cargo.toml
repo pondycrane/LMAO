@@ -1,0 +1,21 @@
+# T7 host E2E — the composed leaf pipeline (design §5 data-flow, minus the radio).
+#
+# Ties the ticket crates together on the host into one runnable leaf:
+#   lma-identity (persist/sign) + lma-wire/lma-lxmf (LXMF SensorReport control)
+#   + leaf-rns (link-window pacing) + leaf-resource (RNS Resource over the link).
+# This is the host half of the T7 "integration + packaging + E2E": the RF leg
+# (radio-interface as rns_core::Interface over the actual RNode) stays hardware.
+[package]
+name = "lmao-leaf-e2e"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+lma-identity = { path = "../../crates/lma-identity" }
+lma-wire = { path = "../../crates/lma-wire" }
+lma-lxmf = { path = "../../crates/lma-lxmf" }
+leaf-rns = { path = "../../crates/leaf-rns" }
+leaf-resource = { path = "../../crates/leaf-resource" }
+prost = "0.13"
+rns-core = "0.1.17"
+rns-crypto = "0.1.10"
