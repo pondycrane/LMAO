@@ -87,6 +87,18 @@ static const char* DEST_HASH_HEX = "dad35b80164b25f7b1474be86e443702";
 // (#124) disables only the RH lockout clause instead of blocking watering.
 #define RH_STALE_MS 600000UL
 
+// Periodic on-serial moisture telemetry for field debugging (both the full
+// sprout and sprout-lite log the same line). Bounded by construction so it can
+// never overflow the constrained Atom Lite:
+//   * RATE-LIMITED — one fixed-size line every MOISTURE_LOG_INTERVAL_MS, so
+//     the device emits a single ~90-byte line/minute in steady state.
+//   * UART-ONLY — never written to flash/NVS, so no storage wear or growth.
+//   * NO HEAP — ESP-IDF esp_log formats into a fixed stack buffer per call, so
+//     it allocates nothing and cannot leak or fragment the heap.
+// 60 s is enough to observe the moisture/settlement trend and correlate a
+// watering decision without flooding the console over days.
+#define MOISTURE_LOG_INTERVAL_MS 60000UL
+
 // hexstr is provided by the shared lma_identity module (firmware_common) —
 // use the same one the Cardputer client uses (DRY, see firmware_common/).
 using lma_identity::hexstr;
@@ -328,6 +340,7 @@ void app_main() {
 
     uint32_t last_persist_ms = 0;
     bool probe_implausible_logged = false;
+    uint32_t last_moisture_log_ms = 0;
 #if !SPROUT_LITE
     uint64_t last_send_ms = 0;
     uint32_t last_announce_ms = 0;
@@ -375,6 +388,23 @@ void app_main() {
         cin.rh_ok = rh_ok_cached && (now_ms - rh_ms < RH_STALE_MS);
 #endif
         const sprout::Outputs eng = control.tick(cin);
+
+        // Periodic moisture telemetry (debug): one rate-limited fixed-size line
+        // on the serial console for both sprout and sprout-lite, reflecting the
+        // moisture the engine actually decided on (settled median when usable)
+        // plus its current state, so a watering decision is reproducible.
+        // See MOISTURE_LOG_INTERVAL_MS for why this is bounded (no flash, no heap).
+        if (now_ms - last_moisture_log_ms >= MOISTURE_LOG_INTERVAL_MS) {
+            last_moisture_log_ms = now_ms;
+            const float dbg_m =
+                (float)(eng.moisture_usable ? eng.moisture_q8 : moisture_q8) / 256.0f;
+            ESP_LOGI(TAG, "moisture=%.1f%% probe=%s state=%s blend=%s pump_cmd=%s%s",
+                     (double)dbg_m, probe_ok ? "ok" : "FAIL",
+                     sprout::state_name(eng.state),
+                     eng.moisture_usable ? "cond" : "raw",
+                     eng.pump_on ? "ON" : "off",
+                     pump_actuation_enabled() ? "" : " (dry-run)");
+        }
 
         // Apply any button-toggled actuation change (hold to arm, tap to
         // disarm).  The armed state is not persisted — a reset drops to dry-run.
