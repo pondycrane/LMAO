@@ -84,6 +84,10 @@ side + Rust receives the completion proof).
   chip linker script (`-Wl,-Tlinkall.x -nostartfiles`; scripts exposed by
   esp-hal's build.rs via `OUT_DIR` link-search). `cargo`/`espflash` env from
   `source ~/export-esp.sh`. Build + size snapshot recorded in `T1-GATE.md`.
+- Control wire (T5): `crates/lma-wire` runs **prost-build** against the shared
+  `proto/lma_messages.proto`, which needs `protoc` at build time — on `PATH` or
+  `PROTOC=/path/to/protoc` (pinned: official `protoc-27.3-linux-aarch_64`,
+  recorded in `T5-GATE.md`). Same for `crates/lma-lxmf` (depends on lma-wire).
 
 ## How to run the gate
 
