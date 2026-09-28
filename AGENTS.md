@@ -147,9 +147,16 @@ no display/receive path — the chart needs the MicroPython client.
   targets build with `LMAO_DEST_HASH_HEX` unset (announce-only, device logs
   "No destination configured — not sending"); only `//tools:install_all`
   resolves the server's current delivery hash and injects it.
-- The client's identity is minted fresh on first boot (native: NVS;
-  MicroPython: on-device storage); its `lxmf/delivery` hash is printed on the
-  serial console and must be added to the server's `ALLOWED_CLIENTS` (env
+- **Client identities are pinned — no drift across re-flashes.** `install_all`
+  keeps one canonical client identity on the host at
+  `~/.local/share/lmao_client/lxmf/identity` (**outside the repo; NEVER commit
+  private keys** — `lma_core/client_identity.py` knows where to load them) and
+  writes it onto the device each flash (`/flash/rns/identity` for MicroPython,
+  `LMAO_NODE_IDENTITY_HEX` for native), adopting the on-device identity on the
+  first install so an already-allow-listed hash keeps working.  A wiped
+  re-flash therefore comes back with the same `lxmf/delivery` hash; only a
+  brand-new device mints a fresh canonical identity.  That hash is printed on
+  the serial console and must be added to the server's `ALLOWED_CLIENTS` (env
   `LMAO_ALLOWED_CLIENTS` in `k8s/lmao-server.yaml`) for the server to accept
   its reports (same flow as Sprout's native hash).
 

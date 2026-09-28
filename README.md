@@ -229,11 +229,20 @@ when the rest of the client boots.
   destination hash, and passes it to the client — written into the
   MicroPython client's on-device config, or baked into the native firmware via
   `LMAO_DEST_HASH_HEX` at build time. Leave it unset to run announce-only.
-- The client's identity is **minted fresh on first boot** (native: NVS;
-  MicroPython: on-device storage). Its `lxmf/delivery` hash is printed on the
-  serial console — add it to the server's `ALLOWED_CLIENTS` (env
-  `LMAO_ALLOWED_CLIENTS` in `k8s/lmao-server.yaml`, see §5a) so the server
-  accepts its reports.
+- The client identity is **pinned — it no longer drifts across re-flashes**.
+  `install_all` keeps ONE canonical client identity on the host at
+  `~/.local/share/lmao_client/lxmf/identity` (**outside the repo** — private
+  keys must never be committed; `lma_core/client_identity.py` knows where to
+  load them) and writes it onto the device on every flash: `/flash/rns/identity`
+  for the MicroPython client, and the same 64-byte private key baked into the
+  native firmware as `LMAO_NODE_IDENTITY_HEX` — so both runtimes of a board
+  share one delivery hash.  On the first install under this scheme an existing
+  on-device identity is **adopted unchanged**, so the currently allow-listed
+  hash keeps working; a wiped re-flash comes back with the *same*
+  `lxmf/delivery` hash instead of minting a fresh one that would need a new
+  `ALLOWED_CLIENTS` entry.  That hash is printed on the serial console and
+  must be added to the server's `ALLOWED_CLIENTS` (env `LMAO_ALLOWED_CLIENTS`
+  in `k8s/lmao-server.yaml`, see §5a) so the server accepts its reports.
 - Report interval (default 300 s, minimum clamped 10 s), optional DHT20 sensor
   and other MicroPython-client settings live in `cardputer_client/config.py`;
   the native firmware takes them as build-time defines
