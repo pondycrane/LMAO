@@ -4,7 +4,6 @@ py_library(
     name = "lma_core",
     srcs = [
         "__init__.py",
-        "attachment.py",
         "config_utils.py",
         "contact_book.py",
         "contacts_api.py",
