@@ -1,0 +1,15 @@
+[package]
+name = "lma-lxmf"
+version.workspace = true
+edition.workspace = true
+description = "T5 LXMF control path: pack/verify an LMAO protobuf envelope in an LXMF message"
+
+[dependencies]
+lma-wire = { path = "../lma-wire" }
+lma-identity = { path = "../lma-identity" }
+prost = "0.13"
+lxmf-core = "0.1.5"
+rns-crypto = "0.1.10"
+
+[dev-dependencies]
+rns-core = "0.1.17"
