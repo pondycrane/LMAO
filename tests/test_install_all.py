@@ -68,6 +68,9 @@ def _patch_imports():
         "inject_dest_hash": patch.object(
             install_all, "_inject_dest_hash", return_value="a" * 32
         ),
+        "inject_client_identity": patch.object(
+            install_all, "_inject_client_identity", return_value="ab" * 16
+        ),
         "flash_cardputer_native": patch.object(
             install_all, "_flash_cardputer_native",
             side_effect=lambda port, result, inject_dest_hash=True: result.ok(
@@ -467,6 +470,12 @@ class TestFlashCardputerClient:
             "inject_dest_hash": patch.object(
                 install_all, "_inject_dest_hash", return_value="a" * 32
             ),
+            # Identity pinning talks to the device (raw REPL) and the host
+            # crypto store; its own client_identity tests cover it — here it
+            # would block on the 10 s exec_raw timeout over the mocked port.
+            "inject_client_identity": patch.object(
+                install_all, "_inject_client_identity", return_value="ab" * 16
+            ),
             "os.path.getsize": patch("os.path.getsize", return_value=100),
         }
         self._all_patches = patches
@@ -632,6 +641,27 @@ class TestFlashCardputerClient:
         install_all._flash_cardputer_client("/dev/ttyACM0", "/fake/root", result)
         # Should still succeed because verification is a warning, not a blocker
         assert result.status == "OK"
+        self.mock_ser.close.assert_called_once()
+
+    # ── client identity pinning (no-drift) ──
+
+    def test_client_identity_pinning_runs_on_success(self):
+        """Client identity pinning runs during a normal flash and is not
+        gated behind inject_dest_hash — a wiped device must never drift."""
+        result = self._make_result()
+        install_all._flash_cardputer_client(
+            "/dev/ttyACM0", "/fake/root", result, inject_dest_hash=False
+        )
+        self.mocks["inject_client_identity"].assert_called_once_with(self.mock_ser)
+        assert result.status == "OK"
+
+    def test_client_identity_pinning_failure_sets_fail(self):
+        """A client identity pinning failure aborts the flash."""
+        self.mocks["inject_client_identity"].side_effect = RuntimeError("no canonical")
+        result = self._make_result()
+        install_all._flash_cardputer_client("/dev/ttyACM0", "/fake/root", result)
+        assert result.status == "FAIL"
+        assert "identity pinning failed" in result.detail
         self.mock_ser.close.assert_called_once()
 
     # ── DEST_HASH injection ──

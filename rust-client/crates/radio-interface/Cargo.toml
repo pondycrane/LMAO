@@ -1,0 +1,7 @@
+[package]
+name = "radio-interface"
+version.workspace = true
+edition.workspace = true
+description = "LMAO leaf radio-interface: RNode LoRa RF frame demux/TX framing (T3)"
+
+[dependencies]

@@ -4,6 +4,7 @@ py_library(
     name = "lma_core",
     srcs = [
         "__init__.py",
+        "client_identity.py",
         "config_utils.py",
         "contact_book.py",
         "contacts_api.py",
