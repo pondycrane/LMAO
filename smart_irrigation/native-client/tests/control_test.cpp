@@ -123,16 +123,24 @@ static Outputs run_until(Sim& s, Pred stop, uint32_t budget_ms, uint32_t step_ms
 static int kale() { return profile_index_by_name("kale"); }
 static int herbs() { return profile_index_by_name("herbs"); }
 static int tomato() { return profile_index_by_name("tomato"); }
+static int monstera() { return profile_index_by_name("monstera"); }
 
 // ── Profile table ────────────────────────────────────────────────────────────
 static void test_profile_table() {
-    CHECK_EQ(profile_count(), 5, "5 plant profiles");
+    CHECK_EQ(profile_count(), 6, "6 plant profiles");
     CHECK_EQ(kale(), 0, "kale is the default profile");
     CHECK_EQ(profile_index_by_name("tomato"), 2, "tomato index");
+    CHECK_EQ(monstera(), 5, "monstera appended last (indices stay stable)");
     CHECK_EQ(profile_index_by_name("nope"), -1, "unknown profile -> -1");
     CHECK_TRUE(profile_at(-7).name == profile_at(0).name, "profile_at clamps to default");
     CHECK_EQ(profile_at(kale()).dry_q8(), q8_from_pct(37), "kale dry = 45 - 8");
     CHECK_EQ(profile_at(kale()).wet_q8(), q8_from_pct(53), "kale wet = 45 + 8");
+    // The first sprout-lite device's plant (monstera): a moist-but-not-soggy
+    // band, second pulse to confirm, dose inside the invariants below.
+    CHECK_EQ(profile_at(monstera()).target_pct, 50, "monstera target = 50 %");
+    CHECK_EQ(profile_at(monstera()).dry_q8(), q8_from_pct(42), "monstera dry = 50 - 8");
+    CHECK_EQ(profile_at(monstera()).wet_q8(), q8_from_pct(58), "monstera wet = 50 + 8");
+    CHECK_EQ(profile_at(monstera()).max_pulses, 2, "monstera = 2 pulses per session");
 
     // A plant added later must not be able to break the short-session
     // invariants or the hardness of the safety ceilings.

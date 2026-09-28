@@ -117,9 +117,30 @@ first boot action, #119).
 
 The plant's optimum is a **plant profile**: `target ± band` becomes the dry/wet
 thresholds, plus the pulse/soak shape and dose caps. Shipped profiles: **kale
-(default)**, herbs, tomato, succulent, generic. The node stores the profile by
-name in NVS (`profile`); switching it today means a reflash or an NVS write —
-remote switching lands with the LXMF downlink phase (#115).
+(default)**, herbs, tomato, succulent, generic, **monstera**. The plant is
+selected **at flashing time** (`--plant NAME`, see below), so each device is
+baked for its own plant; a full Sprout node stores the active profile by name
+in NVS (`profile`) and remote switching lands with the LXMF downlink phase
+(#115).
+
+## Sprout Lite (same client, `--mode sprout-lite`)
+
+A second device class runs the **same native client**, chosen at build/flash
+time (`--mode sprout-lite`): Atom Lite + Watering Unit only — **no DTU/LoRa
+module, no ENV III sensor**. In this mode the client compiles out the whole
+radio/mesh/telemetry path (Reticulum, DTU-UART, announce, SHT30, SensorReport
+upload) and is a pure soil-moisture controller: it reads the probe, runs the
+control engine against the baked plant profile, and water-drives the pump when
+the soil is too dry. No temp/humidity sensing and no data upload. The
+flash-time `--plant NAME` argument sets the device's plant (the first Sprout
+Lite is a **monstera** / Swiss cheese plant, `--plant monstera`). Config is
+baked into `firmware/main/device_config.h` at build time; see
+`native-client/firmware/README.md` for the exact flash commands.
+
+Pump actuation stays dry-run on both variants until the #119 hardware
+pull-down gate is passed — the Lite controller logs its watering decisions but
+does not yet energise the pump.
+
 
 Decisions never act on a single probe reading: only samples taken with the pump
 off and settled enter a 30-sample window, and the value compared against every
@@ -130,15 +151,18 @@ each pump edge so a post-pulse reading is never mixed with pre-pulse soil.
 | Where | What |
 |---|---|
 | `native-client/firmware/main/control.{h,cpp}` | profiles, pulse-train state machine, hard overrides (pure C++, integer Q8.8) |
-| `native-client/firmware/main/pump.{h,cpp}` | G26 driver: default-OFF, actuation gate, on-time accounting |
+| `native-client/firmware/main/pump.{h,cpp}` | G26 driver: default-OFF, runtime actuation gate, on-time accounting |
+| `native-client/firmware/main/button_led.{h,cpp}` | G39 button + SK6812 LED: hold 2 s = arm actuation, tap = dry-run, red LED = armed |
 | `native-client/tests/control_test.cpp` | `bazel test //smart_irrigation/native-client:sprout_control_test` |
 
-⚠️ **Actuation stays off** — `PUMP_ACTUATION_ENABLED` is `0` in `pump.h` until the
-#119 hardware pull-down is fitted and the OFF level is verified through
-reset/flash. The node runs the engine in **DRY RUN**: it decides and logs, the
-pump stays de-energised, sensor_id 6/7 (pump duration/active) are *not* emitted,
-and nothing is written to the persisted control blob — so the ML stream and the
-daily cap never count doses that did not happen.
+⚠️ **Actuation is now runtime and boots off** — every reset/power cycle starts
+in **DRY RUN**: the G39 button arms the pump for the *current* session only
+(hold ~2 s = arm, red LED on; tap = dry-run; the armed state is never
+persisted). Until the #119 hardware pull-down is fitted and the OFF level is
+verified through reset/flash, don't arm it. In dry run the node decides and
+logs, the pump stays de-energised, sensor_id 6/7 (pump duration/active) are
+*not* emitted, and nothing is written to the persisted control blob — so the ML
+stream and the daily cap never count doses that did not happen.
 
 ## Cardputer chart (viewing the Sprout data)
 

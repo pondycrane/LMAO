@@ -5,6 +5,7 @@ set(SRCS
     "moisture.cpp"
     "control.cpp"
     "pump.cpp"
+    "button_led.cpp"
 )
 
 idf_component_register(
@@ -16,6 +17,7 @@ idf_component_register(
         driver
         esp_driver_uart
         esp_driver_i2c
+        esp_driver_rmt
         esp_timer
         esp_hw_support
         nvs_flash
