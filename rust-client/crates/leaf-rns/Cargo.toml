@@ -1,0 +1,11 @@
+[package]
+name = "leaf-rns"
+version.workspace = true
+edition.workspace = true
+description = "LMAO leaf RNS: transport/Link wiring + duty-cycle link-window scheduling (T4)"
+
+[dependencies]
+# lma-identity (T2, merged) — the leaf's RNS identity lifecycle.
+lma-identity = { path = "../lma-identity" }
+# radio-interface (T3, PR #175 — add when merged): frames the RNS interface the
+# link-window scheduler gates the radio RX of. Scheduling is framing-independent.
