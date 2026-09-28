@@ -202,6 +202,28 @@ sh_binary(
     tags = ["manual"],
 )
 
+# ── T9 leaf-power crate (power/duty-cycle polish) ───────────────────────────
+# Deep-sleep scheduling between link windows (composed with the leaf-rns
+# scheduler), a watchdog (detect a wedged/beaconing device — cf cardputer_client
+# #74), and a heap-fragmentation guard (cf #71/#74 robustness). RSSI reporting
+# is the lma-wire sensor_id 9 helper + golden (T9).
+
+filegroup(
+    name = "leaf_power_sources",
+    srcs = glob(
+        ["crates/leaf-power/**"],
+        exclude = ["crates/**/target/**"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+sh_binary(
+    name = "test_leaf_power",
+    srcs = ["test_leaf_power.sh"],
+    data = [":leaf_power_sources"],
+    tags = ["manual"],
+)
+
 # ── T7 host E2E — the composed leaf pipeline (design §5 data-flow, minus RF) ──
 # Runs the whole leaf on the host: identity + LXMF SensorReport control path
 # (lma-identity/lma-wire/lma-lxmf) + an RNS Resource over the held link paced
