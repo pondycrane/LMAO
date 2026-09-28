@@ -7,6 +7,7 @@ members = [
     "crates/radio-interface",
     "crates/lma-wire",
     "crates/lma-lxmf",
+    "crates/leaf-resource",
 ]
 
 [workspace.package]
