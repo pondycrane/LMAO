@@ -10,6 +10,16 @@ CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_160=y
 # in block_locate_free at the next allocation (boot panic-loop). 16 KiB gives
 # the crypto/hash chain real headroom.
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
+# RTReticulum is built with -fexceptions and throws std::invalid_argument on
+# every decryption/parse error path (e.g. an inbound server reply the leaf
+# cannot decrypt). Those throws are wrapped in try/catch inside RNS
+# (Identity::decrypt falls back to the base key), but with app-wide C++
+# exceptions disabled __cxa_allocate_exception resolves to the ESP-IDF abort
+# stubs — so the first such throw ABORTED the node mid-receive, PANIC-reset it
+# to dry-run and dropped the armed red LED. Enable exceptions so those
+# try/catch blocks actually run and undecryptable downlinks are dropped
+# gracefully instead of resetting the device.
+CONFIG_COMPILER_CXX_EXCEPTIONS=y
 # mbedTLS algorithms RTReticulum needs.
 CONFIG_MBEDTLS_HARDWARE_AES=y
 CONFIG_MBEDTLS_HARDWARE_SHA=y
