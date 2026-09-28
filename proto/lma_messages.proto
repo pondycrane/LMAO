@@ -14,6 +14,10 @@ message LMAOEnvelope {
     AudioMessage    audio   = 21;
     ImageMessage    image   = 22;
     CallSignal      call    = 30;
+    LmafManifest    manifest    = 40;
+    LmafChunk       chunk       = 41;
+    LmafAck         ack_lmaf    = 42;
+    LmafCapability  capability  = 43;
   }
 }
 
@@ -104,4 +108,77 @@ message CallSignal {
   Signal signal        = 1;
   string sdp_or_ice    = 2;
   string media_type    = 3;
+}
+// ---------------------------------------------------------------------------
+// LMAF / successor transfer framing (T8).  Chunked, integrity-checked transfer
+// of a large attachment (chart, audio, image, ...) over the stable RNS Resource
+// substrate.  Wire contract pinned from the native C++ client's
+// firmware_common lma_attachment encoder (field numbers must not drift).
+// ---------------------------------------------------------------------------
+
+// Transfer kind registry.
+enum LmafKind {
+  LMAF_UNSPECIFIED = 0;
+  LMAF_VOICE       = 1;
+  LMAF_AUDIO       = 2;
+  LMAF_IMAGE       = 3;
+  LMAF_VIDEO       = 4;
+  LMAF_FILE        = 5;
+  LMAF_CHART       = 6;
+  LMAF_SIGNAL      = 7;
+}
+
+// AttachmentAck.Status contract.
+enum LmafAckStatus {
+  LMAF_RECEIVING = 0;
+  LMAF_COMPLETE  = 1;
+  LMAF_NEED      = 2;
+  LMAF_REJECTED  = 3;
+  LMAF_ABORTED   = 4;
+}
+
+// Transfer manifest: declares the whole attachment before its chunks.
+message LmafManifest {
+  bytes  id          = 1;  // sha256(payload)[:16] — session key
+  bytes  payload_sha256 = 2;  // full 32 B digest, verified after assembly
+  LmafKind kind         = 3;
+  string codec          = 4;  // "lmao:chart-line-v1", "codec2:700C", ...
+  uint32 chunk_size     = 5;
+  uint32 chunk_count    = 6;
+  uint64 total_bytes    = 7;
+  uint32 sample_rate    = 8;
+  uint32 channels       = 9;
+  uint32 duration_ms    = 10;
+  uint32 width          = 11;
+  uint32 height         = 12;
+  string node_id        = 13;
+  uint64 created_ms     = 14;
+}
+
+// One chunk of a transfer.
+message LmafChunk {
+  bytes  id         = 1;  // matching LmafManifest.id
+  uint32 index      = 2;
+  bytes  data       = 3;
+  fixed32 crc       = 4;  // CRC-32 (zlib/EDB88320) of data
+}
+
+// Receiver -> sender acknowledgement / gap report.
+message LmafAck {
+  bytes          id        = 1;
+  LmafAckStatus  status    = 2;
+  uint32         have_count = 3;
+  repeated uint32 missing  = 4 [packed = false];  // chunk indexes still needed (C++ emits non-packed)
+  string         reason    = 5;
+}
+
+// What a node accepts, for the sender to size its chunks.
+message LmafCapability {
+  uint32   lmaf_version       = 1;
+  repeated LmafKind kinds     = 2 [packed = false];  // C++ lma_attachment emits non-packed
+  repeated string  codecs     = 3;
+  uint32   max_chunk_size     = 4;
+  uint64   max_attachment_bytes = 5;
+  uint32   rx_window          = 6;
+  uint32   airtime_budget_bps = 7;
 }

@@ -1,0 +1,13 @@
+[package]
+name = "lma-framing"
+version.workspace = true
+edition.workspace = true
+description = "T8: LMAF/successor transfer-framing reassembler over the stable Resource substrate"
+
+[dependencies]
+lma-wire = { path = "../lma-wire" }
+rns-crypto = "0.1.10"
+
+[dev-dependencies]
+leaf-resource = { path = "../leaf-resource" }
+rns-core = "0.1.17"

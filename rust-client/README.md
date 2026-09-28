@@ -28,6 +28,7 @@ radio (esp-hal UART/SPI)
 | crates/lma-wire | prost `LmaoEnvelope`/`SensorReport` (from `proto/lma_messages.proto`, §6b) | T5 — host PASS |
 | crates/lma-lxmf | LXMF control path (pack/sign/verify) | T5 — host PASS |
 | crates/leaf-resource | RNS Resource over Link (rx/tx, resume) | T6 — host PASS |
+| crates/lma-framing | LMAF/successor framing reassembler on Resource (manifest→chunks→crc→verify→ack) | T8 — host PASS |
 | host/leaf-e2e | **composed leaf pipeline** (§5 data-flow, host) | T7 — PASS |
 
 ## Gates
@@ -42,6 +43,7 @@ bazel run  //rust-client:test_leaf_rns            # T4: link-window scheduler
 bazel run  //rust-client:test_lma_wire            # T5: prost ≡ Python golden (needs PROTOC)
 bazel run  //rust-client:test_lma_lxmf            # T5: LXMF control path (needs PROTOC)
 bazel run  //rust-client:test_leaf_resource       # T6: Resource over Link + RNS hashes
+bazel run  //rust-client:test_lma_framing         # T8: LMAF framing on Resource (needs PROTOC)
 bazel run  //rust-client:run_t0_gate -- --python <py>   # T0: live Python RNS interop
 ```
 
