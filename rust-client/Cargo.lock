@@ -630,6 +630,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "leaf-power"
+version = "0.1.0"
+dependencies = [
+ "leaf-rns",
+]
+
+[[package]]
 name = "leaf-resource"
 version = "0.1.0"
 dependencies = [
