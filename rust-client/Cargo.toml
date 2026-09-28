@@ -1,10 +1,11 @@
 [workspace]
 resolver = "2"
-members = ["host/interop", "crates/lma-identity", "crates/leaf-rns"]
-
-# NOTE: crates/radio-interface (T3) is added to `members` when PR #175 merges.
-# leaf-rns is built here without it (the link-window scheduler is framing-
-# independent); the radio/transport wiring folds in on top of #175.
+members = [
+    "host/interop",
+    "crates/lma-identity",
+    "crates/leaf-rns",
+    "crates/radio-interface",
+]
 
 [workspace.package]
 version = "0.1.0"

@@ -219,6 +219,16 @@ py_test(
 )
 
 py_test(
+    name = "test_client_identity",
+    srcs = ["test_client_identity.py"],
+    deps = [
+        "//lma_core",
+        "@lmao_pip//pytest",
+        "@lmao_pip//rns",
+    ],
+)
+
+py_test(
     name = "test_config",
     srcs = ["test_config.py"],
     data = [

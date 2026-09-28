@@ -46,6 +46,17 @@ static const char* TAG = "cardputer";
 #endif
 static const char* DEST_HASH_HEX = LMAO_DEST_HASH_HEX;
 
+// Pinned 64-byte private-key hex injected by install_all via
+// LMAO_NODE_IDENTITY_HEX (no-drift scheme, lma_core/client_identity.py).
+// When set, this node uses that identity regardless of NVS — the same identity
+// as this board's MicroPython client, so one allow-list entry covers both
+// runtimes and a re-flash never changes the lxmf/delivery hash.  Empty string
+// = keep the NVS load-or-mint behaviour.
+#ifndef LMAO_NODE_IDENTITY_HEX
+#define LMAO_NODE_IDENTITY_HEX ""
+#endif
+static const char* PINNED_IDENTITY_HEX = LMAO_NODE_IDENTITY_HEX;
+
 // Interval between SensorReports (seconds).  Default 300 s matches the
 // Sprout telemetry cadence; E2E patches it to 15 s.  Clamped to >= 10 s to
 // avoid LoRa congestion — mirrors _min_interval in main.py.
@@ -170,8 +181,10 @@ void app_main() {
     // the node is a stable mesh peer and can be allow-listed on the server.
     // A fresh native identity is minted on first boot — its lxmf/delivery
     // hash must be added to the server's ALLOWED_CLIENTS (like Sprout's).
+    // With LMAO_NODE_IDENTITY_HEX baked in, the pinned canonical client
+    // identity wins over NVS (no-drift, lma_core/client_identity.py).
     // Shared with the Sprout client (firmware_common/lma_identity).
-    Identity identity = lma_identity::load_or_create("cardputer");
+    Identity identity = lma_identity::load_or_create("cardputer", PINNED_IDENTITY_HEX);
     ESP_LOGI(TAG, "identity hash: %s", hexstr(identity.get_salt()).c_str());
     {
         // The server allow-lists the sender's lxmf/delivery hash — print ours
