@@ -73,6 +73,26 @@ sh_binary(
     tags = ["manual"],
 )
 
+# ── T3 radio interface crate (frame demux / RF-framing) ────────────
+# Host-testable RNode LoRa RF framing port (lma_rnode_framing) + fixed SX1262
+# RF params. On-device SX1262 SPI loopback is the T3 hardware leg (manual).
+
+filegroup(
+    name = "radio_sources",
+    srcs = glob(
+        ["crates/radio-interface/**"],
+        exclude = ["crates/**/target/**"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+sh_binary(
+    name = "test_radio",
+    srcs = ["test_radio.sh"],
+    data = [":radio_sources"],
+    tags = ["manual"],
+)
+
 # ── T1 firmware (ESP32-S3 / Cardputer, no_std esp-hal) ────────────────
 # Builds out-of-band via cargo + the esp nightly toolchain (no rules_rust, and
 # the xtensa target is outside Bazel) — same convention as native-client.
