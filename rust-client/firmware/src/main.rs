@@ -114,11 +114,13 @@ fn main() -> ! {
     let beacon: [u8; 7] = [0xcb, b'L', b'M', b'A', b'O', 1, 0];
     let loaded = (|| -> Result<(), ()> {
         radio.prepare_send(&beacon)?;
-        radio.start_tx()?;
+        // 100 ms TX timeout (0x1900 * 15.625us) — force-aborts an endless TX.
+        radio.start_tx_timeout([0x00, 0x19, 0x00])?;
         Ok(())
     })();
     println!("[t3] beacon loaded={} 7B, polling irq up to ~250ms...", loaded.is_ok());
     let mut saw_tx_done = false;
+    let mut saw_tx_timeout = false;
     let mut fired_at: Option<u32> = None;
     let mut last_mode: Option<u8> = None;
     for i in 0..100 {
@@ -138,13 +140,22 @@ fn main() -> ! {
         }
         match radio.get_irq_status() {
             Ok(v) => {
-                if v != 0 || saw_tx_done {
-                    println!("[t3] irq[{i}]={:#06x}{}", v, if v & irq::TX_DONE != 0 { " TX_DONE" } else { "" });
+                if v != 0 {
+                    if v & irq::TX_DONE != 0 {
+                        println!("[t3] irq[{i}]={:#06x} TX_DONE", v);
+                    } else if v & irq::TIMEOUT != 0 {
+                        println!("[t3] irq[{i}]={:#06x} TX_TIMEOUT", v);
+                    } else {
+                        println!("[t3] irq[{i}]={:#06x}", v);
+                    }
                 }
                 if v & irq::TX_DONE != 0 {
                     saw_tx_done = true;
                     fired_at = Some(i);
                     break;
+                }
+                if v & irq::TIMEOUT != 0 {
+                    saw_tx_timeout = true;
                 }
             }
             Err(_) => {
@@ -165,7 +176,7 @@ fn main() -> ! {
         Ok(v) => println!("[t3] dev_errors(after tx)={:#06x}", v),
         Err(_) => println!("[t3] dev_errors=ERR"),
     }
-    println!("[t3] beacon TX_DONE={} fired_at={:?}", saw_tx_done, fired_at);
+    println!("[t3] beacon TX_DONE={} TIMEOUT={} fired_at={:?}", saw_tx_done, saw_tx_timeout, fired_at);
     // If a fatal device error blocked TX, clear it and retry the beacon once.
     match radio.get_device_errors() {
         Ok(e) if e != 0 => {
