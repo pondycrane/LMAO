@@ -61,6 +61,13 @@ impl<B: RadioBus> RnsLink<B> {
         self.radio.start_rx([0xFF, 0xFF, 0xFF]).map_err(|_| ())
     }
 
+    /// Drop the radio to STANDBY_RC (XOSC/PLL off — the power-saving state for
+    /// the dormant gap between link windows). `prepare_send` re-warms it via
+    /// STDBY_XOSC before the next TX.
+    pub fn enter_standby(&mut self) -> Result<(), ()> {
+        self.radio.standby().map_err(|_| ())
+    }
+
     /// Transmit an RNS packet (any bytes) over the LoRa link. Splits into RNode
     /// frames, transmits each with a real TX_DONE wait and a bounded RTC
     /// timeout (so a wedged sequencer is force-aborted instead of hanging),

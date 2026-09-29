@@ -1101,6 +1101,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "leaf-rns"
+version = "0.1.0"
+dependencies = [
+ "lma-identity",
+]
+
+[[package]]
 name = "libc"
 version = "0.2.189"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1128,12 +1135,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 
 [[package]]
+name = "lma-identity"
+version = "0.1.0"
+dependencies = [
+ "rns-core",
+ "rns-crypto",
+]
+
+[[package]]
 name = "lmao-firmware-t1"
 version = "0.1.0"
 dependencies = [
  "esp-bootloader-esp-idf",
  "esp-hal",
  "esp-println",
+ "leaf-rns",
  "linked_list_allocator",
  "radio-interface",
  "rns-core",
