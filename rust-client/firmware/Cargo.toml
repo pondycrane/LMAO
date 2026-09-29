@@ -20,6 +20,8 @@ esp-hal = { version = "1.2.2", features = ["esp32s3"] }
 esp-println = { version = "0.18.0", default-features = false, features = ["esp32s3", "jtag-serial"] }
 esp-bootloader-esp-idf = { version = "0.6", features = ["esp32s3"] }
 
+sx126x = { path = "../crates/sx126x" }
+
 [profile.release]
 opt-level = "s"
 lto = "fat"
