@@ -1012,12 +1012,16 @@ async def _periodic_send(
                 soil = chart_data["samples"]
                 air_t = chart_data["temp"]
                 air_h = chart_data["humidity"]
+                water = chart_data.get("water") or []
                 soil_l = f"{soil[-1]}%" if soil else "--"
                 air_t_l = f"{air_t[-1]:.0f}C" if air_t else "--"
                 air_h_l = f"{air_h[-1]}%" if air_h else "--"
+                water_n = sum(1 for a in water if a)
+                water_part = f" water {water_n}" if water_n else ""
                 log(
                     f"Chart: soil={soil_l} air={air_t_l}/{air_h_l} "
-                    f"dry {chart_data['dry']} wet {chart_data['wet']} n={len(soil)}",
+                    f"dry {chart_data['dry']} wet {chart_data['wet']} "
+                    f"n={len(soil)}{water_part}",
                     None,  # serial-only; the view above already owns the screen
                 )
 

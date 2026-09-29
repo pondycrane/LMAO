@@ -102,13 +102,28 @@ class TestParseDataLine:
     def test_ignores_malformed_records(self):
         assert chart.parse_data_line("DATA e824ad2d 37") is None
         assert chart.parse_data_line("DATA e824ad2d 37 53 1 notanumber") is None
-        assert chart.parse_data_line("DATA e824ad2d 37 53 0") is None, "no series"
+        assert chart.parse_data_line("DATA e824ad2d 37 53 1 26") is None
         assert chart.parse_data_line("DATA e824ad2d 37 53 1 26 2 55") is None, (
             "moisture count missing"
         )
-        assert chart.parse_data_line("DATA e824ad2d 37 53 1 26 1 55 1 40 999") is None, (
-            "trailing garbage"
+        assert chart.parse_data_line("DATA e824ad2d 37 53 1 26 1 55 1 40 0 5") is None, (
+            "more than one trailing token is garbage, not a watering mask"
         )
+
+    def test_parses_the_trailing_watering_mask(self):
+        data = chart.parse_data_line("DATA e824ad2d 37 53 1 26 1 55 3 40 41 42 4")
+        assert data["samples"] == [40, 41, 42]
+        assert data["water"] == [False, False, True], "bit 2 (sample index 2) set"
+
+    def test_missing_watering_mask_defaults_to_all_off(self):
+        # Lines the server emitted before the mask field existed must still
+        # parse; water is simply False at every sample (no markers).
+        data = chart.parse_data_line("DATA e824ad2d 37 53 3 25 26 27 2 54 55 3 40 41 42")
+        assert data["water"] == [False, False, False]
+
+    def test_watering_mask_all_bits_set(self):
+        data = chart.parse_data_line("DATA e824ad2d 37 53 0 0 3 40 41 42 7")
+        assert data["water"] == [True, True, True], "mask 0b111"
 
 
 class TestGeometry:
@@ -172,6 +187,26 @@ class TestDraw:
         assert chart.WET_COLOR in tft.colors(), "wet line drawn"
         assert chart.GREY in tft.colors(), "frame drawn"
         assert result["points"] == 3, "three trace segments for four samples"
+
+    def test_draws_watering_markers_at_the_active_columns(self):
+        tft = FakeTft()
+        data = self._data(samples=[46, 45, 47, 46], water=[True, False, True, False])
+        result = chart.draw(tft, data)
+        assert result["error"] is None
+        assert chart.WATER_COLOR in tft.colors(), "watering marker drawn in blue"
+        marker_xs = [
+            x0 for (x0, y0, x1, y1, c) in tft.lines
+            if c == chart.WATER_COLOR and y0 == chart.PLOT_T
+        ]
+        assert chart.x_px(0, 4) in marker_xs, "marker at the first watering sample"
+        assert chart.x_px(2, 4) in marker_xs, "marker at the third watering sample"
+        assert chart.x_px(1, 4) not in marker_xs, "no marker where watering is off"
+        assert chart.x_px(3, 4) not in marker_xs, "no marker where watering is off"
+
+    def test_no_watering_mask_draws_no_markers(self):
+        tft = FakeTft()
+        chart.draw(tft, self._data())
+        assert chart.WATER_COLOR not in tft.colors(), "no watering markers without a mask"
 
     def test_uses_the_displays_line_primitive_when_available(self):
         tft = FakeTft(with_line=True)
