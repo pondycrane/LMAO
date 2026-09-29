@@ -18,15 +18,76 @@
 
 extern crate alloc;
 
+use alloc::vec::Vec;
+
 use radio_interface::interface::RadioInterface;
 use radio_interface::{parse_rnode_frame, split_into_frames, SplitAssembler};
+use rns_core::announce::AnnounceData;
+use rns_core::destination as rns_dest;
+use rns_core::packet::{PacketFlags, RawPacket};
 use sx126x::irq;
 use sx126x::{RadioBus, Sx1262};
+
+/// The leaf node's persistent Ed25519 identity seed (64 B: 32-byte seed + 32-byte
+/// public key, the RNS private-key layout). A production leaf would load this
+/// from secure storage; here it is a fixed constant so the node keeps the same
+/// RNS identity/destination across boots (like the persisted MicroPython
+/// identity).
+const NODE_IDENTITY_SEED: [u8; 64] = [
+    0x1f, 0x8a, 0x4c, 0xd2, 0x77, 0x9e, 0x3b, 0x51, 0x06, 0x2f, 0x94, 0xbe, 0x60, 0xc5, 0x11, 0x9d,
+    0x5e, 0x24, 0x7a, 0x09, 0xb3, 0x46, 0x8f, 0xd1, 0xe2, 0x38, 0x03, 0xfc, 0x0a, 0x8b, 0x66, 0x14,
+    0xe9, 0x31, 0x90, 0x2c, 0x6f, 0x5b, 0xd8, 0x47, 0x52, 0x7e, 0x0d, 0xa4, 0xc9, 0x1a, 0x57, 0x90,
+    0x66, 0x7b, 0x85, 0x34, 0xfb, 0x16, 0x0e, 0x92, 0xd3, 0x6a, 0xe0, 0x49, 0x3c, 0xc1, 0x79, 0x2b,
+];
+
+/// The leaf's RNS app/aspect name (its announce destination).
+const APP_NAME: &str = "lmao";
+const LEAF_ASPECT: &str = "leaf";
 
 /// Longest whole RNS packet the radio carries (matching RNode: 2×254).
 const MAX_PACKET: usize = 508;
 /// Split-fragment reassembly timeout (ms) — mirrors `_REASM_TIMEOUT` × 1000.
 const REASM_TIMEOUT_MS: u32 = 15_000;
+
+/// Provision the node identity from its fixed seed and return its RNS
+/// destination hash (`truncated(sha256(name_hash ‖ identity_hash))` — the
+/// announce destination for `app.aspect`).
+pub fn node_destination_hash() -> ([u8; 16], rns_crypto::identity::Identity) {
+    let identity = rns_crypto::identity::Identity::from_private_key(&NODE_IDENTITY_SEED);
+    let aspects = [LEAF_ASPECT];
+    let dh = rns_dest::destination_hash(APP_NAME, &aspects, Some(identity.hash()));
+    (dh, identity)
+}
+
+/// Build a signed RNS **announce** packet for the node's `app.aspect`
+/// destination (byte-exact with the µReticulum `Destination.announce` wire
+/// format): flags=ANNOUNCE/HDR1-config, hops=0, header destination_hash,
+/// context=0, payload = pubkey ‖ name_hash ‖ random_hash ‖ signature. The
+/// signature covers dest_hash ‖ pubkey ‖ name_hash ‖ random_hash.
+///
+/// `rng` supplies fresh bytes for random_hash so every announce differs
+/// (replay/reassembly-freshness). Returns the raw wire packet.
+pub fn build_announce(identity: &rns_crypto::identity::Identity, random_hash: [u8; 10]) -> Vec<u8> {
+    use rns_core::constants::{DESTINATION_SINGLE, HEADER_1, PACKET_TYPE_ANNOUNCE};
+
+    let aspects = [LEAF_ASPECT];
+    let nh = rns_dest::name_hash(APP_NAME, &aspects);
+    let dh = rns_dest::destination_hash(APP_NAME, &aspects, Some(identity.hash()));
+
+    let (announce_data, _has_ratchet) =
+        AnnounceData::pack(identity, &dh, &nh, &random_hash, None, None).expect("pack announce");
+
+    let flags = PacketFlags {
+        header_type: HEADER_1,
+        context_flag: 0,
+        transport_type: 0,
+        destination_type: DESTINATION_SINGLE,
+        packet_type: PACKET_TYPE_ANNOUNCE,
+    };
+    RawPacket::pack(flags, 0, &dh, None, 0, &announce_data)
+        .expect("pack announce packet")
+        .raw
+}
 
 /// The firmware's RNS link: one radio + one interface + the frame demux.
 pub struct RnsLink<B: RadioBus> {
@@ -81,8 +142,11 @@ impl<B: RadioBus> RnsLink<B> {
         let frames = split_into_frames(data);
         for frame in &frames {
             self.radio.prepare_send(frame).map_err(|_| ())?;
-            // Bounded TX: airtime ~60 ms, timeout 200 ms (0x3200 * 15.625 us).
-            self.radio.start_tx_timeout([0x00, 0x32, 0x00]).map_err(|_| ())?;
+            // Bounded TX: airtime is ~55 ms for a 31 B frame but up to ~175 ms
+            // for a 148 B announce (preamble 24). Use a 400 ms timeout
+            // (0x6400 * 15.625 us) so larger frames don't false-timeout, while
+            // still force-aborting a wedged sequencer.
+            self.radio.start_tx_timeout([0x00, 0x64, 0x00]).map_err(|_| ())?;
             if !self.wait_tx_done() {
                 // Recover the radio (hard reset + reconfigure) happens up-stack.
                 return Err(());
