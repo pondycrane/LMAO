@@ -133,67 +133,84 @@ fn main() -> ! {
     // DATA packet whose payload is arbitrary bytes ("send any data"), then
     // listens and decodes any whole packet that reassembles.
     let mut link = crate::rns_link::RnsLink::new(radio, "LoRa SX1262");
-    if link.arm_rx().is_err() {
-        println!("[rns] RX arm FAILED");
-    }
 
+    use leaf_rns::{LinkWindowConfig, LinkWindowScheduler};
     use rns_core::constants::{DESTINATION_SINGLE, HEADER_1, PACKET_TYPE_DATA};
     use rns_core::packet::{PacketFlags, RawPacket};
 
-    // Bootstrap receiver hash (leaf profile; a real leaf would use its RNS
-    // destination hash / link id). Sentinel bytes so a peer sees us.
+    // Duty-cycle link windows (the leaf design's core power feature): the radio
+    // RX is awake only 200 ms of every 1000 ms; in the 800 ms dormant gap the
+    // radio is stood down and any produced frames wait in the resume queue to
+    // flush at the next window open.
+    let mut sched = LinkWindowScheduler::new(LinkWindowConfig::new(200, 800));
+    // The announced-only leaf holds an established link to its gateway across
+    // dormant gaps, so keepalive pacing + the resume queue apply.
+    sched.mark_link_established(0);
+
+    // Bootstrap receiver hash (a real RNS leaf would announce its identity's
+    // destination hash — the std transport's DHT; out of scope for this probe).
     let dst: [u8; 16] = [0xFF; 16];
 
     let mut beat = 0u32;
     let mut now_ms = 0u32;
     loop {
         beat = beat.wrapping_add(1);
+        esp_hal::delay::Delay::new().delay_millis(100); // real 100 ms tick
+        now_ms = now_ms.wrapping_add(100);
 
-        // Build a valid RNS DATA packet carrying arbitrary bytes + a counter.
-        let payload: [u8; 12] = [
-            b'L', b'M', b'A', b'O', (beat >> 24) as u8, (beat >> 16) as u8,
-            (beat >> 8) as u8, beat as u8, 0x21, 0x7d, 0x00, 0x01,
-        ];
-        let flags = PacketFlags {
-            header_type: HEADER_1,
-            context_flag: 0,
-            transport_type: 0,
-            destination_type: DESTINATION_SINGLE,
-            packet_type: PACKET_TYPE_DATA,
-        };
-        let pkt = match RawPacket::pack(flags, 0, &dst, None, 0, &payload) {
-            Ok(p) => p,
-            Err(e) => {
-                println!("[rns] beat #{beat} packet build error {e:?}");
-                now_ms += 2000;
-                continue;
-            }
-        };
-
-        match link.send(&pkt.raw, now_ms) {
-            Ok(()) => {
-                now_ms += 300;
+        // Produce a valid RNS DATA packet of arbitrary bytes every 5th beat.
+        if beat % 5 == 0 {
+            let payload: [u8; 12] = [
+                b'L', b'M', b'A', b'O', (beat >> 24) as u8, (beat >> 16) as u8,
+                (beat >> 8) as u8, beat as u8, 0x21, 0x7d, 0x00, 0x01,
+            ];
+            let flags = PacketFlags {
+                header_type: HEADER_1,
+                context_flag: 0,
+                transport_type: 0,
+                destination_type: DESTINATION_SINGLE,
+                packet_type: PACKET_TYPE_DATA,
+            };
+            if let Ok(p) = RawPacket::pack(flags, 0, &dst, None, 0, &payload) {
+                let n = p.raw.len();
+                sched.queue_tx(p.raw);
                 println!(
-                    "[rns] beat #{beat} TX {} B link_tx={}",
-                    pkt.raw.len(),
-                    link.interface().stats.tx_frames
+                    "[rns] beat #{beat} queued {n} B (queue={})",
+                    sched.queued_len()
                 );
-            }
-            Err(()) => {
-                // TX wedged (timeout) — hard reset + reconfigure the radio.
-                println!("[rns] beat #{beat} TX FAILED — reconfiguring radio");
-                let _ = configure(&mut link.radio_mut());
-                now_ms += 1000;
             }
         }
 
-        // Listen through the idle window and decode any whole packet that
-        // arrives (a gateway RNode on the leaf profile will be heard here).
-        for _ in 0..40 {
-            let consumed = link.pump_rx(now_ms);
-            if consumed == 0 {
-                esp_hal::delay::Delay::new().delay_millis(50);
-                now_ms += 50;
+        if sched.is_rx_awake(now_ms) {
+            // Link window open: listen + flush queued frames.
+            let _ = link.pump_rx(now_ms);
+            for f in sched.drain_tx(now_ms) {
+                match link.send(&f, now_ms) {
+                    Ok(()) => println!(
+                        "[rns] beat #{beat} window TX {} B link_tx={}",
+                        f.len(),
+                        link.interface().stats.tx_frames
+                    ),
+                    Err(()) => {
+                        println!("[rns] beat #{beat} window TX FAILED — recovering radio");
+                        let _ = configure(&mut link.radio_mut());
+                    }
+                }
+            }
+            // Keepalive pacing (no link traffic for a full period while awake).
+            if sched.keepalive_due(now_ms) {
+                println!("[rns] beat #{beat} keepalive due");
+                sched.note_link_activity(now_ms);
+            }
+        } else {
+            // Dormant gap: radio stood down (power). Queued frames flush at the
+            // next window open (resume-across-gap).
+            let _ = link.enter_standby();
+            if beat % 50 == 0 && sched.queued_len() > 0 {
+                println!(
+                    "[rns] beat #{beat} dormant holding {} queued frame(s)",
+                    sched.queued_len()
+                );
             }
         }
     }
