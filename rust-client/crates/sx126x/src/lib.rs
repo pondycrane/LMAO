@@ -291,6 +291,14 @@ impl<B: RadioBus> Sx1262<B> {
         Ok(((b[1] as u16) << 8) | b[2] as u16)
     }
 
+    /// Raw STATUS byte (first byte returned by any command) + its opmode nibble.
+    /// Opmode in bits[5:4]: 0=STBY_RC,1=STBY_XOSC,2=FS,3=RX,4=TX.
+    pub fn get_status(&mut self) -> Result<(u8, u8), B::Error> {
+        let b = self.cmd_read(cmd::GET_IRQ_STATUS, &[], 3)?;
+        let status = b[0];
+        Ok((status, (status >> 4) & 0x7))
+    }
+
     /// `(rx_length, rx_buffer_ptr)` of a received frame.
     pub fn get_rx_buffer_status(&mut self) -> Result<(u8, u8), B::Error> {
         let b = self.cmd_read(cmd::GET_RX_BUFFER_STATUS, &[], 3)?;

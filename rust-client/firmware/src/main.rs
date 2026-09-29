@@ -116,7 +116,22 @@ fn main() -> ! {
     println!("[t3] beacon loaded={} 7B, polling irq up to ~250ms...", loaded.is_ok());
     let mut saw_tx_done = false;
     let mut fired_at: Option<u32> = None;
+    let mut last_mode: Option<u8> = None;
     for i in 0..100 {
+        if let Ok((_s, mode)) = radio.get_status() {
+            if last_mode != Some(mode) {
+                let name = match mode {
+                    0 => "STBY_RC",
+                    1 => "STBY_XOSC",
+                    2 => "FS",
+                    3 => "RX",
+                    4 => "TX",
+                    _ => "?",
+                };
+                println!("[t3] mode[{i}]={name}");
+                last_mode = Some(mode);
+            }
+        }
         match radio.get_irq_status() {
             Ok(v) => {
                 if v != 0 || saw_tx_done {
