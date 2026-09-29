@@ -986,6 +986,7 @@ dependencies = [
  "esp-bootloader-esp-idf",
  "esp-hal",
  "esp-println",
+ "sx126x",
 ]
 
 [[package]]
@@ -1309,6 +1310,10 @@ dependencies = [
  "quote",
  "syn 2.0.119",
 ]
+
+[[package]]
+name = "sx126x"
+version = "0.1.0"
 
 [[package]]
 name = "syn"
