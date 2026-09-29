@@ -118,17 +118,17 @@ fn main() -> ! {
     let mut fired_at: Option<u32> = None;
     let mut last_mode: Option<u8> = None;
     for i in 0..100 {
-        if let Ok((_s, mode)) = radio.get_status() {
+        if let Ok((s, mode)) = radio.get_status() {
             if last_mode != Some(mode) {
                 let name = match mode {
-                    0 => "STBY_RC",
-                    1 => "STBY_XOSC",
-                    2 => "FS",
-                    3 => "RX",
-                    4 => "TX",
+                    2 => "STBY_RC",
+                    3 => "STBY_XOSC",
+                    4 => "FS",
+                    5 => "RX",
+                    6 => "TX",
                     _ => "?",
                 };
-                println!("[t3] mode[{i}]={name}");
+                println!("[t3] status[{i}]=0x{s:02x} mode={name}");
                 last_mode = Some(mode);
             }
         }
