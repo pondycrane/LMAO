@@ -1,0 +1,7 @@
+[package]
+name = "sx126x"
+version.workspace = true
+edition.workspace = true
+description = "T3 RF-leg: no_std SX1262 LoRa driver core (bus-generic) — config + TX/RX + RSSI, host-golden-tested"
+
+[dependencies]
