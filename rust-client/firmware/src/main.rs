@@ -113,17 +113,26 @@ fn main() -> ! {
         radio.start_tx()?;
         Ok(())
     })();
-    println!("[t3] beacon loaded={} 7B, polling irq...", loaded.is_ok());
+    println!("[t3] beacon loaded={} 7B, polling irq up to ~250ms...", loaded.is_ok());
     let mut saw_tx_done = false;
-    for i in 0..8 {
+    let mut fired_at: Option<u32> = None;
+    for i in 0..100 {
         match radio.get_irq_status() {
             Ok(v) => {
-                println!("[t3] irq[{i}]={:#06x}{}", v, if v & irq::TX_DONE != 0 { " TX_DONE" } else { "" });
+                if v != 0 || saw_tx_done {
+                    println!("[t3] irq[{i}]={:#06x}{}", v, if v & irq::TX_DONE != 0 { " TX_DONE" } else { "" });
+                }
                 if v & irq::TX_DONE != 0 {
                     saw_tx_done = true;
+                    fired_at = Some(i);
+                    break;
                 }
             }
-            Err(_) => println!("[t3] irq[{i}]=ERR(busy/timeout)"),
+            Err(_) => {
+                if i < 8 {
+                    println!("[t3] irq[{i}]=ERR(busy/timeout)");
+                }
+            }
         }
         for _ in 0..400_000 {
             core::hint::spin_loop();
@@ -137,7 +146,7 @@ fn main() -> ! {
         Ok(v) => println!("[t3] dev_errors(after tx)={:#06x}", v),
         Err(_) => println!("[t3] dev_errors=ERR"),
     }
-    println!("[t3] beacon TX_DONE={}", saw_tx_done);
+    println!("[t3] beacon TX_DONE={} fired_at={:?}", saw_tx_done, fired_at);
     // If a fatal device error blocked TX, clear it and retry the beacon once.
     match radio.get_device_errors() {
         Ok(e) if e != 0 => {
