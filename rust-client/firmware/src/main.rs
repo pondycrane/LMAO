@@ -81,6 +81,31 @@ fn main() -> ! {
         Err(_) => println!("[t3] sx1262 configure FAILED (SPI/hardware)"),
     }
 
+    // RF-beacon leg: transmit one LoRa frame and confirm TX_DONE on-air.
+    // Frame uses the RNode 1-byte header (0xcb split-flag style) + payload.
+    // (exercises the read path via get_irq_status — the RF-layout check.)
+    use sx126x::irq;
+    let beacon: [u8; 7] = [0xcb, b'L', b'M', b'A', b'O', 1, 0];
+    let mut tx_done = false;
+    let loaded = (|| -> Result<(), ()> {
+        radio.prepare_send(&beacon)?;
+        radio.start_tx()?;
+        Ok(())
+    })();
+    if loaded.is_ok() {
+        for _ in 0..3000 {
+            match radio.get_irq_status() {
+                Ok(s) if s & irq::TX_DONE != 0 => {
+                    tx_done = true;
+                    break;
+                }
+                Err(_) => break,
+                _ => {}
+            }
+        }
+    }
+    println!("[t3] beacon 7B TX_DONE={}", tx_done);
+
     let mut beat = 0u32;
     loop {
         beat = beat.wrapping_add(1);
