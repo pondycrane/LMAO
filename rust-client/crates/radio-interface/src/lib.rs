@@ -207,6 +207,7 @@ pub fn split_into_frames(payload: &[u8]) -> Vec<Vec<u8>> {
 /// The SX1262 SPI driver (esp-hal) is wired to these constants; the on-device
 /// radio loopback that exercises them is T3's hardware leg (pending the flash
 /// path — see T3-GATE.md).
+pub mod interface;
 pub mod rf_params {
     /// Carrier frequency (Hz).
     pub const FREQ_MHZ: u32 = 868;
