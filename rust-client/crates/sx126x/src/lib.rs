@@ -162,15 +162,37 @@ impl<B: RadioBus> Sx1262<B> {
         self.cmd(cmd::SET_DIO2_AS_RF_SWITCH_CTRL, &[0x01])
     }
 
-    /// Set DIO3 as TCXO control (board 1.8V TCXO, ~5 ms start).
-    pub fn set_dio3_as_tcxo(&mut self) -> Result<(), B::Error> {
-        self.cmd(cmd::SET_DIO3_AS_TCXO_CTRL, &[0x08, 0x00, 0x01, 0x88])
+    /// Set DIO3 as TCXO control. `millivolts` (1.6–3.3 V) and `start_us` mirror
+    /// the µReticulum `sx126x.py` (Cardputer: 1800 mV, 5000 us): trim is the
+    /// index of the nearest table value, timeout in 15.625 us units.
+    /// Valid startup is required for the XOSC/PLL to lock so TX can complete —
+    /// an invalid trim (e.g. 8) breaks the clock and TX never asserts TX_DONE.
+    pub fn set_dio3_as_tcxo(&mut self, millivolts: u16, start_us: u32) -> Result<(), B::Error> {
+        let timeout = (start_us * 1000 + 15624) / 15625;
+        let mut dv = millivolts / 100;
+        let trim_lut = [16u16, 17, 18, 22, 24, 27, 30, 33];
+        while !trim_lut.contains(&dv) {
+            dv -= 1;
+        }
+        let trim = trim_lut.iter().position(|&v| v == dv).unwrap() as u8;
+        let t = timeout.min(0xFFFFFF) as u32;
+        // [trim, timeout_msb, timeout_mid, timeout_lsb]
+        self.cmd(cmd::SET_DIO3_AS_TCXO_CTRL, &[trim, (t >> 16) as u8, (t >> 8) as u8, t as u8])
     }
 
-    /// Set PA config + TX power/ramp (14 dBm, 200 us ramp).
-    pub fn set_pa_config(&mut self, power_dbm: u8, ramp: u8) -> Result<(), B::Error> {
-        self.cmd(cmd::SET_PA_CONFIG, &[0x04, 0x07, 0x00, 0x01])?;
-        self.cmd(cmd::SET_TX_PARAMS, &[power_dbm, ramp])
+    /// Set PA config + TX power/ramp, mirroring the µReticulum `_get_pa_tx_params`
+    /// optimal-value table (Cardputer fixed profile = 14 dBm → `[0x02,0x02,0x00,0x01]`
+    /// with a nominal `SetTxParams` power of 22). `ramp` 0x06 = 200 us.
+    pub fn set_pa_config(&mut self, output_power: u8, ramp: u8) -> Result<(), B::Error> {
+        let (pa, tx_power): ([u8; 4], u8) = match output_power {
+            22 => ([0x04, 0x07, 0x00, 0x01], 22),
+            20 => ([0x03, 0x05, 0x00, 0x01], 22),
+            17 => ([0x02, 0x03, 0x00, 0x01], 22),
+            14 => ([0x02, 0x02, 0x00, 0x01], 22),
+            _ => ([0x04, 0x07, 0x00, 0x01], output_power & 0xFF),
+        };
+        self.cmd(cmd::SET_PA_CONFIG, &pa)?;
+        self.cmd(cmd::SET_TX_PARAMS, &[tx_power, ramp])
     }
 
     /// Set LoRa packet params (preamble, implicit header, payload len, CRC,
