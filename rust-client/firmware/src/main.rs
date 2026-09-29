@@ -72,7 +72,7 @@ fn main() -> ! {
         radio.set_sync_word(0x1424)?;
         radio.set_modulation_params(7, 0x04, 1, 0)?;
         radio.set_dio2_as_rf_switch()?;
-        radio.set_dio3_as_tcxo()?;
+        radio.set_dio3_as_tcxo(1800, 5000)?;
         radio.set_pa_config(14, 0x06)?;
  
         Ok(())
