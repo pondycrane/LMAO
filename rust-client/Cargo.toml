@@ -11,6 +11,7 @@ members = [
     "crates/leaf-resource",
     "crates/lma-framing",
     "crates/leaf-power",
+    "crates/sx126x",
 ]
 
 [workspace.package]

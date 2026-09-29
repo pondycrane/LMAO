@@ -224,6 +224,28 @@ sh_binary(
     tags = ["manual"],
 )
 
+# ── RF-leg: sx126x driver core (no_std, bus-generic) ─────────────────────────
+# Port of the repo's MicroPython SX1262 driver (the one that RF-works on this
+# Cardputer): opcodes/registers + the config calculations, host-golden-tested
+# via a recording RadioBus. The esp-hal SPI binding + on-air RF TX/RX is the
+# hardware leg. Bus-generic so the driver core is fully host-testable.
+
+filegroup(
+    name = "sx126x_sources",
+    srcs = glob(
+        ["crates/sx126x/**"],
+        exclude = ["crates/**/target/**"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+sh_binary(
+    name = "test_sx126x",
+    srcs = ["test_sx126x.sh"],
+    data = [":sx126x_sources"],
+    tags = ["manual"],
+)
+
 # ── T7 host E2E — the composed leaf pipeline (design §5 data-flow, minus RF) ──
 # Runs the whole leaf on the host: identity + LXMF SensorReport control path
 # (lma-identity/lma-wire/lma-lxmf) + an RNS Resource over the held link paced
