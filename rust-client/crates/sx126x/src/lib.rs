@@ -42,12 +42,30 @@ pub mod cmd {
     pub const SET_TX_PARAMS: u8 = 0x8E;
     pub const WRITE_BUFFER: u8 = 0x0E;
     pub const WRITE_REGISTER: u8 = 0x0D;
+    pub const CALIBRATE: u8 = 0x89;
+    pub const GET_DEVICE_ERRORS: u8 = 0x17;
+    pub const CLEAR_DEVICE_ERRORS: u8 = 0x07;
+    pub const SET_PA_RAMP: u8 = 0x94;
 }
 
 /// SX1262 LoRa registers (mirrors `sx126x.py` `_REG_*`).
 pub mod reg {
     pub const LSYNCRH: u16 = 0x740;
     pub const LSYNCRL: u16 = 0x741;
+    /// Modulation-quality workaround register (DS 15.1): set bit 2 before TX.
+    pub const MODQUAL: u16 = 0x0889;
+}
+
+/// SX1262 device-error flag bits (GET_DEVICE_ERRORS), DS 13.4.4.
+pub mod err {
+    pub const RC64K_CALIB_ERR: u16 = 1 << 0;
+    pub const RC13M_CALIB_ERR: u16 = 1 << 1;
+    pub const PLL_LOCK_ERR: u16 = 1 << 2;
+    pub const XOSC_START_ERR: u16 = 1 << 3;
+    pub const IMAGE_CALIB_ERR: u16 = 1 << 4;
+    pub const RX_CALIB_ERR: u16 = 1 << 5;
+    pub const TX_CALIB_ERR: u16 = 1 << 6;
+    pub const ADC_CALIB_ERR: u16 = 1 << 7;
 }
 
 /// Packet types for `SET_PACKET_TYPE`.
@@ -152,6 +170,37 @@ impl<B: RadioBus> Sx1262<B> {
         Ok(((b[1] as u16) << 8) | b[2] as u16)
     }
 
+    /// Write a 16-bit register (CMD_WRITE_REGISTER).
+    pub fn write_register(&mut self, addr: u16, val: u16) -> Result<(), B::Error> {
+        let a = addr.to_be_bytes();
+        let v = val.to_be_bytes();
+        self.cmd(cmd::WRITE_REGISTER, &[a[0], a[1], v[0], v[1]])
+    }
+    /// Convenience 8-bit register write (val in high byte).
+    pub fn write_register_u8(&mut self, addr: u16, val: u8) -> Result<(), B::Error> {
+        self.write_register(addr, (val as u16) << 8)
+    }
+
+    /// Calibrate RC oscillators, PLL and ADC (CMD_CALIBRATE, mask 0xFE = all).
+    /// The µReticulum driver runs this as part of radio bring-up; without it the
+    /// PLL may not lock and TX never asserts TX_DONE.
+    pub fn calibrate(&mut self) -> Result<(), B::Error> {
+        self.cmd(cmd::CALIBRATE, &[0xFE])?;
+        self.bus.wait_ready()
+    }
+
+    /// Device error word (GET_DEVICE_ERRORS, DS 13.4.4) — e.g. PLL_LOCK_ERR /
+    /// XOSC_START_ERR. Fatal errors block TX/RX until cleared.
+    pub fn get_device_errors(&mut self) -> Result<u16, B::Error> {
+        let b = self.cmd_read(cmd::GET_DEVICE_ERRORS, &[], 2)?;
+        Ok(((b[1] as u16) << 8) | b[2] as u16)
+    }
+
+    /// Clear device error flags (CLEAR_DEVICE_ERRORS).
+    pub fn clear_device_errors(&mut self) -> Result<(), B::Error> {
+        self.cmd(cmd::CLEAR_DEVICE_ERRORS, &[])
+    }
+
     /// Set LoRa modulation params: SF, BW register code, coding-rate (4/xx), LDRO.
     pub fn set_modulation_params(&mut self, sf: u8, bw: u8, cr_denom: u8, ldro: u8) -> Result<(), B::Error> {
         self.cmd(cmd::SET_MODULATION_PARAMS, &[sf, bw, cr_denom, ldro])
@@ -214,6 +263,8 @@ impl<B: RadioBus> Sx1262<B> {
         self.standby()?;
         self.set_packet_params(8, 0, payload.len() as u8, 1, 0)?;
         self.cmd(cmd::SET_BUFFER_BASE_ADDRESS, &[0x00, 0xFF])?;
+        // DS 15.1 modulation-quality workaround (µReticulum does this before each TX).
+        self.write_register_u8(reg::MODQUAL, 0x04)?;
         // CMD_WRITE_BUFFER: [offset, data...] — single CS-held transaction.
         let mut wbuf = [0u8; 256];
         wbuf[0] = 0x00; // TX offset

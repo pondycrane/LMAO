@@ -93,6 +93,15 @@ fn main() -> ! {
         Ok(v) => println!("[t3] reg741(readback LSYNCRL)={:#06x}", v),
         Err(_) => println!("[t3] reg741=ERR(busy/timeout)"),
     }
+    // Calibrate all blocks (mirrors µReticulum bring-up); then report device errors.
+    match radio.calibrate() {
+        Ok(()) => println!("[t3] calibrate ok"),
+        Err(_) => println!("[t3] calibrate ERR(busy)"),
+    }
+    match radio.get_device_errors() {
+        Ok(v) => println!("[t3] dev_errors(after calib)={:#06x}", v),
+        Err(_) => println!("[t3] dev_errors=ERR"),
+    }
 
     // RF-beacon leg: transmit one LoRa frame and confirm TX_DONE on-air.
     // DIAGNOSTIC build: log the raw IRQ status over several polls to diagnose
@@ -124,7 +133,42 @@ fn main() -> ! {
         Ok((len, ptr)) => println!("[t3] rxbuf len={len} ptr={ptr}"),
         Err(_) => println!("[t3] rxbuf=ERR"),
     }
+    match radio.get_device_errors() {
+        Ok(v) => println!("[t3] dev_errors(after tx)={:#06x}", v),
+        Err(_) => println!("[t3] dev_errors=ERR"),
+    }
     println!("[t3] beacon TX_DONE={}", saw_tx_done);
+    // If a fatal device error blocked TX, clear it and retry the beacon once.
+    match radio.get_device_errors() {
+        Ok(e) if e != 0 => {
+            println!("[t3] clearing dev_errors + retrying beacon");
+            let _ = radio.clear_device_errors();
+            let loaded = (|| -> Result<(), ()> {
+                radio.prepare_send(&beacon)?;
+                radio.start_tx()?;
+                Ok(())
+            })();
+            let mut d2 = false;
+            if loaded.is_ok() {
+                for _ in 0..8 {
+                    if let Ok(s) = radio.get_irq_status() {
+                        if s & irq::TX_DONE != 0 {
+                            d2 = true;
+                            break;
+                        }
+                    }
+                    for _ in 0..400_000 {
+                        core::hint::spin_loop();
+                    }
+                }
+            }
+            println!("[t3] retry TX_DONE={}", d2);
+            if let Ok(e2) = radio.get_device_errors() {
+                println!("[t3] dev_errors(after retry)={:#06x}", e2);
+            }
+        }
+        _ => {}
+    }
 
     let mut beat = 0u32;
     loop {
