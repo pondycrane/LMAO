@@ -29,8 +29,11 @@ pub mod rns_link;
 // back them with a static linked-list heap.
 #[global_allocator]
 static HEAP: linked_list_allocator::LockedHeap = linked_list_allocator::LockedHeap::empty();
-/// Static heap backing store (32 KiB — plenty for transient RNS packets).
-const HEAP_SIZE: usize = 32768;
+/// Static heap backing store. 128 KiB: the RNS identity build + per-beat
+/// packet and per-announce Vec allocations churn a linked-list allocator hard;
+/// 32 KiB fragmented to exhaustion after ~8 min on the earlier build
+/// (allocation failure → halt). The ESP32-S3 has plenty of SRAM for this.
+const HEAP_SIZE: usize = 131_072;
 static mut HEAP_MEM: [u8; HEAP_SIZE] = [0u8; HEAP_SIZE];
 
 /// Panic handler: log and halt. (esp-hal 1.x does not provide one; we bring
@@ -147,9 +150,14 @@ fn main() -> ! {
     // dormant gaps, so keepalive pacing + the resume queue apply.
     sched.mark_link_established(0);
 
-    // Bootstrap receiver hash (a real RNS leaf would announce its identity's
-    // destination hash — the std transport's DHT; out of scope for this probe).
-    let dst: [u8; 16] = [0xFF; 16];
+    // Real RNS identity: provision the node identity and derive its announce
+    // destination hash (persistent across boots from the fixed seed).
+    let (node_dest, node_identity) = crate::rns_link::node_destination_hash();
+    println!(
+        "[rns] identity pk={:02x?}… dest={:02x?}",
+        node_identity.get_public_key().map(|k| k[..8].to_vec()).unwrap_or_default(),
+        node_dest
+    );
 
     let mut beat = 0u32;
     let mut now_ms = 0u32;
@@ -171,7 +179,7 @@ fn main() -> ! {
                 destination_type: DESTINATION_SINGLE,
                 packet_type: PACKET_TYPE_DATA,
             };
-            if let Ok(p) = RawPacket::pack(flags, 0, &dst, None, 0, &payload) {
+            if let Ok(p) = RawPacket::pack(flags, 0, &node_dest, None, 0, &payload) {
                 let n = p.raw.len();
                 sched.queue_tx(p.raw);
                 println!(
@@ -181,9 +189,30 @@ fn main() -> ! {
             }
         }
 
+        let rng = esp_hal::rng::Rng::new();
         if sched.is_rx_awake(now_ms) {
             // Link window open: listen + flush queued frames.
             let _ = link.pump_rx(now_ms);
+            // Periodic signed RNS announce (every 10 windows ~= 10 s): proves
+            // real identity + announce framing the mesh accepts for this node.
+            if beat % 100 == 0 {
+                let mut rh = [0u8; 10];
+                for c in rh.chunks_mut(4) {
+                    let r = rng.random();
+                    c.copy_from_slice(&r.to_le_bytes()[..c.len()]);
+                }
+                let a = crate::rns_link::build_announce(&node_identity, rh);
+                match a.map(|pkt| (pkt.len(), link.send(&pkt, now_ms))) {
+                    Some((n, Ok(()))) => println!(
+                        "[rns] beat #{beat} ANNOUNCE {n} B (dest={node_dest:02x?})"
+                    ),
+                    Some((_, Err(()))) => {
+                        println!("[rns] beat #{beat} ANNOUNCE TX FAILED — recovering radio");
+                        let _ = configure(&mut link.radio_mut());
+                    }
+                    None => println!("[rns] beat #{beat} ANNOUNCE build failed (skip)"),
+                }
+            }
             for f in sched.drain_tx(now_ms) {
                 match link.send(&f, now_ms) {
                     Ok(()) => println!(
