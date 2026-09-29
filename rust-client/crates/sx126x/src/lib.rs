@@ -43,6 +43,7 @@ pub mod cmd {
     pub const WRITE_BUFFER: u8 = 0x0E;
     pub const WRITE_REGISTER: u8 = 0x0D;
     pub const CALIBRATE: u8 = 0x89;
+    pub const CALIBRATE_IMAGE: u8 = 0x98;
     pub const GET_DEVICE_ERRORS: u8 = 0x17;
     pub const CLEAR_DEVICE_ERRORS: u8 = 0x07;
     pub const SET_PA_RAMP: u8 = 0x94;
@@ -186,6 +187,15 @@ impl<B: RadioBus> Sx1262<B> {
     /// PLL may not lock and TX never asserts TX_DONE.
     pub fn calibrate(&mut self) -> Result<(), B::Error> {
         self.cmd(cmd::CALIBRATE, &[0xFE])?;
+        self.bus.wait_ready()
+    }
+
+    /// In-band image calibration (CMD_CALIBRATE_IMAGE) for the 868 MHz band
+    /// (863–870 MHz → arg 0xD7DB). The µReticulum RF path calls this right after
+    /// `calibrate()`; without it the PLL may not synthesize in-band, causing an
+    /// endless-TX stuck state (mode 6, no TX_DONE).
+    pub fn calibrate_image(&mut self) -> Result<(), B::Error> {
+        self.cmd(cmd::CALIBRATE_IMAGE, &[0xD7, 0xDB])?;
         self.bus.wait_ready()
     }
 

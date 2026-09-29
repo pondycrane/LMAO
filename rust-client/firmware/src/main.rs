@@ -98,6 +98,10 @@ fn main() -> ! {
         Ok(()) => println!("[t3] calibrate ok"),
         Err(_) => println!("[t3] calibrate ERR(busy)"),
     }
+    match radio.calibrate_image() {
+        Ok(()) => println!("[t3] calibrate_image ok"),
+        Err(_) => println!("[t3] calibrate_image ERR(busy)"),
+    }
     match radio.get_device_errors() {
         Ok(v) => println!("[t3] dev_errors(after calib)={:#06x}", v),
         Err(_) => println!("[t3] dev_errors=ERR"),
