@@ -22,6 +22,16 @@ include!("interrupt_stubs.rs");
 
 // esp-hal SPI RadioBus + firmware wiring for the Cardputer SX1262 (RF-leg step 3).
 pub mod sx1262_radio;
+// RNS link: SX1262 driver under the RadioInterface contract + RNode framing.
+pub mod rns_link;
+
+// no_std heap. rns-core packet building + the RNode split assembler allocate;
+// back them with a static linked-list heap.
+#[global_allocator]
+static HEAP: linked_list_allocator::LockedHeap = linked_list_allocator::LockedHeap::empty();
+/// Static heap backing store (32 KiB — plenty for transient RNS packets).
+const HEAP_SIZE: usize = 32768;
+static mut HEAP_MEM: [u8; HEAP_SIZE] = [0u8; HEAP_SIZE];
 
 /// Panic handler: log and halt. (esp-hal 1.x does not provide one; we bring
 /// our own so a panic produces a visible line on the console instead of a
@@ -36,6 +46,12 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 fn main() -> ! {
     // RF-leg step 3: boot esp-hal, then bring up the Cardputer SX1262 over SPI.
     let peripherals = esp_hal::init(Config::default());
+
+    // Bring up the no_std heap before anything allocates (raw mut pointer into
+    // the static backing store is safe here — single-threaded boot).
+    unsafe {
+        HEAP.lock().init(core::ptr::addr_of_mut!(HEAP_MEM) as *mut u8, HEAP_SIZE);
+    }
 
     let mac = esp_hal::efuse::interface_mac_address(InterfaceMacAddress::Station);
     let rev = esp_hal::efuse::chip_revision();
@@ -111,85 +127,74 @@ fn main() -> ! {
         Err(_) => println!("[t3] dev_errors=ERR"),
     }
 
-    // RF-beacon leg: transmit a LoRa frame and confirm TX_DONE on-air.
-    // Repeats every ~2 s in the heartbeat loop below so the event is visible
-    // on any attached monitor (the one-shot boot log raced the serial attach).
-    use sx126x::irq;
-    let beacon: [u8; 7] = [0xcb, b'L', b'M', b'A', b'O', 1, 0];
-
-    // Arm continuous RX — mirrors the reference `start_recv(continuous=True)`
-    // at the end of interface init. The radio idles in RX between beacons;
-    // this *is* the leaf's listen path.
-    match radio.start_rx([0xFF, 0xFF, 0xFF]) {
-        Ok(()) => println!("[t3] continuous RX armed"),
-        Err(_) => println!("[t3] RX arm FAILED"),
+    // RNS link: wire the driver under `RadioInterface` + the RNode RF framing
+    // (the MicroPython `lora.py` transport path, now in Rust). The radio idles
+    // in continuous RX (the leaf's listen path); each beat TXs a valid RNS
+    // DATA packet whose payload is arbitrary bytes ("send any data"), then
+    // listens and decodes any whole packet that reassembles.
+    let mut link = crate::rns_link::RnsLink::new(radio, "LoRa SX1262");
+    if link.arm_rx().is_err() {
+        println!("[rns] RX arm FAILED");
     }
 
-    // Periodic beacon: TX out of the RX idle with a bounded timeout, wait
-    // TX_DONE on REAL millisecond timing (spin loops elide at opt-level "s" —
-    // an elided poll window was the "endless TX" red herring), then re-arm
-    // continuous RX and dump any received frame.
+    use rns_core::constants::{DESTINATION_SINGLE, HEADER_1, PACKET_TYPE_DATA};
+    use rns_core::packet::{PacketFlags, RawPacket};
+
+    // Bootstrap receiver hash (leaf profile; a real leaf would use its RNS
+    // destination hash / link id). Sentinel bytes so a peer sees us.
+    let dst: [u8; 16] = [0xFF; 16];
+
     let mut beat = 0u32;
+    let mut now_ms = 0u32;
     loop {
         beat = beat.wrapping_add(1);
 
-        let loaded = (|| -> Result<(), ()> {
-            radio.prepare_send(&beacon)?;
-            // Bounded TX: airtime ~60 ms, timeout 200 ms (0x3200 * 15.625 us)
-            // so a wedged sequencer is RTC-aborted instead of hanging.
-            radio.start_tx_timeout([0x00, 0x32, 0x00])?;
-            Ok(())
-        })();
-        if !loaded.is_ok() {
-            println!("[t3] beacon #{beat} load FAILED");
-        }
-
-        let mut outcome = "timeout-poll";
-        let mut polls = 0u32;
-        for i in 0..100 {
-            polls = i;
-            match radio.get_irq_status() {
-                Ok(v) => {
-                    if v & irq::TX_DONE != 0 {
-                        outcome = "TX_DONE";
-                        break;
-                    }
-                    if v & irq::TIMEOUT != 0 {
-                        outcome = "TX_TIMEOUT";
-                        break;
-                    }
-                }
-                Err(_) => outcome = "irq_err",
+        // Build a valid RNS DATA packet carrying arbitrary bytes + a counter.
+        let payload: [u8; 12] = [
+            b'L', b'M', b'A', b'O', (beat >> 24) as u8, (beat >> 16) as u8,
+            (beat >> 8) as u8, beat as u8, 0x21, 0x7d, 0x00, 0x01,
+        ];
+        let flags = PacketFlags {
+            header_type: HEADER_1,
+            context_flag: 0,
+            transport_type: 0,
+            destination_type: DESTINATION_SINGLE,
+            packet_type: PACKET_TYPE_DATA,
+        };
+        let pkt = match RawPacket::pack(flags, 0, &dst, None, 0, &payload) {
+            Ok(p) => p,
+            Err(e) => {
+                println!("[rns] beat #{beat} packet build error {e:?}");
+                now_ms += 2000;
+                continue;
             }
-            esp_hal::delay::Delay::new().delay_millis(5);
-        }
-        if outcome != "TX_DONE" {
-            // Recover the radio before the next cycle.
-            let _ = configure(&mut radio);
-        }
-        let _ = radio.clear_irq();
-        println!("[t3] beacon #{beat} result={outcome} polls={polls}");
+        };
 
-        // Back to continuous RX; listen through the idle window and dump any
-        // received frame (bidirectional RNS path).
-        let _ = radio.start_rx([0xFF, 0xFF, 0xFF]);
+        match link.send(&pkt.raw, now_ms) {
+            Ok(()) => {
+                now_ms += 300;
+                println!(
+                    "[rns] beat #{beat} TX {} B link_tx={}",
+                    pkt.raw.len(),
+                    link.interface().stats.tx_frames
+                );
+            }
+            Err(()) => {
+                // TX wedged (timeout) — hard reset + reconfigure the radio.
+                println!("[rns] beat #{beat} TX FAILED — reconfiguring radio");
+                let _ = configure(&mut link.radio_mut());
+                now_ms += 1000;
+            }
+        }
+
+        // Listen through the idle window and decode any whole packet that
+        // arrives (a gateway RNode on the leaf profile will be heard here).
         for _ in 0..40 {
-            if let Ok(v) = radio.get_irq_status() {
-                if v & irq::RX_DONE != 0 {
-                    let ok = irq::rx_success(v);
-                    let (len, ptr) = radio.get_rx_buffer_status().unwrap_or((0, 0));
-                    let (rssi, snr) = radio.get_packet_status().unwrap_or((0, 0.0));
-                    let mut pkt = [0u8; 255];
-                    let n = radio.read_buffer(ptr, &mut pkt[..len as usize]).unwrap_or(0);
-                    println!(
-                        "[t3] RX irq={v:#06x} ok={ok} len={len} rssi={rssi}dBm snr={snr}dB data={:02x?}",
-                        &pkt[..n.min(32)]
-                    );
-                    let _ = radio.clear_irq();
-                    let _ = radio.start_rx([0xFF, 0xFF, 0xFF]);
-                }
+            let consumed = link.pump_rx(now_ms);
+            if consumed == 0 {
+                esp_hal::delay::Delay::new().delay_millis(50);
+                now_ms += 50;
             }
-            esp_hal::delay::Delay::new().delay_millis(50);
         }
     }
 }
