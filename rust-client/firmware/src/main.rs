@@ -29,8 +29,11 @@ pub mod rns_link;
 // back them with a static linked-list heap.
 #[global_allocator]
 static HEAP: linked_list_allocator::LockedHeap = linked_list_allocator::LockedHeap::empty();
-/// Static heap backing store (32 KiB — plenty for transient RNS packets).
-const HEAP_SIZE: usize = 32768;
+/// Static heap backing store. 128 KiB: the RNS identity build + per-beat
+/// packet and per-announce Vec allocations churn a linked-list allocator hard;
+/// 32 KiB fragmented to exhaustion after ~8 min on the earlier build
+/// (allocation failure → halt). The ESP32-S3 has plenty of SRAM for this.
+const HEAP_SIZE: usize = 131_072;
 static mut HEAP_MEM: [u8; HEAP_SIZE] = [0u8; HEAP_SIZE];
 
 /// Panic handler: log and halt. (esp-hal 1.x does not provide one; we bring
@@ -199,12 +202,15 @@ fn main() -> ! {
                     c.copy_from_slice(&r.to_le_bytes()[..c.len()]);
                 }
                 let a = crate::rns_link::build_announce(&node_identity, rh);
-                match link.send(&a, now_ms) {
-                    Ok(()) => println!("[rns] beat #{beat} ANNOUNCE {} B (dest={:02x?})", a.len(), node_dest),
-                    Err(()) => {
+                match a.map(|pkt| (pkt.len(), link.send(&pkt, now_ms))) {
+                    Some((n, Ok(()))) => println!(
+                        "[rns] beat #{beat} ANNOUNCE {n} B (dest={node_dest:02x?})"
+                    ),
+                    Some((_, Err(()))) => {
                         println!("[rns] beat #{beat} ANNOUNCE TX FAILED — recovering radio");
                         let _ = configure(&mut link.radio_mut());
                     }
+                    None => println!("[rns] beat #{beat} ANNOUNCE build failed (skip)"),
                 }
             }
             for f in sched.drain_tx(now_ms) {

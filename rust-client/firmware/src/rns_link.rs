@@ -66,8 +66,13 @@ pub fn node_destination_hash() -> ([u8; 16], rns_crypto::identity::Identity) {
 /// signature covers dest_hash ‖ pubkey ‖ name_hash ‖ random_hash.
 ///
 /// `rng` supplies fresh bytes for random_hash so every announce differs
-/// (replay/reassembly-freshness). Returns the raw wire packet.
-pub fn build_announce(identity: &rns_crypto::identity::Identity, random_hash: [u8; 10]) -> Vec<u8> {
+/// (replay/reassembly-freshness). Returns the raw wire packet, or `None` if
+/// the packet can't be built — the caller logs and moves on rather than
+/// panic-halting the node.
+pub fn build_announce(
+    identity: &rns_crypto::identity::Identity,
+    random_hash: [u8; 10],
+) -> Option<Vec<u8>> {
     use rns_core::constants::{DESTINATION_SINGLE, HEADER_1, PACKET_TYPE_ANNOUNCE};
 
     let aspects = [LEAF_ASPECT];
@@ -75,7 +80,7 @@ pub fn build_announce(identity: &rns_crypto::identity::Identity, random_hash: [u
     let dh = rns_dest::destination_hash(APP_NAME, &aspects, Some(identity.hash()));
 
     let (announce_data, _has_ratchet) =
-        AnnounceData::pack(identity, &dh, &nh, &random_hash, None, None).expect("pack announce");
+        AnnounceData::pack(identity, &dh, &nh, &random_hash, None, None).ok()?;
 
     let flags = PacketFlags {
         header_type: HEADER_1,
@@ -85,8 +90,8 @@ pub fn build_announce(identity: &rns_crypto::identity::Identity, random_hash: [u
         packet_type: PACKET_TYPE_ANNOUNCE,
     };
     RawPacket::pack(flags, 0, &dh, None, 0, &announce_data)
-        .expect("pack announce packet")
-        .raw
+        .ok()
+        .map(|p| p.raw)
 }
 
 /// The firmware's RNS link: one radio + one interface + the frame demux.
