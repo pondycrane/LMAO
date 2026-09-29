@@ -27,18 +27,19 @@ def _report(
     air_humidity=55.0,
     dry=37.0,
     wet=53.0,
+    pump_active=None,
 ):
-    return Report(
-        node_id,
-        [
-            Reading(2, air_humidity),  # air humidity — the Sprout's SHT30
-            Reading(3, air_temp),  # air temperature — ditto
-            Reading(4, moisture),  # soil moisture
-            Reading(10, dry),  # active profile dry threshold
-            Reading(11, wet),  # active profile wet threshold
-            Reading(99, 1.0),  # unknown id must be ignored
-        ],
-    )
+    readings = [
+        Reading(2, air_humidity),  # air humidity — the Sprout's SHT30
+        Reading(3, air_temp),  # air temperature — ditto
+        Reading(4, moisture),  # soil moisture
+        Reading(10, dry),  # active profile dry threshold
+        Reading(11, wet),  # active profile wet threshold
+        Reading(99, 1.0),  # unknown id must be ignored
+    ]
+    if pump_active is not None:
+        readings.append(Reading(7, 1.0 if pump_active else 0.0))  # pump active
+    return Report(node_id, readings)
 
 
 class TestSproutHistory:
@@ -52,19 +53,19 @@ class TestSproutHistory:
         assert history.samples == [46.0, 45.0]
         assert history.temp == [26.0, 26.0]
         assert history.humidity == [55.0, 55.0]
-        assert history.data_line() == "DATA e824ad2d 37 53 2 26 26 2 55 55 2 46 45"
+        assert history.data_line() == "DATA e824ad2d 37 53 2 26 26 2 55 55 2 46 45 0"
 
     def test_band_defaults_to_minus_one_until_the_node_reports_it(self):
         history = SproutHistory()
         history.update(Report("e824ad2d", [Reading(4, 41.5)]))
-        assert history.data_line() == "DATA e824ad2d -1 -1 0 0 1 42"
+        assert history.data_line() == "DATA e824ad2d -1 -1 0 0 1 42 0"
 
     def test_ring_keeps_only_the_newest_samples(self):
         history = SproutHistory(maxlen=3)
         for value in (10.0, 20.0, 30.0, 40.0):
             history.update(_report(moisture=value))
         assert history.samples == [20.0, 30.0, 40.0], "oldest dropped, order kept"
-        assert history.data_line() == "DATA e824ad2d 37 53 3 26 26 26 3 55 55 55 3 20 30 40"
+        assert history.data_line() == "DATA e824ad2d 37 53 3 26 26 26 3 55 55 55 3 20 30 40 0"
 
     def test_air_series_follow_their_own_readings(self):
         history = SproutHistory()
@@ -72,7 +73,7 @@ class TestSproutHistory:
         history.update(_report(moisture=45.0, air_temp=26.3, air_humidity=59.5))
         assert history.temp == [25.7, 26.3]
         assert history.humidity == [58.0, 59.5]
-        assert history.data_line() == "DATA e824ad2d 37 53 2 26 26 2 58 60 2 46 45"
+        assert history.data_line() == "DATA e824ad2d 37 53 2 26 26 2 58 60 2 46 45 0"
 
     def test_air_series_are_capped_on_the_wire_while_moisture_keeps_its_ring(self):
         # LXMF OPPORTUNISTIC single-packet content is capped at 295 bytes
@@ -155,6 +156,32 @@ class TestSproutHistory:
         assert history.humidity == []
         assert history.data_line() == ""
 
+    def test_pump_active_sets_the_corresponding_mask_bit(self):
+        # sensor_id 7 marks the pump active at one report; the bit positions
+        # follow the moisture-sample indices (oldest first): sample 1 (index 1)
+        # watering -> mask 0b010 = 2.
+        history = SproutHistory()
+        history.update(_report(moisture=46.0, pump_active=False))
+        history.update(_report(moisture=45.0, pump_active=True))
+        history.update(_report(moisture=44.0, pump_active=False))
+        assert history.data_line() == "DATA e824ad2d 37 53 3 26 26 26 3 55 55 55 3 46 45 44 2"
+
+    def test_no_pump_reading_yields_a_zero_mask(self):
+        # A report without sensor_id 7 (e.g. dry-run actuation disabled) is
+        # not watering-active — the mask stays 0, no markers drawn.
+        history = SproutHistory()
+        history.update(_report(moisture=46.0))
+        history.update(_report(moisture=45.0))
+        assert history.data_line().endswith(" 2 46 45 0")
+
+    def test_pump_mask_stays_aligned_through_ring_trim(self):
+        history = SproutHistory(maxlen=3)
+        for value, pump in ((10.0, True), (20.0, True), (30.0, False), (40.0, True)):
+            history.update(_report(moisture=value, pump_active=pump))
+        assert history.samples == [20.0, 30.0, 40.0]
+        # Oldest dropped; pump flags [T,F,T] -> bits 0 and 2 -> mask 5.
+        assert history.data_line() == "DATA e824ad2d 37 53 3 26 26 26 3 55 55 55 3 20 30 40 5"
+
 
 if __name__ == "__main__":
     import sys
@@ -184,7 +211,20 @@ class TestDbRowFolding:
         # Cardputer data excluded, node/dry/wet from the Sprout report.  The
         # second sprout report contributes moisture only (no air), so the air
         # series show seq=1's values.
-        assert history.data_line() == "DATA e824ad2d 37 53 1 26 1 55 2 46 45"
+        assert history.data_line() == "DATA e824ad2d 37 53 1 26 1 55 2 46 45 0"
+
+    def test_db_rows_carry_the_watering_mask(self):
+        # sensor_id 7 in DuckDB rows feeds the watering mask like the live
+        # report path does: report seq=2 (moisture 45) was pump-active -> bit 1.
+        rows = [
+            ("e824ad2da00d2c8a45c2db6e700c989b", 1, 4, 46.0),
+            ("e824ad2da00d2c8a45c2db6e700c989b", 1, 7, 0.0),
+            ("e824ad2da00d2c8a45c2db6e700c989b", 2, 4, 45.0),
+            ("e824ad2da00d2c8a45c2db6e700c989b", 2, 7, 1.0),
+        ]
+        history = SproutHistory()
+        assert history.update_db_rows(rows) == 2
+        assert history.data_line() == "DATA e824ad2d -1 -1 0 0 2 46 45 2"
 
     def test_db_rows_ring_stays_bounded(self):
         rows = []

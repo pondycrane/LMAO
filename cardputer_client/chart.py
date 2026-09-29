@@ -4,7 +4,7 @@ humidity and air temperature.
 The server appends one machine-readable line to its LXMF reply to every
 allow-listed client (see ``lma_core/sprout_history.py``):
 
-    DATA <node8> <dry> <wet> <ct> <t0> ... <tt> <ch> <h0> ... <hh> <cm> <m0> ... <mm>
+    DATA <node8> <dry> <wet> <ct> <t0> ... <tt> <ch> <h0> ... <hh> <cm> <m0> ... <mm> <wm>
 
 * ``node8``   — first 8 hex chars of the reporting node id (informational)
 * ``dry``/``wet`` — the node's active plant-profile band, integer percent;
@@ -13,6 +13,10 @@ allow-listed client (see ``lma_core/sprout_history.py``):
   then soil moisture in % — each OLDEST FIRST.  Lengths may differ (e.g. a
   report with a failed air sensor only grows the moisture series), so each
   series carries its own count.
+* ``wm`` — optional watering mask: one bit per moisture sample (bit *i* =
+  sample *i*, oldest first), set where the pump was physically active at
+  that report; the chart draws a blue marker on the soil trace at each set
+  bit.  Absent on lines the server emitted before this field existed.
 
 ``parse_data_line()`` and the geometry helpers are pure MicroPython and are
 host-tested.  ``draw()`` talks to a display adapter exposing four primitives —
@@ -30,6 +34,7 @@ WET_COLOR = 0x00FFFF  # cyan   — the soil wet threshold that stops a session
 SOIL_COLOR = 0xFFFFFF  # white  — the soil-moisture trace
 HUM_COLOR = 0x00FF00  # green  — the air-humidity trace (same % axis as soil)
 TEMP_COLOR = 0xFFA500  # orange — the air-temperature trace (own right °C axis)
+WATER_COLOR = 0x0000FF  # blue   — watering-active marker on the soil trace
 
 W, H = 240, 135
 # Plot box; the right gutter (PLOT_R..240) holds the temperature axis labels.
@@ -78,6 +83,16 @@ def parse_data_line(text):
             for _ in range(cm):
                 samples.append(int(round(float(parts[idx]))))
                 idx += 1
+            # Optional trailing watering mask (bit i = sample i, oldest first).
+            # Absent on lines the server emitted before this field existed —
+            # then there are no watering markers.
+            if idx == len(parts):
+                water_mask = 0
+            elif idx + 1 == len(parts):
+                water_mask = int(parts[idx])  # ValueError -> outer except
+                idx += 1
+            else:
+                continue
             if idx != len(parts):
                 continue
         except (ValueError, TypeError, IndexError):
@@ -94,6 +109,7 @@ def parse_data_line(text):
             "temp": temp,
             "humidity": humidity,
             "samples": samples,
+            "water": [bool(water_mask & (1 << i)) for i in range(len(samples))],
         }
     return None
 
@@ -300,6 +316,17 @@ def draw(tft, data):
             lx = x_px(len(temps) - 1, len(temps))
             ly = y_px(temps[-1], tlo, thi)
             tft.text(f"{temps[-1]:.0f}C", max(PLOT_L, lx - 24), max(PLOT_T, ly - 7), TEMP_COLOR)
+
+        # Watering markers: a blue tick hanging from the top frame at each
+        # sample column where the pump was physically active, aligned with
+        # the moisture series so it reads as "watered here".
+        if samples:
+            water = data.get("water") or []
+            for i, active in enumerate(water[: len(samples)]):
+                if active:
+                    x = x_px(i, len(samples))
+                    _line(tft, x, PLOT_T, x, PLOT_T + 6, WATER_COLOR)
+                    tft.pixel(x, PLOT_T + 7, WATER_COLOR)
 
         return result
     except Exception as exc:  # noqa: BLE001 — display drivers vary; never kill the loop
