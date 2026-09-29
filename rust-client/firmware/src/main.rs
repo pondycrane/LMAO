@@ -81,6 +81,19 @@ fn main() -> ! {
         Err(_) => println!("[t3] sx1262 configure FAILED (SPI/hardware)"),
     }
 
+    // SPI command-channel round-trip: we wrote syncword 0x1424 → LSYNCRH (0x740);
+    // read it back. A match proves the SPI channel genuinely reaches the radio
+    // (config writes otherwise give no acknowledgment), which decides whether
+    // IRQ=0 is a TX problem or a silent no-op channel.
+    match radio.read_register(sx126x::reg::LSYNCRH) {
+        Ok(v) => println!("[t3] reg740(readback LSYNCRH)={:#06x}", v),
+        Err(_) => println!("[t3] reg740=ERR(busy/timeout)"),
+    }
+    match radio.read_register(sx126x::reg::LSYNCRL) {
+        Ok(v) => println!("[t3] reg741(readback LSYNCRL)={:#06x}", v),
+        Err(_) => println!("[t3] reg741=ERR(busy/timeout)"),
+    }
+
     // RF-beacon leg: transmit one LoRa frame and confirm TX_DONE on-air.
     // DIAGNOSTIC build: log the raw IRQ status over several polls to diagnose
     // the SX1262 read path (TX_DONE=false on the merged flash is under test).

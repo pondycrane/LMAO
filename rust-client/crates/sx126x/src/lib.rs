@@ -144,6 +144,14 @@ impl<B: RadioBus> Sx1262<B> {
         self.cmd(cmd::WRITE_REGISTER, &[0x07, 0x40, b[0], b[1]])
     }
 
+    /// Read a 16-bit register (CMD_READ_REGISTER). `wr=[addr_msb, addr_lsb]`;
+    /// response lays out as [status, reg_msb, reg_lsb] → data at b[1..2].
+    pub fn read_register(&mut self, addr: u16) -> Result<u16, B::Error> {
+        let a = addr.to_be_bytes();
+        let b = self.cmd_read(cmd::READ_REGISTER, &a, 3)?;
+        Ok(((b[1] as u16) << 8) | b[2] as u16)
+    }
+
     /// Set LoRa modulation params: SF, BW register code, coding-rate (4/xx), LDRO.
     pub fn set_modulation_params(&mut self, sf: u8, bw: u8, cr_denom: u8, ldro: u8) -> Result<(), B::Error> {
         self.cmd(cmd::SET_MODULATION_PARAMS, &[sf, bw, cr_denom, ldro])
