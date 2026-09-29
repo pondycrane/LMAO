@@ -284,7 +284,14 @@ impl<B: RadioBus> Sx1262<B> {
 
     /// Fire the loaded TX buffer.
     pub fn start_tx(&mut self) -> Result<(), B::Error> {
-        self.cmd(cmd::SET_TX, &[0x00, 0x00, 0x00])
+        self.start_tx_timeout([0x00, 0x00, 0x00])
+    }
+
+    /// Fire the loaded TX buffer with a 24-bit timeout (15.625 us steps).
+    /// A non-zero timeout force-aborts an endless TX and raises TX_TIMEOUT,
+    /// letting the radio return to standby if a frame never completes.
+    pub fn start_tx_timeout(&mut self, timeout24: [u8; 3]) -> Result<(), B::Error> {
+        self.cmd(cmd::SET_TX, &timeout24)
     }
 
     /// Arm a single RX (buffer base 0xFF). `timeout24` is big-endian 24-bit.
