@@ -11,13 +11,13 @@
 //! command) and the esp-hal SPI binding is a thin `RadioBus` impl. RF RF TX/RX
 //! correctness is the on-hardware leg; the *encodings* are locked here.
 //!
-//! `no_std` + `alloc` (only to build command argument buffers).
+//! `no_std`, `alloc`-free (all SPI command buffers are small stack arrays).
 
 #![no_std]
 
-extern crate alloc;
 
-use alloc::vec::Vec;
+
+
 
 /// SX1262 opcodes (mirrors `sx126x.py` `_CMD_*`).
 pub mod cmd {
@@ -139,7 +139,9 @@ impl<B: RadioBus> Sx1262<B> {
         } else {
             sw
         };
-        self.cmd(cmd::WRITE_REGISTER, &reg_bytes(reg::LSYNCRH, &sw.to_be_bytes()))
+        let b = sw.to_be_bytes();
+        // CMD_WRITE_REGISTER(0x740) = [opcode, 0x07, 0x40, lo, hi]
+        self.cmd(cmd::WRITE_REGISTER, &[0x07, 0x40, b[0], b[1]])
     }
 
     /// Set LoRa modulation params: SF, BW register code, coding-rate (4/xx), LDRO.
@@ -173,10 +175,8 @@ impl<B: RadioBus> Sx1262<B> {
         crc: u8,
         invert_iq: u8,
     ) -> Result<(), B::Error> {
-        let mut args = Vec::with_capacity(5);
-        args.extend_from_slice(&preamble.to_be_bytes());
-        args.extend_from_slice(&[implicit, payload_len, crc, invert_iq]);
-        self.cmd(cmd::SET_PACKET_PARAMS, &args)
+        let p = preamble.to_be_bytes();
+        self.cmd(cmd::SET_PACKET_PARAMS, &[p[0], p[1], implicit, payload_len, crc, invert_iq])
     }
 
     /// Load a packet into the TX FIFO (buffer base 0x0), ready to `start_tx`.
@@ -184,10 +184,11 @@ impl<B: RadioBus> Sx1262<B> {
         self.standby()?;
         self.set_packet_params(8, 0, payload.len() as u8, 1, 0)?;
         self.cmd(cmd::SET_BUFFER_BASE_ADDRESS, &[0x00, 0xFF])?;
-        let mut wbuf = Vec::with_capacity(1 + payload.len());
-        wbuf.push(0x00); // TX offset
-        wbuf.extend_from_slice(payload);
-        self.cmd(cmd::WRITE_BUFFER, &wbuf)
+        // CMD_WRITE_BUFFER: [offset, data...] — single CS-held transaction.
+        let mut wbuf = [0u8; 256];
+        wbuf[0] = 0x00; // TX offset
+        wbuf[1..1 + payload.len()].copy_from_slice(payload);
+        self.cmd(cmd::WRITE_BUFFER, &wbuf[..1 + payload.len()])
     }
 
     /// Fire the loaded TX buffer.
@@ -231,12 +232,4 @@ impl<B: RadioBus> Sx1262<B> {
         out[..n].copy_from_slice(&b[1..1 + n]);
         Ok(n)
     }
-}
-
-/// Build a `WRITE_REGISTER` argument buffer: [addr_h, addr_l, data...].
-fn reg_bytes(addr: u16, data: &[u8]) -> Vec<u8> {
-    let mut v = Vec::with_capacity(2 + data.len());
-    v.extend_from_slice(&addr.to_be_bytes());
-    v.extend_from_slice(data);
-    v
 }
