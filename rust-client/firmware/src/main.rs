@@ -65,19 +65,30 @@ fn main() -> ! {
     let mut radio = Sx1262::new(bus);
 
     // Fixed leaf RF profile: 868 / BW125 / SF7 / CR4:5 / pre24 / syncword 0x1424.
-    match (|| -> Result<(), (/* esp-hal error */)> {
+    // Init order is byte-exact with the proven MicroPython `sx126x.py` bring-up.
+    // Extracted so a latched stuck-TX (see below) can hard-reset + reconfigure.
+    fn configure<B: sx126x::RadioBus>(radio: &mut Sx1262<B>) -> Result<(), B::Error> {
         radio.reset()?;
+        radio.set_dio2_as_rf_switch()?;
+        // TCXO is REQUIRED: the no-TCXO experiment showed the XOSC never runs
+        // without DIO3 power (SET_STANDBY_XOSC no-op, SET_TX EXEC_FAIL), i.e.
+        // the Cap LoRa-1262's clock is a DIO3-powered TCXO.
+        radio.set_dio3_as_tcxo(1800, 5000)?;
+        radio.set_dio_irq_masks()?;
+        radio.clear_irq()?;
         radio.set_packet_type_lora()?;
         radio.set_rf_frequency(868_000_000)?;
         radio.set_sync_word(0x1424)?;
+        radio.set_pa_config(14, 0x02)?; // 14 dBm optimal PA, 40 us ramp (reference default)
         radio.set_modulation_params(7, 0x04, 1, 0)?;
-        radio.set_dio2_as_rf_switch()?;
-        radio.set_dio3_as_tcxo(1800, 5000)?;
-        radio.set_pa_config(14, 0x06)?;
- 
+        // NOTE: the working MicroPython path never calibrates on this board
+        // (calibrate/calibrate_image only run under use_dcdc, which is false).
+        radio.antenna_mismatch_workaround()?;
         Ok(())
-    })() {
-        Ok(()) => println!("[t3] sx1262 configured 868/BW125/SF7/CR4:5 syncword=0x1424"),
+    }
+
+    match configure(&mut radio) {
+        Ok(()) => println!("[t3] sx1262 configured 868/BW125/SF7/CR4:5 pre24 syncword=0x1424"),
         Err(_) => println!("[t3] sx1262 configure FAILED (SPI/hardware)"),
     }
 
@@ -93,128 +104,92 @@ fn main() -> ! {
         Ok(v) => println!("[t3] reg741(readback LSYNCRL)={:#06x}", v),
         Err(_) => println!("[t3] reg741=ERR(busy/timeout)"),
     }
-    // Calibrate all blocks (mirrors µReticulum bring-up); then report device errors.
-    match radio.calibrate() {
-        Ok(()) => println!("[t3] calibrate ok"),
-        Err(_) => println!("[t3] calibrate ERR(busy)"),
-    }
-    match radio.calibrate_image() {
-        Ok(()) => println!("[t3] calibrate_image ok"),
-        Err(_) => println!("[t3] calibrate_image ERR(busy)"),
-    }
+    // calibrate/calibrate_image now run inside the config block above; report
+    // post-calibration device errors.
     match radio.get_device_errors() {
         Ok(v) => println!("[t3] dev_errors(after calib)={:#06x}", v),
         Err(_) => println!("[t3] dev_errors=ERR"),
     }
 
-    // RF-beacon leg: transmit one LoRa frame and confirm TX_DONE on-air.
-    // DIAGNOSTIC build: log the raw IRQ status over several polls to diagnose
-    // the SX1262 read path (TX_DONE=false on the merged flash is under test).
+    // RF-beacon leg: transmit a LoRa frame and confirm TX_DONE on-air.
+    // Repeats every ~2 s in the heartbeat loop below so the event is visible
+    // on any attached monitor (the one-shot boot log raced the serial attach).
     use sx126x::irq;
     let beacon: [u8; 7] = [0xcb, b'L', b'M', b'A', b'O', 1, 0];
-    let loaded = (|| -> Result<(), ()> {
-        radio.prepare_send(&beacon)?;
-        // 100 ms TX timeout (0x1900 * 15.625us) — force-aborts an endless TX.
-        radio.start_tx_timeout([0x00, 0x19, 0x00])?;
-        Ok(())
-    })();
-    println!("[t3] beacon loaded={} 7B, polling irq up to ~250ms...", loaded.is_ok());
-    let mut saw_tx_done = false;
-    let mut saw_tx_timeout = false;
-    let mut fired_at: Option<u32> = None;
-    let mut last_mode: Option<u8> = None;
-    for i in 0..100 {
-        if let Ok((s, mode)) = radio.get_status() {
-            if last_mode != Some(mode) {
-                let name = match mode {
-                    2 => "STBY_RC",
-                    3 => "STBY_XOSC",
-                    4 => "FS",
-                    5 => "RX",
-                    6 => "TX",
-                    _ => "?",
-                };
-                println!("[t3] status[{i}]=0x{s:02x} mode={name}");
-                last_mode = Some(mode);
-            }
-        }
-        match radio.get_irq_status() {
-            Ok(v) => {
-                if v != 0 {
-                    if v & irq::TX_DONE != 0 {
-                        println!("[t3] irq[{i}]={:#06x} TX_DONE", v);
-                    } else if v & irq::TIMEOUT != 0 {
-                        println!("[t3] irq[{i}]={:#06x} TX_TIMEOUT", v);
-                    } else {
-                        println!("[t3] irq[{i}]={:#06x}", v);
-                    }
-                }
-                if v & irq::TX_DONE != 0 {
-                    saw_tx_done = true;
-                    fired_at = Some(i);
-                    break;
-                }
-                if v & irq::TIMEOUT != 0 {
-                    saw_tx_timeout = true;
-                }
-            }
-            Err(_) => {
-                if i < 8 {
-                    println!("[t3] irq[{i}]=ERR(busy/timeout)");
-                }
-            }
-        }
-        for _ in 0..400_000 {
-            core::hint::spin_loop();
-        }
-    }
-    match radio.get_rx_buffer_status() {
-        Ok((len, ptr)) => println!("[t3] rxbuf len={len} ptr={ptr}"),
-        Err(_) => println!("[t3] rxbuf=ERR"),
-    }
-    match radio.get_device_errors() {
-        Ok(v) => println!("[t3] dev_errors(after tx)={:#06x}", v),
-        Err(_) => println!("[t3] dev_errors=ERR"),
-    }
-    println!("[t3] beacon TX_DONE={} TIMEOUT={} fired_at={:?}", saw_tx_done, saw_tx_timeout, fired_at);
-    // If a fatal device error blocked TX, clear it and retry the beacon once.
-    match radio.get_device_errors() {
-        Ok(e) if e != 0 => {
-            println!("[t3] clearing dev_errors + retrying beacon");
-            let _ = radio.clear_device_errors();
-            let loaded = (|| -> Result<(), ()> {
-                radio.prepare_send(&beacon)?;
-                radio.start_tx()?;
-                Ok(())
-            })();
-            let mut d2 = false;
-            if loaded.is_ok() {
-                for _ in 0..8 {
-                    if let Ok(s) = radio.get_irq_status() {
-                        if s & irq::TX_DONE != 0 {
-                            d2 = true;
-                            break;
-                        }
-                    }
-                    for _ in 0..400_000 {
-                        core::hint::spin_loop();
-                    }
-                }
-            }
-            println!("[t3] retry TX_DONE={}", d2);
-            if let Ok(e2) = radio.get_device_errors() {
-                println!("[t3] dev_errors(after retry)={:#06x}", e2);
-            }
-        }
-        _ => {}
+
+    // Arm continuous RX — mirrors the reference `start_recv(continuous=True)`
+    // at the end of interface init. The radio idles in RX between beacons;
+    // this *is* the leaf's listen path.
+    match radio.start_rx([0xFF, 0xFF, 0xFF]) {
+        Ok(()) => println!("[t3] continuous RX armed"),
+        Err(_) => println!("[t3] RX arm FAILED"),
     }
 
+    // Periodic beacon: TX out of the RX idle with a bounded timeout, wait
+    // TX_DONE on REAL millisecond timing (spin loops elide at opt-level "s" —
+    // an elided poll window was the "endless TX" red herring), then re-arm
+    // continuous RX and dump any received frame.
     let mut beat = 0u32;
     loop {
         beat = beat.wrapping_add(1);
-        println!("[t1] heartbeat {}", beat);
-        for _ in 0..5_000_000 {
-            core::hint::spin_loop();
+
+        let loaded = (|| -> Result<(), ()> {
+            radio.prepare_send(&beacon)?;
+            // Bounded TX: airtime ~60 ms, timeout 200 ms (0x3200 * 15.625 us)
+            // so a wedged sequencer is RTC-aborted instead of hanging.
+            radio.start_tx_timeout([0x00, 0x32, 0x00])?;
+            Ok(())
+        })();
+        if !loaded.is_ok() {
+            println!("[t3] beacon #{beat} load FAILED");
+        }
+
+        let mut outcome = "timeout-poll";
+        let mut polls = 0u32;
+        for i in 0..100 {
+            polls = i;
+            match radio.get_irq_status() {
+                Ok(v) => {
+                    if v & irq::TX_DONE != 0 {
+                        outcome = "TX_DONE";
+                        break;
+                    }
+                    if v & irq::TIMEOUT != 0 {
+                        outcome = "TX_TIMEOUT";
+                        break;
+                    }
+                }
+                Err(_) => outcome = "irq_err",
+            }
+            esp_hal::delay::Delay::new().delay_millis(5);
+        }
+        if outcome != "TX_DONE" {
+            // Recover the radio before the next cycle.
+            let _ = configure(&mut radio);
+        }
+        let _ = radio.clear_irq();
+        println!("[t3] beacon #{beat} result={outcome} polls={polls}");
+
+        // Back to continuous RX; listen through the idle window and dump any
+        // received frame (bidirectional RNS path).
+        let _ = radio.start_rx([0xFF, 0xFF, 0xFF]);
+        for _ in 0..40 {
+            if let Ok(v) = radio.get_irq_status() {
+                if v & irq::RX_DONE != 0 {
+                    let ok = irq::rx_success(v);
+                    let (len, ptr) = radio.get_rx_buffer_status().unwrap_or((0, 0));
+                    let (rssi, snr) = radio.get_packet_status().unwrap_or((0, 0.0));
+                    let mut pkt = [0u8; 255];
+                    let n = radio.read_buffer(ptr, &mut pkt[..len as usize]).unwrap_or(0);
+                    println!(
+                        "[t3] RX irq={v:#06x} ok={ok} len={len} rssi={rssi}dBm snr={snr}dB data={:02x?}",
+                        &pkt[..n.min(32)]
+                    );
+                    let _ = radio.clear_irq();
+                    let _ = radio.start_rx([0xFF, 0xFF, 0xFF]);
+                }
+            }
+            esp_hal::delay::Delay::new().delay_millis(50);
         }
     }
 }

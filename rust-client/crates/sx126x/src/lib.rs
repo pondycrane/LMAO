@@ -38,6 +38,7 @@ pub mod cmd {
     pub const SET_STANDBY: u8 = 0x80;
     pub const SET_DIO3_AS_TCXO_CTRL: u8 = 0x97;
     pub const SET_DIO2_AS_RF_SWITCH_CTRL: u8 = 0x9D;
+    pub const SET_FS: u8 = 0xC1;
     pub const SET_TX: u8 = 0x83;
     pub const SET_TX_PARAMS: u8 = 0x8E;
     pub const WRITE_BUFFER: u8 = 0x0E;
@@ -55,6 +56,9 @@ pub mod reg {
     pub const LSYNCRL: u16 = 0x741;
     /// Modulation-quality workaround register (DS 15.1): set bit 2 before TX.
     pub const MODQUAL: u16 = 0x0889;
+    /// TX clamp / OCP register — DS 15.2 "Better Resistance to Antenna
+    /// Mismatch" workaround: the SX1262 reference init ORs 0x1E into it.
+    pub const TX_CLAMP: u16 = 0x08D8;
 }
 
 /// SX1262 device-error flag bits (GET_DEVICE_ERRORS), DS 13.4.4.
@@ -100,6 +104,10 @@ pub trait RadioBus {
     fn reset(&mut self) -> Result<(), Self::Error>;
     /// Wait (bounded) until the BUSY line clears.
     fn wait_ready(&mut self) -> Result<(), Self::Error>;
+    /// Blocking delay. Required by the reference init sequence: hardware reset
+    /// timing (1 ms low / 5 ms high) and the 15 ms TCXO-startup settle after
+    /// `SET_DIO3_AS_TCXO_CTRL` (the chip does not hold BUSY for these).
+    fn delay_ms(&mut self, ms: u32);
 }
 
 /// SX1262 driver over any `RadioBus`. A leaf owns exactly one instance.
@@ -127,16 +135,67 @@ impl<B: RadioBus> Sx1262<B> {
         Ok(buf)
     }
 
-    /// Reset the radio (hardware RST), then STANDBY.
+    /// Reset the radio (hardware RST), then STANDBY_RC. The bus owns the pulse;
+    /// here we only mirror the reference's post-reset settle (chip boots to
+    /// STDBY_RC).
     pub fn reset(&mut self) -> Result<(), B::Error> {
         self.bus.reset()?;
         self.bus.wait_ready()?;
         self.standby()
     }
 
-    /// STANDBY (RC).
+    /// STANDBY (RC). Only used right after reset, before the TCXO is
+    /// configured — the TX/RX path uses `standby_xosc` (see below).
     pub fn standby(&mut self) -> Result<(), B::Error> {
         self.cmd(cmd::SET_STANDBY, &[0x00])
+    }
+
+    /// STANDBY (XOSC) + clear IRQs — mirrors the reference `_standby()`, which
+    /// every TX/RX prepare goes through. On this DIO3-TCXO board, firing
+    /// SET_TX from STDBY_RC with the XOSC not yet running (and the expected
+    /// XOSC_START_ERR uncleared) is the endless-TX state (chip stays in mode 6
+    /// with no TX_DONE); the reference avoids it by always entering TX/RX from
+    /// STDBY_XOSC.
+    pub fn standby_xosc(&mut self) -> Result<(), B::Error> {
+        self.cmd(cmd::SET_STANDBY, &[0x01])?;
+        // XOSC settle: entering STDBY_XOSC from STDBY_RC restarts the crystal
+        // (off in RC mode). On this DIO3-TCXO module the startup takes the
+        // configured TCXO time (~5 ms); issuing SET_TX before the crystal is
+        // stable hangs the chip in TX forever (no TX_DONE, no error flag).
+        // The reference never hits this: Python command gaps are milliseconds
+        // and its continuous-RX idle keeps the XOSC warm.
+        self.bus.delay_ms(5);
+        // XOSC_START_ERR re-latches on every RC→XOSC crystal restart; clear it
+        // so a subsequent SET_TX is not rejected.
+        self.clear_device_errors()?;
+        self.clear_irq()
+    }
+
+    /// Clear all IRQ flags (mirrors `_clear_irq()`).
+    pub fn clear_irq(&mut self) -> Result<(), B::Error> {
+        self.cmd(cmd::CLR_IRQ_STATUS, &0xFFFFu16.to_be_bytes())
+    }
+
+    /// Map IRQ sources to DIO1 (mirrors `_CMD_CFG_DIO_IRQ` in the reference
+    /// init): RX_DONE|TX_DONE|TIMEOUT|CRC_ERR overall, RX_DONE|TX_DONE|TIMEOUT
+    /// on DIO1, nothing on DIO2/DIO3.
+    pub fn set_dio_irq_masks(&mut self) -> Result<(), B::Error> {
+        let mask = (irq::RX_DONE | irq::TX_DONE | irq::TIMEOUT | irq::CRC_ERR).to_be_bytes();
+        let dio1 = (irq::RX_DONE | irq::TX_DONE | irq::TIMEOUT).to_be_bytes();
+        self.cmd(cmd::CFG_DIO_IRQ, &[mask[0], mask[1], dio1[0], dio1[1], 0x00, 0x00, 0x00, 0x00])
+    }
+
+    /// DS 15.2 "Better Resistance of the SX1262 Tx to Antenna Mismatch"
+    /// workaround (applied by the reference `_SX1262.__init__`): 0x8D8 |= 0x1E.
+    pub fn antenna_mismatch_workaround(&mut self) -> Result<(), B::Error> {
+        let v = self.reg_read_u8(reg::TX_CLAMP)?;
+        self.reg_write_u8(reg::TX_CLAMP, v | 0x1E)
+    }
+
+    /// Enter FS mode (synthesizer on) — diagnostic: a PLL that locks reaches
+    /// mode 4; a dead synthesizer never does.
+    pub fn set_fs(&mut self) -> Result<(), B::Error> {
+        self.cmd(cmd::SET_FS, &[])
     }
 
     /// Set packet type to LoRa.
@@ -177,9 +236,20 @@ impl<B: RadioBus> Sx1262<B> {
         let v = val.to_be_bytes();
         self.cmd(cmd::WRITE_REGISTER, &[a[0], a[1], v[0], v[1]])
     }
-    /// Convenience 8-bit register write (val in high byte).
-    pub fn write_register_u8(&mut self, addr: u16, val: u8) -> Result<(), B::Error> {
-        self.write_register(addr, (val as u16) << 8)
+    /// Read a single register byte (mirrors `_reg_read`): response lays out
+    /// [status, data] → data at b[1].
+    pub fn reg_read_u8(&mut self, addr: u16) -> Result<u8, B::Error> {
+        let a = addr.to_be_bytes();
+        let b = self.cmd_read(cmd::READ_REGISTER, &a, 2)?;
+        Ok(b[1])
+    }
+
+    /// Write a single register byte (mirrors `_reg_write`: one data byte).
+    /// Note the old `write_register_u8` wrote TWO bytes (clobbering addr+1) —
+    /// this is the correct single-byte form.
+    pub fn reg_write_u8(&mut self, addr: u16, val: u8) -> Result<(), B::Error> {
+        let a = addr.to_be_bytes();
+        self.cmd(cmd::WRITE_REGISTER, &[a[0], a[1], val])
     }
 
     /// Calibrate RC oscillators, PLL and ADC (CMD_CALIBRATE, mask 0xFE = all).
@@ -206,9 +276,11 @@ impl<B: RadioBus> Sx1262<B> {
         Ok(((b[1] as u16) << 8) | b[2] as u16)
     }
 
-    /// Clear device error flags (CLEAR_DEVICE_ERRORS).
+    /// Clear device error flags (CLEAR_DEVICE_ERRORS). DS 13.4.3 takes a
+    /// 2-byte 0x0000 argument (the reference sends it; a short frame may not
+    /// execute).
     pub fn clear_device_errors(&mut self) -> Result<(), B::Error> {
-        self.cmd(cmd::CLEAR_DEVICE_ERRORS, &[])
+        self.cmd(cmd::CLEAR_DEVICE_ERRORS, &[0x00, 0x00])
     }
 
     /// Set LoRa modulation params: SF, BW register code, coding-rate (4/xx), LDRO.
@@ -236,7 +308,12 @@ impl<B: RadioBus> Sx1262<B> {
         let trim = trim_lut.iter().position(|&v| v == dv).unwrap() as u8;
         let t = timeout.min(0xFFFFFF) as u32;
         // [trim, timeout_msb, timeout_mid, timeout_lsb]
-        self.cmd(cmd::SET_DIO3_AS_TCXO_CTRL, &[trim, (t >> 16) as u8, (t >> 8) as u8, t as u8])
+        self.cmd(cmd::SET_DIO3_AS_TCXO_CTRL, &[trim, (t >> 16) as u8, (t >> 8) as u8, t as u8])?;
+        // Reference: settle 15 ms for the TCXO to start, then clear the
+        // *expected* XOSC_START_ERR that DS 13.3.6 says is flagged here. The
+        // chip does not hold BUSY for the startup, hence a real delay.
+        self.bus.delay_ms(15);
+        self.clear_device_errors()
     }
 
     /// Set PA config + TX power/ramp, mirroring the µReticulum `_get_pa_tx_params`
@@ -269,17 +346,22 @@ impl<B: RadioBus> Sx1262<B> {
     }
 
     /// Load a packet into the TX FIFO (buffer base 0x0), ready to `start_tx`.
+    /// Byte-exact with the reference `prepare_send`: STDBY_XOSC + IRQ clear,
+    /// packet params (preamble 24 = the leaf's fixed profile), buffer base,
+    /// payload write, then the DS 15.1 modulation-quality RMW (single byte).
     pub fn prepare_send(&mut self, payload: &[u8]) -> Result<(), B::Error> {
-        self.standby()?;
-        self.set_packet_params(8, 0, payload.len() as u8, 1, 0)?;
+        self.standby_xosc()?;
+        self.set_packet_params(24, 0, payload.len() as u8, 1, 0)?;
         self.cmd(cmd::SET_BUFFER_BASE_ADDRESS, &[0x00, 0xFF])?;
-        // DS 15.1 modulation-quality workaround (µReticulum does this before each TX).
-        self.write_register_u8(reg::MODQUAL, 0x04)?;
         // CMD_WRITE_BUFFER: [offset, data...] — single CS-held transaction.
         let mut wbuf = [0u8; 256];
         wbuf[0] = 0x00; // TX offset
         wbuf[1..1 + payload.len()].copy_from_slice(payload);
-        self.cmd(cmd::WRITE_BUFFER, &wbuf[..1 + payload.len()])
+        self.cmd(cmd::WRITE_BUFFER, &wbuf[..1 + payload.len()])?;
+        // DS 15.1 modulation-quality workaround (BW<500kHz → set bit 2),
+        // read-modify-write of the single byte — required before each TX.
+        let v = self.reg_read_u8(reg::MODQUAL)?;
+        self.reg_write_u8(reg::MODQUAL, v | 0x04)
     }
 
     /// Fire the loaded TX buffer.
@@ -296,8 +378,8 @@ impl<B: RadioBus> Sx1262<B> {
 
     /// Arm a single RX (buffer base 0xFF). `timeout24` is big-endian 24-bit.
     pub fn start_rx(&mut self, timeout24: [u8; 3]) -> Result<(), B::Error> {
-        self.standby()?;
-        self.set_packet_params(8, 0, 0xFF, 1, 0)?;
+        self.standby_xosc()?;
+        self.set_packet_params(24, 0, 0xFF, 1, 0)?;
         self.cmd(cmd::SET_BUFFER_BASE_ADDRESS, &[0xFF, 0x00])?;
         self.cmd(cmd::SET_RX, &timeout24)
     }

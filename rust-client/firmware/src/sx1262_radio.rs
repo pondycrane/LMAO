@@ -47,6 +47,8 @@ impl RadioBus for EspRadioBus<'_> {
         self.spi
             .transfer(&mut buf[..n])
             .map_err(|_| ())?;
+        // (On-wire trace removed after bring-up: the command stream was
+        // verified byte-identical to the reference driver.)
         if !read.is_empty() {
             // After [opcode+write], the following bytes are [status, data...].
             let status = buf[1 + write.len()];
@@ -63,23 +65,29 @@ impl RadioBus for EspRadioBus<'_> {
     }
 
     fn reset(&mut self) -> Result<(), ()> {
+        // Reference reset timing: 1 ms low pulse, then 5 ms settle high.
         self.rst.set_low();
-        // short reset pulse; BUSY poll after
-        for _ in 0..200 {
-            core::hint::spin_loop();
-        }
+        self.delay_ms(1);
         self.rst.set_high();
+        self.delay_ms(5);
         self.wait_ready()
     }
 
     fn wait_ready(&mut self) -> Result<(), ()> {
-        // SX1262 asserts BUSY during internal ops; wait up to ~1 ms.
-        for _ in 0..50_000 {
+        // SX1262 asserts BUSY during internal ops. Typical <105 us, but a full
+        // CALIBRATE can hold it up to ~18 ms (longer with TCXO startup) — the
+        // budget here must cover the worst case, ~50 ms.
+        for _ in 0..10_000_000 {
             if self.busy.is_low() {
                 return Ok(());
             }
             core::hint::spin_loop();
         }
         Err(())
+    }
+
+    fn delay_ms(&mut self, ms: u32) {
+        // Real cycle-counted delay (spin_loop optimizes away at opt-level "s").
+        esp_hal::delay::Delay::new().delay_millis(ms);
     }
 }
