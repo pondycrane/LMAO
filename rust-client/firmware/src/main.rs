@@ -82,29 +82,36 @@ fn main() -> ! {
     }
 
     // RF-beacon leg: transmit one LoRa frame and confirm TX_DONE on-air.
-    // Frame uses the RNode 1-byte header (0xcb split-flag style) + payload.
-    // (exercises the read path via get_irq_status — the RF-layout check.)
+    // DIAGNOSTIC build: log the raw IRQ status over several polls to diagnose
+    // the SX1262 read path (TX_DONE=false on the merged flash is under test).
     use sx126x::irq;
     let beacon: [u8; 7] = [0xcb, b'L', b'M', b'A', b'O', 1, 0];
-    let mut tx_done = false;
     let loaded = (|| -> Result<(), ()> {
         radio.prepare_send(&beacon)?;
         radio.start_tx()?;
         Ok(())
     })();
-    if loaded.is_ok() {
-        for _ in 0..3000 {
-            match radio.get_irq_status() {
-                Ok(s) if s & irq::TX_DONE != 0 => {
-                    tx_done = true;
-                    break;
+    println!("[t3] beacon loaded={} 7B, polling irq...", loaded.is_ok());
+    let mut saw_tx_done = false;
+    for i in 0..8 {
+        match radio.get_irq_status() {
+            Ok(v) => {
+                println!("[t3] irq[{i}]={:#06x}{}", v, if v & irq::TX_DONE != 0 { " TX_DONE" } else { "" });
+                if v & irq::TX_DONE != 0 {
+                    saw_tx_done = true;
                 }
-                Err(_) => break,
-                _ => {}
             }
+            Err(_) => println!("[t3] irq[{i}]=ERR(busy/timeout)"),
+        }
+        for _ in 0..400_000 {
+            core::hint::spin_loop();
         }
     }
-    println!("[t3] beacon 7B TX_DONE={}", tx_done);
+    match radio.get_rx_buffer_status() {
+        Ok((len, ptr)) => println!("[t3] rxbuf len={len} ptr={ptr}"),
+        Err(_) => println!("[t3] rxbuf=ERR"),
+    }
+    println!("[t3] beacon TX_DONE={}", saw_tx_done);
 
     let mut beat = 0u32;
     loop {
