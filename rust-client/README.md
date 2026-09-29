@@ -23,7 +23,7 @@ radio (esp-hal UART/SPI)
 | host/interop | Rust↔Python RNS Link+Resource interop harness | T0 — PASS |
 | firmware/ | no_std esp-hal boot (heartbeat) | T1 — boots on Cardputer |
 | crates/lma-identity | RNS identity + `lxmf/delivery` DEST | T2 — host PASS |
-| crates/radio-interface | RNode LoRa frame demux/RF-framing | T3 — host PASS |
+| crates/radio-interface | RNode LoRa frame demux + leaf radio Interface contract (T3 / RF-leg) | T3 — host PASS |
 | crates/leaf-rns | Link-window scheduler + resume queue | T4 — host PASS |
 | crates/lma-wire | prost `LmaoEnvelope`/`SensorReport` (from `proto/lma_messages.proto`, §6b) | T5 — host PASS |
 | crates/lma-lxmf | LXMF control path (pack/sign/verify) | T5 — host PASS |
