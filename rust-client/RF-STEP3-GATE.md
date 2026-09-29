@@ -22,7 +22,23 @@ wires it into the firmware main loop.**
 `cargo build --release` (esp 1.97 nightly / xtensa-esp32s3-none-elf) is clean;
 the firmware image grew 220 248 → **238 184 B** (SPI + SX1262 driver linked in).
 
-## Hardware-verify required (not provable here)
+## ON-DEVICE CONFIRMATION (flashed on the Cardputer)
+
+
+Flashed via espflash in bootloader mode (`--before no-reset`). On boot:
+```
+[t1] lmao-firmware-t3 booted
+[t1] chip revision: 0.2
+[t1] mac: d0:cf:13:0d:c4:50
+[t3] sx1262 configured 868/BW125/SF7/CR4:5 syncword=0x1424
+```
+**The esp-hal SPI `RadioBus` → `Sx1262` reset + configured the real SX1262 on the
+Cardputer without error** — the `[t3] sx1262 configured` gate line fires, and the
+firmware continues to a healthy heartbeat (no SPI busy-wait hang/panic). This
+confirms the command encodings + SPI transaction are accepted by the hardware.
+(Still pending: on-air TX/RX against the production RNode + the exact read
+response-layout round-trip, the RF step 4 hardware leg.)
+## Hardware-verify required (not provable at build)
 1. The **SX1262 SPI response layout** — where the status byte and read data land
    relative to opcode/args in the single-transaction `transfer` — is asserted
    per the MicroPython `_cmd` semantics but **must be confirmed on the device**
