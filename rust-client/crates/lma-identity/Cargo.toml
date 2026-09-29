@@ -5,8 +5,11 @@ edition.workspace = true
 description = "LMAO leaf identity: mint/load RNS Identity + lxmf/delivery DEST (T2)"
 
 [dependencies]
-rns-core = "0.1.17"
-rns-crypto = "0.1.10"
+# default-features=false keeps the no_std xtensa firmware target buildable
+# (rns-core/rns-crypto enable `std` by default, which the esp build-std lacks).
+# Host crates that need the std transport re-enable it via feature unification.
+rns-core = { version = "0.1.17", default-features = false }
+rns-crypto = { version = "0.1.10", default-features = false }
 
 [dev-dependencies]
 rand = "0.8"
