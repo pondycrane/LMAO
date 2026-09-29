@@ -649,6 +649,8 @@ name = "leaf-rns"
 version = "0.1.0"
 dependencies = [
  "lma-identity",
+ "rns-core",
+ "rns-crypto",
 ]
 
 [[package]]
