@@ -12,13 +12,16 @@ count-prefixed series — temperature, humidity, then moisture — so lengths ma
 differ (e.g. a report with a failed SHT30 contact still contributes its
 moisture):
 
-    DATA <node8> <dry> <wet> <ct> <t0> ... <tt> <ch> <h0> ... <hh> <cm> <m0> ... <mm>
+    DATA <node8> <dry> <wet> <ct> <t0> ... <tt> <ch> <h0> ... <hh> <cm> <m0> ... <mm> <wm>
 
 * ``node8`` — first 8 hex chars of the reporting node id (informational)
 * ``dry``/``wet`` — the node's active plant-profile band, integer percent;
   ``-1`` means the node has not reported a band yet
 * ``ct``/``ch``/``cm`` — per-series sample counts, then the samples themselves
 * air temperature in °C and humidity/moisture in integer percent, OLDEST FIRST
+* ``wm`` — watering mask: one bit per moisture sample (bit *i* = sample *i*,
+  oldest first), set where the pump was physically active at that report; the
+  Cardputer draws a marker on the soil trace at each set bit.
 
 The air series are capped on the wire (``DATA_AIR_MAX_SAMPLES``) because the
 server answers the Cardputer with an LXMF ``OPPORTUNISTIC`` packet whose
@@ -46,6 +49,11 @@ DATA_AIR_MAX_SAMPLES = 10
 SENSOR_AIR_HUMIDITY = 2
 SENSOR_AIR_TEMP = 3
 SENSOR_SOIL_MOISTURE = 4
+# ML watering-event tag: whether the pump was physically active at this
+# report.  sensor_id 6 (pump duration, "s") is informational; the active
+# flag is what the chart's watering markers are drawn from.  Both are
+# omitted by the node while actuation is in dry-run (no markers then).
+SENSOR_PUMP_ACTIVE = 7
 SENSOR_PROFILE_DRY = 10
 SENSOR_PROFILE_WET = 11
 
@@ -58,6 +66,10 @@ class SproutHistory:
         self._moisture = []
         self._temp = []
         self._humidity = []
+        # One bool per moisture sample: was the pump active at that report.
+        # Index-aligned with ``_moisture`` (both OLDEST FIRST) so a bitmask
+        # built from it marks the same samples the chart's soil trace shows.
+        self._pump = []
         self._dry = None
         self._wet = None
         self._node = None
@@ -76,18 +88,23 @@ class SproutHistory:
         """
         node = node or ""
         moisture_seen = False
+        moisture_pushes = 0
         air_temp = None
         air_humidity = None
+        pump_active = None
         dry = None
         wet = None
         for sensor_id, value in samples:
             if sensor_id == SENSOR_SOIL_MOISTURE:
                 self._push(self._moisture, value)
                 moisture_seen = True
+                moisture_pushes += 1
             elif sensor_id == SENSOR_AIR_TEMP:
                 air_temp = value
             elif sensor_id == SENSOR_AIR_HUMIDITY:
                 air_humidity = value
+            elif sensor_id == SENSOR_PUMP_ACTIVE:
+                pump_active = value
             elif sensor_id == SENSOR_PROFILE_DRY:
                 dry = value
             elif sensor_id == SENSOR_PROFILE_WET:
@@ -105,6 +122,13 @@ class SproutHistory:
                 self._dry = dry
             if wet is not None:
                 self._wet = wet
+            # One pump flag per moisture sample so the marker mask stays
+            # index-aligned with the soil trace (the node sends a single
+            # soil + single pump reading per report; the count-based push
+            # keeps them aligned even for a malformed multi-sample report).
+            pump_flag = bool(pump_active) if pump_active is not None else False
+            for _ in range(moisture_pushes):
+                self._push(self._pump, pump_flag)
         return moisture_seen
 
     def update(self, sensor_report):
@@ -179,6 +203,7 @@ class SproutHistory:
         self._moisture = []
         self._temp = []
         self._humidity = []
+        self._pump = []
         self._dry = None
         self._wet = None
         self._node = None
@@ -201,4 +226,12 @@ class SproutHistory:
         tokens += self._series_tokens(self._temp, DATA_AIR_MAX_SAMPLES)
         tokens += self._series_tokens(self._humidity, DATA_AIR_MAX_SAMPLES)
         tokens += self._series_tokens(self._moisture, None)
+        # Watering mask: one bit per moisture sample (bit i = sample i,
+        # oldest first, matching the moisture series order).  The Cardputer
+        # draws a marker on the chart wherever a bit is set.
+        mask = 0
+        for i, active in enumerate(self._pump):
+            if active:
+                mask |= 1 << i
+        tokens.append(str(mask))
         return " ".join(tokens)
