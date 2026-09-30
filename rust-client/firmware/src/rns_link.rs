@@ -28,6 +28,19 @@ use rns_core::packet::{PacketFlags, RawPacket};
 use sx126x::irq;
 use sx126x::{RadioBus, Sx1262};
 
+/// `rns_crypto::Rng` adapter over the ESP32-S3 hardware RNG (used for the
+/// ephemeral X25519 key in encryption-to-server).
+pub struct EspRng(pub esp_hal::rng::Rng);
+
+impl rns_crypto::Rng for EspRng {
+    fn fill_bytes(&mut self, dest: &mut [u8]) {
+        for c in dest.chunks_mut(4) {
+            let r = self.0.random();
+            c.copy_from_slice(&r.to_le_bytes()[..c.len()]);
+        }
+    }
+}
+
 /// The leaf node's persistent Ed25519 identity seed (64 B: 32-byte seed + 32-byte
 /// public key, the RNS private-key layout). A production leaf would load this
 /// from secure storage; here it is a fixed constant so the node keeps the same
@@ -124,6 +137,54 @@ pub fn announce_for(
         packet_type: PACKET_TYPE_ANNOUNCE,
     };
     RawPacket::pack(flags, 0, &dh, None, 0, &announce_data)
+        .ok()
+        .map(|p| p.raw)
+}
+
+/// Build + encrypt a real LXMF message to the LMAO server's `lxmf.delivery`
+/// destination ready to transmit on-air:
+///   1. `lxmf_core::message::pack` — LNMF envelope addressed to the server,
+///      signed by our identity, carrying `content` (any bytes).
+///   2. X25519-encrypt the packed message to the server's public key
+///      (ephemeral ‖ token-ciphertext), exactly as RNS single-destination
+///      encryption.
+///   3. Address an RNS DATA packet to the server's LXMF delivery hash.
+/// Returns the raw wire packet for `RnsLink::send`.
+pub fn build_message_to_server(
+    identity: &rns_crypto::identity::Identity,
+    rng: &mut dyn rns_crypto::Rng,
+    content: &[u8],
+    timestamp: f64,
+) -> Option<Vec<u8>> {
+    use rns_core::constants::{DESTINATION_SINGLE, HEADER_1, PACKET_TYPE_DATA};
+
+    let src_hash = *identity.hash();
+
+    let mut fields = Vec::new();
+    let packed = lxmf_core::message::pack(
+        &SERVER_LXMF_DELIVERY_HASH,
+        &src_hash,
+        timestamp,
+        b"mesh",
+        content,
+        fields,
+        None, // no stamp
+        |data| identity.sign(data).map_err(|_| lxmf_core::message::Error::SignError),
+    )
+    .ok()?
+    .packed;
+
+    let server = rns_crypto::identity::Identity::from_public_key(&SERVER_PUBLIC_KEY);
+    let ciphertext = server.encrypt(&packed, rng).ok()?;
+
+    let flags = PacketFlags {
+        header_type: HEADER_1,
+        context_flag: 0,
+        transport_type: 0,
+        destination_type: DESTINATION_SINGLE,
+        packet_type: PACKET_TYPE_DATA,
+    };
+    RawPacket::pack(flags, 0, &SERVER_LXMF_DELIVERY_HASH, None, 0, &ciphertext)
         .ok()
         .map(|p| p.raw)
 }
