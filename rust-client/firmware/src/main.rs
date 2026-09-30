@@ -9,6 +9,8 @@
 //! this only proves the Rust no_std toolchain + esp-hal boots and runs on the
 //! Cardputer and that `espflash` can load it.
 
+extern crate alloc;
+use alloc::format;
 use esp_hal::{efuse::InterfaceMacAddress, main, Config};
 use esp_println::println;
 
@@ -157,11 +159,28 @@ fn main() -> ! {
     // Real RNS identity: provision the node identity and derive its announce
     // destination hash (persistent across boots from the fixed seed).
     let (node_dest, node_identity) = crate::rns_link::node_destination_hash();
+    let lxmf_del = crate::rns_link::lxmf_delivery_hash(&node_identity);
+    let mut lxmf_buf = [0u8; 32];
+    for (i, b) in lxmf_del.iter().enumerate() {
+        lxmf_buf[i * 2] = HEX[(b >> 4) as usize];
+        lxmf_buf[i * 2 + 1] = HEX[(b & 0x0f) as usize];
+    }
     println!(
-        "[rns] identity pk={:02x?}… dest={:02x?}",
+        "[rns] identity pk={:02x?}… lmao.leaf dest={:02x?} lxmf.delivery={}",
         node_identity.get_public_key().map(|k| k[..8].to_vec()).unwrap_or_default(),
-        node_dest
+        node_dest,
+        core::str::from_utf8(&lxmf_buf).unwrap_or("?")
     );
+
+    // LMAO node_id = hex of the identity hash (what the server keys sensor
+    // reports by — matches the stable leaf's identity_hex).
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut node_id_buf = [0u8; 32];
+    for (i, b) in node_identity.hash().iter().enumerate() {
+        node_id_buf[i * 2] = HEX[(b >> 4) as usize];
+        node_id_buf[i * 2 + 1] = HEX[(b & 0x0f) as usize];
+    }
+    let node_id = core::str::from_utf8(&node_id_buf).expect("ascii hex");
 
     let mut beat = 0u32;
     let mut now_ms = 0u32;
@@ -196,7 +215,7 @@ fn main() -> ! {
         let rng = esp_hal::rng::Rng::new();
         if sched.is_rx_awake(now_ms) {
             // Link window open: listen + flush queued frames.
-            let _ = link.pump_rx(now_ms);
+            let _ = link.pump_rx(now_ms, &node_identity);
             // Periodic signed RNS announces. Alternate every ~10 s between the
             // `lmao.leaf` presence destination and the `lxmf.delivery`
             // destination (so the server can address replies back to this
@@ -224,23 +243,24 @@ fn main() -> ! {
                     None => println!("[rns] beat #{beat} ANNOUNCE build failed (skip)"),
                 }
             }
-            // Periodic LXMF message to the server (~10 s cadence, E2E probe):
-            // real "send any data to the mesh" from the leaf.
-            if beat % 100 == 0 {
-                let payload: [u8; 12] = [
-                    b'L', b'M', b'A', b'O', (beat >> 24) as u8, (beat >> 16) as u8,
-                    (beat >> 8) as u8, beat as u8, 0x2a, 0x5b, 0x00, 0x07,
-                ];
+            // Periodic text message to the server (~30 s) — the production
+            // LMAO POC envelope (LMAOEnvelope{text}, p:Envelope title) exactly
+            // as the stable Cardputer leaf's "Hello from Cardputer" send.
+            if beat % 300 == 0 {
+                let hello = format!("Hello from Rust Cardputer leaf (seq {beat})");
+                let ts_ms = (START_EPOCH * 1000.0) as u64 + beat as u64 * 100;
+                let envelope =
+                    crate::rns_link::build_text_envelope(node_id, &hello, ts_ms);
                 let sent = crate::rns_link::build_message_to_server(
                     &node_identity,
                     &mut crate::rns_link::EspRng(rng),
-                    &payload,
+                    &envelope,
                     START_EPOCH + beat as f64 / 10.0,
                 )
                 .map(|pkt| (pkt.len(), link.send(&pkt, now_ms)));
                 match sent {
                     Some((n, Ok(()))) => println!(
-                        "[rns] beat #{beat} LXMF->server {n} B link_tx={}",
+                        "[rns] beat #{beat} Hello msg {n} B txt=`{hello}` sid={node_id} link_tx={}",
                         link.interface().stats.tx_frames
                     ),
                     Some((_, Err(()))) => {
