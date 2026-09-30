@@ -185,7 +185,14 @@ fn build_lxmf_to_server(
 ) -> Option<Vec<u8>> {
     use rns_core::constants::{DESTINATION_SINGLE, HEADER_1, PACKET_TYPE_DATA};
 
-    let src_hash = *identity.hash();
+    // LXMF messages are between `lxmf.delivery` destinations: the *source*
+    // field is the sending side's delivery destination hash (its `lxmf.delivery`
+    // OUT dest), NOT the raw identity hash. urns sends
+    // `Destination(identity, OUT, SINGLE, "lxmf", "delivery")` as `self._source`
+    // and packs `self._source.hash`; the server keys replies off that hash.
+    // Previously we put the raw identity hash here, so the server couldn't
+    // attribute messages to the (whitelisted) delivery destination.
+    let src_hash = lxmf_delivery_hash(identity);
 
     let mut fields = Vec::new();
     let packed = lxmf_core::message::pack(
