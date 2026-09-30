@@ -81,25 +81,54 @@ Done / committed (branch `feat/rust-client-text-message`, **PR #195**, mergeable
   30 s cadence (the 26 errors are old bursts ending 01:38 UTC).
 - **LXMF source hash** — fixed; server still logs no cardputer message.
 
-### The blocker (real next milestone)
-The server **never receives the packet at the RNS layer** — no `Message
-received`, no decrypt attempt. Cause: the client does `RawPacket::pack` + a
-raw air TX with **no RNS transport/routing**, so the mesh does not route the
-frame to the server's RNode bridge. The stable urns client ran
-`Packet(dest).send()` through the RNS Transport/router (path via announces,
-hop-by-hop). We deferred transport as "client-only scope" (handoff noted
-`rns-core::transport` is NOT std-gated — viable); without it delivery cannot
-happen.
+### The blocker — RESOLVED BY DIAGNOSIS (2026-09-29), fix tracked as L1/L2
 
-## Next steps (in priority order)
-1. **Implement RNS transport/routing on the client** (the outbound deliver
-   path) so the packed DATA packet routes to `dad35b80…` across the mesh.
-   This is the only way to get criterion A green. Substantial, multi-step.
-2. Re-flash + verify **A** (server pod `Message received — From: 99ce3231…`).
-3. Then **B** should fire (inbound decoder already in place) — confirm
-   `INBOUND`/`CHART` on device serial.
-4. Run the ≥6 h durability window (**C**); watch for resets/OOM/radio wedge.
-5. Update this doc's checkboxes as each criterion passes with evidence.
+**The handoff's earlier "implement RNS transport/routing" theory was wrong.**
+Single-hop delivery to the server's local IN destination needs no path and no
+transport: RNS 1.3.5 `Transport.inbound` delivers any well-formed DATA packet
+whose destination hash matches a registered IN destination
+(`_handle_data` → `destinations_map`). There is no transport node between the
+Cardputer and the server's RNode; a HEADER_2/transport frame would be dropped
+as transit-for-someone-else.
+
+**Actual root cause — the LXMF opportunistic wire format.** Python LXMF sends
+`RNS.Packet(dest, packed[LXMessage.DESTINATION_LENGTH:])`: the encrypted RNS
+payload carries the LXMF wire message **without the leading 16-byte
+destination hash**, and the receiver re-prepends it from the packet header
+(`LXMRouter.delivery_packet`: `lxmf_data = packet.destination.hash + data`).
+The Rust firmware encrypted the **full** packed message (dest included), so
+the server's `LXMessage.unpack_from_bytes` misaligned (src parsed as the dest
+hash, msgpack garbage) and LXMF dropped it with
+`Could not assemble LXMF message from received data` (NOTICE) — the line the
+earlier log greps never looked for. RNS-layer decryption succeeded all along
+(hence zero ratchet errors).
+
+**Evidence (offline sim, stock Python RNS 1.3.5 + LXMF 1.0.1, real server
+identity, exact Rust packet bytes — `host/lxmf-sim/`):**
+- Rust announce → **valid**: `Identity.recall(99ce32…)` + path installed.
+- Old-format DATA → `Could not assemble LXMF message from received data`, no
+  delivery.
+- Fixed-format DATA (encrypt `packed[16:]`) → **delivery callback fires**:
+  `From: 99ce32311dc37193eff4951a912f8f1b  Title: p:Envelope  Content length: 86`
+  — the exact production "Message received" line.
+
+The inbound reply path has the **mirror bug** (decrypt → must prepend our
+`lxmf.delivery` hash before `lxmf_core::message::unpack`) — fixed under L2.
+
+## Next steps (in priority order — the ticket plan is `LXMF-CLIENT-PLAN.md`)
+
+1. **L1 (#197)** — fix the wire format: encrypt `packed[16..]`; reference
+   `random_hash` layout (`urandom(5)‖time(5,BE)`); extract the pure wire
+   logic into `crates/leaf-lxmf` (no_std, on rns-core/lxmf-core — no
+   hand-ported protocol) + host regression tests.
+2. **L2 (#198)** — inbound mirror fix + reply-decode host test.
+3. **L3 (#199)** — re-flash + verify **A** live (server pod
+   `Message received — From: 99ce3231…`; older logs should show the
+   `Could not assemble` NOTICEs at pre-fix beats — production confirmation
+   of the diagnosis).
+4. **L4 (#200)** — verify **B** on device serial (`INBOUND`/`reply`/`CHART`).
+5. **L5 (#201)** — run the ≥6 h durability window (**C**); check the boxes
+   below with evidence.
 
 ## Key facts / commands / constants
 - Server identity: `~/.local/share/lmao_server/lxmf/identity` (64 B).
@@ -131,8 +160,12 @@ happen.
 - Honesty rule: never claim server-side delivery/reply unless observed in the
   **server pod logs**. On-air (sprout RXP2P) ≠ delivered.
 
-## Open risk
-Transport integration may pull in more of rns-core (routing table, path
-announces, hop ACK) than the current minimal build carries; heap headroom at
-256 KiB is the constraint to watch (earlier fragmentation OOM'd the LXMF
-path). Keep the change incremental and re-run the durability criteria.
+## Open risks
+- **Inbound duty window**: the 200 ms/1 s RX duty may clip the server's reply
+  (half-duplex turnaround, cf #151 on the native client) — L4 measures the
+  real rate; `LinkWindowConfig::new(200,800)` in `firmware/src/main.rs` is
+  the knob.
+- **Heap churn**: 128 KiB static heap (`HEAP_SIZE`); the earlier 32 KiB
+  build fragmented to exhaustion in ~8 min. L5 watches this.
+- Transport is OFF the table (see blocker section): do not re-add it as a
+  fix attempt.
