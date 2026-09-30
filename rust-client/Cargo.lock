@@ -630,6 +630,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "leaf-lxmf"
+version = "0.1.0"
+dependencies = [
+ "lxmf-core",
+ "rns-core",
+ "rns-crypto",
+]
+
+[[package]]
 name = "leaf-power"
 version = "0.1.0"
 dependencies = [

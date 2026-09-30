@@ -1,0 +1,17 @@
+[package]
+name = "leaf-lxmf"
+version.workspace = true
+edition.workspace = true
+description = "LMAO leaf LXMF wire format: opportunistic outbound pack/encrypt + inbound reply decode (no_std)"
+
+# The production LXMF/RNS protocol crates, forced no_std so this crate also
+# cross-compiles for the xtensa firmware target. On the host workspace the
+# std feature is enabled anyway by the other members (feature unification);
+# the no_std declaration only matters in the firmware workspace, where this is
+# the sole consumer and the firmware build pins default-features off.
+[dependencies]
+rns-core = { version = "0.1.17", default-features = false }
+rns-crypto = { version = "0.1.10", default-features = false }
+lxmf-core = { version = "0.1.5", default-features = false }
+
+[dev-dependencies]

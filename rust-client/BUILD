@@ -156,6 +156,28 @@ sh_binary(
     tags = ["manual"],
 )
 
+# ── L1 leaf-lxmf crate (LXMF opportunistic wire format) ────────────────
+# The pure, host-testable LXMF wire logic extracted from firmware/src/rns_link.rs:
+# RNS announce build, opportunistic pack/encrypt (encrypt `packed[16..]` — the
+# L1 fix), the text-envelope protobuf, and the server-reply mirror decode.
+# Builds directly on rns-core/lxmf-core/rns-crypto (no prost → no PROTOC).
+
+filegroup(
+    name = "leaf_lxmf_sources",
+    srcs = glob(
+        ["crates/leaf-lxmf/**"],
+        exclude = ["crates/**/target/**"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+sh_binary(
+    name = "test_leaf_lxmf",
+    srcs = ["test_leaf_lxmf.sh"],
+    data = [":leaf_lxmf_sources"],
+    tags = ["manual"],
+)
+
 # ── T6 leaf-resource crate (RNS Resource over Link on the leaf) ──────────────
 # Wraps rns-core's ResourceReceiver/Sender for the leaf: RX (advertisement →
 # parts → hash-verified assemble → completion proof), TX (leaf-originated),
