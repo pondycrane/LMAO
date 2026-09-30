@@ -266,11 +266,17 @@ sh_binary(
 # with `bazel run //cardputer_client:flash`). Never pulled into test runs.
 
 filegroup(
+    name = "vendor_sources",
+    srcs = glob(["vendor/**"]),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
     name = "firmware_sources",
     srcs = glob(
         ["firmware/**"],
         exclude = ["firmware/target/**"],
-    ),
+    ) + [":vendor_sources"],
     visibility = ["//visibility:public"],
 )
 
