@@ -33,11 +33,11 @@ static HEAP: linked_list_allocator::LockedHeap = linked_list_allocator::LockedHe
 /// RTC; message ordering/freshness is not the point of this client probe).
 const START_EPOCH: f64 = 1_788_000_000.0;
 
-/// Static heap backing store. 128 KiB: the RNS identity build + per-beat
-/// packet and per-announce Vec allocations churn a linked-list allocator hard;
-/// 32 KiB fragmented to exhaustion after ~8 min on the earlier build
-/// (allocation failure → halt). The ESP32-S3 has plenty of SRAM for this.
-const HEAP_SIZE: usize = 131_072;
+/// Static heap backing store. The LXMF send path + per-beat packet/announce
+/// Vec allocations churn a linked-list allocator; 32 KiB died ~8 min in, 128 KiB
+/// was outrun by the added LXMF allocations. 256 KiB gives real headroom
+/// against fragmentation OOM (the S3 has plenty of SRAM).
+const HEAP_SIZE: usize = 262_144;
 static mut HEAP_MEM: [u8; HEAP_SIZE] = [0u8; HEAP_SIZE];
 
 /// Panic handler: log and halt. (esp-hal 1.x does not provide one; we bring
