@@ -1,11 +1,13 @@
 # rust-client — the LMAO ESP32-S3 Rust client
 
-The Rust implementation of the LMAO **Cardputer leaf** (design:
-[`docs/esp32-rust-client-design.md`](../docs/esp32-rust-client-design.md)).
-The standing mandate: the MicroPython Cardputer stays the live production node
-until the Rust stack is end-to-end; on-device legs are production-gated.
+The Rust implementation of the LMAO **Cardputer leaf**. The old incremental
+Cardputer-client design doc was removed when the plan pivoted to a full-Rust
+**server** (`docs/rust-server-migration.md`); the client firmware in this tree
+remains the on-device stack it builds on. The standing mandate: the MicroPython
+Cardputer stays the live production node until the Rust stack is end-to-end;
+on-device legs are production-gated.
 
-## Layout (design §5 — data-flow)
+## Layout (data-flow)
 
 ```
 radio (esp-hal UART/SPI)
