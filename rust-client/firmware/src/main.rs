@@ -208,7 +208,7 @@ fn main() -> ! {
         let rng = esp_hal::rng::Rng::new();
         if sched.is_rx_awake(now_ms) {
             // Link window open: listen + flush queued frames.
-            let _ = link.pump_rx(now_ms);
+            let _ = link.pump_rx(now_ms, &node_identity);
             // Periodic signed RNS announces. Alternate every ~10 s between the
             // `lmao.leaf` presence destination and the `lxmf.delivery`
             // destination (so the server can address replies back to this
