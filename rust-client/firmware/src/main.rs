@@ -159,10 +159,17 @@ fn main() -> ! {
     // Real RNS identity: provision the node identity and derive its announce
     // destination hash (persistent across boots from the fixed seed).
     let (node_dest, node_identity) = crate::rns_link::node_destination_hash();
+    let lxmf_del = crate::rns_link::lxmf_delivery_hash(&node_identity);
+    let mut lxmf_buf = [0u8; 32];
+    for (i, b) in lxmf_del.iter().enumerate() {
+        lxmf_buf[i * 2] = HEX[(b >> 4) as usize];
+        lxmf_buf[i * 2 + 1] = HEX[(b & 0x0f) as usize];
+    }
     println!(
-        "[rns] identity pk={:02x?}… dest={:02x?}",
+        "[rns] identity pk={:02x?}… lmao.leaf dest={:02x?} lxmf.delivery={}",
         node_identity.get_public_key().map(|k| k[..8].to_vec()).unwrap_or_default(),
-        node_dest
+        node_dest,
+        core::str::from_utf8(&lxmf_buf).unwrap_or("?")
     );
 
     // LMAO node_id = hex of the identity hash (what the server keys sensor
