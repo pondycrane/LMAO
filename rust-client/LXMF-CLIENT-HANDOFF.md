@@ -73,6 +73,21 @@ Done / committed (branch `feat/rust-client-text-message`, **PR #195**, mergeable
   On-device `sid=8a1766…` verified.
 - 6d180d3 — LXMF `source_hash` = the sender's `lxmf.delivery` hash
   (not raw identity hash), matching urns wire format.
+- **L1 (#197)** on `feat/rust-client-lxmf-wire` — wire format fixed + extracted:
+  the pure LXMF wire logic now lives in **`crates/leaf-lxmf`**
+  (no_std+alloc; `announce`/`wire`/`envelope`/`inbound`, built on
+  rns-core/lxmf-core/rns-crypto — no hand-ported protocol). `wire::pack_lxmf_to_server`
+  encrypts `packed[16..]` (was full `packed`); announce `random_hash` is the
+  reference `urandom(5) ‖ unix_time(5, BE)`.
+  `cargo test -p leaf-lxmf` green (6 tests pin `RNS payload == encrypt(packed[16..])`,
+  `dest_hash ‖ decrypt(payload)` unpacks+verifies, the inbound mirror, and the
+  random_hash layout). Firmware release build green.
+  Offline sim (**`host/lxmf-sim/ingest.py`** + `crates/leaf-lxmf/examples/sim_dump.rs`)
+  PASS with the new shape: `DELIVERY CALLBACK FIRED — From: 99ce32…  Title:
+  p:Envelope  Content length: 86` — the production "Message received" line.
+  The inbound mirror fix (**L2**) is implemented in
+  `leaf_lxmf::decrypt_server_reply` (prepends our `lxmf.delivery` hash) and
+  host-tested here too.
 
 ### Ruled out with host/cluster evidence (do NOT reinvestigate these)
 - **Identity not whitelisted** — fixed; 99ce32… is in the k8s allow-list.
@@ -117,11 +132,14 @@ The inbound reply path has the **mirror bug** (decrypt → must prepend our
 
 ## Next steps (in priority order — the ticket plan is `LXMF-CLIENT-PLAN.md`)
 
-1. **L1 (#197)** — fix the wire format: encrypt `packed[16..]`; reference
-   `random_hash` layout (`urandom(5)‖time(5,BE)`); extract the pure wire
-   logic into `crates/leaf-lxmf` (no_std, on rns-core/lxmf-core — no
-   hand-ported protocol) + host regression tests.
-2. **L2 (#198)** — inbound mirror fix + reply-decode host test.
+1. ~~**L1 (#197)** — fix the wire format~~ **DONE** on
+   `feat/rust-client-lxmf-wire`: `crates/leaf-lxmf` extracted (announce,
+   opportunistic pack/encrypt `packed[16..]`, text-envelope, reply decode);
+   `random_hash = urandom(5) ‖ unix_time(5, BE)`; `cargo test -p leaf-lxmf`
+   green; firmware release builds; offline sim PASS (delivery callback fired).
+2. **L2 (#198)** — the inbound mirror fix is already implemented + host-tested
+   in `leaf_lxmf::decrypt_server_reply` (from the L1 extraction); remaining is
+   the live reply-decode check on device (folded into L4's B verification).
 3. **L3 (#199)** — re-flash + verify **A** live (server pod
    `Message received — From: 99ce3231…`; older logs should show the
    `Could not assemble` NOTICEs at pre-fix beats — production confirmation

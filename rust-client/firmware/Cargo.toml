@@ -23,6 +23,7 @@ esp-bootloader-esp-idf = { version = "0.6", features = ["esp32s3"] }
 sx126x = { path = "../crates/sx126x" }
 radio-interface = { path = "../crates/radio-interface" }
 leaf-rns = { path = "../crates/leaf-rns" }
+leaf-lxmf = { path = "../crates/leaf-lxmf" }
 # rns-core pulls rns-crypto with default features (std). It has an optional
 # no_std `std` feature — force it off so the RNS packet code cross-compiles for
 # the xtensa firmware target (we need RawPacket pack/unpack, not std RNG).

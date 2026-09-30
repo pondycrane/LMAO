@@ -159,7 +159,7 @@ fn main() -> ! {
     // Real RNS identity: provision the node identity and derive its announce
     // destination hash (persistent across boots from the fixed seed).
     let (node_dest, node_identity) = crate::rns_link::node_destination_hash();
-    let lxmf_del = crate::rns_link::lxmf_delivery_hash(&node_identity);
+    let lxmf_del = leaf_lxmf::lxmf_delivery_hash(&node_identity);
     let mut lxmf_buf = [0u8; 32];
     for (i, b) in lxmf_del.iter().enumerate() {
         lxmf_buf[i * 2] = HEX[(b >> 4) as usize];
@@ -221,17 +221,20 @@ fn main() -> ! {
             // destination (so the server can address replies back to this
             // leaf).
             if beat % 100 == 0 {
-                let mut rh = [0u8; 10];
-                for c in rh.chunks_mut(4) {
-                    let r = rng.random();
-                    c.copy_from_slice(&r.to_le_bytes()[..c.len()]);
-                }
+                // µReticulum reference random_hash: urandom(5) ‖ unix_time(5, BE)
+                // so the server's path-table timebase is real (not garbage).
+                let mut random5 = [0u8; 5];
+                let a = rng.random();
+                random5[..4].copy_from_slice(&a.to_le_bytes());
+                random5[4] = (rng.random() & 0xff) as u8;
+                let unix_time = (START_EPOCH + f64::from(now_ms) / 1000.0) as u64;
+                let rh = leaf_lxmf::random_hash(random5, unix_time);
                 let (app, aspect, label) = if beat % 200 == 0 {
                     ("lmao", "leaf", "lmao.leaf")
                 } else {
                     ("lxmf", "delivery", "lxmf.delivery")
                 };
-                let a = crate::rns_link::announce_for(&node_identity, app, aspect, rh);
+                let a = leaf_lxmf::announce_for(&node_identity, app, aspect, rh);
                 match a.map(|pkt| (pkt.len(), link.send(&pkt, now_ms))) {
                     Some((n, Ok(()))) => println!(
                         "[rns] beat #{beat} ANNOUNCE {n} B ({label} dest) src={node_dest:02x?}"
@@ -250,10 +253,12 @@ fn main() -> ! {
                 let hello = format!("Hello from Rust Cardputer leaf (seq {beat})");
                 let ts_ms = (START_EPOCH * 1000.0) as u64 + beat as u64 * 100;
                 let envelope =
-                    crate::rns_link::build_text_envelope(node_id, &hello, ts_ms);
-                let sent = crate::rns_link::build_message_to_server(
+                    leaf_lxmf::build_text_envelope(node_id, &hello, ts_ms);
+                let sent = leaf_lxmf::build_message_to_server(
                     &node_identity,
                     &mut crate::rns_link::EspRng(rng),
+                    &crate::rns_link::SERVER_LXMF_DELIVERY_HASH,
+                    &crate::rns_link::SERVER_PUBLIC_KEY,
                     &envelope,
                     START_EPOCH + beat as f64 / 10.0,
                 )

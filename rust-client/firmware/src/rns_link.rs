@@ -12,25 +12,28 @@
 //!   `RadioInterface::process_incoming` — which decodes the raw RNS packet and
 //!   stamps RSSI/SNR on it (the leaf's signal source).
 //!
+//! The **pure wire protocol** — RNS announce build, LXMF opportunistic
+//! pack/encrypt, the text-envelope protobuf, and server-reply decode — lives
+//! in the no_std `leaf-lxmf` crate (host-testable; see `crates/leaf-lxmf`).
+//! This module only wires that logic to the radio + the ESP32-S3 RNG and
+//! prints the verified INBOUND/reply/CHART results to the serial console.
+//!
 //! All waits are real milliseconds (`esp_hal::delay::Delay`) — spin loops elide
 //! at `opt-level = "s"` and that previously shrank the TX poll below the frame
 //! airtime.
 
 extern crate alloc;
 
-use alloc::string::String;
-use alloc::vec::Vec;
-
 use radio_interface::interface::RadioInterface;
 use radio_interface::{parse_rnode_frame, split_into_frames, SplitAssembler};
-use rns_core::announce::AnnounceData;
 use rns_core::destination as rns_dest;
-use rns_core::packet::{PacketFlags, RawPacket};
+use rns_core::packet::RawPacket;
+use rns_crypto::identity::Identity;
 use sx126x::irq;
 use sx126x::{RadioBus, Sx1262};
 
 /// `rns_crypto::Rng` adapter over the ESP32-S3 hardware RNG (used for the
-/// ephemeral X25519 key in encryption-to-server).
+/// ephemeral X25519 key in encryption-to-server + announce random_hash).
 pub struct EspRng(pub esp_hal::rng::Rng);
 
 impl rns_crypto::Rng for EspRng {
@@ -105,348 +108,40 @@ pub fn node_destination_hash() -> ([u8; 16], rns_crypto::identity::Identity) {
     (dh, identity)
 }
 
-/// Build a signed RNS **announce** packet for the node's `app.aspect`
-/// destination (byte-exact with the µReticulum `Destination.announce` wire
-/// format): flags=ANNOUNCE/HDR1-config, hops=0, header destination_hash,
-/// context=0, payload = pubkey ‖ name_hash ‖ random_hash ‖ signature. The
-/// signature covers dest_hash ‖ pubkey ‖ name_hash ‖ random_hash.
-///
-/// `rng` supplies fresh bytes for random_hash so every announce differs
-/// (replay/reassembly-freshness). Returns the raw wire packet, or `None` if
-/// the packet can't be built — the caller logs and moves on rather than
-/// panic-halting the node.
-pub fn build_announce(
-    identity: &rns_crypto::identity::Identity,
-    random_hash: [u8; 10],
-) -> Option<Vec<u8>> {
-    use rns_core::constants::{DESTINATION_SINGLE, HEADER_1, PACKET_TYPE_ANNOUNCE};
-
-    announce_for(identity, APP_NAME, LEAF_ASPECT, random_hash)
-}
-
-/// Build a signed RNS announce for `name.aspect` of this identity (byte-exact
-/// with the µReticulum `Destination.announce` wire format — see
-/// `build_announce`). Used to announce both the `lmao.leaf` presence
-/// destination and the `lxmf.delivery` destination (so the server can address
-/// replies back to this leaf).
-pub fn announce_for(
-    identity: &rns_crypto::identity::Identity,
-    app_name: &str,
-    aspect: &str,
-    random_hash: [u8; 10],
-) -> Option<Vec<u8>> {
-    use rns_core::constants::{DESTINATION_SINGLE, HEADER_1, PACKET_TYPE_ANNOUNCE};
-
-    let aspects = [aspect];
-    let nh = rns_dest::name_hash(app_name, &aspects);
-    let dh = rns_dest::destination_hash(app_name, &aspects, Some(identity.hash()));
-
-    let (announce_data, _has_ratchet) =
-        AnnounceData::pack(identity, &dh, &nh, &random_hash, None, None).ok()?;
-
-    let flags = PacketFlags {
-        header_type: HEADER_1,
-        context_flag: 0,
-        transport_type: 0,
-        destination_type: DESTINATION_SINGLE,
-        packet_type: PACKET_TYPE_ANNOUNCE,
-    };
-    RawPacket::pack(flags, 0, &dh, None, 0, &announce_data)
-        .ok()
-        .map(|p| p.raw)
-}
-
-/// Build + encrypt a real LXMF message to the LMAO server's `lxmf.delivery`
-/// destination ready to transmit on-air:
-///   1. `lxmf_core::message::pack` — LNMF envelope addressed to the server,
-///      signed by our identity, carrying `content` (any bytes).
-///   2. X25519-encrypt the packed message to the server's public key
-///      (ephemeral ‖ token-ciphertext), exactly as RNS single-destination
-///      encryption.
-///   3. Address an RNS DATA packet to the server's LXMF delivery hash.
-/// Returns the raw wire packet for `RnsLink::send`.
-pub fn build_message_to_server(
-    identity: &rns_crypto::identity::Identity,
-    rng: &mut dyn rns_crypto::Rng,
-    content: &[u8],
-    timestamp: f64,
-) -> Option<Vec<u8>> {
-    // The stable leaf sends protobuf LMAO envelopes under the p:Envelope title.
-    build_lxmf_to_server(identity, rng, b"p:Envelope", content, timestamp)
-}
-
-/// Pack + encrypt an LXMF message to the server with an explicit title.
-fn build_lxmf_to_server(
-    identity: &rns_crypto::identity::Identity,
-    rng: &mut dyn rns_crypto::Rng,
-    title: &[u8],
-    content: &[u8],
-    timestamp: f64,
-) -> Option<Vec<u8>> {
-    use rns_core::constants::{DESTINATION_SINGLE, HEADER_1, PACKET_TYPE_DATA};
-
-    // LXMF messages are between `lxmf.delivery` destinations: the *source*
-    // field is the sending side's delivery destination hash (its `lxmf.delivery`
-    // OUT dest), NOT the raw identity hash. urns sends
-    // `Destination(identity, OUT, SINGLE, "lxmf", "delivery")` as `self._source`
-    // and packs `self._source.hash`; the server keys replies off that hash.
-    // Previously we put the raw identity hash here, so the server couldn't
-    // attribute messages to the (whitelisted) delivery destination.
-    let src_hash = lxmf_delivery_hash(identity);
-
-    let mut fields = Vec::new();
-    let packed = lxmf_core::message::pack(
-        &SERVER_LXMF_DELIVERY_HASH,
-        &src_hash,
-        timestamp,
-        title,
-        content,
-        fields,
-        None, // no stamp
-        |data| identity.sign(data).map_err(|_| lxmf_core::message::Error::SignError),
-    )
-    .ok()?
-    .packed;
-
-    let server = rns_crypto::identity::Identity::from_public_key(&SERVER_PUBLIC_KEY);
-    let ciphertext = server.encrypt(&packed, rng).ok()?;
-
-    let flags = PacketFlags {
-        header_type: HEADER_1,
-        context_flag: 0,
-        transport_type: 0,
-        destination_type: DESTINATION_SINGLE,
-        packet_type: PACKET_TYPE_DATA,
-    };
-    RawPacket::pack(flags, 0, &SERVER_LXMF_DELIVERY_HASH, None, 0, &ciphertext)
-        .ok()
-        .map(|p| p.raw)
-}
-
-// ── Minimal protobuf encoder (LMAO envelopes; no prost on-device) ──────────
-// Wire types: 0=varint, 2=length-delimited, 5=fixed32 (little-endian).
-
-fn pb_varint(buf: &mut Vec<u8>, mut v: u64) {
-    while v >= 0x80 {
-        buf.push((v as u8 & 0x7f) | 0x80);
-        v >>= 7;
-    }
-    buf.push(v as u8);
-}
-fn pb_tag(buf: &mut Vec<u8>, field: u32, wire: u8) {
-    pb_varint(buf, ((field as u64) << 3) | wire as u64);
-}
-fn pb_field_var(buf: &mut Vec<u8>, field: u32, v: u64) {
-    pb_tag(buf, field, 0);
-    pb_varint(buf, v);
-}
-fn pb_field_ld(buf: &mut Vec<u8>, field: u32, data: &[u8]) {
-    pb_tag(buf, field, 2);
-    pb_varint(buf, data.len() as u64);
-    buf.extend_from_slice(data);
-}
-/// Build the LMAO `LMAOEnvelope{ text: TextMessage }` protobuf bytes exactly
-/// as the stable leaf's `encode_envelope_text(encode_text_message(...))`:
-/// field 20 (TextMessage) with node_id, the text content and a millisecond
-/// timestamp. This is the "Hello from Cardputer" text message.
-pub fn build_text_envelope(node_id_hex: &str, content: &str, timestamp_ms: u64) -> Vec<u8> {
-    let mut text_msg = Vec::new();
-    pb_field_ld(&mut text_msg, 1, node_id_hex.as_bytes()); // node_id
-    pb_field_ld(&mut text_msg, 2, content.as_bytes()); // content
-    pb_field_var(&mut text_msg, 3, timestamp_ms); // timestamp (ms)
-
-    let mut envelope = Vec::new();
-    pb_field_ld(&mut envelope, 20, &text_msg); // FIELD_TEXT = 20
-    envelope
-}
-
-// ── Inbound: server reply / chart data (the leaf's receive half) ─────────────
+// ── Inbound: log the server's reply (chart-data receive half) ───────────────
 //
 // The server ACKs every client message with an encrypted LXMF reply whose
 // content is an `LMAOEnvelope{text: TextMessage}`; `TextMessage.content` is
 // "ACK from LMAO Server — received your message (N bytes)" followed by a
 // `DATA …` line carrying the recent Sprout moisture series, so the client
-// charts it with no extra airtime. This mirrors the stable client's
-// `handle_reply` + `chart.parse_data_line` (main.py).
+// charts it with no extra airtime. The decrypt + opportunistic-mirror unpack +
+// chart parse all live in `leaf_lxmf`; this just prints the result.
 
-/// Truncated LXMF delivery destination hash for this identity — the address
-/// the server replies to (the announce destination for `lxmf.delivery`).
-pub fn lxmf_delivery_hash(identity: &rns_crypto::identity::Identity) -> [u8; 16] {
-    rns_dest::destination_hash("lxmf", &["delivery"], Some(identity.hash()))
-}
-
-/// Minimal protobuf varint reader (pairs with `pb_varint`).
-fn read_pb_varint(buf: &[u8], pos: &mut usize) -> Option<u64> {
-    let mut res = 0u64;
-    let mut shift = 0u32;
-    loop {
-        let b = *buf.get(*pos)?;
-        *pos += 1;
-        res |= ((b & 0x7f) as u64) << shift;
-        if b & 0x80 == 0 {
-            return Some(res);
-        }
-        shift += 7;
-        if shift >= 64 {
-            return None;
-        }
-    }
-}
-
-/// Body of the first length-delimited protobuf field `want` in `buf` (skips
-/// other wire types defensively). `LMAOEnvelope`/`TextMessage` are small; a
-/// linear scan is fine here.
-fn find_pb_field_ld(buf: &[u8], want: u32) -> Option<&[u8]> {
-    let mut pos = 0;
-    while pos < buf.len() {
-        let tag = read_pb_varint(buf, &mut pos)?;
-        let field = (tag >> 3) as u32;
-        let wire = (tag & 7) as u8;
-        match wire {
-            0 => {
-                read_pb_varint(buf, &mut pos)?;
-            }
-            1 => pos = pos.checked_add(8)?,
-            2 => {
-                let len = read_pb_varint(buf, &mut pos)? as usize;
-                let end = pos.checked_add(len)?;
-                if end > buf.len() {
-                    return None;
-                }
-                if field == want {
-                    return Some(&buf[pos..end]);
-                }
-                pos = end;
-            }
-            5 => pos = pos.checked_add(4)?,
-            _ => return None, // groups not used by LMAO
-        }
-    }
-    None
-}
-
-/// Extract `TextMessage.content` from an `LMAOEnvelope{text}` protobuf
-/// (field 20 → TextMessage field 2) — the server reply payload.
-fn decode_text_content(envelope: &[u8]) -> Option<&[u8]> {
-    let text_msg = find_pb_field_ld(envelope, 20)?; // FIELD_TEXT = 20
-    find_pb_field_ld(text_msg, 2) // TextMessage.content = 2
-}
-
-/// no_std rounding (`f32::round` is std/libm): round half up for the
-/// non-negative server values (moisture %, temperature). NaN saturates to 0.
-fn roundi(x: f32) -> i64 {
-    (x + 0.5) as i64
-}
-
-/// A parsed `DATA …` chart record (mirrors `chart.parse_data_line`).
-pub struct ChartRecord {
-    pub node: String,
-    pub dry: i64,
-    pub wet: i64,
-    pub temp: Vec<f32>,
-    pub humidity: Vec<i64>,
-    pub samples: Vec<i64>,
-    pub water_mask: u64,
-}
-
-/// Extract the first `DATA ` record from *text* (the server piggybacks the
-/// Sprout moisture series on its ACK), or None. Tolerates the ACK line
-/// sharing the message and skips malformed records rather than failing.
-pub fn parse_data_line(text: &str) -> Option<ChartRecord> {
-    for raw in text.lines() {
-        let line = raw.trim();
-        if !line.starts_with("DATA ") {
-            continue;
-        }
-        let all: Vec<&str> = line.split_whitespace().collect();
-        if all.len() < 6 || all[0] != "DATA" {
-            continue;
-        }
-        // Inner closure so a malformed record just aborts to "keep scanning".
-        let rec = (|| -> Option<ChartRecord> {
-            let node = String::from(all[1]);
-            let dry = all[2].parse::<f32>().ok().map(roundi)?;
-            let wet = all[3].parse::<f32>().ok().map(roundi)?;
-            let ct = all.get(4)?.parse::<usize>().ok()?;
-            let mut idx = 5;
-            let mut temp = Vec::new();
-            for _ in 0..ct {
-                temp.push(all.get(idx)?.parse::<f32>().ok()?);
-                idx += 1;
-            }
-            let ch = all.get(idx)?.parse::<usize>().ok()?;
-            idx += 1;
-            let mut humidity = Vec::new();
-            for _ in 0..ch {
-                humidity.push(all.get(idx)?.parse::<f32>().ok().map(roundi)?);
-                idx += 1;
-            }
-            let cm = all.get(idx)?.parse::<usize>().ok()?;
-            idx += 1;
-            let mut samples = Vec::new();
-            for _ in 0..cm {
-                samples.push(all.get(idx)?.parse::<f32>().ok().map(roundi)?);
-                idx += 1;
-            }
-            // Optional trailing watering mask (old lines lack it).
-            let water_mask = match all.len() - idx {
-                0 => 0u64,
-                1 => all[idx].parse::<u64>().ok()?,
-                _ => return None,
-            };
-            // A percent-less line can never come from the server — reject it
-            // (mirrors the Python guard: `if not humidity and not samples`).
-            if humidity.is_empty() && samples.is_empty() {
-                return None;
-            }
-            Some(ChartRecord { node, dry, wet, temp, humidity, samples, water_mask })
-        })();
-        if rec.is_some() {
-            return rec;
-        }
-    }
-    None
-}
-
-/// Decrypt + unpack an inbound DATA packet addressed to our `lxmf.delivery` —
-/// the server's reply to one of our messages — and, when it carries a `DATA …`
-/// chart line, parse and print the record (the leaf's receive half, replacing
-/// the stable client's screen chart with a serial log until a display driver
-/// lands in the Rust firmware).
-pub fn handle_lxmf_reply(identity: &rns_crypto::identity::Identity, pkt: &RawPacket) {
-    // 1. X25519-decrypt the packet payload (encrypted to our public key).
-    let plaintext = match identity.decrypt(&pkt.data) {
-        Ok(p) => p,
-        Err(_) => {
-            esp_println::println!("[rns] inbound decrypt failed (bad key / not for us? — skip)");
-            return;
-        }
-    };
-    // 2. LXMF unpack, verifying the signature against the server's key.
-    let server = rns_crypto::identity::Identity::from_public_key(&SERVER_PUBLIC_KEY);
-    let verify = |_src: &[u8; 16], sig: &[u8; 64], data: &[u8]| server.verify(sig, data);
-    let msg = match lxmf_core::message::unpack(&plaintext, Some(&verify)) {
-        Ok(m) => m,
-        Err(e) => {
-            esp_println::println!("[rns] inbound LXMF unpack failed: {e:?}");
-            return;
-        }
+/// Decrypt + unpack + parse the server's reply to one of our messages, then
+/// log the `INBOUND` / `reply` / `CHART` lines (mirrors the stable client's
+/// `handle_reply` + `chart.parse_data_line`).
+fn handle_lxmf_reply(identity: &Identity, pkt: &RawPacket) {
+    let Some(reply) = leaf_lxmf::decrypt_server_reply(
+        identity,
+        &pkt.data,
+        &SERVER_PUBLIC_KEY,
+        &leaf_lxmf::lxmf_delivery_hash(identity),
+    ) else {
+        // decrypt/unpack failed — not for us or a bad key; skip silently.
+        return;
     };
     esp_println::println!(
         "[rns] INBOUND lxmf src={:02x?} title={:?} sig_valid={:?} content={} B",
-        &msg.source_hash[..8],
-        core::str::from_utf8(&msg.title).unwrap_or("<bin>"),
-        msg.signature_valid,
-        msg.content.len()
+        &reply.src_hash[..8],
+        core::str::from_utf8(&reply.title).unwrap_or("<bin>"),
+        reply.sig_valid,
+        reply.content.len()
     );
-    // 3. The reply content is `LMAOEnvelope{text: TextMessage}`
-    //    ("ACK …\nDATA …"). Pull the text out and parse the chart line.
-    let Some(text) = decode_text_content(&msg.content) else { return };
-    let Ok(text) = core::str::from_utf8(text) else { return };
-    for line in text.lines().take(1) {
+    // First line of the decoded text is the ACK itself.
+    for line in reply.text.lines().take(1) {
         esp_println::println!("[rns] reply: {line}");
     }
-    if let Some(c) = parse_data_line(text) {
+    if let Some(c) = reply.chart {
         esp_println::println!(
             "[rns] CHART node={} dry={} wet={} temp={:?} humidity={:?} samples={:?} water_mask={:#x}",
             c.node, c.dry, c.wet, c.temp, c.humidity, c.samples, c.water_mask
@@ -590,7 +285,7 @@ impl<B: RadioBus> RnsLink<B> {
                         // addressed to our lxmf.delivery destination. Decrypt
                         // + parse it for the piggybacked chart data.
                         if pkt.flags.packet_type == rns_core::constants::PACKET_TYPE_DATA
-                            && pkt.destination_hash == lxmf_delivery_hash(identity)
+                            && pkt.destination_hash == leaf_lxmf::lxmf_delivery_hash(identity)
                         {
                             handle_lxmf_reply(identity, &pkt);
                         }
