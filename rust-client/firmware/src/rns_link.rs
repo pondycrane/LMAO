@@ -44,6 +44,24 @@ const NODE_IDENTITY_SEED: [u8; 64] = [
 const APP_NAME: &str = "lmao";
 const LEAF_ASPECT: &str = "leaf";
 
+/// The LMAO server's LXMF delivery destination hash — derived from the
+/// server's persisted identity (`~/.local/share/lmao_server/lxmf/identity`)
+/// exactly as `lma_core.server_identity.delivery_destination_hash_hex` does,
+/// verified byte-exact against the sprout deployment's
+/// `server delivery hash=dad35b80164b25f7b1474be86e443702`.
+pub const SERVER_LXMF_DELIVERY_HASH: [u8; 16] = [
+    0xda, 0xd3, 0x5b, 0x80, 0x16, 0x4b, 0x25, 0xf7, 0xb1, 0x47, 0x4b, 0xe8, 0x6e, 0x44, 0x37, 0x02,
+];
+
+/// The server's RNS public identity key (64 B, from the same identity file) —
+/// the key we encrypt outbound single-destination messages to (X25519).
+pub const SERVER_PUBLIC_KEY: [u8; 64] = [
+    0x19, 0x85, 0xac, 0x0e, 0xf9, 0x8f, 0x17, 0xd2, 0x66, 0x71, 0xf2, 0xf9, 0xea, 0x31, 0xc0, 0x59,
+    0x3a, 0x90, 0xfe, 0xc1, 0xa3, 0x05, 0x79, 0xfa, 0x68, 0x54, 0x5a, 0x0c, 0xc0, 0x15, 0x94, 0x20,
+    0x78, 0x90, 0x18, 0x21, 0x3f, 0x31, 0x15, 0x23, 0x9d, 0x0e, 0xd1, 0x03, 0x6c, 0xf3, 0x37, 0x5e,
+    0xe7, 0x5c, 0xd4, 0x10, 0x31, 0x8e, 0xda, 0x87, 0xfb, 0x94, 0x20, 0xce, 0x7a, 0x4c, 0xa7, 0x88,
+];
+
 /// Longest whole RNS packet the radio carries (matching RNode: 2×254).
 const MAX_PACKET: usize = 508;
 /// Split-fragment reassembly timeout (ms) — mirrors `_REASM_TIMEOUT` × 1000.
@@ -75,9 +93,25 @@ pub fn build_announce(
 ) -> Option<Vec<u8>> {
     use rns_core::constants::{DESTINATION_SINGLE, HEADER_1, PACKET_TYPE_ANNOUNCE};
 
-    let aspects = [LEAF_ASPECT];
-    let nh = rns_dest::name_hash(APP_NAME, &aspects);
-    let dh = rns_dest::destination_hash(APP_NAME, &aspects, Some(identity.hash()));
+    announce_for(identity, APP_NAME, LEAF_ASPECT, random_hash)
+}
+
+/// Build a signed RNS announce for `name.aspect` of this identity (byte-exact
+/// with the µReticulum `Destination.announce` wire format — see
+/// `build_announce`). Used to announce both the `lmao.leaf` presence
+/// destination and the `lxmf.delivery` destination (so the server can address
+/// replies back to this leaf).
+pub fn announce_for(
+    identity: &rns_crypto::identity::Identity,
+    app_name: &str,
+    aspect: &str,
+    random_hash: [u8; 10],
+) -> Option<Vec<u8>> {
+    use rns_core::constants::{DESTINATION_SINGLE, HEADER_1, PACKET_TYPE_ANNOUNCE};
+
+    let aspects = [aspect];
+    let nh = rns_dest::name_hash(app_name, &aspects);
+    let dh = rns_dest::destination_hash(app_name, &aspects, Some(identity.hash()));
 
     let (announce_data, _has_ratchet) =
         AnnounceData::pack(identity, &dh, &nh, &random_hash, None, None).ok()?;
