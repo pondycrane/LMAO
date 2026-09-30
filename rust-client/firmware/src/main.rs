@@ -193,18 +193,25 @@ fn main() -> ! {
         if sched.is_rx_awake(now_ms) {
             // Link window open: listen + flush queued frames.
             let _ = link.pump_rx(now_ms);
-            // Periodic signed RNS announce (every 10 windows ~= 10 s): proves
-            // real identity + announce framing the mesh accepts for this node.
+            // Periodic signed RNS announces. Alternate every ~10 s between the
+            // `lmao.leaf` presence destination and the `lxmf.delivery`
+            // destination (so the server can address replies back to this
+            // leaf).
             if beat % 100 == 0 {
                 let mut rh = [0u8; 10];
                 for c in rh.chunks_mut(4) {
                     let r = rng.random();
                     c.copy_from_slice(&r.to_le_bytes()[..c.len()]);
                 }
-                let a = crate::rns_link::build_announce(&node_identity, rh);
+                let (app, aspect, label) = if beat % 200 == 0 {
+                    ("lmao", "leaf", "lmao.leaf")
+                } else {
+                    ("lxmf", "delivery", "lxmf.delivery")
+                };
+                let a = crate::rns_link::announce_for(&node_identity, app, aspect, rh);
                 match a.map(|pkt| (pkt.len(), link.send(&pkt, now_ms))) {
                     Some((n, Ok(()))) => println!(
-                        "[rns] beat #{beat} ANNOUNCE {n} B (dest={node_dest:02x?})"
+                        "[rns] beat #{beat} ANNOUNCE {n} B ({label} dest) src={node_dest:02x?}"
                     ),
                     Some((_, Err(()))) => {
                         println!("[rns] beat #{beat} ANNOUNCE TX FAILED — recovering radio");
