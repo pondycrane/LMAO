@@ -29,6 +29,10 @@ pub mod rns_link;
 // back them with a static linked-list heap.
 #[global_allocator]
 static HEAP: linked_list_allocator::LockedHeap = linked_list_allocator::LockedHeap::empty();
+/// Nominal Unix epoch base for LXMF message timestamps (the firmware has no
+/// RTC; message ordering/freshness is not the point of this client probe).
+const START_EPOCH: f64 = 1_788_000_000.0;
+
 /// Static heap backing store. 128 KiB: the RNS identity build + per-beat
 /// packet and per-announce Vec allocations churn a linked-list allocator hard;
 /// 32 KiB fragmented to exhaustion after ~8 min on the earlier build
@@ -218,6 +222,32 @@ fn main() -> ! {
                         let _ = configure(&mut link.radio_mut());
                     }
                     None => println!("[rns] beat #{beat} ANNOUNCE build failed (skip)"),
+                }
+            }
+            // Periodic LXMF message to the server (~10 s cadence, E2E probe):
+            // real "send any data to the mesh" from the leaf.
+            if beat % 100 == 0 {
+                let payload: [u8; 12] = [
+                    b'L', b'M', b'A', b'O', (beat >> 24) as u8, (beat >> 16) as u8,
+                    (beat >> 8) as u8, beat as u8, 0x2a, 0x5b, 0x00, 0x07,
+                ];
+                let sent = crate::rns_link::build_message_to_server(
+                    &node_identity,
+                    &mut crate::rns_link::EspRng(rng),
+                    &payload,
+                    START_EPOCH + beat as f64 / 10.0,
+                )
+                .map(|pkt| (pkt.len(), link.send(&pkt, now_ms)));
+                match sent {
+                    Some((n, Ok(()))) => println!(
+                        "[rns] beat #{beat} LXMF->server {n} B link_tx={}",
+                        link.interface().stats.tx_frames
+                    ),
+                    Some((_, Err(()))) => {
+                        println!("[rns] beat #{beat} LXMF send FAILED — recovering radio");
+                        let _ = configure(&mut link.radio_mut());
+                    }
+                    None => println!("[rns] beat #{beat} LXMF build/encrypt failed (skip)"),
                 }
             }
             for f in sched.drain_tx(now_ms) {

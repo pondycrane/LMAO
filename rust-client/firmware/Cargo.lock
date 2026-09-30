@@ -1151,6 +1151,7 @@ dependencies = [
  "esp-println",
  "leaf-rns",
  "linked_list_allocator",
+ "lxmf-core",
  "radio-interface",
  "rns-core",
  "rns-crypto",
@@ -1171,6 +1172,16 @@ name = "log"
 version = "0.4.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
+
+[[package]]
+name = "lxmf-core"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e15e5558bf39a437777d114458cf961590a2479d6a44398549374e9ad6ca3d42"
+dependencies = [
+ "rns-core",
+ "rns-crypto",
+]
 
 [[package]]
 name = "memchr"
