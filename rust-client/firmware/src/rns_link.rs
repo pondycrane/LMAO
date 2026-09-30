@@ -18,6 +18,7 @@
 
 extern crate alloc;
 
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use radio_interface::interface::RadioInterface;
@@ -46,11 +47,25 @@ impl rns_crypto::Rng for EspRng {
 /// from secure storage; here it is a fixed constant so the node keeps the same
 /// RNS identity/destination across boots (like the persisted MicroPython
 /// identity).
+///
+/// This is the **canonical Cardputer client identity** — the exact 64 bytes of
+/// `~/.local/share/lmao_client/lxmf/identity` (the file the repo's install
+/// tooling pins onto the device at `/flash/rns/identity`, lma_core/
+/// client_identity.py). It yields the server-whitelisted `lxmf.delivery` hash
+/// `99ce32311dc37193eff4951a912f8f1b` and identity hash
+/// `8a17668171337ca80177c7464f6c9020` — both are in
+/// `LMAO_ALLOWED_CLIENTS` (k8s/lmao-server.yaml). A freshly-invented seed
+/// previously made this node a *different* identity the server drops at the
+/// allow-list gate, so no reply ever came back.
 const NODE_IDENTITY_SEED: [u8; 64] = [
-    0x1f, 0x8a, 0x4c, 0xd2, 0x77, 0x9e, 0x3b, 0x51, 0x06, 0x2f, 0x94, 0xbe, 0x60, 0xc5, 0x11, 0x9d,
-    0x5e, 0x24, 0x7a, 0x09, 0xb3, 0x46, 0x8f, 0xd1, 0xe2, 0x38, 0x03, 0xfc, 0x0a, 0x8b, 0x66, 0x14,
-    0xe9, 0x31, 0x90, 0x2c, 0x6f, 0x5b, 0xd8, 0x47, 0x52, 0x7e, 0x0d, 0xa4, 0xc9, 0x1a, 0x57, 0x90,
-    0x66, 0x7b, 0x85, 0x34, 0xfb, 0x16, 0x0e, 0x92, 0xd3, 0x6a, 0xe0, 0x49, 0x3c, 0xc1, 0x79, 0x2b,
+    0x28, 0x0a, 0xea, 0x11, 0xb8, 0x8c, 0x63, 0xb1,
+    0xc9, 0x1f, 0x8b, 0x9c, 0x73, 0x8c, 0x13, 0x8f,
+    0xd4, 0xe8, 0x7e, 0x5d, 0xd5, 0xe5, 0x29, 0xc3,
+    0xab, 0x98, 0xd6, 0x20, 0x23, 0xbc, 0x9c, 0x75,
+    0x31, 0x95, 0xcf, 0xa3, 0xa4, 0x89, 0xa7, 0xf4,
+    0xa1, 0x7b, 0xa4, 0x12, 0xdf, 0x5b, 0xa5, 0xa9,
+    0x0c, 0xde, 0x60, 0xd8, 0xe4, 0xe6, 0x7f, 0xc7,
+    0xc1, 0x0c, 0xe0, 0x9a, 0xce, 0xd0, 0x42, 0xf8,
 ];
 
 /// The leaf's RNS app/aspect name (its announce destination).
@@ -156,6 +171,18 @@ pub fn build_message_to_server(
     content: &[u8],
     timestamp: f64,
 ) -> Option<Vec<u8>> {
+    // The stable leaf sends protobuf LMAO envelopes under the p:Envelope title.
+    build_lxmf_to_server(identity, rng, b"p:Envelope", content, timestamp)
+}
+
+/// Pack + encrypt an LXMF message to the server with an explicit title.
+fn build_lxmf_to_server(
+    identity: &rns_crypto::identity::Identity,
+    rng: &mut dyn rns_crypto::Rng,
+    title: &[u8],
+    content: &[u8],
+    timestamp: f64,
+) -> Option<Vec<u8>> {
     use rns_core::constants::{DESTINATION_SINGLE, HEADER_1, PACKET_TYPE_DATA};
 
     let src_hash = *identity.hash();
@@ -165,7 +192,7 @@ pub fn build_message_to_server(
         &SERVER_LXMF_DELIVERY_HASH,
         &src_hash,
         timestamp,
-        b"mesh",
+        title,
         content,
         fields,
         None, // no stamp
@@ -187,6 +214,237 @@ pub fn build_message_to_server(
     RawPacket::pack(flags, 0, &SERVER_LXMF_DELIVERY_HASH, None, 0, &ciphertext)
         .ok()
         .map(|p| p.raw)
+}
+
+// ── Minimal protobuf encoder (LMAO envelopes; no prost on-device) ──────────
+// Wire types: 0=varint, 2=length-delimited, 5=fixed32 (little-endian).
+
+fn pb_varint(buf: &mut Vec<u8>, mut v: u64) {
+    while v >= 0x80 {
+        buf.push((v as u8 & 0x7f) | 0x80);
+        v >>= 7;
+    }
+    buf.push(v as u8);
+}
+fn pb_tag(buf: &mut Vec<u8>, field: u32, wire: u8) {
+    pb_varint(buf, ((field as u64) << 3) | wire as u64);
+}
+fn pb_field_var(buf: &mut Vec<u8>, field: u32, v: u64) {
+    pb_tag(buf, field, 0);
+    pb_varint(buf, v);
+}
+fn pb_field_ld(buf: &mut Vec<u8>, field: u32, data: &[u8]) {
+    pb_tag(buf, field, 2);
+    pb_varint(buf, data.len() as u64);
+    buf.extend_from_slice(data);
+}
+/// Build the LMAO `LMAOEnvelope{ text: TextMessage }` protobuf bytes exactly
+/// as the stable leaf's `encode_envelope_text(encode_text_message(...))`:
+/// field 20 (TextMessage) with node_id, the text content and a millisecond
+/// timestamp. This is the "Hello from Cardputer" text message.
+pub fn build_text_envelope(node_id_hex: &str, content: &str, timestamp_ms: u64) -> Vec<u8> {
+    let mut text_msg = Vec::new();
+    pb_field_ld(&mut text_msg, 1, node_id_hex.as_bytes()); // node_id
+    pb_field_ld(&mut text_msg, 2, content.as_bytes()); // content
+    pb_field_var(&mut text_msg, 3, timestamp_ms); // timestamp (ms)
+
+    let mut envelope = Vec::new();
+    pb_field_ld(&mut envelope, 20, &text_msg); // FIELD_TEXT = 20
+    envelope
+}
+
+// ── Inbound: server reply / chart data (the leaf's receive half) ─────────────
+//
+// The server ACKs every client message with an encrypted LXMF reply whose
+// content is an `LMAOEnvelope{text: TextMessage}`; `TextMessage.content` is
+// "ACK from LMAO Server — received your message (N bytes)" followed by a
+// `DATA …` line carrying the recent Sprout moisture series, so the client
+// charts it with no extra airtime. This mirrors the stable client's
+// `handle_reply` + `chart.parse_data_line` (main.py).
+
+/// Truncated LXMF delivery destination hash for this identity — the address
+/// the server replies to (the announce destination for `lxmf.delivery`).
+pub fn lxmf_delivery_hash(identity: &rns_crypto::identity::Identity) -> [u8; 16] {
+    rns_dest::destination_hash("lxmf", &["delivery"], Some(identity.hash()))
+}
+
+/// Minimal protobuf varint reader (pairs with `pb_varint`).
+fn read_pb_varint(buf: &[u8], pos: &mut usize) -> Option<u64> {
+    let mut res = 0u64;
+    let mut shift = 0u32;
+    loop {
+        let b = *buf.get(*pos)?;
+        *pos += 1;
+        res |= ((b & 0x7f) as u64) << shift;
+        if b & 0x80 == 0 {
+            return Some(res);
+        }
+        shift += 7;
+        if shift >= 64 {
+            return None;
+        }
+    }
+}
+
+/// Body of the first length-delimited protobuf field `want` in `buf` (skips
+/// other wire types defensively). `LMAOEnvelope`/`TextMessage` are small; a
+/// linear scan is fine here.
+fn find_pb_field_ld(buf: &[u8], want: u32) -> Option<&[u8]> {
+    let mut pos = 0;
+    while pos < buf.len() {
+        let tag = read_pb_varint(buf, &mut pos)?;
+        let field = (tag >> 3) as u32;
+        let wire = (tag & 7) as u8;
+        match wire {
+            0 => {
+                read_pb_varint(buf, &mut pos)?;
+            }
+            1 => pos = pos.checked_add(8)?,
+            2 => {
+                let len = read_pb_varint(buf, &mut pos)? as usize;
+                let end = pos.checked_add(len)?;
+                if end > buf.len() {
+                    return None;
+                }
+                if field == want {
+                    return Some(&buf[pos..end]);
+                }
+                pos = end;
+            }
+            5 => pos = pos.checked_add(4)?,
+            _ => return None, // groups not used by LMAO
+        }
+    }
+    None
+}
+
+/// Extract `TextMessage.content` from an `LMAOEnvelope{text}` protobuf
+/// (field 20 → TextMessage field 2) — the server reply payload.
+fn decode_text_content(envelope: &[u8]) -> Option<&[u8]> {
+    let text_msg = find_pb_field_ld(envelope, 20)?; // FIELD_TEXT = 20
+    find_pb_field_ld(text_msg, 2) // TextMessage.content = 2
+}
+
+/// no_std rounding (`f32::round` is std/libm): round half up for the
+/// non-negative server values (moisture %, temperature). NaN saturates to 0.
+fn roundi(x: f32) -> i64 {
+    (x + 0.5) as i64
+}
+
+/// A parsed `DATA …` chart record (mirrors `chart.parse_data_line`).
+pub struct ChartRecord {
+    pub node: String,
+    pub dry: i64,
+    pub wet: i64,
+    pub temp: Vec<f32>,
+    pub humidity: Vec<i64>,
+    pub samples: Vec<i64>,
+    pub water_mask: u64,
+}
+
+/// Extract the first `DATA ` record from *text* (the server piggybacks the
+/// Sprout moisture series on its ACK), or None. Tolerates the ACK line
+/// sharing the message and skips malformed records rather than failing.
+pub fn parse_data_line(text: &str) -> Option<ChartRecord> {
+    for raw in text.lines() {
+        let line = raw.trim();
+        if !line.starts_with("DATA ") {
+            continue;
+        }
+        let all: Vec<&str> = line.split_whitespace().collect();
+        if all.len() < 6 || all[0] != "DATA" {
+            continue;
+        }
+        // Inner closure so a malformed record just aborts to "keep scanning".
+        let rec = (|| -> Option<ChartRecord> {
+            let node = String::from(all[1]);
+            let dry = all[2].parse::<f32>().ok().map(roundi)?;
+            let wet = all[3].parse::<f32>().ok().map(roundi)?;
+            let ct = all.get(4)?.parse::<usize>().ok()?;
+            let mut idx = 5;
+            let mut temp = Vec::new();
+            for _ in 0..ct {
+                temp.push(all.get(idx)?.parse::<f32>().ok()?);
+                idx += 1;
+            }
+            let ch = all.get(idx)?.parse::<usize>().ok()?;
+            idx += 1;
+            let mut humidity = Vec::new();
+            for _ in 0..ch {
+                humidity.push(all.get(idx)?.parse::<f32>().ok().map(roundi)?);
+                idx += 1;
+            }
+            let cm = all.get(idx)?.parse::<usize>().ok()?;
+            idx += 1;
+            let mut samples = Vec::new();
+            for _ in 0..cm {
+                samples.push(all.get(idx)?.parse::<f32>().ok().map(roundi)?);
+                idx += 1;
+            }
+            // Optional trailing watering mask (old lines lack it).
+            let water_mask = match all.len() - idx {
+                0 => 0u64,
+                1 => all[idx].parse::<u64>().ok()?,
+                _ => return None,
+            };
+            // A percent-less line can never come from the server — reject it
+            // (mirrors the Python guard: `if not humidity and not samples`).
+            if humidity.is_empty() && samples.is_empty() {
+                return None;
+            }
+            Some(ChartRecord { node, dry, wet, temp, humidity, samples, water_mask })
+        })();
+        if rec.is_some() {
+            return rec;
+        }
+    }
+    None
+}
+
+/// Decrypt + unpack an inbound DATA packet addressed to our `lxmf.delivery` —
+/// the server's reply to one of our messages — and, when it carries a `DATA …`
+/// chart line, parse and print the record (the leaf's receive half, replacing
+/// the stable client's screen chart with a serial log until a display driver
+/// lands in the Rust firmware).
+pub fn handle_lxmf_reply(identity: &rns_crypto::identity::Identity, pkt: &RawPacket) {
+    // 1. X25519-decrypt the packet payload (encrypted to our public key).
+    let plaintext = match identity.decrypt(&pkt.data) {
+        Ok(p) => p,
+        Err(_) => {
+            esp_println::println!("[rns] inbound decrypt failed (bad key / not for us? — skip)");
+            return;
+        }
+    };
+    // 2. LXMF unpack, verifying the signature against the server's key.
+    let server = rns_crypto::identity::Identity::from_public_key(&SERVER_PUBLIC_KEY);
+    let verify = |_src: &[u8; 16], sig: &[u8; 64], data: &[u8]| server.verify(sig, data);
+    let msg = match lxmf_core::message::unpack(&plaintext, Some(&verify)) {
+        Ok(m) => m,
+        Err(e) => {
+            esp_println::println!("[rns] inbound LXMF unpack failed: {e:?}");
+            return;
+        }
+    };
+    esp_println::println!(
+        "[rns] INBOUND lxmf src={:02x?} title={:?} sig_valid={:?} content={} B",
+        &msg.source_hash[..8],
+        core::str::from_utf8(&msg.title).unwrap_or("<bin>"),
+        msg.signature_valid,
+        msg.content.len()
+    );
+    // 3. The reply content is `LMAOEnvelope{text: TextMessage}`
+    //    ("ACK …\nDATA …"). Pull the text out and parse the chart line.
+    let Some(text) = decode_text_content(&msg.content) else { return };
+    let Ok(text) = core::str::from_utf8(text) else { return };
+    for line in text.lines().take(1) {
+        esp_println::println!("[rns] reply: {line}");
+    }
+    if let Some(c) = parse_data_line(text) {
+        esp_println::println!(
+            "[rns] CHART node={} dry={} wet={} temp={:?} humidity={:?} samples={:?} water_mask={:#x}",
+            c.node, c.dry, c.wet, c.temp, c.humidity, c.samples, c.water_mask
+        );
+    }
 }
 
 /// The firmware's RNS link: one radio + one interface + the frame demux.
@@ -261,7 +519,10 @@ impl<B: RadioBus> RnsLink<B> {
     /// Poll the radio for a received frame and, when a whole RNS packet is
     /// assembled, decode it through the interface. Returns number of LoRa
     /// frames consumed. `now_ms` is the current monotonic millisecond clock.
-    pub fn pump_rx(&mut self, now_ms: u32) -> u32 {
+    /// `identity` is the node identity: an inbound DATA packet addressed to
+    /// our `lxmf.delivery` hash is decrypted as the server's reply and parsed
+    /// for the piggybacked chart data.
+    pub fn pump_rx(&mut self, now_ms: u32, identity: &rns_crypto::identity::Identity) -> u32 {
         let mut consumed = 0;
         loop {
             let flags = match self.radio.get_irq_status() {
@@ -308,15 +569,25 @@ impl<B: RadioBus> RnsLink<B> {
             );
             if res.complete {
                 match self.interface.process_incoming(&res.data, now_ms as u64) {
-                    Ok(pkt) => esp_println::println!(
-                        "[rns] RNS packet len={} type={:#x} hops={} dst={:02x?} hash={:02x?} dist_rssi={:?}",
-                        pkt.raw.len(),
-                        pkt.flags.pack(),
-                        pkt.hops,
-                        &pkt.destination_hash[..8],
-                        &pkt.packet_hash[..8],
-                        pkt.rssi
-                    ),
+                    Ok(pkt) => {
+                        esp_println::println!(
+                            "[rns] RNS packet len={} type={:#x} hops={} dst={:02x?} hash={:02x?} dist_rssi={:?}",
+                            pkt.raw.len(),
+                            pkt.flags.pack(),
+                            pkt.hops,
+                            &pkt.destination_hash[..8],
+                            &pkt.packet_hash[..8],
+                            pkt.rssi
+                        );
+                        // The server's reply to us: an LXMF DATA message
+                        // addressed to our lxmf.delivery destination. Decrypt
+                        // + parse it for the piggybacked chart data.
+                        if pkt.flags.packet_type == rns_core::constants::PACKET_TYPE_DATA
+                            && pkt.destination_hash == lxmf_delivery_hash(identity)
+                        {
+                            handle_lxmf_reply(identity, &pkt);
+                        }
+                    }
                     Err(e) => esp_println::println!(
                         "[rns] raw frame {:02x?} (not a decodable RNS packet: {e:?})",
                         &res.data[..res.data.len().min(24)]
