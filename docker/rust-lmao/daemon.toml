@@ -1,0 +1,14 @@
+# lxmd (LXMF-rs spine) daemon config.
+# RPC is bound to loopback (remote RPC requires token auth / mTLS).
+[node]
+display_name = "rust-lmao"
+
+[rpc]
+listen = "127.0.0.1:4243"
+
+[storage]
+db = "/var/lib/lxmf/reticulum.db"
+identity = "/var/lib/lxmf/identity"
+
+[lxmf]
+announce_at_start = true

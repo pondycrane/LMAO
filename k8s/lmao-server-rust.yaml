@@ -1,0 +1,44 @@
+# Rust LMAO server — K8s deployment (full-Rust migration, see docs/rust-server-migration.md).
+#
+# Schedules on node tp4 (the node hosting the Heltec V3 RNode at /dev/ttyUSB0,
+# same pin as the legacy Python k8s/lmao-server.yaml). Mounts the RNode device +
+# an emptyDir data volume for the lxmd identity/storage.
+# The node must reach the registry (192.168.50.153:5000); tp4 does (tp1 does not).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lmao-server-rust
+  namespace: default
+  labels:
+    app: lmao-server-rust
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: lmao-server-rust
+  template:
+    metadata:
+      labels:
+        app: lmao-server-rust
+    spec:
+      nodeName: tp4
+      containers:
+        - name: lmao-server-rust
+          image: 192.168.50.153:5000/lmao-server-rust:test
+          imagePullPolicy: Always
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: rnode
+              mountPath: /dev/ttyUSB0
+            - name: data
+              mountPath: /var/lib/lxmf
+          resources:
+            limits:
+              memory: 512Mi
+      volumes:
+        - name: rnode
+          hostPath:
+            path: /dev/ttyUSB0
+        - name: data
+          emptyDir: {}

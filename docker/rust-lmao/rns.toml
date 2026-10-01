@@ -1,0 +1,17 @@
+# RNS config for the Rust LMAO server — LoRa RNode on /dev/ttyUSB0.
+# Radio profile matches the LMAO leaf (cardputer / sprout): 868 / BW125 / SF7 / CR4:5 / 17 dBm.
+[reticulum]
+enable_transport = true
+
+[[interfaces]]
+type = "lora"
+enabled = true
+name = "rnode868"
+region = "EU868"
+device = "/dev/ttyUSB0"
+baud_rate = 115200
+state_path = "/var/lib/lxmf/rnode_state.json"
+frequency = 868000000
+bandwidth = 125000
+spreading_factor = 7
+coding_rate = "5"
