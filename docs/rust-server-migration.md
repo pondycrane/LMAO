@@ -210,3 +210,33 @@ The gating risk named above (cardputer ↔ Rust receiver over real LoRa RF) is
    `RESOURCE received bytes=500 sha256=f6b83965…`; skips when the rig
    (Cardputer `/dev/ttyACM0`, RNode `/dev/ttyUSB0`, receiver deployment) is not
    reachable. `bazel test` → PASSED (skip path on the dev host).
+
+### App layer — Rust server crate (`rust-client/host/lmao-server-rs`, 2026-10-01)
+
+Port of the Python `lmao_server` app layer (migration step 3, "App layer in
+order"); the RNS/LXMF mesh sits behind the `MeshSender` seam so the whole app
+layer is host-testable without a radio. `cargo test -p lmao-server-rs` → 20/20
+PASS; binary smoke-tested live (contact book + NATS + gRPC + contacts HTTP).
+
+| Python piece | Rust port |
+|---|---|
+| gRPC `LMAO` service 50051 | `grpc.rs` tonic (Send / Subscribe stream / GetIdentity), proto via tonic-build (`proto/lma_grpc.proto`); envelope types reused from `lma-wire` |
+| `lma_core/contact_book.py` SQLite | `store.rs` rusqlite — same schema (`contacts`), `register`/`touch`/`find`/`all`, upsert CASE + `device-<last4>` default names |
+| `lma_core/contacts_api.py` :8081 | `contacts.rs` axum — `GET /contacts`, `GET /contacts/find`, `POST /contacts` (same 400/201 semantics); `LMAO_CONTACTS_PORT` |
+| `_publish_to_nats` (subject `lmao.messages.env`, stream `LMAO_MESSAGES`) | `nats.rs` async-nats JetStream, graceful-degrade |
+| `handle_lxmf_delivery` app logic | `delivery.rs` — allow-list gate, learn-contact (register-if-unknown else touch), LMAOEnvelope decode + Sprout chart fold, ACK TextMessage (DATA-line piggyback), NATS, gRPC fan-out |
+| `lma_core/sprout_history.py` | `sprout.rs` — ring + `DATA <node> <dry> <wet> … <pump-mask>` line |
+
+**Remaining gaps / next steps:**
+1. **Bazel-ify the server crate** (`//rust-client:lmao_server_rs`): needs a
+   `cargo_build_script` for tonic-build with a protoc toolchain in the Bazel
+   sandbox (the crate builds in cargo now; `@lmao_crates` index already
+   contains its deps).
+2. **Wire the rns-net RF seam**: implement `MeshSender` on the rns-net
+   link/resource receiver (deliver ACK + dispatch `Send` envelopes toward a
+   destination hash), then the live cardputer → delivery → gRPC/NATS path is
+   end-to-end Rust. `LogMesh` stub is in place meanwhile.
+3. **LXMF delivery semantics over rns-net**: currently the Resource receiver
+   feeds raw envelopes into `DeliveryHandler`; routing/ACK wire behavior needs
+   the rns-net send path (either rns-net Link/Resource dispatch or an
+   lxmf-core pack step) proven on RF.

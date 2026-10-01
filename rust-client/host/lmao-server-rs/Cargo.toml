@@ -1,0 +1,42 @@
+# Rust LMAO server — app layer.
+#
+# Ports the Python `lmao_server` app layer (design §5 / migration step 3):
+#   - tonic gRPC LMAO service (Send / Subscribe stream / GetIdentity)
+#   - rusqlite contact book (same schema as lma_core/contact_book.py)
+#   - axum contacts HTTP API :8081 (same routes as lma_core/contacts_api.py)
+#   - async-nats JetStream publish (subject lmao.messages.env, stream LMAO_MESSAGES)
+#   - LXMF delivery-handler app logic: allow-list gate, learn-contact, decode,
+#     ACK piggyback (Sprout chart data_line), gRPC fan-out.
+#
+# The RNS/LXMF mesh sits behind the `MeshSender` seam so the whole app layer is
+# host-testable without a radio; main() wires a real source (the rns-net RF
+# link/resource receiver) to `DeliveryHandler`.
+[package]
+name = "lmao-server-rs"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+lma-wire = { path = "../../crates/lma-wire" }
+prost = "0.13"
+tonic = "0.12"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "signal"] }
+tokio-stream = "0.1"
+rusqlite = { version = "0.32", features = ["bundled"] }
+axum = "0.7"
+tower = { version = "0.5", features = ["util"] }
+async-nats = "0.36"
+async-trait = "0.1"
+parking_lot = "0.12"
+log = "0.4"
+env_logger = "0.11"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[build-dependencies]
+tonic-build = "0.12"
+
+[dev-dependencies]
+http-body-util = "0.1"
+futures = "0.3"
+tower-http = { version = "0.6", features = ["trace"] }
