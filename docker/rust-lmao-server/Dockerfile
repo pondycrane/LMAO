@@ -6,23 +6,20 @@
 #   docker build -f docker/rust-lmao-server/Dockerfile -t lmao-server-rust-app:latest .
 # Release via install_all:
 #   bazel run //tools:install_all -- --include-services
+#
+# Build-time optimization — warm builder base:
+#   `builder.Dockerfile` compiles the FULL dependency tree ONCE into
+#   /src/rust-client/target (tag lmao-server-rust-builder:<tag>; install_all
+#   builds it on first deploy if missing). This Dockerfile starts FROM that
+#   warm image so each deploy recompiles only the changed server source
+#   against the cached deps — minutes, not the ~15-min cold tree compile.
+#   No cargo-chef/BuildKit/dummy-crate gymnastics; works on any builder.
 
-# ── Builder: cargo build with protoc for tonic-build/prost-build ────────────
-FROM rust:1.83-bookworm AS builder
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends protobuf-compiler ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
-
-WORKDIR /src
-# Build context must be the repo root so the crate's build.rs `../../../proto`
-# path (relative to host/lmao-server-rs) resolves to /src/proto.
-COPY rust-client/ /src/rust-client/
-COPY proto/ /src/proto/
-
+# ── builder: thin build on top of the warm deps image ───────────────────────
+FROM lmao-server-rust-builder:1 AS builder
 WORKDIR /src/rust-client
-# Self-contained build (protoc installed above for tonic-build/prost-build).
-# The first image build compiles the full dependency tree; subsequent deploys
-# only rebuild the crate itself if the dependency graph is unchanged.
+# Copy the real (possibly changed) server source; only changed crates rebuild.
+COPY rust-client/host /src/rust-client/host
 RUN cargo build --release -p lmao-server-rs
 
 # ── Runtime ────────────────────────────────────────────────────────────────
