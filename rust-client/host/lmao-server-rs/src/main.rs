@@ -76,6 +76,34 @@ async fn main() {
         Box::new(LogMesh), // mesh seam — real rns-net dispatcher lands here
     ));
 
+    // ── RF receive leg (the receiver, merged into the server) ──────────
+    let rf_port = std::env::var("LMAO_RNODE_PORT").unwrap_or_else(|_| "/dev/ttyUSB0".into());
+    let rf_disabled = std::env::var("LMAO_DISABLE_RF").as_deref() == Ok("1");
+    let _rf_node = if rf_disabled || !std::path::Path::new(&rf_port).exists() {
+        if !rf_disabled {
+            log::info!("RF receive off ({rf_port} not present)");
+        } else {
+            log::info!("RF receive off (LMAO_DISABLE_RF=1)");
+        }
+        None
+    } else {
+        let rf_cfg = lmao_server_rs::rf::RfConfig {
+            serial_port: rf_port.clone(),
+            identity_hex_64b: std::env::var("LMAO_SERVER_RNS_IDENTITY_HEX").ok(),
+            ..Default::default()
+        };
+        match lmao_server_rs::rf::start_rf_node(state.clone(), rf_cfg) {
+            Ok(node) => {
+                log::info!("RF receive running on {rf_port}");
+                Some(node)
+            }
+            Err(e) => {
+                log::warn!("RF receive failed to start on {rf_port}: {e}");
+                None
+            }
+        }
+    };
+
     // ── gRPC :50051 ─────────────────────────────────────────────────
     let grpc_port = std::env::var("LMAO_GRPC_PORT").unwrap_or_else(|_| "50051".into());
     let grpc_addr: std::net::SocketAddr = format!("[::]:{grpc_port}")

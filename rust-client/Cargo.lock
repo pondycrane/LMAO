@@ -915,6 +915,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e17592d60ebacc7d5e169f4663c5f84f9161cc90328abcfe8456f41e4dfcb284"
 
 [[package]]
+name = "hex"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
+
+[[package]]
 name = "hmac"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1355,11 +1361,15 @@ dependencies = [
  "axum",
  "env_logger",
  "futures",
+ "hex",
  "http-body-util",
  "lma-wire",
  "log",
  "parking_lot",
  "prost",
+ "rns-core",
+ "rns-crypto",
+ "rns-net",
  "rusqlite",
  "serde",
  "serde_json",
