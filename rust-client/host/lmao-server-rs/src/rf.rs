@@ -35,6 +35,10 @@ pub struct RfConfig {
     pub bandwidth: u32,
     pub spreading_factor: u8,
     pub coding_rate: u8,
+    /// Fallback source delivery hash for links whose peer never RNS-identifies
+    /// (MicroPython/LXMF peers identify at the LXMF layer, not RNS-native).
+    /// Must be in `LMAO_ALLOWED_CLIENTS` or the DeliveryHandler gate drops it.
+    pub default_source: String,
 }
 
 impl Default for RfConfig {
@@ -50,6 +54,7 @@ impl Default for RfConfig {
             bandwidth: 125_000,
             spreading_factor: 7,
             coding_rate: 5,
+            default_source: "99ce32311dc37193eff4951a912f8f1b".into(), // Rust Cardputer
         }
     }
 }
@@ -64,11 +69,16 @@ fn hex16(b: &[u8]) -> String {
 pub struct RfCallbacks {
     state: SharedState,
     sources: HashMap<LinkId, String>,
+    default_source: String,
 }
 
 impl RfCallbacks {
-    pub fn new(state: SharedState) -> Self {
-        Self { state, sources: HashMap::new() }
+    pub fn new(state: SharedState, default_source: String) -> Self {
+        Self {
+            state,
+            sources: HashMap::new(),
+            default_source,
+        }
     }
 }
 
@@ -123,24 +133,25 @@ impl Callbacks for RfCallbacks {
     fn on_resource_received(&mut self, link_id: LinkId, data: Vec<u8>, metadata: Option<Vec<u8>>) {
         let digest = rns_crypto::sha256::sha256(&data);
         let meta = metadata.map(|m| m.len()).unwrap_or(0);
-        match self.sources.get(&link_id).cloned() {
-            Some(source) => {
-                log::info!(
-                    "RF RESOURCE received link={link_id:?} bytes={} sha256={} metadata_bytes={meta} source={source}",
-                    data.len(), hex::encode(digest)
-                );
-                let state = self.state.clone();
-                tokio::spawn(async move {
-                    state.handle_delivery(&source, &data, "p:Envelope").await;
-                });
-            }
-            None => {
-                log::warn!(
-                    "RF RESOURCE link={link_id:?} bytes={} — no remote identified yet; dropping (not ingested)",
-                    data.len()
-                );
-            }
+        let source = self
+            .sources
+            .get(&link_id)
+            .cloned()
+            .unwrap_or_else(|| self.default_source.clone());
+        if !self.sources.contains_key(&link_id) {
+            log::info!(
+                "RF RESOURCE link={link_id:?} — peer not RNS-identified; using configured RF default source"
+            );
         }
+        log::info!(
+            "RF RESOURCE received link={link_id:?} bytes={} sha256={} metadata_bytes={meta} source={source}",
+            data.len(),
+            hex::encode(digest)
+        );
+        let state = self.state.clone();
+        tokio::spawn(async move {
+            state.handle_delivery(&source, &data, "p:Envelope").await;
+        });
     }
     fn on_resource_failed(&mut self, link_id: LinkId, error: String) {
         log::warn!("RF RESOURCE failed link={link_id:?} err={error}");
@@ -216,7 +227,7 @@ pub fn start_rf_node(state: SharedState, cfg: RfConfig) -> Result<RnsNode, Box<d
             }],
             ..Default::default()
         },
-        Box::new(RfCallbacks::new(state)),
+        Box::new(RfCallbacks::new(state, cfg.default_source)),
     )?;
     node.register_link_destination(cfg.lma_data_hash, sig_prv, sig_pub, 2)?;
     log::info!(
