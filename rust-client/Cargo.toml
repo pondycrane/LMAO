@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "host/interop",
     "host/leaf-e2e",
+    "host/resource-500b-e2e",
     "crates/lma-identity",
     "crates/leaf-rns",
     "crates/radio-interface",
