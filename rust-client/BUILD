@@ -352,15 +352,6 @@ rust_library(
 )
 
 rust_library(
-    name = "leaf_lxmf",
-    crate_name = "leaf_lxmf",
-    edition = "2021",
-    srcs = glob(["crates/leaf-lxmf/src/**"]),
-    deps = _RNS + ["@lmao_crates//:lxmf-core"],
-    visibility = ["//visibility:public"],
-)
-
-rust_library(
     name = "leaf_resource",
     crate_name = "leaf_resource",
     edition = "2021",

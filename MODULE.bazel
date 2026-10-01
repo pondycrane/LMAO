@@ -34,6 +34,7 @@ crate.from_cargo(
         "//rust-client:host/interop/Cargo.toml",
         "//rust-client:host/leaf-e2e/Cargo.toml",
         "//rust-client:host/resource-500b-e2e/Cargo.toml",
+        "//rust-client:host/lmao-server-rs/Cargo.toml",
         "//rust-client:crates/lma-identity/Cargo.toml",
         "//rust-client:crates/leaf-rns/Cargo.toml",
         "//rust-client:crates/radio-interface/Cargo.toml",
@@ -43,7 +44,6 @@ crate.from_cargo(
         "//rust-client:crates/lma-framing/Cargo.toml",
         "//rust-client:crates/leaf-power/Cargo.toml",
         "//rust-client:crates/sx126x/Cargo.toml",
-        "//rust-client:crates/leaf-lxmf/Cargo.toml",
     ],
 )
 use_repo(crate, "lmao_crates")
