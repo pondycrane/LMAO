@@ -90,6 +90,10 @@ async fn main() {
         let rf_cfg = lmao_server_rs::rf::RfConfig {
             serial_port: rf_port.clone(),
             identity_hex_64b: std::env::var("LMAO_SERVER_RNS_IDENTITY_HEX").ok(),
+            default_source: std::env::var("LMAO_RF_DEFAULT_SOURCE")
+                .unwrap_or_default()
+                .trim()
+                .to_lowercase(),
             ..Default::default()
         };
         match lmao_server_rs::rf::start_rf_node(state.clone(), rf_cfg) {
