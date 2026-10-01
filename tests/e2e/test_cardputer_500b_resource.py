@@ -85,35 +85,60 @@ def _reset_cardputer():
 
 
 RECEIVED_RE = re.compile(r"RESOURCE received .* bytes=(\d+) sha256=([0-9a-f]{64})")
-LINK_RE = re.compile(r"LINK established")
-
+# LNG receiver lines start with the RFC3339 timestamp: [YYYY-MM-DDTHH:MM:SSZ].
+TS_RE = re.compile(r"\[(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)")
 
 def _recent_logs():
     r = _kubectl(["logs", "-l", RECEIVER_LABEL, "--tail=2000"])
     return r.stdout if r.returncode == 0 else ""
 
 
-@pytest.mark.skipif(not HARDWARE_OK, reason=HARDWARE_REASON)
+def _rx_500_lines(logs: str) -> list[tuple[str, str]]:
+    """Return (timestamp, sha256) for every logged `bytes=500` resource line."""
+    out: list[tuple[str, str]] = []
+    for line in logs.splitlines():
+        ts = TS_RE.match(line)
+        if not ts:
+            continue
+        m = RECEIVED_RE.search(line)
+        if m and m.group(1) == "500":
+            out.append((ts.group(1), m.group(2)))
+    return out
+
+
 def test_cardputer_500b_resource_reaches_receiver():
+    # Hardware is a hard requirement for this over-the-air e2e — a missing
+    # device must FAIL, not skip, so nobody mistakes a skip for a pass.
+    if not HARDWARE_OK:
+        pytest.fail(
+            "cannot run the 500-B RF e2e — hardware missing: "
+            f"{HARDWARE_REASON}. Run on the rig with the Cardputer on "
+            "/dev/ttyACM0, the RNode on /dev/ttyUSB0, and a reachable "
+            "lmao-server-rust-recv deployment."
+        )
+
+    # Snapshot the newest bytes=500 line BEFORE the reset so we only accept a
+    # FRESH over-the-air frame that lands after it (not a stale historical one).
+    before = None
+    for ts, _ in _rx_500_lines(_recent_logs()):
+        before = ts if before is None else max(before, ts)  # ISO strings sort chronologically
+
     _reset_cardputer()
 
     deadline = time.time() + WAIT_SECONDS
-    saw_link = False
     while time.time() < deadline:
-        logs = _recent_logs()
-        if not saw_link and LINK_RE.search(logs):
-            saw_link = True
-        for m in RECEIVED_RE.finditer(logs):
-            if m.group(1) == "500":
-                assert m.group(2) == EXPECTED_SHA256, (
-                    f"receiver got bytes=500 but sha256 {m.group(2)} != "
-                    f"LoRa-proven {EXPECTED_SHA256} (firmware payload changed?)"
-                )
-                return
+        for ts, sha in _rx_500_lines(_recent_logs()):
+            if before is not None and ts <= before:
+                continue  # stale line — not a transmission after the reset
+            assert sha == EXPECTED_SHA256, (
+                f"fresh receiver frame bytes=500 but sha256 {sha} != "
+                f"LoRa-proven {EXPECTED_SHA256} (firmware payload changed?)"
+            )
+            return
         time.sleep(POLL_INTERVAL)
 
-    detail = "link established" if saw_link else "no LINK established in logs"
     raise AssertionError(
-        f"timed out after {WAIT_SECONDS}s waiting for RESOURCE received bytes=500 "
-        f"sha256={EXPECTED_SHA256}; {detail}"
+        f"timed out after {WAIT_SECONDS}s waiting for a FRESH RESOURCE received "
+        f"bytes=500 sha256={EXPECTED_SHA256} after cardputer reset "
+        f"(last seen before snapshot: {before})"
     )
