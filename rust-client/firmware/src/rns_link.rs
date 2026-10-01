@@ -505,18 +505,32 @@ impl<B: RadioBus> RnsLink<B> {
         self.interface.note_outgoing(data);
 
         let frames = split_into_frames(data);
-        for frame in &frames {
+        let total = frames.len();
+        for (i, frame) in frames.iter().enumerate() {
+            // DEBUG (temporary): per-frame TX visibility for the multi-frame
+            // (split) message path — frame2 of the 307-byte Hello is going
+            // missing on-air while frame1 (and single-frame announces) work.
+            esp_println::println!("[dbg] send frame {}/{} len={}", i + 1, total, frame.len());
             self.radio.prepare_send(frame).map_err(|_| ())?;
             // Bounded TX: airtime is ~55 ms for a 31 B frame but up to ~175 ms
             // for a 148 B announce (preamble 24). Use a 400 ms timeout
             // (0x6400 * 15.625 us) so larger frames don't false-timeout, while
             // still force-aborting a wedged sequencer.
             self.radio.start_tx_timeout([0x00, 0x64, 0x00]).map_err(|_| ())?;
-            if !self.wait_tx_done() {
+            let ok = self.wait_tx_done();
+            esp_println::println!("[dbg] frame {}/{} tx_done={}", i + 1, total, ok);
+            if !ok {
                 // Recover the radio (hard reset + reconfigure) happens up-stack.
                 return Err(());
             }
             self.radio.clear_irq().ok();
+            // Back-to-back split frames give the receiver's LoRa demodulator no
+            // AGC/sync turnaround; a short gap between them lets the next frame's
+            // preamble lock (frame2 of a 2-frame message was being missed
+            // on-air, truncating the packet and failing server decryption).
+            if i + 1 < total {
+                esp_hal::delay::Delay::new().delay_millis(50);
+            }
         }
         self.radio.start_rx([0xFF, 0xFF, 0xFF]).ok();
         let _ = now_ms;
@@ -528,8 +542,15 @@ impl<B: RadioBus> RnsLink<B> {
     /// frames consumed. `now_ms` is the current monotonic millisecond clock.
     /// `identity` is the node identity: an inbound DATA packet addressed to
     /// our `lxmf.delivery` hash is decrypted as the server's reply and parsed
-    /// for the piggybacked chart data.
-    pub fn pump_rx(&mut self, now_ms: u32, identity: &rns_crypto::identity::Identity) -> u32 {
+    /// for the piggybacked chart data. Every decoded inbound packet is also
+    /// offered to `dispatch` (used to route link handshake / resource packets
+    /// to the LinkResource driver).
+    pub fn pump_rx(
+        &mut self,
+        now_ms: u32,
+        identity: &rns_crypto::identity::Identity,
+        dispatch: &mut dyn FnMut(&RawPacket),
+    ) -> u32 {
         let mut consumed = 0;
         loop {
             let flags = match self.radio.get_irq_status() {
@@ -594,6 +615,7 @@ impl<B: RadioBus> RnsLink<B> {
                         {
                             handle_lxmf_reply(identity, &pkt);
                         }
+                        dispatch(&pkt);
                     }
                     Err(e) => esp_println::println!(
                         "[rns] raw frame {:02x?} (not a decodable RNS packet: {e:?})",
