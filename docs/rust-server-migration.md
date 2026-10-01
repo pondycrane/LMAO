@@ -159,3 +159,54 @@ those devices are sprouts (M5Stack), not RNode-format radios. Cardputer
 needs a real RNode (or a sprout flashed to RNode firmware) to attach before
 the cardputer↔LXMF-rs over-LoRa test can run.
 
+
+## Parity proof — updated (2026-10-01, hardware + Bazel + e2e)
+
+The gating risk named above (cardputer ↔ Rust receiver over real LoRa RF) is
+**retired**. Summary of what now runs end-to-end:
+
+### Cardputer → Rust receiver over real LoRa (k8s on tp4)
+- **Receiver** `lmao-server-rust-recv` (rns-net 0.7.2 / rns-core 0.1.17, the
+  cardputer's RNS generation) deployed to tp4 with the persisted LMAO identity;
+  Heltec V3 RNode on `/dev/ttyUSB0` (868/BW125/SF7/CR5).
+- Cardputer reset re-dials `lmao.data` and the **Link establishes over RF**
+  (`LINK established dest=24a097…c66 rtt≈0.67s`).
+- The receiver **reassembles + sha256-verifies the pushed Resource**:
+  `RESOURCE received bytes=1400 sha256=55772ad2…` (auto-split into parts by the
+  library; no hand splitting).
+- **Fixes that made it work:**
+  1. **Serve Resource parts RAW** — rns-net carries `CONTEXT_RESOURCE` raw and
+     does **not** link-decrypt parts (only ADV/REQ/HMU/PRF are link-encrypted);
+     the cardputer was double-encrypting via `encrypt_pkt` on top of
+     `ResourceSender::encrypt_fn`. `link_resource.rs` now wraps parts in a plain
+     `build_link_packet` (commit `01da101`).
+  2. **`RESOURCE_SDU` 220→160** — part link-packets must fit one ≤254 B LoRa
+     frame (a >254 B split packet's 2nd frame does not radiate on the cardputer
+     radio): `19 + 160 + 16 + 32 + pkcs7pad = 243 ≤ 254`.
+  3. **§10.5 RESOURCE_REQ shape was a red herring** — instrumented the cardputer:
+     the REQ (`flag=00 + 32 B resource_hash`) was *accepted* and 4 parts served;
+     the format was correct all along.
+- **Payload-size ceilings (measured):** ESP32 heap OOMs at ≥20 KB payload; the
+  ADV's hashmap must fit one ≤254 B frame, capping a single-ADV resource at
+  ~2.7–3 KB without RNS ADV segmentation. Handled + acted on; documented for any
+  future "larger resource" firmware work.
+
+### Bazel ("everything driven by Bazel")
+- **rules_rust + crate_universe** in `MODULE.bazel` (0.74.0): host rust-client
+  workspace compiles *in* Bazel (`rust_library` for `lma-identity`, `leaf-rns`,
+  `radio-interface`, `leaf-power`, `sx126x`, `leaf-lxmf`, `leaf-resource` from
+  the `@lmao_crates` cargo-bazel index). Xtensa ESP32 firmware stays
+  out-of-band (cargo + esp nightly; no Bazel xtensa target) — the repo's
+  documented convention.
+- Root `BUILD.bazel` added (package marker required by cargo-bazel splicing).
+
+### New e2e tests (both Bazel-wired)
+1. **`//rust-client:resource_500b_e2e`** (Rust host, deterministic) — runs the
+   cardputer's exact 500-B `(i % 251)` payload through `ResourceTx`→`ResourceRx`
+   in-process and asserts the reassembled 500 bytes hash to the **LoRa-proven**
+   `f6b83965…`. `bazel test` → PASSED.
+2. **`//tests:test_cardputer_500b_resource`** (pytest, hardware-gated) — resets
+   the Cardputer and asserts the k8s receiver logs
+   `RESOURCE received bytes=500 sha256=f6b83965…`; skips when the rig
+   (Cardputer `/dev/ttyACM0`, RNode `/dev/ttyUSB0`, receiver deployment) is not
+   reachable. `bazel test` → PASSED (skip path on the dev host).
