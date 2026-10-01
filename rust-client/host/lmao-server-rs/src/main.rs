@@ -1,0 +1,111 @@
+//! Rust LMAO server binary — bootstraps the app layer:
+//!   - tonic gRPC `LMAO` service on :50051 (Send / Subscribe / GetIdentity)
+//!   - axum contacts HTTP API on :8081 (GET/POST /contacts, /contacts/find)
+//!   - optional NATS JetStream (subject lmao.messages.env)
+//!   - contact book (rusqlite, LMAO_CONTACTS_DB)
+//!
+//! Env:
+//!   LMAO_SERVER_DEST_HEX  server identity hash for GetIdentity (default = the
+//!                         lmao.data dest the cardputer dials)
+//!   LMAO_SERVER_NODE_NAME default "lmao-server"
+//!   LMAO_ALLOWED_CLIENTS  comma-separated lxmf/delivery hashes (allow-list)
+//!   LMAO_CONTACTS_DB      SQLite path (default "contacts.db")
+//!   NATS_SERVER           default nats://localhost:4222
+//!
+//! The mesh sender is a log-only stub until the rns-net RF link/resource
+//! receiver is wired to DeliveryHandler (mesh seam).
+
+use std::collections::HashSet;
+use std::sync::Arc;
+
+use lmao_server_rs::contacts;
+use lmao_server_rs::delivery::{AppState, LogMesh};
+use lmao_server_rs::grpc::LmaoGrpcService;
+use lmao_server_rs::lma::lmao_server::LmaoServer;
+use lmao_server_rs::nats::NatsPublisher;
+use lmao_server_rs::store::ContactBook;
+
+const DEFAULT_DEST_HEX: &str = "24a097043d6d7f8fe0fb188e375c4c66"; // lmao.data
+const DEFAULT_CLIENT_DELIVERY: &str = "99ce32311dc37193eff4951a912f8f1b"; // Rust Cardputer
+
+#[tokio::main]
+async fn main() {
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+
+    // ── contact book ────────────────────────────────────────────────
+    let contacts_db =
+        std::env::var("LMAO_CONTACTS_DB").unwrap_or_else(|_| "contacts.db".into());
+    let book = match ContactBook::open(&contacts_db) {
+        Ok(b) => b,
+        Err(e) => {
+            log::error!("contact book unavailable at {contacts_db}: {e}");
+            std::process::exit(1);
+        }
+    };
+    log::info!("contact book ready at {contacts_db}");
+
+    // ── identity + allow-list ───────────────────────────────────────
+    let identity_hex = std::env::var("LMAO_SERVER_DEST_HEX").unwrap_or_else(|_| DEFAULT_DEST_HEX.into());
+    let node_name = std::env::var("LMAO_SERVER_NODE_NAME").unwrap_or_else(|_| "lmao-server".into());
+
+    let mut allowed: HashSet<String> = std::env::var("LMAO_ALLOWED_CLIENTS")
+        .unwrap_or_default()
+        .split(',')
+        .filter_map(|s| {
+            let t = s.trim().to_lowercase();
+            (!t.is_empty()).then_some(t)
+        })
+        .collect();
+    allowed.insert(DEFAULT_CLIENT_DELIVERY.to_string());
+
+    // ── NATS (optional — degrade gracefully) ─────────────────────────
+    let nats_url = std::env::var("NATS_SERVER").unwrap_or_else(|_| "nats://localhost:4222".into());
+    let nats = NatsPublisher::connect(&nats_url).await;
+    match &nats {
+        Some(_) => log::info!("NATS JetStream connected at {nats_url}"),
+        None => log::warn!("NATS unavailable ({nats_url}) — publishing disabled"),
+    }
+
+    // ── shared state ────────────────────────────────────────────────
+    let state = Arc::new(AppState::new(
+        book,
+        allowed,
+        identity_hex,
+        node_name,
+        nats,
+        Box::new(LogMesh), // mesh seam — real rns-net dispatcher lands here
+    ));
+
+    // ── gRPC :50051 ─────────────────────────────────────────────────
+    let grpc_port = std::env::var("LMAO_GRPC_PORT").unwrap_or_else(|_| "50051".into());
+    let grpc_addr: std::net::SocketAddr = format!("[::]:{grpc_port}")
+        .parse()
+        .expect("invalid gRPC bind address");
+    log::info!("gRPC LMAO service listening on {grpc_addr}");
+
+    // ── contacts HTTP API :8081 (LMAO_CONTACTS_PORT, Python parity) ──
+    let http_port = std::env::var("LMAO_CONTACTS_PORT").unwrap_or_else(|_| "8081".into());
+    let http_listener = tokio::net::TcpListener::bind(format!("[::]:{http_port}"))
+        .await
+        .unwrap_or_else(|e| panic!("bind contacts API :{http_port}: {e}"));
+    log::info!("contacts API listening on {}", http_listener.local_addr().unwrap());
+
+    let grpc = tonic::transport::Server::builder()
+        .add_service(LmaoServer::new(LmaoGrpcService {
+            state: state.clone(),
+        }))
+        .serve_with_shutdown(grpc_addr, shutdown_signal());
+    let http = axum::serve(http_listener, contacts::router(state.clone()))
+        .with_graceful_shutdown(shutdown_signal());
+
+    tokio::select! {
+        r = grpc => log::info!("gRPC server exited: {r:?}"),
+        r = http => log::info!("contacts server exited: {r:?}"),
+    }
+    log::info!("lmao-server-rs shutting down");
+}
+
+async fn shutdown_signal() {
+    let _ = tokio::signal::ctrl_c().await;
+    log::info!("SIGINT received — shutting down");
+}
