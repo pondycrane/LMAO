@@ -1101,6 +1101,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "leaf-lxmf"
+version = "0.1.0"
+dependencies = [
+ "lxmf-core",
+ "rns-core",
+ "rns-crypto",
+]
+
+[[package]]
+name = "leaf-resource"
+version = "0.1.0"
+dependencies = [
+ "rns-core",
+ "rns-crypto",
+]
+
+[[package]]
 name = "leaf-rns"
 version = "0.1.0"
 dependencies = [
@@ -1149,6 +1166,8 @@ dependencies = [
  "esp-bootloader-esp-idf",
  "esp-hal",
  "esp-println",
+ "leaf-lxmf",
+ "leaf-resource",
  "leaf-rns",
  "linked_list_allocator",
  "lxmf-core",
