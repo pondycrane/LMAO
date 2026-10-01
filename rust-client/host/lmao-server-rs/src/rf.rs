@@ -70,14 +70,19 @@ pub struct RfCallbacks {
     state: SharedState,
     sources: HashMap<LinkId, String>,
     default_source: String,
+    /// Tokio runtime handle — rns-net callbacks run on the `rns-driver`
+    /// thread (NOT a tokio worker), so `tokio::spawn` would panic. Spawn via
+    /// the shared handle instead.
+    rt: tokio::runtime::Handle,
 }
 
 impl RfCallbacks {
-    pub fn new(state: SharedState, default_source: String) -> Self {
+    pub fn new(state: SharedState, default_source: String, rt: tokio::runtime::Handle) -> Self {
         Self {
             state,
             sources: HashMap::new(),
             default_source,
+            rt,
         }
     }
 }
@@ -149,7 +154,7 @@ impl Callbacks for RfCallbacks {
             hex::encode(digest)
         );
         let state = self.state.clone();
-        tokio::spawn(async move {
+        self.rt.spawn(async move {
             state.handle_delivery(&source, &data, "p:Envelope").await;
         });
     }
@@ -276,7 +281,11 @@ pub fn start_rf_node(state: SharedState, cfg: RfConfig) -> Result<RnsNode, Box<d
             registry: None,
             backbone_peer_pool: None,
         },
-        Box::new(RfCallbacks::new(state, cfg.default_source)),
+        Box::new(RfCallbacks::new(
+            state,
+            cfg.default_source,
+            tokio::runtime::Handle::current(),
+        )),
     )?;
     node.register_link_destination(cfg.lma_data_hash, sig_prv, sig_pub, 2)?;
     log::info!(
