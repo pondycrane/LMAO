@@ -267,17 +267,17 @@ impl LinkResource {
                         req[3],
                         req[4]
                     );
-                    let key = self.session_key;
-                    let mut iv = self.packet_iv_hi;
-                    self.packet_iv_hi = iv.wrapping_add(1024);
                     let mut parts = 0usize;
                     if let Some(tx) = self.tx.as_mut() {
                         for a in tx.handle_request(&req, now_f) {
                             if let ResourceAction::SendPart(p) = a {
                                 parts += 1;
-                                if let Some(pp) = Self::encrypt_pkt(
-                                    key,
-                                    iv,
+                                // Parts are already pre-encrypted by
+                                // ResourceSender's `encrypt_fn`; rns-net carries
+                                // CONTEXT_RESOURCE raw (it does NOT
+                                // link-decrypt parts, unlike ADV/REQ/HMU/PRF),
+                                // so wrap them in a plain link DATA packet.
+                                if let Some(pp) = Self::build_link_packet(
                                     &link_id,
                                     PACKET_TYPE_DATA,
                                     CONTEXT_RESOURCE,
@@ -285,7 +285,6 @@ impl LinkResource {
                                 ) {
                                     out.push(pp);
                                 }
-                                iv = iv.wrapping_add(1);
                             }
                         }
                     }
