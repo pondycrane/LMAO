@@ -26,6 +26,8 @@ include!("interrupt_stubs.rs");
 pub mod sx1262_radio;
 // RNS link: SX1262 driver under the RadioInterface contract + RNode framing.
 pub mod rns_link;
+// Link initiator + Resource push to the server's lmao.data destination.
+pub mod link_resource;
 
 // no_std heap. rns-core packet building + the RNode split assembler allocate;
 // back them with a static linked-list heap.
@@ -73,6 +75,10 @@ fn main() -> ! {
     use esp_hal::spi::master::{Config as SpiCfg, Spi};
     use sx126x::Sx1262;
 
+    // NOTE: CS is NOT bound to the SPI peripheral — the SX1262 needs CS held
+    // LOW for the whole command stream (opcode + up-to-256-byte payload), but
+    // esp-hal's non-DMA blocking transfer would otherwise toggle CS per 64-byte
+    // hardware-FIFO chunk (corrupting >64-byte transfers). Drive CS manually.
     let spi = Spi::new(
         peripherals.SPI2,
         SpiCfg::default(),
@@ -80,13 +86,13 @@ fn main() -> ! {
     .expect("SPI config")
     .with_sck(peripherals.GPIO40)
     .with_mosi(peripherals.GPIO14)
-    .with_miso(peripherals.GPIO39)
-    .with_cs(peripherals.GPIO5);
+    .with_miso(peripherals.GPIO39);
 
+    let cs = Output::new(peripherals.GPIO5, Level::High, OutputConfig::default());
     let rst = Output::new(peripherals.GPIO3, Level::High, OutputConfig::default());
     let busy = Input::new(peripherals.GPIO6, InputConfig::default());
 
-    let bus = crate::sx1262_radio::EspRadioBus::new(spi, rst, busy);
+    let bus = crate::sx1262_radio::EspRadioBus::new(spi, cs, rst, busy);
     let mut radio = Sx1262::new(bus);
 
     // Fixed leaf RF profile: 868 / BW125 / SF7 / CR4:5 / pre24 / syncword 0x1424.
@@ -136,6 +142,24 @@ fn main() -> ! {
         Err(_) => println!("[t3] dev_errors=ERR"),
     }
 
+    // DEBUG (temporary): SX1262 FIFO loopback — write a known 168-byte pattern
+    // (announce-sized) into the TX FIFO and read it back. Corruption past the
+    // 64-byte ESP32-S3 SPI FIFO boundary would show up here.
+    {
+        let mut pat = [0u8; 168];
+        for (i, b) in pat.iter_mut().enumerate() {
+            *b = i as u8;
+        }
+        let _ = radio.prepare_send(&pat);
+        let mut rb = [0u8; 168];
+        let n = radio.read_buffer(0, &mut rb).unwrap_or(0);
+        let first_diff = pat.iter().zip(rb.iter()).position(|(a, b)| a != b);
+        println!(
+            "[dbg] fifo loopback n={n} match={} first_diff={first_diff:?}",
+            rb[..168.min(n)] == pat[..168.min(n)]
+        );
+    }
+
     // RNS link: wire the driver under `RadioInterface` + the RNode RF framing
     // (the MicroPython `lora.py` transport path, now in Rust). The radio idles
     // in continuous RX (the leaf's listen path); each beat TXs a valid RNS
@@ -151,7 +175,11 @@ fn main() -> ! {
     // RX is awake only 200 ms of every 1000 ms; in the 800 ms dormant gap the
     // radio is stood down and any produced frames wait in the resume queue to
     // flush at the next window open.
-    let mut sched = LinkWindowScheduler::new(LinkWindowConfig::new(200, 800));
+    // TEMP (issue #197): keep RX awake continuously so a one-shot broadcast
+    // LRPROOF isn't lost in a dormant RX gap (the earlier 200ms/800ms duty
+    // cycle missed it; sprout heartbeats overwrite the radio FIFO while
+    // dormant). Restore duty cycling after the link handshake is proven.
+    let mut sched = LinkWindowScheduler::new(LinkWindowConfig::new(1000, 0));
     // The announced-only leaf holds an established link to its gateway across
     // dormant gaps, so keepalive pacing + the resume queue apply.
     sched.mark_link_established(0);
@@ -159,7 +187,7 @@ fn main() -> ! {
     // Real RNS identity: provision the node identity and derive its announce
     // destination hash (persistent across boots from the fixed seed).
     let (node_dest, node_identity) = crate::rns_link::node_destination_hash();
-    let lxmf_del = crate::rns_link::lxmf_delivery_hash(&node_identity);
+    let lxmf_del = leaf_lxmf::lxmf_delivery_hash(&node_identity);
     let mut lxmf_buf = [0u8; 32];
     for (i, b) in lxmf_del.iter().enumerate() {
         lxmf_buf[i * 2] = HEX[(b >> 4) as usize];
@@ -171,6 +199,15 @@ fn main() -> ! {
         node_dest,
         core::str::from_utf8(&lxmf_buf).unwrap_or("?")
     );
+    // DEBUG (temporary): full public key so we can compare the on-device
+    // identity bytes to what goes on-air in the announce payload.
+    if let Some(pk) = node_identity.get_public_key() {
+        let mut hexs = alloc::string::String::new();
+        for b in &pk {
+            hexs.push_str(&format!("{b:02x}"));
+        }
+        println!("[dbg] identity pkfull={hexs}");
+    }
 
     // LMAO node_id = hex of the identity hash (what the server keys sensor
     // reports by — matches the stable leaf's identity_hex).
@@ -184,13 +221,16 @@ fn main() -> ! {
 
     let mut beat = 0u32;
     let mut now_ms = 0u32;
+    // Cardputer → server Link + Resource push (issue #197). All packets ≤254 B.
+    let mut link_res = crate::link_resource::LinkResource::new();
+    let mut resource_started = false;
     loop {
         beat = beat.wrapping_add(1);
         esp_hal::delay::Delay::new().delay_millis(100); // real 100 ms tick
         now_ms = now_ms.wrapping_add(100);
 
         // Produce a valid RNS DATA packet of arbitrary bytes every 5th beat.
-        if beat % 5 == 0 {
+        if false { // TEMP (issue #197): 31B arbitrary-data heartbeat test ping disabled to free the half-duplex RF channel
             let payload: [u8; 12] = [
                 b'L', b'M', b'A', b'O', (beat >> 24) as u8, (beat >> 16) as u8,
                 (beat >> 8) as u8, beat as u8, 0x21, 0x7d, 0x00, 0x01,
@@ -215,30 +255,108 @@ fn main() -> ! {
         let rng = esp_hal::rng::Rng::new();
         if sched.is_rx_awake(now_ms) {
             // Link window open: listen + flush queued frames.
-            let _ = link.pump_rx(now_ms, &node_identity);
+            let now_f = START_EPOCH + f64::from(now_ms) / 1000.0;
+            let mut esp_rng = crate::rns_link::EspRng(rng);
+
+            // ── Cardputer → server Link + Resource driver (issue #197) ───────
+            // Every ~10 s, ensure a Link handshake with `lmao.data` is in
+            // flight; once established, push one big message as a Resource.
+            let mut to_tx: alloc::vec::Vec<alloc::vec::Vec<u8>> = alloc::vec::Vec::new();
+            if beat % 100 == 10 {
+                // (Re)initiate the Link if it isn't already handshaking.
+                if link_res.phase == crate::link_resource::LinkPhase::Idle
+                    || link_res.phase == crate::link_resource::LinkPhase::Failed
+                {
+                    if let Some(pkt) = link_res.begin_link(now_f, &mut esp_rng) {
+                        to_tx.push(pkt);
+                        println!(
+                            "[link] beat #{beat} LINKREQUEST to lmao.data link_id={:02x?}",
+                            link_res.link_id
+                        );
+                    }
+                }
+            }
+            // Route inbound link handshake / resource packets + collect replies.
+            {
+                let lr = &mut link_res;
+                link.pump_rx(now_ms, &node_identity, &mut |pkt: &rns_core::packet::RawPacket| {
+                    let replies = lr.pump_inbound(pkt, now_f, &mut esp_rng);
+                    to_tx.extend(replies);
+                });
+            }
+            // Once the link is up, push the big message as a Resource (once).
+            if !resource_started && link_res.established() {
+                let payload: alloc::vec::Vec<u8> = (0..1400u16).map(|i| (i % 251) as u8).collect();
+                let pkts = link_res.start_resource(&payload, now_f);
+                to_tx.extend(pkts);
+                resource_started = true;
+                println!(
+                    "[link] beat #{beat} link up ({}), pushing {}-B resource ({}-B parts)",
+                    link_res.phase == crate::link_resource::LinkPhase::Complete,
+                    payload.len(),
+                    crate::link_resource::RESOURCE_SDU
+                );
+            }
+            // Re-advertise on a long backoff (every ~5 s), NOT every tick:
+            // a 212 B LoRa frame has ~300 ms of airtime, so advertising every
+            // 100 ms floods the half-duplex channel and the server never
+            // cleanly receives an advertisement.
+            if resource_started && beat % 50 == 0 {
+                let adv = link_res.poll_resource(now_f);
+                to_tx.extend(adv);
+            }
+            match link_res.phase {
+                crate::link_resource::LinkPhase::Complete => println!(
+                    "[link] beat #{beat} RESOURCE COMPLETE ({}/{})",
+                    link_res.sent_parts, link_res.total_parts
+                ),
+                crate::link_resource::LinkPhase::Failed => println!("[link] beat #{beat} FAILED"),
+                _ => {}
+            }
+            for p in to_tx {
+                match link.send(&p, now_ms) {
+                    Ok(()) => println!("[link] beat #{beat} TX {} B", p.len()),
+                    Err(()) => println!("[link] beat #{beat} TX FAILED"),
+                }
+            }
             // Periodic signed RNS announces. Alternate every ~10 s between the
             // `lmao.leaf` presence destination and the `lxmf.delivery`
             // destination (so the server can address replies back to this
             // leaf).
             if beat % 100 == 0 {
-                let mut rh = [0u8; 10];
-                for c in rh.chunks_mut(4) {
-                    let r = rng.random();
-                    c.copy_from_slice(&r.to_le_bytes()[..c.len()]);
-                }
+                // µReticulum reference random_hash: urandom(5) ‖ unix_time(5, BE)
+                // so the server's path-table timebase is real (not garbage).
+                let mut random5 = [0u8; 5];
+                let a = rng.random();
+                random5[..4].copy_from_slice(&a.to_le_bytes());
+                random5[4] = (rng.random() & 0xff) as u8;
+                let unix_time = (START_EPOCH + f64::from(now_ms) / 1000.0) as u64;
+                let rh = leaf_lxmf::random_hash(random5, unix_time);
                 let (app, aspect, label) = if beat % 200 == 0 {
                     ("lmao", "leaf", "lmao.leaf")
                 } else {
                     ("lxmf", "delivery", "lxmf.delivery")
                 };
-                let a = crate::rns_link::announce_for(&node_identity, app, aspect, rh);
-                match a.map(|pkt| (pkt.len(), link.send(&pkt, now_ms))) {
-                    Some((n, Ok(()))) => println!(
-                        "[rns] beat #{beat} ANNOUNCE {n} B ({label} dest) src={node_dest:02x?}"
-                    ),
-                    Some((_, Err(()))) => {
-                        println!("[rns] beat #{beat} ANNOUNCE TX FAILED — recovering radio");
-                        let _ = configure(&mut link.radio_mut());
+                let a = leaf_lxmf::announce_for(&node_identity, app, aspect, rh);
+                match a {
+                    Some(pkt) => {
+                        let n = pkt.len();
+                        // DEBUG (temporary): dump the exact bytes RF sends, so
+                        // we can compare in-firmware vs on-air announce fields.
+                        let mut hexs = alloc::string::String::new();
+                        for b in &pkt {
+                            hexs.push_str(&format!("{b:02x}"));
+                        }
+                        println!("[dbg] beat #{beat} {label} n={n} hex={hexs}");
+                        match link.send(&pkt, now_ms) {
+                            Ok(()) => println!(
+                                "[rns] beat #{beat} ANNOUNCE {n} B ({label} dest) src={node_dest:02x?}"
+                            ),
+                            Err(()) => {
+                                println!("[rns] beat #{beat} ANNOUNCE TX FAILED — recovering radio");
+                                let _ = configure(&mut link.radio_mut());
+                            }
+                        }
                     }
                     None => println!("[rns] beat #{beat} ANNOUNCE build failed (skip)"),
                 }
@@ -246,14 +364,16 @@ fn main() -> ! {
             // Periodic text message to the server (~30 s) — the production
             // LMAO POC envelope (LMAOEnvelope{text}, p:Envelope title) exactly
             // as the stable Cardputer leaf's "Hello from Cardputer" send.
-            if beat % 300 == 0 {
+            if false { // TEMP (issue #197): 291B LXMF "Hello" test message disabled to free channel + avoid ratchet-decrypt spam
                 let hello = format!("Hello from Rust Cardputer leaf (seq {beat})");
                 let ts_ms = (START_EPOCH * 1000.0) as u64 + beat as u64 * 100;
                 let envelope =
-                    crate::rns_link::build_text_envelope(node_id, &hello, ts_ms);
-                let sent = crate::rns_link::build_message_to_server(
+                    leaf_lxmf::build_text_envelope(node_id, &hello, ts_ms);
+                let sent = leaf_lxmf::build_message_to_server(
                     &node_identity,
                     &mut crate::rns_link::EspRng(rng),
+                    &crate::rns_link::SERVER_LXMF_DELIVERY_HASH,
+                    &crate::rns_link::SERVER_PUBLIC_KEY,
                     &envelope,
                     START_EPOCH + beat as f64 / 10.0,
                 )
