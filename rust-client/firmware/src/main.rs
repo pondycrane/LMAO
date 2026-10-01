@@ -286,7 +286,7 @@ fn main() -> ! {
             }
             // Once the link is up, push the big message as a Resource (once).
             if !resource_started && link_res.established() {
-                let payload: alloc::vec::Vec<u8> = (0..1400u16).map(|i| (i % 251) as u8).collect();
+                let payload: alloc::vec::Vec<u8> = (0..500u16).map(|i| (i % 251) as u8).collect();
                 let pkts = link_res.start_resource(&payload, now_f);
                 to_tx.extend(pkts);
                 resource_started = true;
