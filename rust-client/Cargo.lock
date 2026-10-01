@@ -725,6 +725,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lmao-resource-500b-e2e"
+version = "0.1.0"
+dependencies = [
+ "leaf-resource",
+ "rns-core",
+ "rns-crypto",
+]
+
+[[package]]
 name = "lmao-t0-interop"
 version = "0.1.0"
 dependencies = [

@@ -1,0 +1,2 @@
+# Workspace-root package marker. Required so the crate_universe extension can
+# reference //:MODULE.bazel as a package (cargo-bazel splicing).

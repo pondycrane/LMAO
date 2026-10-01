@@ -1,0 +1,20 @@
+# E2E: cardputer 500-byte resource → LMAO server (host, deterministic).
+#
+# Mirrors the live LoRa proof (2026-10-01): the Cardputer firmware pushes the
+# payload `(0..500).map(|i| i % 251)` as an RNS Resource over the held link and
+# the k8s Rust receiver (`lmao-server-rust-recv`) reassembles it:
+#   RESOURCE received bytes=500 sha256=f6b8396506ad2ac31bfe6d73fa0155e090b62b4321043dafe308090296b28d84
+# This test re-runs the *same payload* through the leaf ResourceTX (cardputer
+# side) → server ResourceRX (LMAO side) state machines on the host and asserts
+# the reassembled 500 bytes hash to that exact hardware-proven sha256 — a
+# deterministic cross-check of the real RF path with no hardware required.
+
+[package]
+name = "lmao-resource-500b-e2e"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+leaf-resource = { path = "../../crates/leaf-resource" }
+rns-core = "0.1.17"
+rns-crypto = "0.1.10"

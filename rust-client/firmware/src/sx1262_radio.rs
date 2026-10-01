@@ -19,34 +19,47 @@ use sx126x::RadioBus;
 
 pub struct EspRadioBus<'d> {
     spi: Spi<'d, Blocking>,
+    cs: Output<'d>,
     rst: Output<'d>,
     busy: Input<'d>,
 }
 
 impl<'d> EspRadioBus<'d> {
-    /// `spi` must be an `Spi` already bound to SCK/MOSI/MISO/CS on the pins above.
-    pub fn new(spi: Spi<'d, Blocking>, rst: Output<'d>, busy: Input<'d>) -> Self {
-        EspRadioBus { spi, rst, busy }
+    /// `spi` must be an `Spi` bound to SCK/MOSI/MISO on the pins above (CS is
+    /// NOT attached to the peripheral — the bus drives it manually). `cs` is
+    /// GPIO5 as a plain output, held high when idle.
+    pub fn new(spi: Spi<'d, Blocking>, cs: Output<'d>, rst: Output<'d>, busy: Input<'d>) -> Self {
+        EspRadioBus { spi, cs, rst, busy }
     }
 }
+
+/// ESP32-S3 SPI hardware FIFO depth (bytes). Any transfer is chunked at this —
+/// with CS held low manually across the whole command so the SX1262 sees one
+/// transaction, not one-per-chunk (which would corrupt the payload stream).
+const SPI_FIFO: usize = 64;
 
 impl RadioBus for EspRadioBus<'_> {
     type Error = ();
 
     fn command(&mut self, opcode: u8, write: &[u8], read: &mut [u8]) -> Result<(), ()> {
-        // One CS assertion per command. For reads we clock `read.len()` extra
-        // bytes in the same transaction (SX1262 returns status then data).
-        // NOTE (hardware-verif): layout of status/data relative to opcode+args
-        // mirrors the MicroPython `_cmd`; confirm on the device.
+        // One CS assertion per command, held LOW across every FIFO chunk (the
+        // SX1262 frames a command by CS; releasing it mid-stream is a new
+        // command). Reads clock `read.len()` extra bytes in the same stream
+        // (SX1262 returns status then data after the opcode+args).
         let mut buf = [0u8; 260];
         let data_len = read.len().saturating_sub(1); // first byte is status
         let n = 1 + write.len() + read.len();
         buf[0] = opcode;
         buf[1..1 + write.len()].copy_from_slice(write);
-        // Sequential in-place transfer: TX buf (opcode+args+nops), RX same slots.
-        self.spi
-            .transfer(&mut buf[..n])
-            .map_err(|_| ())?;
+
+        self.cs.set_low();
+        // Chunk at the hardware FIFO so esp-hal does a single operation per
+        // call (its internal >64-byte path is what corrupted long transfers).
+        for chunk in buf[..n].chunks_mut(SPI_FIFO) {
+            self.spi.transfer(chunk).map_err(|_| ())?;
+        }
+        self.cs.set_high();
+
         // (On-wire trace removed after bring-up: the command stream was
         // verified byte-identical to the reference driver.)
         if !read.is_empty() {
