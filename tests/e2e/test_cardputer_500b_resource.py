@@ -12,18 +12,22 @@ This test drives that real RF path and asserts the exact hardware-proven
 sha256, cross-checking the deterministic host e2e
 (`//rust-client:resource_500b_e2e`, which asserts the same digest in-process).
 
+The RF receiver is merged INTO the Rust server (`lmao-server-rust-app`, the
+`src/rf.rs` rns-net leg), so the `RESOURCE received bytes=500` line is read
+from that deployment's logs — not a separate receiver pod.
+
 Hardware requirements:
   * Cardputer on ``/dev/ttyACM0`` running a firmware built from
     ``rust-client/firmware`` with the 500-B payload (the flashed image is left
     untouched — only a USB reset is issued to re-dial `lmao.data`).
-  * ``kubectl`` configured for the cluster running ``lmao-server-rust-recv``
-    (image ``lmao-server-rust-recv:test`` on node tp4, RNode on /dev/ttyUSB0).
+  * ``kubectl`` configured for the cluster running ``lmao-server-rust-app``
+    (on node tp4, RNode on /dev/ttyUSB0).
 
-Skips (never fails) when any of those are missing.
+Hardware is a hard requirement: the test FAILS (not skips) when it is missing.
 
 Run with::
 
-    bazel test //tests:test_cardputer_500b_resource --test_output=all
+    bazel test //tests:test_cardputer_500b_resource --test_output=all --spawn_strategy=standalone
 """
 
 import re
@@ -33,9 +37,10 @@ import time
 
 import pytest
 
-# The payload sha256 the receiver must log (LoRa-proven, 2026-10-01).
+# The payload sha256 the (server-merged) receiver must log (LoRa-proven).
 EXPECTED_SHA256 = "f6b8396506ad2ac31bfe6d73fa0155e090b62b4321043dafe308090296b28d84"
-RECEIVER_LABEL = "app=lmao-server-rust-recv"
+SERVER_LABEL = "app=lmao-server-rust-app"
+RECEIVER_LABEL = SERVER_LABEL
 WAIT_SECONDS = 120
 POLL_INTERVAL = 2.0
 
@@ -58,9 +63,9 @@ def _hardware_present():
         return False, "/dev/ttyACM0 (Cardputer) not present"
     if not os.path.exists("/dev/ttyUSB0"):
         return False, "/dev/ttyUSB0 (RNode) not present"
-    r = _kubectl(["get", "deploy", "lmao-server-rust-recv", "-n", "default"])
+    r = _kubectl(["get", "deploy", "lmao-server-rust-app", "-n", "default"])
     if r.returncode != 0:
-        return False, "receiver deployment lmao-server-rust-recv not reachable"
+        return False, "merged receiver/server deployment lmao-server-rust-app not reachable"
     return True, ""
 
 
