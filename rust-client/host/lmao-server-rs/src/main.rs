@@ -87,15 +87,17 @@ async fn main() {
         }
         None
     } else {
-        let rf_cfg = lmao_server_rs::rf::RfConfig {
-            serial_port: rf_port.clone(),
-            identity_hex_64b: std::env::var("LMAO_SERVER_RNS_IDENTITY_HEX").ok(),
-            default_source: std::env::var("LMAO_RF_DEFAULT_SOURCE")
-                .unwrap_or_default()
-                .trim()
-                .to_lowercase(),
-            ..Default::default()
-        };
+        // Mutate the Default config so an UNSET env var keeps the struct's
+        // default_source ("99ce…") instead of overriding it with "".
+        let mut rf_cfg = lmao_server_rs::rf::RfConfig::default();
+        rf_cfg.serial_port = rf_port.clone();
+        rf_cfg.identity_hex_64b = std::env::var("LMAO_SERVER_RNS_IDENTITY_HEX").ok();
+        if let Ok(v) = std::env::var("LMAO_RF_DEFAULT_SOURCE") {
+            let v = v.trim().to_lowercase();
+            if !v.is_empty() {
+                rf_cfg.default_source = v;
+            }
+        }
         match lmao_server_rs::rf::start_rf_node(state.clone(), rf_cfg) {
             Ok(node) => {
                 log::info!("RF receive running on {rf_port}");
