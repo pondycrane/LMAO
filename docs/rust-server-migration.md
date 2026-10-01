@@ -240,3 +240,22 @@ PASS; binary smoke-tested live (contact book + NATS + gRPC + contacts HTTP).
    feeds raw envelopes into `DeliveryHandler`; routing/ACK wire behavior needs
    the rns-net send path (either rns-net Link/Resource dispatch or an
    lxmf-core pack step) proven on RF.
+
+### Deployment — Rust server via install_all (`--include-services`, 2026-10-01)
+
+The Rust app-layer server is now releasable through the repo's deploy tool the
+same way the Python server is:
+
+- **Image**: `docker/rust-lmao-server/Dockerfile` (multi-stage: cargo build with
+  `protobuf-compiler` for tonic-build → slim runtime; runtime env sets
+  `LMAO_CONTACTS_DB=/data/contacts.db` and the in-cluster NATS address).
+- **Manifest**: `k8s/lmao-server-rust-app.yaml` — contacts PVC (local-path,
+  ContactBook survives restarts) + Deployment + Service (gRPC 50051, contacts
+  8081). No RNode/hostNetwork yet — the RF seam is a stub; add both when the
+  rns-net `MeshSender` lands.
+- **Install_Services**: `tools/install_services.install_rust_lmao_server()`
+  builds the image, releases it via the local registry
+  (`192.168.50.153:5000/lmao-server-rust-app:latest`), applies the manifest,
+  waits for rollout, and verifies the pod logged both listeners.
+- **install_all**: `--include-services` now deploys the Rust server (skip with
+  `--skip-rust-server`; skipped automatically under `--skip-k8s`).

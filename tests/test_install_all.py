@@ -233,6 +233,11 @@ class TestParseArgs:
         args = install_all._parse_args(["--include-services", "--skip-k8s"])
         assert args.skip_k8s is True
 
+    def test_skip_rust_server_flag(self):
+        """--skip-rust-server sets the flag to True."""
+        args = install_all._parse_args(["--include-services", "--skip-rust-server"])
+        assert args.skip_rust_server is True
+
     def test_skip_iot_ingest_flag(self):
         """--skip-iot-ingest sets the flag to True."""
         args = install_all._parse_args(["--include-services", "--skip-iot-ingest"])

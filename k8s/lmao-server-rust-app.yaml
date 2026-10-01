@@ -1,0 +1,110 @@
+# Rust LMAO server app layer — in-cluster Deployment (full-Rust migration,
+# see docs/rust-server-migration.md). Serves the same surface as the legacy
+# Python `lmao-server` (k8s/lmao-server.yaml):
+#   - gRPC LMAO service   :50051  (GetIdentity / Send / Subscribe stream)
+#   - contacts HTTP API   :8081   (GET/POST /contacts, /contacts/find)
+#   - NATS JetStream publishing of received envelopes (lmao.messages.env)
+#
+# Differs from the Python server today: the RNS/RNode RF seam is behind a
+# MeshSender stub (LogMesh), so no /dev/ttyUSB0 hostPath or hostNetwork is
+# mounted yet — add both when the rns-net seam (ACK + Send dispatch) lands.
+#
+# Identity is supplied via LMAO_SERVER_DEST_HEX (the server's LXM identity
+# hex) instead of a filesystem identity, matching the Rust crate's config.
+# The SQLite ContactBook persists on the `local-path` PVC so learned devices
+# survive restarts.
+#
+# Apply:
+#   kubectl apply -f k8s/lmao-server-rust-app.yaml
+# Reach the gRPC API in-cluster via:
+#   lmao-server-rust-app.default.svc.cluster.local:50051
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: lmao-server-rust-app-contacts
+  namespace: default
+  labels:
+    app: lmao-server-rust-app
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 100Mi
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lmao-server-rust-app
+  namespace: default
+  labels:
+    app: lmao-server-rust-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: lmao-server-rust-app
+  strategy:
+    type: Recreate  # RWO contacts PVC — never run two pods
+  template:
+    metadata:
+      labels:
+        app: lmao-server-rust-app
+    spec:
+      containers:
+        - name: lmao-server-rust-app
+          image: 192.168.50.153:5000/lmao-server-rust-app:latest
+          imagePullPolicy: Always
+          env:
+            - name: NATS_SERVER
+              value: nats://nats-server.default.svc.cluster.local:4222
+            - name: LMAO_CONTACTS_DB
+              value: /data/contacts.db
+            - name: LMAO_GRPC_PORT
+              value: "50051"
+            - name: LMAO_CONTACTS_PORT
+              value: "8081"
+            - name: LMAO_SERVER_DEST_HEX
+              value: 24a097043d6d7f8fe0fb188e375c4c66
+            - name: LMAO_SERVER_NODE_NAME
+              value: lmao-server-rust-app
+            - name: LMAO_ALLOWED_CLIENTS
+              value: "7b38fa21e75d8866c18de3da01540f2e,f5f05952392627393f067df8c9eaf6c6,277bf9fbfecf26b9eae91ba60f6c3597,99ce32311dc37193eff4951a912f8f1b"
+          ports:
+            - name: grpc
+              containerPort: 50051
+            - name: http
+              containerPort: 8081
+          volumeMounts:
+            - name: contacts
+              mountPath: /data
+          resources:
+            limits:
+              memory: 256Mi
+      volumes:
+        - name: contacts
+          persistentVolumeClaim:
+            claimName: lmao-server-rust-app-contacts
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: lmao-server-rust-app
+  namespace: default
+  labels:
+    app: lmao-server-rust-app
+spec:
+  selector:
+    app: lmao-server-rust-app
+  ports:
+    - name: grpc
+      port: 50051
+      targetPort: 50051
+      protocol: TCP
+    - name: http
+      port: 8081
+      targetPort: 8081
+      protocol: TCP
