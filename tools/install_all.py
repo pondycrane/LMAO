@@ -78,6 +78,7 @@ from tools.install_services import (
     install_iot_ingest_consumer,
     install_k8s_services,
     install_pi_server,
+    install_rust_lmao_server,
     setup_registry,
     stop_pi_server_container,
 )
@@ -767,6 +768,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Skip Kubernetes manifest apply (only meaningful with --include-services).",
     )
     parser.add_argument(
+        "--skip-rust-server",
+        action="store_true",
+        help="Skip the Rust LMAO server image build + K8s deploy "
+        "(only meaningful with --include-services).",
+    )
+    parser.add_argument(
         "--skip-iot-ingest",
         action="store_true",
         help="Skip IoT Ingest Consumer deploy (only meaningful with --include-services).",
@@ -902,6 +909,8 @@ def main(argv: list[str] | None = None) -> None:
     results.append(k8s_result)
     iot_result = DeviceResult("IoT Ingest Consumer")
     results.append(iot_result)
+    rust_server_result = DeviceResult("Rust LMAO Server")
+    results.append(rust_server_result)
 
     if args.include_services:
         try:
@@ -913,6 +922,15 @@ def main(argv: list[str] | None = None) -> None:
                     deploy_lmao_server(pi_result)
                 else:
                     print("  Skipping K8s deploy — image build/release did not succeed")
+
+            # Full-Rust migration: deploy the Rust LMAO server app layer
+            # (gRPC + contacts + NATS) as the Python server's replacement.
+            if args.skip_rust_server:
+                rust_server_result.skip("--skip-rust-server")
+            elif args.skip_k8s:
+                rust_server_result.skip("--skip-k8s (K8s services skipped)")
+            else:
+                install_rust_lmao_server(rust_server_result)
 
             if args.skip_k8s:
                 k8s_result.skip("--skip-k8s")
