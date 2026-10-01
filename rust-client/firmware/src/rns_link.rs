@@ -18,7 +18,6 @@
 
 extern crate alloc;
 
-use alloc::string::String;
 use alloc::vec::Vec;
 
 use radio_interface::interface::RadioInterface;
@@ -119,8 +118,6 @@ pub fn build_announce(
     identity: &rns_crypto::identity::Identity,
     random_hash: [u8; 10],
 ) -> Option<Vec<u8>> {
-    use rns_core::constants::{DESTINATION_SINGLE, HEADER_1, PACKET_TYPE_ANNOUNCE};
-
     announce_for(identity, APP_NAME, LEAF_ASPECT, random_hash)
 }
 
@@ -194,7 +191,7 @@ fn build_lxmf_to_server(
     // attribute messages to the (whitelisted) delivery destination.
     let src_hash = lxmf_delivery_hash(identity);
 
-    let mut fields = Vec::new();
+    let fields = Vec::new();
     let packed = lxmf_core::message::pack(
         &SERVER_LXMF_DELIVERY_HASH,
         &src_hash,
@@ -269,6 +266,17 @@ pub fn build_text_envelope(node_id_hex: &str, content: &str, timestamp_ms: u64) 
 // charts it with no extra airtime. This mirrors the stable client's
 // `handle_reply` + `chart.parse_data_line` (main.py).
 
+/// µReticulum reference `random_hash` layout: `urandom(5) ‖ unix_time(5, BE)`.
+/// The first 5 bytes are sender-fresh random; the last 5 are the 5 most
+/// significant bytes of the big-endian 64-bit Unix timestamp (the path-table
+/// timebase the server derives announce recency from).
+pub fn random_hash(random5: [u8; 5], unix_time: u64) -> [u8; 10] {
+    let mut rh = [0u8; 10];
+    rh[..5].copy_from_slice(&random5);
+    rh[5..].copy_from_slice(&unix_time.to_be_bytes()[3..]);
+    rh
+}
+
 /// Truncated LXMF delivery destination hash for this identity — the address
 /// the server replies to (the announce destination for `lxmf.delivery`).
 pub fn lxmf_delivery_hash(identity: &rns_crypto::identity::Identity) -> [u8; 16] {
@@ -332,94 +340,20 @@ fn decode_text_content(envelope: &[u8]) -> Option<&[u8]> {
     find_pb_field_ld(text_msg, 2) // TextMessage.content = 2
 }
 
-/// no_std rounding (`f32::round` is std/libm): round half up for the
-/// non-negative server values (moisture %, temperature). NaN saturates to 0.
-fn roundi(x: f32) -> i64 {
-    (x + 0.5) as i64
-}
-
-/// A parsed `DATA …` chart record (mirrors `chart.parse_data_line`).
-pub struct ChartRecord {
-    pub node: String,
-    pub dry: i64,
-    pub wet: i64,
-    pub temp: Vec<f32>,
-    pub humidity: Vec<i64>,
-    pub samples: Vec<i64>,
-    pub water_mask: u64,
-}
-
-/// Extract the first `DATA ` record from *text* (the server piggybacks the
-/// Sprout moisture series on its ACK), or None. Tolerates the ACK line
-/// sharing the message and skips malformed records rather than failing.
-pub fn parse_data_line(text: &str) -> Option<ChartRecord> {
-    for raw in text.lines() {
-        let line = raw.trim();
-        if !line.starts_with("DATA ") {
-            continue;
-        }
-        let all: Vec<&str> = line.split_whitespace().collect();
-        if all.len() < 6 || all[0] != "DATA" {
-            continue;
-        }
-        // Inner closure so a malformed record just aborts to "keep scanning".
-        let rec = (|| -> Option<ChartRecord> {
-            let node = String::from(all[1]);
-            let dry = all[2].parse::<f32>().ok().map(roundi)?;
-            let wet = all[3].parse::<f32>().ok().map(roundi)?;
-            let ct = all.get(4)?.parse::<usize>().ok()?;
-            let mut idx = 5;
-            let mut temp = Vec::new();
-            for _ in 0..ct {
-                temp.push(all.get(idx)?.parse::<f32>().ok()?);
-                idx += 1;
-            }
-            let ch = all.get(idx)?.parse::<usize>().ok()?;
-            idx += 1;
-            let mut humidity = Vec::new();
-            for _ in 0..ch {
-                humidity.push(all.get(idx)?.parse::<f32>().ok().map(roundi)?);
-                idx += 1;
-            }
-            let cm = all.get(idx)?.parse::<usize>().ok()?;
-            idx += 1;
-            let mut samples = Vec::new();
-            for _ in 0..cm {
-                samples.push(all.get(idx)?.parse::<f32>().ok().map(roundi)?);
-                idx += 1;
-            }
-            // Optional trailing watering mask (old lines lack it).
-            let water_mask = match all.len() - idx {
-                0 => 0u64,
-                1 => all[idx].parse::<u64>().ok()?,
-                _ => return None,
-            };
-            // A percent-less line can never come from the server — reject it
-            // (mirrors the Python guard: `if not humidity and not samples`).
-            if humidity.is_empty() && samples.is_empty() {
-                return None;
-            }
-            Some(ChartRecord { node, dry, wet, temp, humidity, samples, water_mask })
-        })();
-        if rec.is_some() {
-            return rec;
-        }
-    }
-    None
-}
-
 /// Decrypt + unpack an inbound DATA packet addressed to our `lxmf.delivery` —
 /// the server's reply to one of our messages — and, when it carries a `DATA …`
-/// chart line, parse and print the record (the leaf's receive half, replacing
-/// the stable client's screen chart with a serial log until a display driver
-/// lands in the Rust firmware).
-pub fn handle_lxmf_reply(identity: &rns_crypto::identity::Identity, pkt: &RawPacket) {
+/// chart line, return the parsed record for the panel to display.  Logs each
+/// stage on serial so RF bring-up stays visible without the LCD.
+pub fn handle_lxmf_reply(
+    identity: &rns_crypto::identity::Identity,
+    pkt: &RawPacket,
+) -> Option<lma_chart::ChartRecord> {
     // 1. X25519-decrypt the packet payload (encrypted to our public key).
     let plaintext = match identity.decrypt(&pkt.data) {
         Ok(p) => p,
         Err(_) => {
             esp_println::println!("[rns] inbound decrypt failed (bad key / not for us? — skip)");
-            return;
+            return None;
         }
     };
     // 2. LXMF unpack, verifying the signature against the server's key.
@@ -429,7 +363,7 @@ pub fn handle_lxmf_reply(identity: &rns_crypto::identity::Identity, pkt: &RawPac
         Ok(m) => m,
         Err(e) => {
             esp_println::println!("[rns] inbound LXMF unpack failed: {e:?}");
-            return;
+            return None;
         }
     };
     esp_println::println!(
@@ -441,17 +375,17 @@ pub fn handle_lxmf_reply(identity: &rns_crypto::identity::Identity, pkt: &RawPac
     );
     // 3. The reply content is `LMAOEnvelope{text: TextMessage}`
     //    ("ACK …\nDATA …"). Pull the text out and parse the chart line.
-    let Some(text) = decode_text_content(&msg.content) else { return };
-    let Ok(text) = core::str::from_utf8(text) else { return };
+    let Some(text) = decode_text_content(&msg.content) else { return None };
+    let Ok(text) = core::str::from_utf8(text) else { return None };
     for line in text.lines().take(1) {
         esp_println::println!("[rns] reply: {line}");
     }
-    if let Some(c) = parse_data_line(text) {
-        esp_println::println!(
-            "[rns] CHART node={} dry={} wet={} temp={:?} humidity={:?} samples={:?} water_mask={:#x}",
-            c.node, c.dry, c.wet, c.temp, c.humidity, c.samples, c.water_mask
-        );
-    }
+    let c = lma_chart::parse_data_line(text)?;
+    esp_println::println!(
+        "[rns] CHART node={} dry={} wet={} samples={} temp_count={} water_mask={:#x}",
+        c.node, c.dry, c.wet, c.samples.len(), c.temp.len(), c.water_mask
+    );
+    Some(c)
 }
 
 /// The firmware's RNS link: one radio + one interface + the frame demux.
@@ -550,6 +484,7 @@ impl<B: RadioBus> RnsLink<B> {
         now_ms: u32,
         identity: &rns_crypto::identity::Identity,
         dispatch: &mut dyn FnMut(&RawPacket),
+        on_chart: &mut dyn FnMut(&lma_chart::ChartRecord),
     ) -> u32 {
         let mut consumed = 0;
         loop {
@@ -609,11 +544,14 @@ impl<B: RadioBus> RnsLink<B> {
                         );
                         // The server's reply to us: an LXMF DATA message
                         // addressed to our lxmf.delivery destination. Decrypt
-                        // + parse it for the piggybacked chart data.
+                        // + parse the piggybacked chart line, and hand the
+                        // record to the panel (main owns the LCD).
                         if pkt.flags.packet_type == rns_core::constants::PACKET_TYPE_DATA
                             && pkt.destination_hash == lxmf_delivery_hash(identity)
                         {
-                            handle_lxmf_reply(identity, &pkt);
+                            if let Some(c) = handle_lxmf_reply(identity, &pkt) {
+                                on_chart(&c);
+                            }
                         }
                         dispatch(&pkt);
                     }
