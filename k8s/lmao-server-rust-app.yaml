@@ -11,28 +11,16 @@
 #
 # Identity is supplied via LMAO_SERVER_DEST_HEX (the server's LXM identity
 # hex) instead of a filesystem identity, matching the Rust crate's config.
-# The SQLite ContactBook persists on the `local-path` PVC so learned devices
-# survive restarts.
+#
+# The SQLite ContactBook mounts on an `emptyDir` for now: the cluster's
+# local-path provisioner is unhealthy (create-process timeouts on new PVCs;
+# existing PVCs still bound). Swap back to a `local-path` PVC once the
+# provisioner is repaired so learned devices survive restarts.
 #
 # Apply:
 #   kubectl apply -f k8s/lmao-server-rust-app.yaml
 # Reach the gRPC API in-cluster via:
 #   lmao-server-rust-app.default.svc.cluster.local:50051
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: lmao-server-rust-app-contacts
-  namespace: default
-  labels:
-    app: lmao-server-rust-app
-spec:
-  accessModes: ["ReadWriteOnce"]
-  storageClassName: local-path
-  resources:
-    requests:
-      storage: 100Mi
-
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -53,6 +41,7 @@ spec:
       labels:
         app: lmao-server-rust-app
     spec:
+      nodeName: tp4  # host the LoRa RNode (same node the Python server pins to)
       containers:
         - name: lmao-server-rust-app
           image: 192.168.50.153:5000/lmao-server-rust-app:latest
@@ -85,8 +74,7 @@ spec:
               memory: 256Mi
       volumes:
         - name: contacts
-          persistentVolumeClaim:
-            claimName: lmao-server-rust-app-contacts
+          emptyDir: {}
 
 ---
 apiVersion: v1
