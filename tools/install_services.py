@@ -1331,6 +1331,34 @@ def install_rust_lmao_server(result, repo_root=None):
         f"{DEFAULT_REGISTRY_HOST}:{DEFAULT_REGISTRY_PORT}/lmao-server-rust-app:latest"
     )
 
+    # ── Ensure the warm builder (deps precompiled) exists ──
+    # The server Dockerfile `FROM lmao-server-rust-builder:1`, so deploys are
+    # thin. The builder is built once (cold, ~15 min) and reused thereafter.
+    builder_tag = "lmao-server-rust-builder:1"
+    builder_dockerfile = os.path.join(
+        repo_root, "docker", "rust-lmao-server", "builder.Dockerfile"
+    )
+    if os.path.isfile(builder_dockerfile):
+        check = subprocess.run(
+            ["docker", "image", "inspect", builder_tag],
+            capture_output=True,
+            text=True,
+        )
+        if check.returncode != 0:
+            print(f"  Building warm Rust builder ({builder_tag}) — one-time cold compile …")
+            proc = subprocess.run(
+                ["docker", "build", "-t", builder_tag, "-f", builder_dockerfile, "."],
+                cwd=repo_root,
+                capture_output=True,
+                text=True,
+            )
+            if proc.returncode != 0:
+                tail = proc.stderr.strip().split("\n")[-3:]
+                result.fail(f"Warm builder build failed: {'; '.join(tail)}")
+                print(f"  FAIL: warm builder build — {'; '.join(tail)}")
+                return
+            print("  OK: warm Rust builder built")
+
     # ── Build ──
     dockerfile = os.path.join(repo_root, "docker", "rust-lmao-server", "Dockerfile")
     try:

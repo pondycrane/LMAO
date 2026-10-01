@@ -265,3 +265,28 @@ same way the Python server is:
   waits for rollout, and verifies the pod logged both listeners.
 - **install_all**: `--include-services` now deploys the Rust server (skip with
   `--skip-rust-server`; skipped automatically under `--skip-k8s`).
+
+
+### Build-time optimization (warm builder image, 2026-10-01)
+
+`install_all --include-services` used to recompile the **entire dependency tree
+on every Rust-server deploy** (~15–40 min on arm64: tonic/hyper/rusqlite/
+async-nats/rns-net). Now:
+
+- `docker/rust-lmao-server/builder.Dockerfile` compiles the full dep graph ONCE
+  into `/src/rust-client/target`, tagged `lmao-server-rust-builder:1`.
+- `docker/rust-lmao-server/Dockerfile` `FROM`s that warm image and recompiles
+  only the changed `lmao-server-rs` source against the cached deps —
+  **minutes, not the cold tree compile**.
+- `install_rust_lmao_server()` builds the warm builder automatically on the
+  first deploy if it's missing; later deploys are thin.
+
+Chosen over cargo-chef / BuildKit cache mounts / two-tier dummy caches because
+those depend on Docker layer-caching behavior that is unreliable on the deploy
+host's legacy builder; the warm-builder image is deterministic on any builder.
+
+Measured on the deploy host (arm64): the one-time warm-builder cold build takes
+~42 min; an unchanged deploy is ~11 s (Docker cache); a source-change deploy is
+~4.5 min wall (cargo 1m41s) — versus ~15–40 min per deploy before. A
+`.dockerignore` at the repo root excludes `rust-client/target` (~GB) from the
+build context, which alone cut ~6–7 min of tar/upload per deploy.
