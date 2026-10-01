@@ -253,8 +253,12 @@ same way the Python server is:
   (the RNode node) + Service (gRPC 50051, contacts 8081). The ContactBook
   currently mounts an `emptyDir` — the cluster's local-path provisioner is
   unhealthy (create-process timeouts on new PVCs), so swap back to a
-  `local-path` PVC for persistence once it's repaired. No RNode/hostNetwork
-  yet — the RF seam is a stub; add both when the rns-net `MeshSender` lands.
+  `local-path` PVC for persistence once it's repaired. **RF receive merged
+  into the server** (`src/rf.rs`): the pod drives the RNode via
+  `LMAO_RNODE_PORT` (privileged, `/dev/ttyUSB0` hostPath) and ingests payload
+  Resources straight into DeliveryHandler — the standalone receiver image is
+  no longer needed. `MeshSender` ACK-over-rns-net is still the remaining seam
+  (app layer uses `LogMesh`).
 - **Install_Services**: `tools/install_services.install_rust_lmao_server()`
   builds the image, releases it via the local registry
   (`192.168.50.153:5000/lmao-server-rust-app:latest`), applies the manifest,

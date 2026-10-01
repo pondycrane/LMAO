@@ -46,7 +46,15 @@ spec:
         - name: lmao-server-rust-app
           image: 192.168.50.153:5000/lmao-server-rust-app:latest
           imagePullPolicy: Always
+          securityContext:
+            privileged: true  # RNode USB serial passthrough (LoRa RF receive)
           env:
+            - name: RUST_LOG
+              value: lmao_server_rs=info,rns_net=info,rns_core=info
+            - name: LMAO_RNODE_PORT
+              value: /dev/ttyUSB0
+            - name: LMAO_SERVER_RNS_IDENTITY_HEX
+              value: 803763856683f9cc649c63dc45ae22d17d007e74e26afd176a04131a072b8160b2920e025efcbb88d3d84e002f07b0d84ad0192bec18f19d32c13d99894c857f
             - name: NATS_SERVER
               value: nats://nats-server.default.svc.cluster.local:4222
             - name: LMAO_CONTACTS_DB
@@ -69,12 +77,17 @@ spec:
           volumeMounts:
             - name: contacts
               mountPath: /data
+            - name: rnode
+              mountPath: /dev/ttyUSB0
           resources:
             limits:
-              memory: 256Mi
+              memory: 512Mi
       volumes:
         - name: contacts
           emptyDir: {}
+        - name: rnode
+          hostPath:
+            path: /dev/ttyUSB0
 
 ---
 apiVersion: v1
