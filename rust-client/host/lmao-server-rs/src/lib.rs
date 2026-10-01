@@ -10,6 +10,7 @@ pub mod contacts;
 pub mod delivery;
 pub mod grpc;
 pub mod nats;
+pub mod rf;
 pub mod sprout;
 pub mod store;
 
