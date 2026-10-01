@@ -266,6 +266,27 @@ sh_binary(
 # with `bazel run //cardputer_client:flash`). Never pulled into test runs.
 
 filegroup(
+
+# ── lma-chart — no_std Cardputer chart renderer (host tests) ----------------
+# The chart is host-tested here (cargo test) with a recording fake display;
+# the esp32s3 firmware consumes the same crate via its own workspace path dep.
+
+filegroup(
+    name = "lma_chart_sources",
+    srcs = glob(
+        ["crates/lma-chart/**"],
+        exclude = ["crates/**/target/**"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+sh_binary(
+    name = "test_lma_chart",
+    srcs = ["test_lma_chart.sh"],
+    data = [":lma_chart_sources"],
+    tags = ["manual"],
+)
+
     name = "vendor_sources",
     srcs = glob(["vendor/**"]),
     visibility = ["//visibility:public"],

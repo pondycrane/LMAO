@@ -28,6 +28,8 @@ pub mod sx1262_radio;
 pub mod rns_link;
 // Link initiator + Resource push to the server's lmao.data destination.
 pub mod link_resource;
+// Cardputer ST7789 panel driver + RGB565 framebuffer (the chart display).
+pub mod display;
 
 // no_std heap. rns-core packet building + the RNode split assembler allocate;
 // back them with a static linked-list heap.
@@ -187,7 +189,7 @@ fn main() -> ! {
     // Real RNS identity: provision the node identity and derive its announce
     // destination hash (persistent across boots from the fixed seed).
     let (node_dest, node_identity) = crate::rns_link::node_destination_hash();
-    let lxmf_del = leaf_lxmf::lxmf_delivery_hash(&node_identity);
+    let lxmf_del = crate::rns_link::lxmf_delivery_hash(&node_identity);
     let mut lxmf_buf = [0u8; 32];
     for (i, b) in lxmf_del.iter().enumerate() {
         lxmf_buf[i * 2] = HEX[(b >> 4) as usize];
@@ -221,9 +223,25 @@ fn main() -> ! {
 
     let mut beat = 0u32;
     let mut now_ms = 0u32;
+
     // Cardputer → server Link + Resource push (issue #197). All packets ≤254 B.
     let mut link_res = crate::link_resource::LinkResource::new();
     let mut resource_started = false;
+
+    // The chart panel: ST7789 on SPI3 (HSPI) — SCK=36, MOSI=35, CS=37,
+    // DC=34, backlight=38 (see display.rs).  The radio took SPI2, so the
+    // display bus is separate and the two never contend.
+    let mut lcd = crate::display::Lcd::new(
+        Spi::new(peripherals.SPI3, SpiCfg::default())
+            .expect("lcd SPI config")
+            .with_sck(peripherals.GPIO36)
+            .with_mosi(peripherals.GPIO35),
+        Output::new(peripherals.GPIO34, Level::Low, OutputConfig::default()),
+        Output::new(peripherals.GPIO37, Level::High, OutputConfig::default()),
+        Output::new(peripherals.GPIO38, Level::Low, OutputConfig::default()),
+    );
+    println!("[t6] st7789 init (240x135) — display ready for the chart");
+
     loop {
         beat = beat.wrapping_add(1);
         esp_hal::delay::Delay::new().delay_millis(100); // real 100 ms tick
@@ -282,6 +300,13 @@ fn main() -> ! {
                 link.pump_rx(now_ms, &node_identity, &mut |pkt: &rns_core::packet::RawPacket| {
                     let replies = lr.pump_inbound(pkt, now_f, &mut esp_rng);
                     to_tx.extend(replies);
+                }, &mut |c: &lma_chart::ChartRecord| {
+                    // The server's reply carried a fresh DATA line — paint the
+                    // Sprout chart on the panel (the cardputer display, now in
+                    // Rust) and blit it.
+                    let points = lma_chart::draw(&mut lcd, c);
+                    lcd.present();
+                    println!("[t6] chart drawn: {points} trace segments");
                 });
             }
             // Once the link is up, push the big message as a Resource (once).
@@ -331,13 +356,13 @@ fn main() -> ! {
                 random5[..4].copy_from_slice(&a.to_le_bytes());
                 random5[4] = (rng.random() & 0xff) as u8;
                 let unix_time = (START_EPOCH + f64::from(now_ms) / 1000.0) as u64;
-                let rh = leaf_lxmf::random_hash(random5, unix_time);
+                let rh = crate::rns_link::random_hash(random5, unix_time);
                 let (app, aspect, label) = if beat % 200 == 0 {
                     ("lmao", "leaf", "lmao.leaf")
                 } else {
                     ("lxmf", "delivery", "lxmf.delivery")
                 };
-                let a = leaf_lxmf::announce_for(&node_identity, app, aspect, rh);
+                let a = crate::rns_link::announce_for(&node_identity, app, aspect, rh);
                 match a {
                     Some(pkt) => {
                         let n = pkt.len();
@@ -368,12 +393,10 @@ fn main() -> ! {
                 let hello = format!("Hello from Rust Cardputer leaf (seq {beat})");
                 let ts_ms = (START_EPOCH * 1000.0) as u64 + beat as u64 * 100;
                 let envelope =
-                    leaf_lxmf::build_text_envelope(node_id, &hello, ts_ms);
-                let sent = leaf_lxmf::build_message_to_server(
+                    crate::rns_link::build_text_envelope(node_id, &hello, ts_ms);
+                let sent = crate::rns_link::build_message_to_server(
                     &node_identity,
                     &mut crate::rns_link::EspRng(rng),
-                    &crate::rns_link::SERVER_LXMF_DELIVERY_HASH,
-                    &crate::rns_link::SERVER_PUBLIC_KEY,
                     &envelope,
                     START_EPOCH + beat as f64 / 10.0,
                 )
