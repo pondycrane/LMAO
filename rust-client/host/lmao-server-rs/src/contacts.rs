@@ -8,8 +8,9 @@
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
+use prost::Message;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -20,7 +21,67 @@ pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/contacts", get(list_contacts).post(register_contact))
         .route("/contacts/find", get(find_contact))
+        // Sprout ingest + telemetry probe (dev/field path into DeliveryHandler;
+        // the rns-net RF seam sinks into the same handler when wiring lands).
+        .route("/ingest", post(ingest_sensor))
+        .route("/sprout", get(sprout_probe))
         .with_state(state)
+}
+
+/// Ingest a new Sprout `SensorReport` (JSON) into DeliveryHandler — the same
+/// pipeline a mesh-received envelope takes: allow-list gate, learn contact,
+/// fold the Sprout chart, ACK, NATS, gRPC fan-out.
+#[derive(Deserialize)]
+struct IngestBody {
+    #[serde(rename = "source_hash")]
+    source_hash: String,
+    #[serde(rename = "node_id")]
+    node_id: String,
+    seq: Option<u32>,
+    battery: Option<f32>,
+    readings: Option<Vec<IngestReading>>,
+}
+
+#[derive(Deserialize)]
+struct IngestReading {
+    #[serde(rename = "sensor_id")]
+    sensor_id: u32,
+    value: f32,
+    unit: Option<String>,
+}
+
+async fn ingest_sensor(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<IngestBody>,
+) -> Response {
+    use lma_wire::{reading, sensor_envelope};
+    if body.source_hash.is_empty() || body.node_id.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "Both 'source_hash' and 'node_id' are required." })),
+        )
+            .into_response();
+    }
+    let env = sensor_envelope(
+        &body.node_id,
+        body.seq.unwrap_or(1),
+        body.battery.unwrap_or(3.3),
+        body.readings
+            .unwrap_or_default()
+            .into_iter()
+            .map(|r| reading(r.sensor_id, r.value, r.unit.as_deref().unwrap_or("-"), 0))
+            .collect(),
+    );
+    state
+        .handle_delivery(&body.source_hash, &env.encode_to_vec(), "p:Envelope")
+        .await;
+    (StatusCode::ACCEPTED, Json(json!({ "status": "ingested" }))).into_response()
+}
+
+/// Current Sprout telemetry chart line (the `DATA …` string DeliveryHandler
+/// keeps folding), so ingestion is observable at a glance.
+async fn sprout_probe(State(state): State<Arc<AppState>>) -> Json<Value> {
+    Json(json!({ "data_line": state.sprout.data_line() }))
 }
 
 async fn list_contacts(State(state): State<Arc<AppState>>) -> Json<Value> {
@@ -171,6 +232,43 @@ mod tests {
         let fv = body_json(find).await;
         assert_eq!(fv["contacts"].as_array().unwrap().len(), 1);
         assert_eq!(fv["contacts"][0]["delivery_hash"], "ab12cd34");
+    }
+
+    #[tokio::test]
+    async fn ingest_sensor_learns_contact_and_folds_chart() {
+        use crate::delivery::{LogMesh, SharedState};
+
+        let src = "99ce32311dc37193eff4951a912f8f1b";
+        let state = SharedState::new(AppState::new(
+            ContactBook::open_in_memory().unwrap(),
+            [src.to_string()].into_iter().collect(),
+            "id".into(),
+            "lmao-server".into(),
+            None,
+            Box::new(LogMesh),
+        ));
+        let app = router(state.clone());
+        let body = format!(
+            r#"{{"source_hash":"{src}","node_id":"sprout01","readings":[{{"sensor_id":4,"value":42.0,"unit":"%"}}]}}"#
+        );
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/ingest")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+
+        // The sprout was learned as a device, and its telemetry folded the chart.
+        let contacts = state.contact_book.all().unwrap();
+        assert_eq!(contacts.len(), 1);
+        assert_eq!(contacts[0].delivery_hash, src);
+        assert!(state.sprout.data_line().starts_with("DATA sprout01"));
     }
 
     #[tokio::test]
