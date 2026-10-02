@@ -241,6 +241,21 @@ fn main() -> ! {
         Output::new(peripherals.GPIO38, Level::Low, OutputConfig::default()),
     );
     println!("[t6] st7789 init (240x135) — display ready for the chart");
+    // Paint the empty chart immediately (header + "waiting for samples") so the
+    // panel isn't black before the first server `DATA` reply arrives.
+    {
+        let empty = lma_chart::ChartRecord {
+            node: alloc::string::String::new(),
+            dry: -1,
+            wet: -1,
+            temp: alloc::vec::Vec::new(),
+            humidity: alloc::vec::Vec::new(),
+            samples: alloc::vec::Vec::new(),
+            water_mask: 0,
+        };
+        let _ = lma_chart::draw(&mut lcd, &empty);
+        lcd.present();
+    }
 
     loop {
         beat = beat.wrapping_add(1);
