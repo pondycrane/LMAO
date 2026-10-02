@@ -218,8 +218,10 @@ The gating risk named above (cardputer ↔ Rust receiver over real LoRa RF) is
 
 Port of the Python `lmao_server` app layer (migration step 3, "App layer in
 order"); the RNS/LXMF mesh sits behind the `MeshSender` seam so the whole app
-layer is host-testable without a radio. `cargo test -p lmao-server-rs` → 20/20
-PASS; binary smoke-tested live (contact book + NATS + gRPC + contacts HTTP).
+layer is host-testable without a radio. `cargo test -p lmao-server-rs` →
+22/22 PASS (incl. the mesh-seam integration test); binary smoke-tested live
+(contact book + NATS + gRPC + contacts HTTP + RF leg up with mesh replies
+enabled).
 
 | Python piece | Rust port |
 |---|---|
@@ -230,19 +232,31 @@ PASS; binary smoke-tested live (contact book + NATS + gRPC + contacts HTTP).
 | `handle_lxmf_delivery` app logic | `delivery.rs` — allow-list gate, learn-contact (register-if-unknown else touch), LMAOEnvelope decode + Sprout chart fold, ACK TextMessage (DATA-line piggyback), NATS, gRPC fan-out |
 | `lma_core/sprout_history.py` | `sprout.rs` — ring + `DATA <node> <dry> <wet> … <pump-mask>` line |
 
+**Done / verified (2026-10-02):**
+1. **rns-net RF seam wired back**: `start_rf_node` returns the live node +
+   `RnsMeshSender` (an `MeshSender` impl, `src/rns_mesh.rs`) which packs the
+   reply with `lxmf-core` (title `p:Envelope`, the LMAOEnvelope TextMessage
+   carrying the ACK + Sprout `DATA …` line), encrypts to the client's recalled
+   announce identity, and routes opportunistically via the RNode — the Python
+   `LXMessage(desired_method=OPPORTUNISTIC)` mirror. `main()` installs it into
+   `AppState.mesh` (an `Arc<RwLock<Arc<dyn MeshSender>>>`) once the RF leg is
+   up. Proven by `tests/mesh_integration.rs`: an in-process rns-net "server"
+   node + synthetic Lua-style client over a TCP relay — announce-recall →
+   opportunistic LXMF → the client decrypts and recovers the exact
+   LMAOEnvelope bytes. `cargo test -p lmao-server-rs` → 21 unit + 1
+   integration PASS; live over-LoRa reply pending an RNode on the dev box.
+
 **Remaining gaps / next steps:**
 1. **Bazel-ify the server crate** (`//rust-client:lmao_server_rs`): needs a
    `cargo_build_script` for tonic-build with a protoc toolchain in the Bazel
    sandbox (the crate builds in cargo now; `@lmao_crates` index already
    contains its deps).
-2. **Wire the rns-net RF seam**: implement `MeshSender` on the rns-net
-   link/resource receiver (deliver ACK + dispatch `Send` envelopes toward a
-   destination hash), then the live cardputer → delivery → gRPC/NATS path is
-   end-to-end Rust. `LogMesh` stub is in place meanwhile.
-3. **LXMF delivery semantics over rns-net**: currently the Resource receiver
-   feeds raw envelopes into `DeliveryHandler`; routing/ACK wire behavior needs
-   the rns-net send path (either rns-net Link/Resource dispatch or an
-   lxmf-core pack step) proven on RF.
+2. **Live over-LoRa loop**: run the server binary on the box with the real
+   identity (`LMAO_SERVER_RNS_IDENTITY_HEX=<64-byte server key>`), RNode
+   (`LMAO_RNODE_PORT`), allow-list, and the Cardputer reporting — the RNode for
+   the dev box isn't currently present (ttyUSB0 boots the Sprout LITE build),
+   so the seam is proven in-process + the radio hop is the remaining
+   end-to-end check.
 
 ### Deployment — Rust server via install_all (`--include-services`, 2026-10-01)
 
@@ -259,9 +273,9 @@ same way the Python server is:
   **RF receive merged into the server** (`src/rf.rs`): the pod drives the
   RNode via `LMAO_RNODE_PORT` (privileged, `hostPath`, currently
   `/dev/ttyUSB1` on tp4) and ingests payload Resources straight into
-  DeliveryHandler — the standalone receiver image is no longer needed.
-  `MeshSender` ACK-over-rns-net is still the remaining seam (app layer uses
-  `LogMesh`).
+  DeliveryHandler — the standalone receiver image is no longer needed; the
+  outbound `MeshSender` replies (ACK + Sprout `DATA …`) are packed + sent by
+  `src/rns_mesh.rs` over the same RNode.
 - **Install_Services**: `tools/install_services.install_rust_lmao_server()`
   builds the image, releases it via the local registry
   (`192.168.50.153:5000/lmao-server-rust-app:latest`), applies the manifest,

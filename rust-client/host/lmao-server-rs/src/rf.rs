@@ -22,6 +22,7 @@ use rns_net::{
 use rns_crypto::identity::Identity;
 
 use crate::delivery::SharedState;
+use crate::rns_mesh::{KnownPeers, RnsMeshSender};
 
 /// Radio + identity settings for the RF receive leg.
 pub struct RfConfig {
@@ -64,12 +65,15 @@ fn hex16(b: &[u8]) -> String {
     hex::encode(b)
 }
 
-/// rns-net callback sink: recalls each Link's remote source delivery hash and
-/// pushes received Resource payloads into the DeliveryHandler.
+/// rns-net callback sink: recalls each Link's remote source delivery hash,
+/// records on-mesh announces (so the mesh sender can reach peers), and pushes
+/// received Resource payloads into the DeliveryHandler.
 pub struct RfCallbacks {
     state: SharedState,
     sources: HashMap<LinkId, String>,
     default_source: String,
+    /// Latest announced identity per dest-hash (populated for the mesh sender).
+    peers: KnownPeers,
     /// Tokio runtime handle — rns-net callbacks run on the `rns-driver`
     /// thread (NOT a tokio worker), so `tokio::spawn` would panic. Spawn via
     /// the shared handle instead.
@@ -77,11 +81,17 @@ pub struct RfCallbacks {
 }
 
 impl RfCallbacks {
-    pub fn new(state: SharedState, default_source: String, rt: tokio::runtime::Handle) -> Self {
+    pub fn new(
+        state: SharedState,
+        default_source: String,
+        peers: KnownPeers,
+        rt: tokio::runtime::Handle,
+    ) -> Self {
         Self {
             state,
             sources: HashMap::new(),
             default_source,
+            peers,
             rt,
         }
     }
@@ -89,7 +99,13 @@ impl RfCallbacks {
 
 impl Callbacks for RfCallbacks {
     fn on_announce(&mut self, announced: rns_net::AnnouncedIdentity) {
-        log::debug!("RF announce dest={} hops={}", announced.dest_hash, announced.hops);
+        let hash = hex16(&announced.dest_hash.0);
+        log::debug!("RF announce dest={hash} hops={}", announced.hops);
+        // Cache the announced identity (hash + pubkey) so the mesh sender can
+        // encrypt outbound LXMF replies to this peer (the Python server's
+        // `source_dest`). The last announce wins; the client re-announces
+        // lxmf.delivery every ~10 s.
+        self.peers.lock().insert(hash, announced);
     }
     fn on_path_updated(&mut self, dest_hash: DestHash, hops: u8) {
         log::debug!("RF path updated dest={} hops={}", dest_hash, hops);
@@ -195,8 +211,15 @@ fn rnode_config(cfg: &RfConfig) -> RNodeConfig {
     }
 }
 
-/// Start the RF receive node (blocking). Returns the running [`RnsNode`].
-pub fn start_rf_node(state: SharedState, cfg: RfConfig) -> Result<RnsNode, Box<dyn std::error::Error>> {
+/// Start the RF receive node + wire an outbound [`RnsMeshSender`] over it.
+/// Returns the running [`RnsNode`] (keep it alive) + the mesh sender for
+/// `AppState`. The node enters the announce table from the client's announces,
+/// which `RnsMeshSender` recalls to encrypt replies back to each peer.
+pub fn start_rf_node(
+    state: SharedState,
+    cfg: RfConfig,
+    peers: KnownPeers,
+) -> Result<(std::sync::Arc<RnsNode>, RnsMeshSender), Box<dyn std::error::Error>> {
     let identity = match &cfg.identity_hex_64b {
         Some(hx) => {
             let raw = hex::decode(hx)?;
@@ -284,6 +307,7 @@ pub fn start_rf_node(state: SharedState, cfg: RfConfig) -> Result<RnsNode, Box<d
         Box::new(RfCallbacks::new(
             state,
             cfg.default_source,
+            peers.clone(),
             tokio::runtime::Handle::current(),
         )),
     )?;
@@ -293,5 +317,9 @@ pub fn start_rf_node(state: SharedState, cfg: RfConfig) -> Result<RnsNode, Box<d
         cfg.serial_port,
         hex::encode(cfg.lma_data_hash)
     );
-    Ok(node)
+    let node = std::sync::Arc::new(node);
+    // Recreate the server identity from the extracted private key (Identity is
+    // not Clone; NodeConfig consumed the original).
+    let mesh = RnsMeshSender::new(node.clone(), peers, Identity::from_private_key(&pk));
+    Ok((node, mesh))
 }
