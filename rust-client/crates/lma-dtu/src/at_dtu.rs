@@ -28,8 +28,11 @@ pub const PIN_UART_RX: u32 = 19;
 pub const DTU_BAUD: u32 = 115200;
 
 /// Longest payload one `AT+PSEND` accepts (bigger frames are rejected with
-/// AT_PARAM_ERROR — observed live) = the RNode 254-B radio frame payload.
-pub const DTU_FRAME_PAYLOAD: usize = 254;
+/// AT_PARAM_ERROR — measured live on the bench RAK3172: 156 B is already
+/// refused, so a single-frame packet is capped at 128 B and anything larger
+/// splits into 2 split-flagged frames (the RNode's SplitAssembler reassembles
+/// by seq). The native firmware assumed 254 B, which silently fails here.
+pub const DTU_FRAME_PAYLOAD: usize = 128;
 
 /// LMAO mesh radio params as RUI4 P2P AT values (must match the server RNode):
 /// 868 MHz / BW 125k / SF 7 / CR 4:5 / preamble 24 / syncword 0x1424, and a
@@ -40,7 +43,7 @@ pub const DTU_FRAME_PAYLOAD: usize = 254;
 /// `PTP` is the P2P peer address (all devices share the same value on the
 /// LMAO channel); the RNode + Cardputer ignore the byte-wise address and just
 /// demod the frames.
-pub const DTU_CONFIG_CMDS: [&str; 8] = [
+pub const DTU_CONFIG_CMDS: [&str; 7] = [
     "AT+PFREQ=868000000",
     "AT+PSF=7",
     "AT+PBW=0",
@@ -48,7 +51,6 @@ pub const DTU_CONFIG_CMDS: [&str; 8] = [
     "AT+PPL=24",
     "AT+SYNCWORD=1424",
     "AT+PTP=17",
-    "AT+PWORK=22",
 ];
 
 /// The full config boot sequence, in order (each without CRLF; main adds it):
@@ -232,7 +234,6 @@ mod tests {
                 "AT+PPL=24",
                 "AT+SYNCWORD=1424",
                 "AT+PTP=17",
-                "AT+PWORK=22",
                 "AT+PRECV=65535",
             ]
         );
@@ -264,8 +265,9 @@ mod tests {
     }
 
     #[test]
-    fn tx_split_two_frames_both_flagged() {
-        // 300 B payload (> 254) → two frames, both headers flagged (seq|0x01).
+    fn tx_split_three_frames_all_flagged() {
+        // 300 B payload (> 128, the RAK's measured per-PSEND cap) → three
+        // frames, all headers flagged (seq|0x01) → RNode SplitAssembler joins.
         let pkt: Vec<u8> = (0u16..300u16).map(|i| i as u8).collect();
         let seq = 0x20;
         let frames: Vec<String> = tx_lines(&pkt, seq)
@@ -273,15 +275,18 @@ mod tests {
             .filter(|(l, _)| l.starts_with("AT+PSEND="))
             .map(|(l, _)| l)
             .collect();
-        assert_eq!(frames.len(), 2);
+        assert_eq!(frames.len(), 3);
         let f0 = from_hex(frames[0].strip_prefix("AT+PSEND=").unwrap()).unwrap();
         let f1 = from_hex(frames[1].strip_prefix("AT+PSEND=").unwrap()).unwrap();
-        assert_eq!(f0[0] & 0x01, 1, "first split frame flagged");
-        assert_eq!(f1[0] & 0x01, 1, "second split frame flagged");
-        assert_eq!(f0.len(), 255);
-        assert_eq!(f1.len(), 1 + 46);
-        assert_eq!(&f0[1..], &pkt[..254]);
-        assert_eq!(&f1[1..], &pkt[254..]);
+        let f2 = from_hex(frames[2].strip_prefix("AT+PSEND=").unwrap()).unwrap();
+        for f in [&f0, &f1, &f2] {
+            assert_eq!(f[0] & 0x01, 1, "every split frame flagged");
+        }
+        assert_eq!(f0.len(), 1 + DTU_FRAME_PAYLOAD);
+        assert_eq!(f1.len(), 1 + DTU_FRAME_PAYLOAD);
+        assert_eq!(f2.len(), 1 + (300 - 2 * DTU_FRAME_PAYLOAD));
+        assert_eq!(&f0[1..], &pkt[..DTU_FRAME_PAYLOAD]);
+        assert_eq!(&f2[1..], &pkt[2 * DTU_FRAME_PAYLOAD..]);
     }
 
     #[test]
