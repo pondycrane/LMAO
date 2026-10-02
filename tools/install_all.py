@@ -19,6 +19,7 @@ Usage (via Bazel):
     bazel run //tools:install_all -- --skip-rnode
     bazel run //tools:install_all -- --setup-registry
     bazel run //tools:install_all -- --include-services
+    bazel run //tools:install_all -- --include-services --stack python
     bazel run //tools:install_all -- --include-services --skip-k8s
 
 Prerequisites:
@@ -755,7 +756,17 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--include-services",
         action="store_true",
-        help="Also install Pi server (Docker) and apply K8s manifests.",
+        help="Also install the server stack (Docker image + K8s manifests).",
+    )
+    parser.add_argument(
+        "--stack",
+        default="rust",
+        choices=["auto", "python", "rust"],
+        help="Which server application layer to install with --include-services. "
+        "rust (default): the Rust server only — the future replacement for the "
+        "Python stack; python: the Python server only; auto: the legacy "
+        "behavior of deploying both (honouring --skip-server / "
+        "--skip-rust-server).",
     )
     parser.add_argument(
         "--skip-server",
@@ -914,7 +925,20 @@ def main(argv: list[str] | None = None) -> None:
 
     if args.include_services:
         try:
-            if args.skip_server:
+            # Which server application layer to install (--stack).  Rust is
+            # the default: it is the future replacement for the Python
+            # server, so a plain --include-services builds only the Rust
+            # stack.  `--stack python` opts back into the Python server;
+            # `--stack auto` keeps the legacy behavior of deploying both
+            # (honouring --skip-server / --skip-rust-server).
+            stack = args.stack
+            want_python = stack in ("auto", "python")
+            want_rust = stack in ("auto", "rust")
+
+            # Python application layer (legacy; only with `auto` or `python`).
+            if not want_python:
+                pi_result.skip(f"--stack {stack} (Python server not deployed)")
+            elif args.skip_server:
                 pi_result.skip("--skip-server")
             else:
                 install_pi_server(pi_result)
@@ -923,9 +947,10 @@ def main(argv: list[str] | None = None) -> None:
                 else:
                     print("  Skipping K8s deploy — image build/release did not succeed")
 
-            # Full-Rust migration: deploy the Rust LMAO server app layer
-            # (gRPC + contacts + NATS) as the Python server's replacement.
-            if args.skip_rust_server:
+            # Rust application layer (the future default — --stack rust).
+            if not want_rust:
+                rust_server_result.skip(f"--stack {stack} (Rust server not deployed)")
+            elif args.skip_rust_server:
                 rust_server_result.skip("--skip-rust-server")
             elif args.skip_k8s:
                 rust_server_result.skip("--skip-k8s (K8s services skipped)")
