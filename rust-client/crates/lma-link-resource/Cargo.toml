@@ -1,0 +1,19 @@
+# Shared RNS Link initiator + Resource push to the LMAO server's `lmao.data`
+# destination (DRY: one copy used by BOTH the Cardputer firmware and the
+# Sprout sender instead of two nearly-identical local `link_resource.rs`).
+#
+# Radio-agnostic: consumes/produces whole `rns_core::packet::RawPacket` bytes;
+# the caller owns the LoRa PHY (SX1262 SPI or RAK3172-AT) + the TX/RX pump.
+[package]
+name = "lma-link-resource"
+version.workspace = true
+edition.workspace = true
+description = "no_std RNS LINKREQUEST -> LRPROOF -> Resource push driver (server-facing)"
+
+[dependencies]
+rns-core = { version = "0.1.17", default-features = false }
+rns-crypto = { version = "0.1.10", default-features = false }
+leaf-resource = { path = "../leaf-resource" }
+
+[dev-dependencies]
+# (host) nothing extra — exercises via the workspaces' own host tests.

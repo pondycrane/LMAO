@@ -24,6 +24,7 @@ sx126x = { path = "../crates/sx126x" }
 radio-interface = { path = "../crates/radio-interface" }
 leaf-rns = { path = "../crates/leaf-rns" }
 leaf-resource = { path = "../crates/leaf-resource" }
+lma-link-resource = { path = "../crates/lma-link-resource" }
 # The chart renderer (no_std): parses the server's DATA line + draws the
 # Sprout chart over a fill/pixel display trait (see src/display.rs).
 lma-chart = { path = "../crates/lma-chart" }

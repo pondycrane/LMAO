@@ -1,11 +1,14 @@
-//! Cardputer RNS **Link initiator + Resource push** to the LMAO server's
-//! `lmao.data` destination (issue #197).
+#![no_std]
+
+//! Shared RNS **Link initiator + Resource push** to the LMAO server's
+//! `lmao.data` destination — the single driver used by BOTH the Cardputer
+//! firmware and the Sprout sender (DRY; the transport was previously
+//! copy-pasted into each `link_resource.rs`).
 //!
 //! Establishes an RNS Link (LINKREQUEST → LRPROOF → LRRTT) against the server,
-//! then pushes a big message as an RNS Resource (advertise → parts → proof),
-//! exactly the flow the server consumes via `set_resource_callback` /
-//! `set_resource_concluded_callback` (RNS 1.3.5 accepts a Resource **only**
-//! over a Link).
+//! then pushes a payload as an RNS Resource (advertise → parts → proof),
+//! exactly the flow the server consumes via `on_resource_received`
+//! (RNS 1.3.5 accepts a Resource **only** over a Link).
 //!
 //! Frame-size discipline: every whole RNS packet this module emits is kept
 //! ≤254 B so `split_into_frames` produces exactly one non-flagged LoRa frame
@@ -28,7 +31,6 @@ use rns_core::packet::{PacketFlags, RawPacket};
 use rns_core::resource::ResourceAction;
 use rns_crypto::Rng;
 
-use esp_println::println;
 use leaf_resource::ResourceTx;
 
 /// Server `lmao.data` destination hash — printed by the server at startup
@@ -122,6 +124,20 @@ impl LinkResource {
                 | LinkPhase::AwaitingProof
                 | LinkPhase::Complete
         )
+    }
+
+    /// Reset a stalled or failed link back to Idle so the caller can issue a
+    /// fresh LINKREQUEST (a single lost LRPROOF would otherwise strand the
+    /// half-duplex link in `Linking` forever).
+    pub fn reset(&mut self) {
+        self.phase = LinkPhase::Idle;
+        self.engine = None;
+        self.link_id = None;
+        self.session_key = None;
+        self.tx = None;
+        self.sent_parts = 0;
+        self.total_parts = 0;
+        self.packet_iv_hi = 0;
     }
 
     /// Build the LINKREQUEST packet addressed to the server's `lmao.data`
@@ -249,24 +265,9 @@ impl LinkResource {
             }
             PACKET_TYPE_DATA => match pkt.context {
                 CONTEXT_RESOURCE_REQ => {
-                    println!(
-                        "[dbg] REQ pkt received ctlen={} ctx={}",
-                        pkt.data.len(),
-                        pkt.context
-                    );
                     let Some(req) = Self::decrypt_data(self.session_key, &pkt.data) else {
-                        println!("[dbg] REQ decrypt FAILED");
                         return out;
                     };
-                    println!(
-                        "[dbg] REQ decrypted {}B f0-4={:02x}{:02x}{:02x}{:02x}{:02x}",
-                        req.len(),
-                        req[0],
-                        req[1],
-                        req[2],
-                        req[3],
-                        req[4]
-                    );
                     let mut parts = 0usize;
                     if let Some(tx) = self.tx.as_mut() {
                         for a in tx.handle_request(&req, now_f) {
@@ -288,7 +289,6 @@ impl LinkResource {
                             }
                         }
                     }
-                    println!("[dbg] REQ served parts={}", parts);
                 }
                 CONTEXT_RESOURCE_PRF => {
                     let Some(proof) = Self::decrypt_data(self.session_key, &pkt.data) else {
