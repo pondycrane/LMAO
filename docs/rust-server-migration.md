@@ -328,6 +328,31 @@ dangling `leaf-lxmf` path dep.  All five functions already live in-firmware
 (`random_hash` was added from the µReticulum reference layout), so the dep is
 removed and the calls point at `crate::rns_link` instead.
 
+### Sprout (irrigation node) sender in Rust (2026-10-02)
+
+The Sprout's data path is now a Rust no_std sender too — `rust-client/
+firmware-sprout` (Atom Lite / ESP32, own Cargo workspace like the Cardputer
+firmware) replaces the native-client's C++ send leg: it provisions a persistent
+RNS identity, announces `lmao/sprout` + `lxmf.delivery` (30 s), reads the
+soil/air sensors (ADC1_CH4 moisture, ENV III SHT30 over I2C) and sends one
+X25519-encrypted LXMF SensorReport to the server's `lxmf/delivery` every 5 min
+over the RAK3172 DTU (LoRa P2P `AT+PSEND`, the same RNS framing as the RNode
+mesh).  `rust-client/crates/lma-dtu` hosts the RAK-AT radio protocol + the no_std
+SensorReport envelope (11 host tests, golden-vector-locked to the C++ encoder).
+The pump stays dry-run (GPIO26 LOW, actuation never armed); the irrigation
+control engine is intentionally out of the send leg.
+
+**One-time action:** add the Sprout's delivery hash
+`6f876d40fe1a3ca663be290108341230` to the server's `LMAO_ALLOWED_CLIENTS`
+(k8s/lmao-server.yaml + env) or `DeliveryHandler` drops its reports at the
+source gate.  Build/flash + port-identification notes: see
+`rust-client/firmware-sprout/README.md`. **Flashed + verified 2026-10-02**: on
+this rev-1.1 chip the stock firmware build wasn't bootable (esp-hal 1.2.2
+defaults `ESP_HAL_CONFIG_MIN_CHIP_REVISION` to v3.0), fixed by setting it to
+v1.0 in the firmware's `.cargo/config.toml` — it now boots clean, configures
+the RAK3172 P2P, announces both destinations, and sends the first LXMF
+SensorReport (moisture 39.8 %, air 25.9 °C/68 %, 339 B) on the DTU.
+
 
 ### install_all `--stack` selector
 

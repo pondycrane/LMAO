@@ -6,6 +6,7 @@ members = [
     "host/resource-500b-e2e",
     "host/lmao-server-rs",
     "crates/lma-identity",
+    "crates/lma-dtu",
     "crates/leaf-rns",
     "crates/radio-interface",
     "crates/lma-chart",
