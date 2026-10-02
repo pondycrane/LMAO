@@ -27,7 +27,6 @@ pub mod sx1262_radio;
 // RNS link: SX1262 driver under the RadioInterface contract + RNode framing.
 pub mod rns_link;
 // Link initiator + Resource push to the server's lmao.data destination.
-pub mod link_resource;
 // Cardputer ST7789 panel driver + RGB565 framebuffer (the chart display).
 pub mod display;
 
@@ -227,7 +226,7 @@ fn main() -> ! {
     let mut now_ms = 0u32;
 
     // Cardputer → server Link + Resource push (issue #197). All packets ≤254 B.
-    let mut link_res = crate::link_resource::LinkResource::new();
+    let mut link_res = lma_link_resource::LinkResource::new();
     let mut resource_started = false;
 
     // The chart panel: ST7789V2 240x135 on SPI2/FSPI via the open-source
@@ -323,8 +322,8 @@ fn main() -> ! {
             let mut to_tx: alloc::vec::Vec<alloc::vec::Vec<u8>> = alloc::vec::Vec::new();
             if beat % 100 == 10 {
                 // (Re)initiate the Link if it isn't already handshaking.
-                if link_res.phase == crate::link_resource::LinkPhase::Idle
-                    || link_res.phase == crate::link_resource::LinkPhase::Failed
+                if link_res.phase == lma_link_resource::LinkPhase::Idle
+                    || link_res.phase == lma_link_resource::LinkPhase::Failed
                 {
                     if let Some(pkt) = link_res.begin_link(now_f, &mut esp_rng) {
                         to_tx.push(pkt);
@@ -359,9 +358,9 @@ fn main() -> ! {
                 resource_started = true;
                 println!(
                     "[link] beat #{beat} link up ({}), pushing {}-B resource ({}-B parts)",
-                    link_res.phase == crate::link_resource::LinkPhase::Complete,
+                    link_res.phase == lma_link_resource::LinkPhase::Complete,
                     payload.len(),
-                    crate::link_resource::RESOURCE_SDU
+                    lma_link_resource::RESOURCE_SDU
                 );
             }
             // Re-advertise on a long backoff (every ~5 s), NOT every tick:
@@ -373,11 +372,11 @@ fn main() -> ! {
                 to_tx.extend(adv);
             }
             match link_res.phase {
-                crate::link_resource::LinkPhase::Complete => println!(
+                lma_link_resource::LinkPhase::Complete => println!(
                     "[link] beat #{beat} RESOURCE COMPLETE ({}/{})",
                     link_res.sent_parts, link_res.total_parts
                 ),
-                crate::link_resource::LinkPhase::Failed => println!("[link] beat #{beat} FAILED"),
+                lma_link_resource::LinkPhase::Failed => println!("[link] beat #{beat} FAILED"),
                 _ => {}
             }
             for p in to_tx {

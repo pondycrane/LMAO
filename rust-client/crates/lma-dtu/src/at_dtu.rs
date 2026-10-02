@@ -32,8 +32,15 @@ pub const DTU_BAUD: u32 = 115200;
 pub const DTU_FRAME_PAYLOAD: usize = 254;
 
 /// LMAO mesh radio params as RUI4 P2P AT values (must match the server RNode):
-/// 868 MHz / BW 125k / SF 7 / CR 4:5 / preamble 24 / syncword 0x1424 / TX 17.
-pub const DTU_CONFIG_CMDS: [&str; 7] = [
+/// 868 MHz / BW 125k / SF 7 / CR 4:5 / preamble 24 / syncword 0x1424, and a
+/// **max TX power (22 dBm)** — the RAK's power-on default is lower than the
+/// Cardputer's 14 dBm SX1262, which is why the Sprout never reached the
+/// server's RNode half a rack away while the Cardputer does.
+///
+/// `PTP` is the P2P peer address (all devices share the same value on the
+/// LMAO channel); the RNode + Cardputer ignore the byte-wise address and just
+/// demod the frames.
+pub const DTU_CONFIG_CMDS: [&str; 8] = [
     "AT+PFREQ=868000000",
     "AT+PSF=7",
     "AT+PBW=0",
@@ -41,6 +48,7 @@ pub const DTU_CONFIG_CMDS: [&str; 7] = [
     "AT+PPL=24",
     "AT+SYNCWORD=1424",
     "AT+PTP=17",
+    "AT+PWORK=22",
 ];
 
 /// The full config boot sequence, in order (each without CRLF; main adds it):
@@ -219,6 +227,7 @@ mod tests {
                 "AT+PPL=24",
                 "AT+SYNCWORD=1424",
                 "AT+PTP=17",
+                "AT+PWORK=22",
                 "AT+PRECV=65535",
             ]
         );

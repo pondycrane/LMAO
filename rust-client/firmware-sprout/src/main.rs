@@ -30,7 +30,6 @@ use esp_println::println;
 esp_bootloader_esp_idf::esp_app_desc!();
 
 /// The Sprout's RNS identity + announce/LXMF message builder (this firmware).
-mod link_resource;
 mod sender;
 
 #[global_allocator]
@@ -224,7 +223,7 @@ fn main() -> ! {
     // Link+Resource state (server-facing): the SensorReport envelope is pushed
     // as an RNS Resource to the server's lmao.data link destination (the
     // server's on_resource_received folds it into the Sprout chart).
-    let mut link_res = crate::link_resource::LinkResource::new();
+    let mut link_res = lma_link_resource::LinkResource::new();
     let mut pending_payload: Option<alloc::vec::Vec<u8>> = None;
     let mut resource_started = false;
     let mut last_res_poll_ms: u32 = 0;
@@ -314,15 +313,15 @@ fn main() -> ! {
             // A lost LRPROOF strands the half-duplex link in `Linking`, so a
             // timed-out Linking phase is reset to Idle to issue a fresh
             // LINKREQUEST (while still cooldown-gated).
-            if link_res.phase == crate::link_resource::LinkPhase::Linking
+            if link_res.phase == lma_link_resource::LinkPhase::Linking
                 && now_ms.wrapping_sub(last_link_attempt_ms) >= LINK_RETRY_MS
             {
                 link_res.reset();
                 println!("[link] LRPROOF timeout — resetting to re-link");
             }
             // (Re)initiate the LINKREQUEST if not already handshaking.
-            if (link_res.phase == crate::link_resource::LinkPhase::Idle
-                || link_res.phase == crate::link_resource::LinkPhase::Failed)
+            if (link_res.phase == lma_link_resource::LinkPhase::Idle
+                || link_res.phase == lma_link_resource::LinkPhase::Failed)
                 && now_ms.wrapping_sub(last_link_attempt_ms) >= LINK_RETRY_MS
             {
                 last_link_attempt_ms = now_ms;
@@ -354,7 +353,7 @@ fn main() -> ! {
                 tx_packet(&mut tx, &mut rx2, &mut delay, &p, seq);
             }
             match link_res.phase {
-                crate::link_resource::LinkPhase::Complete => {
+                lma_link_resource::LinkPhase::Complete => {
                     println!(
                         "[link] RESOURCE COMPLETE ({}/{})",
                         link_res.sent_parts, link_res.total_parts
@@ -362,7 +361,7 @@ fn main() -> ! {
                     resource_started = false;
                     pending_payload = None;
                 }
-                crate::link_resource::LinkPhase::Failed => {
+                lma_link_resource::LinkPhase::Failed => {
                     println!("[link] FAILED — retrying next cooldown");
                     resource_started = false;
                     pending_payload = None;

@@ -1100,6 +1100,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lma-link-resource"
+version = "0.1.0"
+dependencies = [
+ "leaf-resource",
+ "rns-core",
+ "rns-crypto",
+]
+
+[[package]]
 name = "lmao-firmware-sprout"
 version = "0.1.0"
 dependencies = [
@@ -1107,9 +1116,9 @@ dependencies = [
  "esp-bootloader-esp-idf",
  "esp-hal",
  "esp-println",
- "leaf-resource",
  "linked_list_allocator",
  "lma-dtu",
+ "lma-link-resource",
  "lxmf-core",
  "nb 1.1.0",
  "rns-core",
