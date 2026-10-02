@@ -72,7 +72,9 @@ fn main() -> ! {
     println!("[t1] chip revision: {}.{}", rev.major, rev.minor);
     println!("[t1] mac: {}", mac);
 
-    // SX1262 radio over SPI2 (HSPI) — Cardputer pins (see sx1262_radio.rs).
+    // SX1262 radio over SPI3 (HSPI) — Cardputer pins (see sx1262_radio.rs).
+    // The radio/EXT bus is HSPI/SPI3_HOST (per cardputer_pins.h + the ADV
+    // reference), leaving SPI2/FSPI free for the ST7789 panel.
     use esp_hal::gpio::{Input, InputConfig, Level, Output, OutputConfig};
     use esp_hal::spi::master::{Config as SpiCfg, Spi};
     use sx126x::Sx1262;
@@ -82,7 +84,7 @@ fn main() -> ! {
     // esp-hal's non-DMA blocking transfer would otherwise toggle CS per 64-byte
     // hardware-FIFO chunk (corrupting >64-byte transfers). Drive CS manually.
     let spi = Spi::new(
-        peripherals.SPI2,
+        peripherals.SPI3,
         SpiCfg::default(),
     )
     .expect("SPI config")
@@ -228,34 +230,58 @@ fn main() -> ! {
     let mut link_res = crate::link_resource::LinkResource::new();
     let mut resource_started = false;
 
-    // The chart panel: ST7789 on SPI3 (HSPI) — SCK=36, MOSI=35, CS=37,
-    // DC=34, backlight=38 (see display.rs).  The radio took SPI2, so the
-    // display bus is separate and the two never contend.
-    let mut lcd = crate::display::Lcd::new(
-        Spi::new(peripherals.SPI3, SpiCfg::default())
-            .expect("lcd SPI config")
-            .with_sck(peripherals.GPIO36)
-            .with_mosi(peripherals.GPIO35),
-        Output::new(peripherals.GPIO34, Level::Low, OutputConfig::default()),
-        Output::new(peripherals.GPIO37, Level::High, OutputConfig::default()),
-        Output::new(peripherals.GPIO38, Level::Low, OutputConfig::default()),
-    );
+    // The chart panel: ST7789V2 240x135 on SPI2/FSPI via the open-source
+    // mipidsi driver — SCK=36, MOSI=35, CS=37, DC=34, RST=33, BL=38 (the
+    // Cardputer-ADV panel config, same as the working no_std Rust reference).
+    // mipidsi's ST7789 model applies the 240×135 window (offset 52,40, Deg90,
+    // inverted colours) + reset during init, so no raw CASET/MADCTL hand-rolling.
+    use embedded_hal_bus::spi::ExclusiveDevice;
+    use mipidsi::interface::SpiInterface;
+    use mipidsi::models::ST7789;
+    use mipidsi::options::{ColorInversion, Orientation, Rotation};
+    use mipidsi::Builder;
+    let mut delay = esp_hal::delay::Delay::new();
+    let lcd_spi = Spi::new(
+        peripherals.SPI2,
+        SpiCfg::default().with_frequency(esp_hal::time::Rate::from_mhz(40)),
+    )
+    .expect("lcd SPI config")
+    .with_sck(peripherals.GPIO36)
+    .with_mosi(peripherals.GPIO35);
+    let dc = Output::new(peripherals.GPIO34, Level::Low, OutputConfig::default());
+    let cs = Output::new(peripherals.GPIO37, Level::High, OutputConfig::default());
+    let rst = Output::new(peripherals.GPIO33, Level::High, OutputConfig::default());
+    let mut bl = Output::new(peripherals.GPIO38, Level::Low, OutputConfig::default());
+    let mut spi_buf = [0u8; 4096];
+    let lcd_dev = ExclusiveDevice::new(lcd_spi, cs, delay).expect("excl device");
+    let di = SpiInterface::new(lcd_dev, dc, &mut spi_buf[..]);
+    let mut display = Builder::new(ST7789, di)
+        .display_size(135, 240)
+        .display_offset(52, 40)
+        .invert_colors(ColorInversion::Inverted)
+        .orientation(Orientation::new().rotate(Rotation::Deg90))
+        .reset_pin(rst)
+        .init(&mut delay)
+        .expect("st7789 init");
+    // Boot render: `lma_chart::draw` with no data paints the panel header +
+    // "waiting for samples" — drawn while the backlight is still OFF, then the
+    // rail comes up, so the very first thing the user sees is the ready chart
+    // (never a garbled GRAM flash). This is the visible confirmation the 240×135
+    // panel now drives via mipidsi (RST=33 + FSPI + correct window).
+    let boot_c = lma_chart::ChartRecord {
+        node: alloc::string::String::new(),
+        dry: -1,
+        wet: -1,
+        temp: alloc::vec::Vec::new(),
+        humidity: alloc::vec::Vec::new(),
+        samples: alloc::vec::Vec::new(),
+        water_mask: 0,
+    };
+    let mut boot_frame = crate::display::Frame;
+    lma_chart::draw(&mut boot_frame, &boot_c);
+    let _ = crate::display::blit(&mut display);
+    bl.set_high();
     println!("[t6] st7789 init (240x135) — display ready for the chart");
-    // Paint the empty chart immediately (header + "waiting for samples") so the
-    // panel isn't black before the first server `DATA` reply arrives.
-    {
-        let empty = lma_chart::ChartRecord {
-            node: alloc::string::String::new(),
-            dry: -1,
-            wet: -1,
-            temp: alloc::vec::Vec::new(),
-            humidity: alloc::vec::Vec::new(),
-            samples: alloc::vec::Vec::new(),
-            water_mask: 0,
-        };
-        let _ = lma_chart::draw(&mut lcd, &empty);
-        lcd.present();
-    }
 
     loop {
         beat = beat.wrapping_add(1);
@@ -317,10 +343,11 @@ fn main() -> ! {
                     to_tx.extend(replies);
                 }, &mut |c: &lma_chart::ChartRecord| {
                     // The server's reply carried a fresh DATA line — paint the
-                    // Sprout chart on the panel (the cardputer display, now in
-                    // Rust) and blit it.
-                    let points = lma_chart::draw(&mut lcd, c);
-                    lcd.present();
+                    // Sprout chart into the framebuffer and blit the panel
+                    // (the cardputer display, now in Rust + mipidsi).
+                    let mut frame = crate::display::Frame;
+                    let points = lma_chart::draw(&mut frame, c);
+                    let _ = crate::display::blit(&mut display);
                     println!("[t6] chart drawn: {points} trace segments");
                 });
             }
