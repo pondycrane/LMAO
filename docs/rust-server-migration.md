@@ -148,16 +148,18 @@ whose source is not published to crates.io.
 is **unverified** — it must be exercised on the cardputer RF link (hardware)
 before the port is committed.
 
-**RF-leg equipment finding (2026-09-30):** the host has **no RNode USB LoRa
-radio** to receive the cardputer. LXMF-rs `lora` RNode interface config is
-correct (opens the port, writes `rnode_state.json`, applies 868/BW125/SF7) but
-the RNode detect fails (``did not confirm an RNode device``). Both LXMF-rs and
-Python RNS 1.5.2 (`RNodeInterface`) fail the detect on **both** `/dev/ttyUSB0`
-and `/dev/ttyUSB1` (probed with the exact RNS KISS detect frame across bauds);
-those devices are sprouts (M5Stack), not RNode-format radios. Cardputer
-(`/dev/ttyACM0`) confirmed alive and TXing Link/keepalive on 868. The RF RX leg
-needs a real RNode (or a sprout flashed to RNode firmware) to attach before
-the cardputer↔LXMF-rs over-LoRa test can run.
+**RF-leg location (read this before probing):** the RNode LoRa radio is
+**not attached to the dev workstation** — it lives on the **k3s cluster node
+`tp4`** and is driven by the in-cluster server pod via a `hostPath` mount
+(see `k8s/lmao-server-rust-app.yaml`; issue #93, "RNode on K8s"). The
+workstation's `/dev/ttyUSB0`/`/dev/ttyUSB1` are unrelated devices (other
+M5Stack boards, not the RNode) — do not probe them when looking for the RF
+radio. The RNode's USB tty number on `tp4` can shift after a replug (e.g.
+`ttyUSB0` → `ttyUSB1`), so after any replug confirm the live device from the
+pod (`ls -l /dev/ttyUSB*`) and align `LMAO_RNODE_PORT` + the `hostPath` with
+it, then `kubectl rollout restart deployment/lmao-server-rust-app`. A previous
+note claimed the host "has no RNode" after a detect failed on the workstation's
+own ttyUSB ports — that was probing the wrong host.
 
 
 ## Parity proof — updated (2026-10-01, hardware + Bazel + e2e)
@@ -208,7 +210,8 @@ The gating risk named above (cardputer ↔ Rust receiver over real LoRa RF) is
 2. **`//tests:test_cardputer_500b_resource`** (pytest, hardware-gated) — resets
    the Cardputer and asserts the k8s receiver logs
    `RESOURCE received bytes=500 sha256=f6b83965…`; skips when the rig
-   (Cardputer `/dev/ttyACM0`, RNode `/dev/ttyUSB0`, receiver deployment) is not
+   (Cardputer `/dev/ttyACM0` on the dev host; RNode `/dev/ttyUSB<port>` on the
+   k8s node tp4; receiver deployment in-cluster) is not
    reachable. `bazel test` → PASSED (skip path on the dev host).
 
 ### App layer — Rust server crate (`rust-client/host/lmao-server-rs`, 2026-10-01)
@@ -250,15 +253,15 @@ same way the Python server is:
   `protobuf-compiler` for tonic-build → slim runtime; runtime env sets
   `LMAO_CONTACTS_DB=/data/contacts.db` and the in-cluster NATS address).
 - **Manifest**: `k8s/lmao-server-rust-app.yaml` — Deployment pinned to tp4
-  (the RNode node) + Service (gRPC 50051, contacts 8081). The ContactBook
-  currently mounts an `emptyDir` — the cluster's local-path provisioner is
-  unhealthy (create-process timeouts on new PVCs), so swap back to a
-  `local-path` PVC for persistence once it's repaired. **RF receive merged
-  into the server** (`src/rf.rs`): the pod drives the RNode via
-  `LMAO_RNODE_PORT` (privileged, `/dev/ttyUSB0` hostPath) and ingests payload
-  Resources straight into DeliveryHandler — the standalone receiver image is
-  no longer needed. `MeshSender` ACK-over-rns-net is still the remaining seam
-  (app layer uses `LogMesh`).
+  (the k3s node with the RNode) + Service (gRPC 50051, contacts 8081). The
+  ContactBook persists on the `lmao-server-rust-app-contacts` `local-path`
+  PVC (the provisioner was repaired + the PVC bound; survived pod restarts).
+  **RF receive merged into the server** (`src/rf.rs`): the pod drives the
+  RNode via `LMAO_RNODE_PORT` (privileged, `hostPath`, currently
+  `/dev/ttyUSB1` on tp4) and ingests payload Resources straight into
+  DeliveryHandler — the standalone receiver image is no longer needed.
+  `MeshSender` ACK-over-rns-net is still the remaining seam (app layer uses
+  `LogMesh`).
 - **Install_Services**: `tools/install_services.install_rust_lmao_server()`
   builds the image, releases it via the local registry
   (`192.168.50.153:5000/lmao-server-rust-app:latest`), applies the manifest,
