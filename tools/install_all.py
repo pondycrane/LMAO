@@ -19,6 +19,7 @@ Usage (via Bazel):
     bazel run //tools:install_all -- --skip-rnode
     bazel run //tools:install_all -- --setup-registry
     bazel run //tools:install_all -- --include-services
+    bazel run //tools:install_all -- --include-services --stack python
     bazel run //tools:install_all -- --include-services --skip-k8s
 
 Prerequisites:
@@ -33,6 +34,9 @@ import argparse
 import contextlib
 import os
 import re
+import shlex
+import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -222,6 +226,61 @@ def _flash_cardputer_native(port: str, result: DeviceResult,
     else:
         result.ok(f"Built + flashed native firmware on {port} (no DEST_HASH — announce-only)")
         print(f"  OK: native firmware flashed on {port} (no DEST_HASH — device will not send)")
+
+
+def _flash_cardputer_rust(port: str, result: DeviceResult) -> None:
+    """Build + flash the Rust esp32s3 firmware to the Cardputer.
+
+    Full-Rust stack: replaces the MicroPython runtime on the cardputer with
+    `rust-client/firmware` (the Rust link/radio + ST7789 chart display).  Uses
+    the repo's canonical `flash_firmware.sh` recipe: build the release image
+    with the esp toolchain (`export-esp.sh`), then `espflash flash --before
+    no-reset`.  Because the cardputer's USB-Serial-JTAG de-enumerates on a
+    DTR/RTS reset, the chip should be in download/bootloader mode (hold GO/BOOT
+    at USB attach) for espflash to attach — otherwise this reports FAIL.
+    """
+    print(f"\n--- Cardputer (rust): building + flashing Rust firmware on {port} ---")
+    # espflash lives in ~/.cargo/bin (the flash subprocess below is a login
+    # shell that reads ~/.cargo/env); don't gate on the python process PATH.
+    home = os.environ.get("HOME", "~")
+    espflash = shutil.which("espflash") or os.path.exists(
+        os.path.join(home, ".cargo", "bin", "espflash")
+    )
+    if not espflash:
+        result.skip("espflash not found (~/.cargo/bin)")
+        print("  SKIP: espflash not found")
+        return
+    print(
+        "  NOTE: this REPLACES the MicroPython runtime.  The Cardputer should be in\n"
+        "  download/bootloader mode (hold GO/BOOT at USB attach) for espflash."
+    )
+    firmware_dir = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "rust-client", "firmware"
+    )
+    cmd = (
+        f'export PATH="$HOME/.cargo/bin:$PATH"; '
+        "source ~/export-esp.sh 2>/dev/null || true; "
+        f"cd {shlex.quote(firmware_dir)} && "
+        "cargo build --release && "
+        "exec espflash flash --before no-reset "
+        f"--port {shlex.quote(port)} --chip esp32s3 --after hard-reset "
+        "target/xtensa-esp32s3-none-elf/release/lmao-firmware-t1"
+    )
+    try:
+        p = subprocess.run(["bash", "-lc", cmd], text=True, capture_output=True)
+    except Exception as exc:  # noqa: BLE001 - flash tooling varies; never kill the loop
+        result.fail(f"Rust firmware flash error: {exc}")
+        print(f"  FAIL: {exc}")
+        return
+    if p.returncode != 0:
+        tail = (p.stdout + "\n" + p.stderr).strip().splitlines()[-6:]
+        result.fail("espflash flash failed (see output)")
+        print("  FAIL: espflash flash failed")
+        for line in tail:
+            print("   ", line)
+        return
+    result.ok(f"Rust firmware flashed (esp32s3, {port})")
+    print("  OK: Rust firmware flashed")
 
 
 def _inject_dest_hash(ser, client_root: str) -> str:
@@ -755,7 +814,17 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--include-services",
         action="store_true",
-        help="Also install Pi server (Docker) and apply K8s manifests.",
+        help="Also install the server stack (Docker image + K8s manifests).",
+    )
+    parser.add_argument(
+        "--stack",
+        default="rust",
+        choices=["auto", "python", "rust"],
+        help="Which server application layer to install with --include-services. "
+        "rust (default): the Rust server only — the future replacement for the "
+        "Python stack; python: the Python server only; auto: the legacy "
+        "behavior of deploying both (honouring --skip-server / "
+        "--skip-rust-server).",
     )
     parser.add_argument(
         "--skip-server",
@@ -799,6 +868,14 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "reserved for tight-heap hardware (Sprout/Atom Lite native client), "
         "so it is no longer the Cardputer default.",
     )
+    cp_group.add_argument(
+        "--rust-cardputer",
+        action="store_true",
+        help="Build + flash the Rust esp32s3 firmware (rust-client/firmware) to "
+        "the Cardputer, replacing the MicroPython client (full-Rust stack). "
+        "REPLACES the running MicroPython runtime; the Cardputer should be in "
+        "download/bootloader mode (hold GO/BOOT at USB attach) for espflash.",
+    )
     return parser.parse_args(argv)
 
 
@@ -837,6 +914,9 @@ def main(argv: list[str] | None = None) -> None:
         if not port:
             cp_result.skip("No Cardputer detected on USB")
             print("Cardputer: SKIP — not detected on USB")
+        elif args.rust_cardputer:
+            print("Cardputer: using Rust firmware (--rust-cardputer)")
+            _flash_cardputer_rust(port, cp_result)
         elif args.native_cardputer:
             print("Cardputer: using native C firmware (--native-cardputer)")
             _flash_cardputer_native(
@@ -914,7 +994,20 @@ def main(argv: list[str] | None = None) -> None:
 
     if args.include_services:
         try:
-            if args.skip_server:
+            # Which server application layer to install (--stack).  Rust is
+            # the default: it is the future replacement for the Python
+            # server, so a plain --include-services builds only the Rust
+            # stack.  `--stack python` opts back into the Python server;
+            # `--stack auto` keeps the legacy behavior of deploying both
+            # (honouring --skip-server / --skip-rust-server).
+            stack = args.stack
+            want_python = stack in ("auto", "python")
+            want_rust = stack in ("auto", "rust")
+
+            # Python application layer (legacy; only with `auto` or `python`).
+            if not want_python:
+                pi_result.skip(f"--stack {stack} (Python server not deployed)")
+            elif args.skip_server:
                 pi_result.skip("--skip-server")
             else:
                 install_pi_server(pi_result)
@@ -923,9 +1016,10 @@ def main(argv: list[str] | None = None) -> None:
                 else:
                     print("  Skipping K8s deploy — image build/release did not succeed")
 
-            # Full-Rust migration: deploy the Rust LMAO server app layer
-            # (gRPC + contacts + NATS) as the Python server's replacement.
-            if args.skip_rust_server:
+            # Rust application layer (the future default — --stack rust).
+            if not want_rust:
+                rust_server_result.skip(f"--stack {stack} (Rust server not deployed)")
+            elif args.skip_rust_server:
                 rust_server_result.skip("--skip-rust-server")
             elif args.skip_k8s:
                 rust_server_result.skip("--skip-k8s (K8s services skipped)")
