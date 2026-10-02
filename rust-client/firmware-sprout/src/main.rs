@@ -30,6 +30,7 @@ use esp_println::println;
 esp_bootloader_esp_idf::esp_app_desc!();
 
 /// The Sprout's RNS identity + announce/LXMF message builder (this firmware).
+mod link_resource;
 mod sender;
 
 #[global_allocator]
@@ -66,6 +67,12 @@ const SEND_INTERVAL_MS: u32 = 300_000;
 const ANNOUNCE_INTERVAL_MS: u32 = 30_000;
 /// Loop tick.
 const TICK_MS: u32 = 100;
+/// Cooldown before re-attempting a LINKREQUEST while the link is Idle/Failed.
+const LINK_RETRY_MS: u32 = 5_000;
+/// Backoff between Resource re-advertisements while a transfer is in flight
+/// (a ~212 B LoRa frame has ~300 ms airtime — advertising every tick would
+/// flood the half-duplex channel).
+const RES_POLL_MS: u32 = 5_000;
 /// Nominal Unix epoch base (no RTC on the Atom; ordering is not the point).
 const START_EPOCH: f64 = 1_788_000_000.0;
 
@@ -214,6 +221,14 @@ fn main() -> ! {
     let mut now_ms: u32 = 0;
     let mut last_send_ms: u32 = 0; // 0 → first sample goes out immediately
     let mut last_announce_ms: u32 = 0;
+    // Link+Resource state (server-facing): the SensorReport envelope is pushed
+    // as an RNS Resource to the server's lmao.data link destination (the
+    // server's on_resource_received folds it into the Sprout chart).
+    let mut link_res = crate::link_resource::LinkResource::new();
+    let mut pending_payload: Option<alloc::vec::Vec<u8>> = None;
+    let mut resource_started = false;
+    let mut last_res_poll_ms: u32 = 0;
+    let mut last_link_attempt_ms: u32 = 0;
     let mut bf = [0u8; 512]; // UART RX scratch
     let mut tick = 0u32;
     // Front-control (arming) state.
@@ -233,6 +248,16 @@ fn main() -> ! {
             if n > 0 {
                 for pkt in at_rx.feed(&bf[..n], now_ms) {
                     println!("[dtu] RX complete packet {}B", pkt.len());
+                    // Feed the Link+Resource inbound (LRPROOF / part-requests /
+                    // proof) so the SensorReport Resource progresses.
+                    if let Ok(rp) = rns_core::packet::RawPacket::unpack(&pkt) {
+                        let now_f = START_EPOCH + now_ms as f64 / 1000.0;
+                        let replies = link_res.pump_inbound(&rp, now_f, &mut esp_rng);
+                        for r in replies {
+                            let seq = (hw_rng.random() & 0xf0) as u8;
+                            tx_packet(&mut tx, &mut rx2, &mut delay, &r, seq);
+                        }
+                    }
                 }
             }
         }
@@ -278,6 +303,71 @@ fn main() -> ! {
             if let Some(f) = sender::announce_for(&keys.identity, "lxmf", "delivery", rh) {
                 println!("[sprout] announce lxmf/delivery ({}B)", f.len());
                 tx_packet(&mut tx, &mut rx2, &mut delay, &f, rand_seq);
+            }
+        }
+
+        // ── Link + Resource pump: push the queued SensorReport protobuf to the
+        //    server's `lmao.data` link destination as an RNS Resource (the
+        //    server's `on_resource_received` folds it into the Sprout chart).
+        let now_f = START_EPOCH + now_ms as f64 / 1000.0;
+        if pending_payload.is_some() {
+            // A lost LRPROOF strands the half-duplex link in `Linking`, so a
+            // timed-out Linking phase is reset to Idle to issue a fresh
+            // LINKREQUEST (while still cooldown-gated).
+            if link_res.phase == crate::link_resource::LinkPhase::Linking
+                && now_ms.wrapping_sub(last_link_attempt_ms) >= LINK_RETRY_MS
+            {
+                link_res.reset();
+                println!("[link] LRPROOF timeout — resetting to re-link");
+            }
+            // (Re)initiate the LINKREQUEST if not already handshaking.
+            if (link_res.phase == crate::link_resource::LinkPhase::Idle
+                || link_res.phase == crate::link_resource::LinkPhase::Failed)
+                && now_ms.wrapping_sub(last_link_attempt_ms) >= LINK_RETRY_MS
+            {
+                last_link_attempt_ms = now_ms;
+                if let Some(pkt) = link_res.begin_link(now_f, &mut esp_rng) {
+                    println!("[link] LINKREQUEST to lmao.data (link_id={:02x?})", link_res.link_id);
+                    let seq = (hw_rng.random() & 0xf0) as u8;
+                    tx_packet(&mut tx, &mut rx2, &mut delay, &pkt, seq);
+                }
+            }
+            // Once the link is up, push the SensorReport envelope as a Resource.
+            if !resource_started && link_res.established() {
+                if let Some(env) = pending_payload.as_ref() {
+                    let pkts = link_res.start_resource(env, now_f);
+                    let seq = (hw_rng.random() & 0xf0) as u8;
+                    for p in pkts {
+                        tx_packet(&mut tx, &mut rx2, &mut delay, &p, seq);
+                    }
+                    resource_started = true;
+                    println!("[link] link up — pushing SensorReport Resource ({}B)", env.len());
+                }
+            }
+        }
+        // Re-advertise on a backoff while a transfer is in flight.
+        if resource_started && now_ms.wrapping_sub(last_res_poll_ms) >= RES_POLL_MS {
+            last_res_poll_ms = now_ms;
+            let adv = link_res.poll_resource(now_f);
+            let seq = (hw_rng.random() & 0xf0) as u8;
+            for p in adv {
+                tx_packet(&mut tx, &mut rx2, &mut delay, &p, seq);
+            }
+            match link_res.phase {
+                crate::link_resource::LinkPhase::Complete => {
+                    println!(
+                        "[link] RESOURCE COMPLETE ({}/{})",
+                        link_res.sent_parts, link_res.total_parts
+                    );
+                    resource_started = false;
+                    pending_payload = None;
+                }
+                crate::link_resource::LinkPhase::Failed => {
+                    println!("[link] FAILED — retrying next cooldown");
+                    resource_started = false;
+                    pending_payload = None;
+                }
+                _ => {}
             }
         }
 
@@ -360,12 +450,16 @@ fn main() -> ! {
                 let seq = (now_ms % 100_000) as u32;
                 let report = lma_dtu::envelope::encode_sensor_report(&keys.node_id, seq, 0.0, &readings);
                 let env = lma_dtu::envelope::encode_envelope(&report);
-                let unix = START_EPOCH + now_ms as f64 / 1000.0;
-                if let Some(frame) = sender::message_to_server(&keys.identity, &mut esp_rng, &env, unix) {
-                    let tx_seq = (hw_rng.random() & 0xf0) as u8;
-                    println!("[sprout] TX SensorReport {}B (env {}B)", frame.len(), env.len());
-                    tx_packet(&mut tx, &mut rx2, &mut delay, &frame, tx_seq);
-                }
+                println!(
+                    "[sprout] SensorReport queued (env {}B) — will push as link Resource",
+                    env.len()
+                );
+                // The server's RF leg folds LMAOEnvelope{Sensor} Resources into
+                // the chart, so the SensorReport now rides as a Resource to the
+                // server's `lmao.data` link destination (Link+Resource pump above),
+                // replacing the old opportunistic single-packet send the server's
+                // `on_resource_received` path never folded.
+                pending_payload = Some(env);
             }
         }
 

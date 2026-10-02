@@ -1058,6 +1058,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "leaf-resource"
+version = "0.1.0"
+dependencies = [
+ "rns-core",
+ "rns-crypto",
+]
+
+[[package]]
 name = "libc"
 version = "0.2.189"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1099,6 +1107,7 @@ dependencies = [
  "esp-bootloader-esp-idf",
  "esp-hal",
  "esp-println",
+ "leaf-resource",
  "linked_list_allocator",
  "lma-dtu",
  "lxmf-core",
