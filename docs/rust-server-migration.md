@@ -328,6 +328,28 @@ dangling `leaf-lxmf` path dep.  All five functions already live in-firmware
 (`random_hash` was added from the µReticulum reference layout), so the dep is
 removed and the calls point at `crate::rns_link` instead.
 
+### Sprout (irrigation node) sender in Rust (2026-10-02)
+
+The Sprout's data path is now a Rust no_std sender too — `rust-client/
+firmware-sprout` (Atom Lite / ESP32, own Cargo workspace like the Cardputer
+firmware) replaces the native-client's C++ send leg: it provisions a persistent
+RNS identity, announces `lmao/sprout` + `lxmf.delivery` (30 s), reads the
+soil/air sensors (ADC1_CH4 moisture, ENV III SHT30 over I2C) and sends one
+X25519-encrypted LXMF SensorReport to the server's `lxmf/delivery` every 5 min
+over the RAK3172 DTU (LoRa P2P `AT+PSEND`, the same RNS framing as the RNode
+mesh).  `rust-client/crates/lma-dtu` hosts the RAK-AT radio protocol + the no_std
+SensorReport envelope (11 host tests, golden-vector-locked to the C++ encoder).
+The pump stays dry-run (GPIO26 LOW, actuation never armed); the irrigation
+control engine is intentionally out of the send leg.
+
+**One-time action:** add the Sprout's delivery hash
+`6f876d40fe1a3ca663be290108341230` to the server's `LMAO_ALLOWED_CLIENTS`
+(k8s/lmao-server.yaml + env) or `DeliveryHandler` drops its reports at the
+source gate.  Build/flash + port-identification notes: see
+`rust-client/firmware-sprout/README.md`.  Not yet flashed to hardware — the
+on-device verification (DTU TX → server RNode RX → chart fold) is the next
+step, mirroring the Cardputer panel's flash-verify loop.
+
 
 ### install_all `--stack` selector
 

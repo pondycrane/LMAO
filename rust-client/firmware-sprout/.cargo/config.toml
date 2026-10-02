@@ -1,0 +1,16 @@
+# Sprout firmware cargo config — Xtensa ESP32 (classic, the Atom Lite) no_std
+# build + espflash runner.  The channel must match the esp nightly installed by
+# `espup` (see rust-toolchain.toml); esp-hal on Xtensa needs build-std + the
+# chip linker script from esp-hal's build.rs.
+[build]
+target = "xtensa-esp32-none-elf"
+
+[target.'cfg(target_arch = "xtensa")']
+runner = "espflash flash --monitor"
+rustflags = [
+  "-C", "link-arg=-Wl,-Tlinkall.x",
+  "-C", "link-arg=-nostartfiles",
+]
+
+[unstable]
+build-std = ["core", "alloc"]
