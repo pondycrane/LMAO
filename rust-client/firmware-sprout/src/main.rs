@@ -222,12 +222,10 @@ fn main() -> ! {
     let mut last_announce_ms: u32 = 0;
     // Link+Resource state (server-facing): the SensorReport envelope is pushed
     // as an RNS Resource to the server's lmao.data link destination (the
-    // server's on_resource_received folds it into the Sprout chart).
+    // server's on_resource_received folds it into the Sprout chart). The send
+    // lifecycle is the shared `ResourcePump` the Cardputer uses too (DRY).
     let mut link_res = lma_link_resource::LinkResource::new();
-    let mut pending_payload: Option<alloc::vec::Vec<u8>> = None;
-    let mut resource_started = false;
-    let mut last_res_poll_ms: u32 = 0;
-    let mut last_link_attempt_ms: u32 = 0;
+    let mut res_pump = lma_link_resource::ResourcePump::new(LINK_RETRY_MS, RES_POLL_MS);
     let mut bf = [0u8; 512]; // UART RX scratch
     let mut tick = 0u32;
     // Front-control (arming) state.
@@ -305,69 +303,24 @@ fn main() -> ! {
             }
         }
 
-        // ── Link + Resource pump: push the queued SensorReport protobuf to the
-        //    server's `lmao.data` link destination as an RNS Resource (the
-        //    server's `on_resource_received` folds it into the Sprout chart).
+        // ── Link + Resource pump (shared with the Cardputer: `ResourcePump`) ──
+        // Push the queued SensorReport protobuf to the server's `lmao.data`
+        // link destination as an RNS Resource (the server's `on_resource_received`
+        // folds it into the Sprout chart).
         let now_f = START_EPOCH + now_ms as f64 / 1000.0;
-        if pending_payload.is_some() {
-            // A lost LRPROOF strands the half-duplex link in `Linking`, so a
-            // timed-out Linking phase is reset to Idle to issue a fresh
-            // LINKREQUEST (while still cooldown-gated).
-            if link_res.phase == lma_link_resource::LinkPhase::Linking
-                && now_ms.wrapping_sub(last_link_attempt_ms) >= LINK_RETRY_MS
-            {
-                link_res.reset();
-                println!("[link] LRPROOF timeout — resetting to re-link");
-            }
-            // (Re)initiate the LINKREQUEST if not already handshaking.
-            if (link_res.phase == lma_link_resource::LinkPhase::Idle
-                || link_res.phase == lma_link_resource::LinkPhase::Failed)
-                && now_ms.wrapping_sub(last_link_attempt_ms) >= LINK_RETRY_MS
-            {
-                last_link_attempt_ms = now_ms;
-                if let Some(pkt) = link_res.begin_link(now_f, &mut esp_rng) {
-                    println!("[link] LINKREQUEST to lmao.data (link_id={:02x?})", link_res.link_id);
-                    let seq = (hw_rng.random() & 0xf0) as u8;
-                    tx_packet(&mut tx, &mut rx2, &mut delay, &pkt, seq);
-                }
-            }
-            // Once the link is up, push the SensorReport envelope as a Resource.
-            if !resource_started && link_res.established() {
-                if let Some(env) = pending_payload.as_ref() {
-                    let pkts = link_res.start_resource(env, now_f);
-                    let seq = (hw_rng.random() & 0xf0) as u8;
-                    for p in pkts {
-                        tx_packet(&mut tx, &mut rx2, &mut delay, &p, seq);
-                    }
-                    resource_started = true;
-                    println!("[link] link up — pushing SensorReport Resource ({}B)", env.len());
-                }
-            }
-        }
-        // Re-advertise on a backoff while a transfer is in flight.
-        if resource_started && now_ms.wrapping_sub(last_res_poll_ms) >= RES_POLL_MS {
-            last_res_poll_ms = now_ms;
-            let adv = link_res.poll_resource(now_f);
+        res_pump.tick(&mut link_res, now_ms, now_f, &mut esp_rng, &mut |p| {
             let seq = (hw_rng.random() & 0xf0) as u8;
-            for p in adv {
-                tx_packet(&mut tx, &mut rx2, &mut delay, &p, seq);
+            tx_packet(&mut tx, &mut rx2, &mut delay, p, seq);
+        });
+        match link_res.phase {
+            lma_link_resource::LinkPhase::Complete => println!(
+                "[link] RESOURCE COMPLETE ({}/{})",
+                link_res.sent_parts, link_res.total_parts
+            ),
+            lma_link_resource::LinkPhase::Failed => {
+                println!("[link] FAILED — retrying next cooldown");
             }
-            match link_res.phase {
-                lma_link_resource::LinkPhase::Complete => {
-                    println!(
-                        "[link] RESOURCE COMPLETE ({}/{})",
-                        link_res.sent_parts, link_res.total_parts
-                    );
-                    resource_started = false;
-                    pending_payload = None;
-                }
-                lma_link_resource::LinkPhase::Failed => {
-                    println!("[link] FAILED — retrying next cooldown");
-                    resource_started = false;
-                    pending_payload = None;
-                }
-                _ => {}
-            }
+            _ => {}
         }
 
         // 5-min sensor bundle → LXMF SensorReport → server.
@@ -455,10 +408,11 @@ fn main() -> ! {
                 );
                 // The server's RF leg folds LMAOEnvelope{Sensor} Resources into
                 // the chart, so the SensorReport now rides as a Resource to the
-                // server's `lmao.data` link destination (Link+Resource pump above),
-                // replacing the old opportunistic single-packet send the server's
-                // `on_resource_received` path never folded.
-                pending_payload = Some(env);
+                // server's `lmao.data` link destination (the shared
+                // `ResourcePump` above), replacing the old opportunistic
+                // single-packet send the server's `on_resource_received` path
+                // never folded.
+                res_pump.set_payload(env);
             }
         }
 

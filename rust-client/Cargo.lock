@@ -1402,6 +1402,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "lmao-sprout-resource-300b-e2e"
+version = "0.1.0"
+dependencies = [
+ "leaf-resource",
+ "lma-link-resource",
+ "rns-core",
+ "rns-crypto",
+]
+
+[[package]]
 name = "lmao-t0-interop"
 version = "0.1.0"
 dependencies = [

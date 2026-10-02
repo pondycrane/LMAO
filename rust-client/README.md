@@ -33,6 +33,9 @@ radio (esp-hal UART/SPI)
 | crates/lma-framing | LMAF/successor framing reassembler on Resource (manifest→chunks→crc→verify→ack) | T8 — host PASS |
 | crates/leaf-power | power/duty polish: sleep-to-window, watchdog, heap guard | T9 — host PASS |
 | crates/sx126x | SX1262 LoRa driver core (bus-generic; RF-leg step 2) | RF-leg — host PASS |
+| crates/lma-link-resource | RNS Link initiator + Resource push (DRY: Cardputer + Sprout) | shared — PASS |
+| host/resource-500b-e2e | **Cardputer 500-B Resource → server** cross-check (RF-proven sha) | parity — PASS |
+| host/sprout-resource-300b-e2e | **Sprout 300-B Resource → server** (same wire format; heap-safe size) | parity — PASS |
 | host/leaf-e2e | **composed leaf pipeline** (§5 data-flow, host) | T7 — PASS |
 
 ## Gates
