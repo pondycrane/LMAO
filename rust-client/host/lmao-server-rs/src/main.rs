@@ -12,8 +12,10 @@
 //!   LMAO_CONTACTS_DB      SQLite path (default "contacts.db")
 //!   NATS_SERVER           default nats://localhost:4222
 //!
-//! The mesh sender is a log-only stub until the rns-net RF link/resource
-//! receiver is wired to DeliveryHandler (mesh seam).
+//! When `LMAO_RNODE_PORT` is present, the RF leg starts an rns-net LoRa node
+//! and installs the real `RnsMeshSender` into `AppState.mesh` (opportunistic
+//! LXMF replies the Cardputer's `handle_lxmf_reply` decrypts). Without the
+//! radio the app layer runs on the `LogMesh` placeholder.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -73,12 +75,15 @@ async fn main() {
         identity_hex,
         node_name,
         nats,
-        Box::new(LogMesh), // mesh seam — real rns-net dispatcher lands here
+        Box::new(LogMesh), // placeholder until the RF leg installs the real sender (below)
     ));
 
     // ── RF receive leg (the receiver, merged into the server) ──────────
     let rf_port = std::env::var("LMAO_RNODE_PORT").unwrap_or_else(|_| "/dev/ttyUSB0".into());
     let rf_disabled = std::env::var("LMAO_DISABLE_RF").as_deref() == Ok("1");
+    // Announced identities the RF leg hears; the mesh sender recalls them to
+    // encrypt + route replies back to each peer.
+    let peers: lmao_server_rs::rns_mesh::KnownPeers = Default::default();
     let _rf_node = if rf_disabled || !std::path::Path::new(&rf_port).exists() {
         if !rf_disabled {
             log::info!("RF receive off ({rf_port} not present)");
@@ -98,9 +103,15 @@ async fn main() {
                 rf_cfg.default_source = v;
             }
         }
-        match lmao_server_rs::rf::start_rf_node(state.clone(), rf_cfg) {
-            Ok(node) => {
-                log::info!("RF receive running on {rf_port}");
+        match lmao_server_rs::rf::start_rf_node(state.clone(), rf_cfg, peers.clone()) {
+            Ok((node, mesh)) => {
+                // Install the real opportunistic-LXMF sender (the replies the
+                // Cardputer's `handle_lxmf_reply` waits for) — replaces the
+                // log-only stub.
+                let boxed: Box<dyn lmao_server_rs::delivery::MeshSender + Send + Sync> =
+                    Box::new(mesh);
+                *state.mesh.write() = Arc::from(boxed);
+                log::info!("RF receive running on {rf_port}; mesh replies enabled");
                 Some(node)
             }
             Err(e) => {

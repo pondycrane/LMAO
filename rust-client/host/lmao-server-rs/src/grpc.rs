@@ -55,9 +55,8 @@ impl Lmao for LmaoGrpcService {
             }));
         }
 
-        match self
-            .state
-            .mesh
+        let mesh = self.state.mesh.read().clone();
+        match mesh
             .send(&dest_hash, &envelope_bytes, "p:Envelope")
             .await
         {

@@ -11,6 +11,7 @@ pub mod delivery;
 pub mod grpc;
 pub mod nats;
 pub mod rf;
+pub mod rns_mesh;
 pub mod sprout;
 pub mod store;
 

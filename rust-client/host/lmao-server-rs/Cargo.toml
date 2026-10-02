@@ -28,6 +28,9 @@ tower = { version = "0.5", features = ["util"] }
 async-nats = "0.36"
 async-trait = "0.1"
 parking_lot = "0.12"
+# LXMF message packing for outbound replies (the Cardputer firmware's
+# `build_message_to_server` mirror — the server side of the mesh send leg).
+lxmf-core = "0.1.5"
 log = "0.4"
 env_logger = "0.11"
 serde = { version = "1", features = ["derive"] }

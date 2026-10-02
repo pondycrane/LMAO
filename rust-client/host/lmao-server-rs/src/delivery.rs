@@ -59,7 +59,11 @@ pub struct AppState {
     pub subscribers: Mutex<Vec<mpsc::UnboundedSender<DeliveryEvent>>>,
     pub sprout: SharedSproutHistory,
     pub nats: Option<NatsPublisher>,
-    pub mesh: Box<dyn MeshSender + Send + Sync>,
+    /// Late-bound mesh dispatcher (LogMesh until the RF node is up, then the
+    /// real rns-net sender) — `RwLock<Arc<..>>` so `main()` can install the
+    /// real one after `start_rf_node` returns its node, and callers can clone
+    /// the handle out of the guard (no guard held across an `.await`).
+    pub mesh: Arc<parking_lot::RwLock<Arc<dyn MeshSender + Send + Sync>>>,
 }
 
 impl AppState {
@@ -80,7 +84,7 @@ impl AppState {
             subscribers: Mutex::new(Vec::new()),
             sprout: SharedSproutHistory::default(),
             nats,
-            mesh,
+            mesh: Arc::new(parking_lot::RwLock::new(Arc::from(mesh))),
         }
     }
 
@@ -150,7 +154,8 @@ impl AppState {
             })),
         };
         let reply_bytes = reply.encode_to_vec();
-        if let Err(e) = self.mesh.send(source_hash, &reply_bytes, "p:Envelope").await {
+        let mesh = self.mesh.read().clone();
+        if let Err(e) = mesh.send(source_hash, &reply_bytes, "p:Envelope").await {
             log::warn!("ACK to {source_hash} failed: {e}");
         } else {
             log::info!("reply sent to {source_hash}: {reply_text:?}");

@@ -56,6 +56,17 @@ bazel run  //rust-client:run_t0_gate -- --python <py>   # T0: live Python RNS in
 - `lma-wire`/`lma-lxmf`/`leaf` need `protoc` (prost-build from
   `proto/lma_messages.proto`): `export PROTOC=/path/to/protoc` (pinned
   `protoc-27.3-linux-aarch_64`; see `UPSTREAM.md`).
+
+Building / testing the host **server** on this box (the `/tmp` tmpfs is small
+and `ring`/`prost-build` spill temp files into it):
+
+```bash
+cd rust-client
+export TMPDIR=/home/pondycrane/tmp TMP=/home/pondycrane/tmp \
+       PROTOC=/tmp/protoc/bin/protoc
+cargo test  -p lmao-server-rs --target-dir /home/pondycrane/host-target   # 21 unit + mesh-seam integration
+cargo build -p lmao-server-rs --target-dir /home/pondycrane/host-target
+```
 - Hardware: the Cardputer is flashed only via
   `bazel run //cardputer_client:flash` (stable MicroPython — do not disturb the
   production node). The Rust firmware is `//rust-client:{build_firmware,
