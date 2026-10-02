@@ -240,9 +240,15 @@ def _flash_cardputer_rust(port: str, result: DeviceResult) -> None:
     at USB attach) for espflash to attach — otherwise this reports FAIL.
     """
     print(f"\n--- Cardputer (rust): building + flashing Rust firmware on {port} ---")
-    if shutil.which("espflash") is None:
-        result.skip("espflash not found on PATH")
-        print("  SKIP: espflash not found on PATH")
+    # espflash lives in ~/.cargo/bin (the flash subprocess below is a login
+    # shell that reads ~/.cargo/env); don't gate on the python process PATH.
+    home = os.environ.get("HOME", "~")
+    espflash = shutil.which("espflash") or os.path.exists(
+        os.path.join(home, ".cargo", "bin", "espflash")
+    )
+    if not espflash:
+        result.skip("espflash not found (~/.cargo/bin)")
+        print("  SKIP: espflash not found")
         return
     print(
         "  NOTE: this REPLACES the MicroPython runtime.  The Cardputer should be in\n"
@@ -252,6 +258,7 @@ def _flash_cardputer_rust(port: str, result: DeviceResult) -> None:
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "rust-client", "firmware"
     )
     cmd = (
+        f'export PATH="$HOME/.cargo/bin:$PATH"; '
         "source ~/export-esp.sh 2>/dev/null || true; "
         f"cd {shlex.quote(firmware_dir)} && "
         "cargo build --release && "
