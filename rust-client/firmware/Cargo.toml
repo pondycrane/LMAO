@@ -23,8 +23,17 @@ esp-bootloader-esp-idf = { version = "0.6", features = ["esp32s3"] }
 sx126x = { path = "../crates/sx126x" }
 radio-interface = { path = "../crates/radio-interface" }
 leaf-rns = { path = "../crates/leaf-rns" }
-leaf-lxmf = { path = "../crates/leaf-lxmf" }
 leaf-resource = { path = "../crates/leaf-resource" }
+# The chart renderer (no_std): parses the server's DATA line + draws the
+# Sprout chart over a fill/pixel display trait (see src/display.rs).
+lma-chart = { path = "../crates/lma-chart" }
+# Built-in Cardputer-ADV ST7789 panel, driven by the open-source mipidsi driver
+# (same crate + config as BotEkrem/echoputer, a proven no_std Rust Cardputer-ADV
+# project): mipidsi owns the ST7789 init/reset/window/rotation.
+mipidsi = { version = "0.10", default-features = false }
+embedded-graphics = "0.8"
+embedded-hal-bus = "0.3"
+embedded-hal = "1.0"
 # rns-core pulls rns-crypto with default features (std). It has an optional
 # no_std `std` feature — force it off so the RNS packet code cross-compiles for
 # the xtensa firmware target (we need RawPacket pack/unpack, not std RNG).

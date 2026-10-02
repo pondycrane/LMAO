@@ -8,6 +8,7 @@ members = [
     "crates/lma-identity",
     "crates/leaf-rns",
     "crates/radio-interface",
+    "crates/lma-chart",
     "crates/lma-wire",
     "crates/lma-lxmf",
     "crates/leaf-resource",
