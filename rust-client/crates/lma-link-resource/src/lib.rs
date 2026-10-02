@@ -1,11 +1,14 @@
-//! Cardputer RNS **Link initiator + Resource push** to the LMAO server's
-//! `lmao.data` destination (issue #197).
+#![no_std]
+
+//! Shared RNS **Link initiator + Resource push** to the LMAO server's
+//! `lmao.data` destination — the single driver used by BOTH the Cardputer
+//! firmware and the Sprout sender (DRY; the transport was previously
+//! copy-pasted into each `link_resource.rs`).
 //!
 //! Establishes an RNS Link (LINKREQUEST → LRPROOF → LRRTT) against the server,
-//! then pushes a big message as an RNS Resource (advertise → parts → proof),
-//! exactly the flow the server consumes via `set_resource_callback` /
-//! `set_resource_concluded_callback` (RNS 1.3.5 accepts a Resource **only**
-//! over a Link).
+//! then pushes a payload as an RNS Resource (advertise → parts → proof),
+//! exactly the flow the server consumes via `on_resource_received`
+//! (RNS 1.3.5 accepts a Resource **only** over a Link).
 //!
 //! Frame-size discipline: every whole RNS packet this module emits is kept
 //! ≤254 B so `split_into_frames` produces exactly one non-flagged LoRa frame
@@ -28,7 +31,6 @@ use rns_core::packet::{PacketFlags, RawPacket};
 use rns_core::resource::ResourceAction;
 use rns_crypto::Rng;
 
-use esp_println::println;
 use leaf_resource::ResourceTx;
 
 /// Server `lmao.data` destination hash — printed by the server at startup
@@ -48,8 +50,15 @@ pub const SERVER_ED25519_PUB: [u8; 32] = [
 ];
 
 /// Link packet (19-byte HEADER_1 + `encrypt_with_iv` expansion ≈ IV16 + HMAC32
-/// + CBC padding) must stay ≤ 254 B so each RF packet is a single LoRa frame
-/// (a >254-B split packet's second frame does not radiate on this radio).
+/// + CBC padding) must stay ≤ 254 B so each RF packet is a single LoRa frame.
+///
+/// This SDU is a **frame-safety choice, not manual message-chopping**: the whole
+/// payload is handed to `ResourceSender`, which splits it into parts of this
+/// size (the library's job). We size parts so each encrypted part carrier is a
+/// single on-air frame because multi-frame (split) transports lose frame2 on
+/// BOTH radio paths — the Cardputer's own SX1262 shows "frame2 of the 307-byte
+/// Hello is going missing on-air while frame1 works" (`firmware/src/rns_link.rs`),
+/// and the Sprout's RAK3172 rejects/never-radiates the second PSEND frame.
 /// pkcs7 pads a full block when part%16==0, so for 160 B: 19 + 160 + 16 + 32 + 16 = 243 ≤ 254.
 pub const RESOURCE_SDU: usize = 160;
 
@@ -122,6 +131,20 @@ impl LinkResource {
                 | LinkPhase::AwaitingProof
                 | LinkPhase::Complete
         )
+    }
+
+    /// Reset a stalled or failed link back to Idle so the caller can issue a
+    /// fresh LINKREQUEST (a single lost LRPROOF would otherwise strand the
+    /// half-duplex link in `Linking` forever).
+    pub fn reset(&mut self) {
+        self.phase = LinkPhase::Idle;
+        self.engine = None;
+        self.link_id = None;
+        self.session_key = None;
+        self.tx = None;
+        self.sent_parts = 0;
+        self.total_parts = 0;
+        self.packet_iv_hi = 0;
     }
 
     /// Build the LINKREQUEST packet addressed to the server's `lmao.data`
@@ -249,24 +272,9 @@ impl LinkResource {
             }
             PACKET_TYPE_DATA => match pkt.context {
                 CONTEXT_RESOURCE_REQ => {
-                    println!(
-                        "[dbg] REQ pkt received ctlen={} ctx={}",
-                        pkt.data.len(),
-                        pkt.context
-                    );
                     let Some(req) = Self::decrypt_data(self.session_key, &pkt.data) else {
-                        println!("[dbg] REQ decrypt FAILED");
                         return out;
                     };
-                    println!(
-                        "[dbg] REQ decrypted {}B f0-4={:02x}{:02x}{:02x}{:02x}{:02x}",
-                        req.len(),
-                        req[0],
-                        req[1],
-                        req[2],
-                        req[3],
-                        req[4]
-                    );
                     let mut parts = 0usize;
                     if let Some(tx) = self.tx.as_mut() {
                         for a in tx.handle_request(&req, now_f) {
@@ -288,7 +296,6 @@ impl LinkResource {
                             }
                         }
                     }
-                    println!("[dbg] REQ served parts={}", parts);
                 }
                 CONTEXT_RESOURCE_PRF => {
                     let Some(proof) = Self::decrypt_data(self.session_key, &pkt.data) else {
@@ -423,5 +430,100 @@ impl Rng for EspFixedRng {
             *b = (v >> 16) as u8;
         }
         self.0 = v;
+    }
+}
+
+/// Shared Cardputer/Sprout Link+Resource **send pump**.
+///
+/// Encapsulates the whole resource-send lifecycle both firmwares used to
+/// re-implement inline (DRY): (re)initiate the LINKREQUEST on Idle/Failed with
+/// a retry cooldown + lost-LRPROOF reset, start the Resource once the handshake
+/// is established, re-advertise on a poll cadence while transferring, and clear
+/// the queue on Complete/Failed so the next payload can push. Transport-agnostic:
+/// every whole RNS packet is handed to `send` (RAK-AT on the Sprout, SX1262/RNS
+/// interface on the Cardputer); inbound routing stays in the caller.
+pub struct ResourcePump {
+    payload: Option<alloc::vec::Vec<u8>>,
+    started: bool,
+    last_link_ms: u32,
+    last_poll_ms: u32,
+    link_retry_ms: u32,
+    res_poll_ms: u32,
+}
+
+impl ResourcePump {
+    pub fn new(link_retry_ms: u32, res_poll_ms: u32) -> Self {
+        Self {
+            payload: None,
+            started: false,
+            last_link_ms: 0,
+            last_poll_ms: 0,
+            link_retry_ms,
+            res_poll_ms,
+        }
+    }
+
+    /// Queue `data` to push once the link is up. A transfer already in flight is
+    /// left running; an idle queue slot is replaced (so a fresh sensor sample
+    /// supersedes an unsent one).
+    pub fn set_payload(&mut self, data: alloc::vec::Vec<u8>) {
+        if !self.started {
+            self.payload = Some(data);
+        }
+    }
+
+    /// True while a payload is queued or a transfer is in flight.
+    pub fn is_busy(&self) -> bool {
+        self.started || self.payload.is_some()
+    }
+
+    /// One tick of the Link+Resource send lifecycle. Emits every whole RNS
+    /// packet through `send` (which owns the transport + frame splitting).
+    pub fn tick(
+        &mut self,
+        lr: &mut LinkResource,
+        now_ms: u32,
+        now_f: f64,
+        rng: &mut dyn Rng,
+        send: &mut dyn FnMut(&[u8]),
+    ) {
+        let Some(payload) = self.payload.as_deref() else {
+            return;
+        };
+        // Lost-LRPROOF guard: a stalled handshake is reset so a fresh
+        // LINKREQUEST can be issued (cooldown-gated).
+        if lr.phase == LinkPhase::Linking && now_ms.wrapping_sub(self.last_link_ms) >= self.link_retry_ms {
+            lr.reset();
+        }
+        // (Re)initiate the link when idle/failed, gated by the retry cooldown.
+        if (lr.phase == LinkPhase::Idle || lr.phase == LinkPhase::Failed)
+            && now_ms.wrapping_sub(self.last_link_ms) >= self.link_retry_ms
+        {
+            self.last_link_ms = now_ms;
+            if let Some(pkt) = lr.begin_link(now_f, rng) {
+                send(pkt.as_slice());
+            }
+        }
+        // Start the Resource once the handshake completes.
+        if !self.started && lr.established() {
+            self.started = true;
+            let pkts = lr.start_resource(payload, now_f);
+            for p in pkts {
+                send(p.as_slice());
+            }
+        }
+        // Re-advertise on the poll cadence while transferring; clear the queue
+        // once the transfer ends so a subsequent payload can push.
+        if self.started && now_ms.wrapping_sub(self.last_poll_ms) >= self.res_poll_ms {
+            self.last_poll_ms = now_ms;
+            let pkts = lr.poll_resource(now_f);
+            for p in pkts {
+                send(p.as_slice());
+            }
+            if matches!(lr.phase, LinkPhase::Complete | LinkPhase::Failed) {
+                self.started = false;
+                self.payload = None;
+            }
+        }
     }
 }

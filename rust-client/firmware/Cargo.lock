@@ -1203,6 +1203,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lma-link-resource"
+version = "0.1.0"
+dependencies = [
+ "leaf-resource",
+ "rns-core",
+ "rns-crypto",
+]
+
+[[package]]
 name = "lmao-firmware-t1"
 version = "0.1.0"
 dependencies = [
@@ -1216,6 +1225,7 @@ dependencies = [
  "leaf-rns",
  "linked_list_allocator",
  "lma-chart",
+ "lma-link-resource",
  "lxmf-core",
  "mipidsi",
  "radio-interface",

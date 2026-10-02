@@ -27,7 +27,6 @@ pub mod sx1262_radio;
 // RNS link: SX1262 driver under the RadioInterface contract + RNode framing.
 pub mod rns_link;
 // Link initiator + Resource push to the server's lmao.data destination.
-pub mod link_resource;
 // Cardputer ST7789 panel driver + RGB565 framebuffer (the chart display).
 pub mod display;
 
@@ -227,8 +226,12 @@ fn main() -> ! {
     let mut now_ms = 0u32;
 
     // Cardputer → server Link + Resource push (issue #197). All packets ≤254 B.
-    let mut link_res = crate::link_resource::LinkResource::new();
-    let mut resource_started = false;
+    let mut link_res = lma_link_resource::LinkResource::new();
+    // Shared Link+Resource send pump — the SAME driver the Sprout uses (DRY):
+    // initiates the `lmao.data` Link, pushes the payload as a Resource once
+    // established, re-advertises on a poll cadence, clears on completion.
+    let mut res_pump = lma_link_resource::ResourcePump::new(5_000, 5_000);
+    res_pump.set_payload((0..500u16).map(|i| (i % 251) as u8).collect());
 
     // The chart panel: ST7789V2 240x135 on SPI2/FSPI via the open-source
     // mipidsi driver — SCK=36, MOSI=35, CS=37, DC=34, RST=33, BL=38 (the
@@ -318,23 +321,12 @@ fn main() -> ! {
             let mut esp_rng = crate::rns_link::EspRng(rng);
 
             // ── Cardputer → server Link + Resource driver (issue #197) ───────
-            // Every ~10 s, ensure a Link handshake with `lmao.data` is in
-            // flight; once established, push one big message as a Resource.
+            // Shared `ResourcePump`: (re)initiate the `lmao.data` Link, push
+            // the 500-B payload as a Resource once established, re-advertise on
+            // the poll cadence, and clear on completion — the SAME driver the
+            // Sprout uses (DRY). Inbound handshake/resource packets are routed
+            // here; the chart callback repaints the panel from server DATA lines.
             let mut to_tx: alloc::vec::Vec<alloc::vec::Vec<u8>> = alloc::vec::Vec::new();
-            if beat % 100 == 10 {
-                // (Re)initiate the Link if it isn't already handshaking.
-                if link_res.phase == crate::link_resource::LinkPhase::Idle
-                    || link_res.phase == crate::link_resource::LinkPhase::Failed
-                {
-                    if let Some(pkt) = link_res.begin_link(now_f, &mut esp_rng) {
-                        to_tx.push(pkt);
-                        println!(
-                            "[link] beat #{beat} LINKREQUEST to lmao.data link_id={:02x?}",
-                            link_res.link_id
-                        );
-                    }
-                }
-            }
             // Route inbound link handshake / resource packets + collect replies.
             {
                 let lr = &mut link_res;
@@ -351,33 +343,15 @@ fn main() -> ! {
                     println!("[t6] chart drawn: {points} trace segments");
                 });
             }
-            // Once the link is up, push the big message as a Resource (once).
-            if !resource_started && link_res.established() {
-                let payload: alloc::vec::Vec<u8> = (0..500u16).map(|i| (i % 251) as u8).collect();
-                let pkts = link_res.start_resource(&payload, now_f);
-                to_tx.extend(pkts);
-                resource_started = true;
-                println!(
-                    "[link] beat #{beat} link up ({}), pushing {}-B resource ({}-B parts)",
-                    link_res.phase == crate::link_resource::LinkPhase::Complete,
-                    payload.len(),
-                    crate::link_resource::RESOURCE_SDU
-                );
-            }
-            // Re-advertise on a long backoff (every ~5 s), NOT every tick:
-            // a 212 B LoRa frame has ~300 ms of airtime, so advertising every
-            // 100 ms floods the half-duplex channel and the server never
-            // cleanly receives an advertisement.
-            if resource_started && beat % 50 == 0 {
-                let adv = link_res.poll_resource(now_f);
-                to_tx.extend(adv);
-            }
+            res_pump.tick(&mut link_res, now_ms, now_f, &mut esp_rng, &mut |p| {
+                to_tx.push(p.to_vec());
+            });
             match link_res.phase {
-                crate::link_resource::LinkPhase::Complete => println!(
+                lma_link_resource::LinkPhase::Complete => println!(
                     "[link] beat #{beat} RESOURCE COMPLETE ({}/{})",
                     link_res.sent_parts, link_res.total_parts
                 ),
-                crate::link_resource::LinkPhase::Failed => println!("[link] beat #{beat} FAILED"),
+                lma_link_resource::LinkPhase::Failed => println!("[link] beat #{beat} FAILED"),
                 _ => {}
             }
             for p in to_tx {

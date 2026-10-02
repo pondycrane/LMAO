@@ -4,6 +4,7 @@ members = [
     "host/interop",
     "host/leaf-e2e",
     "host/resource-500b-e2e",
+    "host/sprout-resource-300b-e2e",
     "host/lmao-server-rs",
     "crates/lma-identity",
     "crates/lma-dtu",
@@ -15,6 +16,7 @@ members = [
     "crates/leaf-resource",
     "crates/lma-framing",
     "crates/leaf-power",
+    "crates/lma-link-resource",
     "crates/sx126x",
 ]
 
