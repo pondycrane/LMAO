@@ -20,8 +20,9 @@ extern crate alloc;
 
 use esp_hal::analog::adc::{Adc, AdcConfig, Attenuation};
 use esp_hal::delay::Delay;
-use esp_hal::gpio::{Level, Output, OutputConfig};
+use esp_hal::gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull};
 use esp_hal::main;
+use esp_hal::rmt::{PulseCode, Rmt, TxChannelConfig, TxChannelCreator};
 use esp_hal::uart::{self, UartTx};
 use esp_hal::Config;
 use esp_println::println;
@@ -92,7 +93,39 @@ fn at_drain(rx2: &mut esp_hal::uart::UartRx<'_, esp_hal::Blocking>, delay: &mut 
     }
 }
 
-/// Transmit one whole RNS packet on the DTU (PRECV off → PSEND hex → PRECV on).
+/// Drive the SK6812 front LED (G27, single GRB pixel, 10 MHz RMT ticks) to a
+/// colour. Red = actuation armed, black = dry-run (matches the native-client's
+/// `button_led`). Consumes + returns the RMT channel (transmit() consumes it).
+fn led_set(
+    ch: esp_hal::rmt::Channel<'_, esp_hal::Blocking, esp_hal::rmt::Tx>,
+    r: u8,
+    g: u8,
+    b: u8,
+) -> esp_hal::rmt::Channel<'_, esp_hal::Blocking, esp_hal::rmt::Tx> {
+    // SK6812 at 10 MHz (RMT 80 MHz / clk_div 8 = 0.1 us/tick): 1-bit = 0.9us H
+    // /0.3us L, 0-bit = 0.3us H /0.9us L (GRB byte order, MSB-first); a ≥80us
+    // low reset terminator latches the frame.
+    let mut data = [PulseCode::new(Level::High, 1, Level::Low, 1); 26];
+    for i in 0..24 {
+        let byte = match i / 8 {
+            0 => g,
+            1 => r,
+            _ => b,
+        };
+        let bit = (byte >> (7 - (i % 8))) & 1;
+        data[i] = if bit == 1 {
+            PulseCode::new(Level::High, 9, Level::Low, 3)
+        } else {
+            PulseCode::new(Level::High, 3, Level::Low, 9)
+        };
+    }
+    data[24] = PulseCode::new(Level::Low, 1000, Level::Low, 1000); // 200 us reset
+    data[25] = PulseCode::end_marker();
+    let tx = ch.transmit(&data).expect("led transmit");
+    tx.wait().expect("led done")
+}
+
+
 fn tx_packet(
     tx: &mut UartTx<'_, esp_hal::Blocking>,
     rx2: &mut esp_hal::uart::UartRx<'_, esp_hal::Blocking>,
@@ -117,10 +150,25 @@ fn main() -> ! {
     let mut delay = Delay::new();
 
     // ── SAFETY: pump enable LOW (OFF) FIRST — never leave the control line
-    // floating. THIS BUILD NEVER ARMS ACTUATION (dry-run only).
+    // floating. This build boots dry-run; the G39 button arms actuation (the
+    // control engine — not part of the send leg — is what would energise it).
     let mut pump = Output::new(peripherals.GPIO26, Level::Low, OutputConfig::default());
     pump.set_low();
-    println!("[sprout] rust sender boot — pump drive LOW (dry-run, never armed)");
+    println!("[sprout] rust sender boot — pump drive LOW (dry-run)");
+
+    // ── front controls: G39 button (external pull-up ⇒ LOW when pressed) + the
+    // single SK6812 red LED on G27. Long-press (2 s) arms actuation; quick tap
+    // disarms; the armed state is NOT persisted (reset → dry-run), matching the
+    // native-client `button_led`.
+    let mut btn = Input::new(peripherals.GPIO39, InputConfig::default().with_pull(Pull::Up));
+    let rmt = Rmt::new(peripherals.RMT, esp_hal::time::Rate::from_mhz(80)).expect("rmt");
+    let mut led_channel = rmt
+        .channel0
+        .configure_tx(&TxChannelConfig::default().with_clk_divider(8))
+        .expect("rmt tx channel")
+        .with_pin(peripherals.GPIO27);
+    led_channel = led_set(led_channel, 0, 0, 0); // LED off (dry-run)
+    println!("[sprout] front controls: G39 button + SK6812 LED ready (dry-run)");
 
     // ── identity ────────────────────────────────────────────────────────────
     let keys = sender::provision();
@@ -168,6 +216,10 @@ fn main() -> ! {
     let mut last_announce_ms: u32 = 0;
     let mut bf = [0u8; 512]; // UART RX scratch
     let mut tick = 0u32;
+    // Front-control (arming) state.
+    let mut actuation_armed = false;
+    let mut btn_last = true; // G39 released (external pull-up ⇒ HIGH)
+    let mut press_start_ms: Option<u32> = None;
 
     loop {
         delay.delay_millis(TICK_MS);
@@ -184,6 +236,30 @@ fn main() -> ! {
                 }
             }
         }
+
+        // Front control: long-press (≥2 s) arms actuation → red LED; quick tap
+        // disarms. Per-session only (never persisted ⇒ reset drops to dry-run).
+        let pressed = btn.is_low();
+        match (pressed, btn_last) {
+            (true, false) => press_start_ms = Some(now_ms),
+            (false, true) => {
+                if let Some(start) = press_start_ms {
+                    let dur = now_ms.wrapping_sub(start);
+                    if dur >= 2000 && !actuation_armed {
+                        actuation_armed = true;
+                        led_channel = led_set(led_channel, 255, 0, 0);
+                        println!("[sprout] actuation ARMED (button long-press, red LED on)");
+                    } else if dur <= 1000 && actuation_armed {
+                        actuation_armed = false;
+                        led_channel = led_set(led_channel, 0, 0, 0);
+                        println!("[sprout] actuation dry-run (button tap, LED off)");
+                    }
+                }
+                press_start_ms = None;
+            }
+            _ => {}
+        }
+        btn_last = pressed;
 
         // Periodic signed announces (lmao.sprout + lxmf.delivery).
         if now_ms - last_announce_ms >= ANNOUNCE_INTERVAL_MS || last_announce_ms == 0 {
@@ -272,6 +348,13 @@ fn main() -> ! {
             }
             readings.push(lma_dtu::envelope::encode_reading(10, DRY_PCT, "%", timestamp_ms));
             readings.push(lma_dtu::envelope::encode_reading(11, WET_PCT, "%", timestamp_ms));
+            if actuation_armed {
+                // ML watering-event tags once the actuator is armed. The pump
+                // itself is driven by the control engine (not in this send
+                // leg), so duration/active are 0 here.
+                readings.push(lma_dtu::envelope::encode_reading(6, 0.0, "s", timestamp_ms));
+                readings.push(lma_dtu::envelope::encode_reading(7, 0.0, "bool", timestamp_ms));
+            }
 
             if !readings.is_empty() {
                 let seq = (now_ms % 100_000) as u32;

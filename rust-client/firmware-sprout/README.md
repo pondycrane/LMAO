@@ -28,9 +28,7 @@ hash below to the server.
   sends one LXMF SensorReport (sensor ids 2/3/4 + 10/11 plant band) to the
   server's `lxmf/delivery` destination, X25519-encrypted to the server key —
   the same message-construction path the Cardputer firmware uses (proven live).
-- Pump enable (GPIO26) is driven LOW at boot and this build **never arms
-  actuation** (dry-run only — the irrigation control engine is not part of the
-  send leg).
+- **Front controls** (native-client parity): the **G39 button** — hold ~2 s **arms actuation** (SK6812 red LED on G27 lights), quick tap disarms; per-session only (a reset always drops back to dry-run). Pump enable (GPIO26) is driven LOW at boot and stays LOW — the irrigation control engine that would energise it is not part of the send leg; arming adds the ML pump-tag readings (sensor ids 6/7) to each report.
 - DTU RX is polled (`+EVT:RXP2P` → RNode-frame reassembly) so the node stays a
   mesh peer and any server replies are logged (ACK/DATA reply handling is a
   follow-up).
