@@ -342,10 +342,22 @@ SensorReport envelope (11 host tests, golden-vector-locked to the C++ encoder).
 The pump stays dry-run (GPIO26 LOW, actuation never armed); the irrigation
 control engine is intentionally out of the send leg.
 
-**One-time action:** add the Sprout's delivery hash
-`6f876d40fe1a3ca663be290108341230` to the server's `LMAO_ALLOWED_CLIENTS`
+**One-time action (already done):** the Sprout's delivery hash
+`f5f05952392627393f067df8c9eaf6c6` must be in `LMAO_ALLOWED_CLIENTS`
 (k8s/lmao-server.yaml + env) or `DeliveryHandler` drops its reports at the
-source gate.  Build/flash + port-identification notes: see
+source gate. (An earlier revision wrongly told ops to add `6f876d40…` — that
+was the made-up seed identity, not the production NVS `f5f0…` one now pinned in
+`firmware-sprout/src/sender.rs`.)
+
+**PSEND size trap (driver-level false positive):** the bench RAK3172 rejects
+`AT+PSEND` frames ≥ ~160 B on-air with `AT_PARAM_ERROR` — well under the 254 B
+the native firmware assumed. A too-big announce logs `[dtu] -> AT+PSEND=…`
+(from the driver's point of view it "TX'd") but **nothing radiates**. `lma-dtu`
+caps a single frame at 128 B and splits anything larger into seq-flag 0x01
+pairs; the server's RNode reassembles by seq. Keep `DTU_FRAME_PAYLOAD` at 128
+unless the exact RAK cap is re-measured on a fresh DUT.
+
+Build/flash + port-identification notes: see
 `rust-client/firmware-sprout/README.md`. **Flashed + verified 2026-10-02**: on
 this rev-1.1 chip the stock firmware build wasn't bootable (esp-hal 1.2.2
 defaults `ESP_HAL_CONFIG_MIN_CHIP_REVISION` to v3.0), fixed by setting it to
