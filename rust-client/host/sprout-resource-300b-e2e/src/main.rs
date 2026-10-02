@@ -16,9 +16,11 @@
 
 use std::process::ExitCode;
 
+use lma_dtu::at_dtu::{from_hex, tx_lines};
 use lma_link_resource::RESOURCE_SDU;
 use leaf_resource::store::VecBackedStore;
 use leaf_resource::{ResourceRx, ResourceTx, Store};
+use radio_interface::{parse_rnode_frame, SplitAssembler};
 use rns_core::resource::ResourceAction;
 use rns_crypto::sha256::sha256;
 use rns_crypto::FixedRng;
@@ -47,9 +49,45 @@ fn decrypt(d: &[u8]) -> Result<Vec<u8>, ()> {
     Ok(d.iter().map(|b| b ^ 0x5a).collect())
 }
 
-/// The whole e2e: Sprout 300-B Resource push → server RX, hash-verified.
-/// Panics on any failure (also detaches the runnable logic from `main` so
-/// `rust_test` can execute it directly under Bazel).
+/// Route ONE whole packet over the emulated **RAK-RF frame transport** — the
+/// Sprout's real radio leg: `tx_lines` (the RAK `AT+PSEND` frame splitter at
+/// the measured 128-B cap) → `parse_rnode_frame` → the RNode `SplitAssembler`
+/// (the server/urns RX side). Larger-than-one-frame packets genuinely split
+/// into multiple flagged frames and are reassembled here — i.e. "all frames
+/// received", no workaround. Returns every completed packet (normally exactly
+/// one). Counts frames against the assembler's completed counter.
+fn rf_roundtrip(
+    pkt: &[u8],
+    asm: &mut SplitAssembler,
+    now_ms: &mut u32,
+    frames: &mut usize,
+    packets: &mut usize,
+) -> Vec<Vec<u8>> {
+    let mut out = Vec::new();
+    for (line, _wait_ms) in tx_lines(pkt, 0x50) {
+        if let Some(hex) = line.strip_prefix("AT+PSEND=") {
+            *frames += 1;
+            let onair = from_hex(hex).expect("AT+PSEND hex");
+            let frame = parse_rnode_frame(&onair);
+            let r = asm.push(&frame, *now_ms);
+            *now_ms = now_ms.wrapping_add(100);
+            if r.complete {
+                out.push(r.data);
+            }
+        }
+    }
+    assert!(
+        !out.is_empty(),
+        "packet {}B split into {frames} frames but never reassembled",
+        pkt.len()
+    );
+    *packets += 1;
+    out
+}
+
+/// The whole e2e: Sprout 300-B Resource push → server RX, with **every**
+/// exchanged packet crossing the real RAK frame transport (multiframe included),
+/// hash-verified end to end. Panics on any failure.
 fn run() {
     // 1. Pin the payload to the deterministic target before touching the
     //    transfer: if the firmware payload pattern ever changes, this fails
@@ -63,19 +101,31 @@ fn run() {
     );
 
     // 2. Sprout side: Resource sender (advertise → serve parts → proof) with
-    //    the Sprout's real part SDU (160 B ⇒ a single ≤254-B link frame each).
+    //    the Sprout's real part SDU. Because the RAK's per-PSEND cap is 128 B
+    //    (measured: ≥160 rejected), EVERY 160-B part already spans two flagged
+    //    split frames — so the whole transfer is genuinely multiframe.
     let now = 1000.0f64;
     let link_rtt = 0.1;
     let mut rng = FixedRng::new(b"e2e-sprout-rng");
+
+    // The shared RX-side frame reassembler (server/urns SplitAssembler).
+    let mut asm = SplitAssembler::new(508, 15_000);
+    let mut now_ms = 0u32;
+    let mut frames = 0usize;
+    let mut packets = 0usize;
+
     let mut tx = ResourceTx::new(&payload, None, RESOURCE_SDU, &encrypt, &mut rng, now, link_rtt)
         .expect("sprout ResourceTx");
-    let adv = match &tx.advertise(now)[0] {
+    let adv0 = match &tx.advertise(now)[0] {
         ResourceAction::SendAdvertisement(a) => a.clone(),
         _ => panic!("no advertisement produced"),
     };
+    // The advertisement crosses the RF transport too.
+    let adv_rt = rf_roundtrip(&adv0, &mut asm, &mut now_ms, &mut frames, &mut packets);
+    assert_eq!(adv_rt.len(), 1, "advertisement frame(s) reassembled");
 
     // 3. LMAO server side: Resource receiver (accept → request → assemble).
-    let mut rx = ResourceRx::from_advertisement(&adv, RESOURCE_SDU, link_rtt, now)
+    let mut rx = ResourceRx::from_advertisement(&adv_rt[0], RESOURCE_SDU, link_rtt, now)
         .expect("server ResourceRx");
 
     let mut rx_actions = rx.accept(now);
@@ -89,14 +139,20 @@ fn run() {
         for a in rx_actions {
             match a {
                 ResourceAction::SendRequest(req) => {
-                    for sa in tx.handle_request(&req, now) {
+                    // Receiver → sender request crosses the RF transport.
+                    let req_rt = rf_roundtrip(&req, &mut asm, &mut now_ms, &mut frames, &mut packets);
+                    assert_eq!(req_rt.len(), 1, "part-request frame(s) reassembled");
+                    for sa in tx.handle_request(&req_rt[0], now) {
                         if let ResourceAction::SendPart(p) = sa {
                             outbound.push(p);
                         }
                     }
                 }
                 ResourceAction::SendHmu(hmu) => {
-                    next.extend(rx.feed_hmu(&hmu, now));
+                    // Sender HMU hashmap update crosses the RF transport.
+                    let hmu_rt = rf_roundtrip(&hmu, &mut asm, &mut now_ms, &mut frames, &mut packets);
+                    assert_eq!(hmu_rt.len(), 1, "HMU frame(s) reassembled");
+                    next.extend(rx.feed_hmu(&hmu_rt[0], now));
                 }
                 ResourceAction::Failed(e) => panic!("server RX failed: {e:?}"),
                 _ => {}
@@ -104,7 +160,10 @@ fn run() {
         }
         rx_actions = next;
         for p in outbound {
-            rx_actions.extend(rx.feed_part(&p, now));
+            // Each part crosses the RF transport as >=1 flagged frame.
+            let part_rt = rf_roundtrip(&p, &mut asm, &mut now_ms, &mut frames, &mut packets);
+            assert_eq!(part_rt.len(), 1, "resource part frame(s) reassembled");
+            rx_actions.extend(rx.feed_part(&part_rt[0], now));
         }
     }
 
@@ -119,6 +178,20 @@ fn run() {
     assert_eq!(data.len(), EXPECTED_BYTES, "server reassembled wrong byte count");
     assert_eq!(data, payload, "server reassembled payload differs from sprout");
     assert_eq!(sha256(&data), HW_SHA256, "reassembled sha256 != pinned value");
+
+    // 5. Every whole packet was reassembled from every TX'd frame — none lost,
+    //    none dropped — and the transfer was genuinely multiframe (more RAK
+    //    split-frames than whole packets).
+    assert_eq!(
+        asm.completed() as usize, packets,
+        "packet accounting: {packets} whole packets TX'd but {} reassembled",
+        asm.completed()
+    );
+    assert_eq!(asm.dropped(), 0, "a frame was dropped by the reassembler");
+    assert!(
+        frames > packets,
+        "expected a multiframe transfer (each >128-B part spans 2+ RAK frames);          {frames} frames for {packets} packets"
+    );
 }
 
 fn crate_hex(b: &[u8]) -> String {
@@ -129,7 +202,8 @@ fn main() -> ExitCode {
     run();
     let parts = (EXPECTED_BYTES + RESOURCE_SDU - 1) / RESOURCE_SDU;
     println!(
-        "[sprout-300b-e2e] PASS — sprout 300-B resource ({parts} parts) reassembled \
+        "[sprout-300b-e2e] PASS — single 300-B resource send ({parts} parts) -> RAK \
+         split-frames -> SplitAssembler, all frames + resource reassembled \
          hash-verified; sha256={}",
         crate_hex(&HW_SHA256)
     );
