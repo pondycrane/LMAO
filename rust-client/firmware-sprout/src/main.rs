@@ -210,7 +210,21 @@ fn main() -> ! {
             last_send_ms = now_ms;
 
             // Moisture % (2-point calibration; lower counts == wetter).
-            let raw = nb::block!(adc.read_oneshot(&mut moisture_pin)).unwrap_or(0);
+            // Bounded poll: on ESP32 rev1 the one-shot SAR can wedge in
+            // `WouldBlock` (never reports done), which `nb::block!` would spin
+            // on forever — so give up after a bounded number of polls and send
+            // the report without moisture (air + band still ride along).
+            let mut raw = 0u16;
+            for _ in 0..100_000u32 {
+                match adc.read_oneshot(&mut moisture_pin) {
+                    Ok(v) => {
+                        raw = v;
+                        break;
+                    }
+                    Err(nb::Error::WouldBlock) => {}
+                    Err(_) => break,
+                }
+            }
             let mut moisture: Option<f32> = None;
             if raw > 0 {
                 let span = MOISTURE_DRY_COUNT - MOISTURE_WET_COUNT;
@@ -223,6 +237,8 @@ fn main() -> ! {
                 }
                 moisture = Some(pct);
                 println!("[sprout] moisture raw={raw} -> {pct:.1}%");
+            } else {
+                println!("[sprout] ADC unavailable (moisture skipped)");
             }
 
             // Air T/H from the ENV III SHT30 (fail-safe: the report continues

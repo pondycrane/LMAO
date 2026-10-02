@@ -10,6 +10,13 @@ When flashed to the Sprout Atom Lite, the Rust server's RF ingest
 Sprout sensor data into the Cardputer chart — **no Python, no native-client C++
 in the send path**.
 
+**Verified on the Sprout (2026-10-02, ttyUSB1):** boots clean on the rev-1.1
+chip, configures the DTU P2P radio, announces `lmao/sprout` + `lxmf.delivery`,
+and sends the first LXMF SensorReport (moisture 39.8%, air 25.9 °C/68%,
+339 B) over the wire. Data now flows from the Sprout into the server's mesh —
+the remaining step to see it on the Cardputer chart is adding the allow-list
+hash below to the server.
+
 ## What it does
 
 - Boots esp-hal (Atom Lite = ESP32 classic), UART2 → RAK3172 DTU P2P config
@@ -42,6 +49,13 @@ espflash flash --port /dev/ttyUSB1 --chip esp32 --after hard-reset \
 > RNode is `/dev/ttyUSB0` (prints `mp_cmd=off`); the Sprout Atom is an "M5stack"
 > FTDI (`0403:6001`) too — confirm the serial (`69526EE94F` vs `A952AD9F4F`)
 > so you don't reflash the RNode radio.
+>
+> **Rev-1 silicon note.** The Sprout's ESP32 is silicon **rev1.1** (MAC
+> `c8:85:41:67:dd:34`). esp-hal 1.2.2 defaults `ESP_HAL_CONFIG_MIN_CHIP_REVISION`
+> to v3.0 and panics at boot on older silicon (and the IDF-6.1 bootloader refuses
+> rev<3 app images). `.cargo/config.toml` `[env]` sets it to `100` (v1.0) so a
+> stock `espflash flash` builds a rev-1 app image that boots clean — no manual
+> image patching needed.
 
 ## Server allow-list (ONE-TIME ACTION)
 
