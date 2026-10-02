@@ -1,0 +1,5 @@
+# Sprout firmware toolchain — the esp nightly fork (installed via `espup`).
+# The xtensa-esp32-none-elf target is built from `rust-src` via `-Z build-std`
+# (see .cargo/config.toml).  Host workspace keeps `stable` in ../rust-toolchain.toml.
+[toolchain]
+channel = "esp"

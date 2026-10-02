@@ -1295,6 +1295,13 @@ name = "lma-chart"
 version = "0.1.0"
 
 [[package]]
+name = "lma-dtu"
+version = "0.1.0"
+dependencies = [
+ "radio-interface",
+]
+
+[[package]]
 name = "lma-framing"
 version = "0.1.0"
 dependencies = [
