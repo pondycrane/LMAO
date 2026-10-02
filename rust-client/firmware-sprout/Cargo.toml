@@ -27,6 +27,10 @@ lxmf-core = { version = "0.1.5", default-features = false }
 # Sprout DTU radio protocol + no_std SensorReport envelope (host-tested crate;
 # pulls radio-interface framing).
 lma-dtu = { path = "../crates/lma-dtu" }
+# T6 RNS Resource-over-Link TX — the SensorReport envelope rides as a Resource
+# so the server's on_resource_received folds it into the chart. Shared with
+# the Cardputer firmware (DRY: one Link+Resource driver, lma-link-resource).
+lma-link-resource = { path = "../crates/lma-link-resource" }
 # esp-hal implements embedded-hal 1.0 I2c (used for the ENV III SHT30 read).
 embedded-hal = "1.0"
 # ADC one-shot read is `nb`-based in esp-hal.

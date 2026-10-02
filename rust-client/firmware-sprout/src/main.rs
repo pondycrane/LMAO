@@ -66,6 +66,12 @@ const SEND_INTERVAL_MS: u32 = 300_000;
 const ANNOUNCE_INTERVAL_MS: u32 = 30_000;
 /// Loop tick.
 const TICK_MS: u32 = 100;
+/// Cooldown before re-attempting a LINKREQUEST while the link is Idle/Failed.
+const LINK_RETRY_MS: u32 = 5_000;
+/// Backoff between Resource re-advertisements while a transfer is in flight
+/// (a ~212 B LoRa frame has ~300 ms airtime — advertising every tick would
+/// flood the half-duplex channel).
+const RES_POLL_MS: u32 = 5_000;
 /// Nominal Unix epoch base (no RTC on the Atom; ordering is not the point).
 const START_EPOCH: f64 = 1_788_000_000.0;
 
@@ -214,6 +220,12 @@ fn main() -> ! {
     let mut now_ms: u32 = 0;
     let mut last_send_ms: u32 = 0; // 0 → first sample goes out immediately
     let mut last_announce_ms: u32 = 0;
+    // Link+Resource state (server-facing): the SensorReport envelope is pushed
+    // as an RNS Resource to the server's lmao.data link destination (the
+    // server's on_resource_received folds it into the Sprout chart). The send
+    // lifecycle is the shared `ResourcePump` the Cardputer uses too (DRY).
+    let mut link_res = lma_link_resource::LinkResource::new();
+    let mut res_pump = lma_link_resource::ResourcePump::new(LINK_RETRY_MS, RES_POLL_MS);
     let mut bf = [0u8; 512]; // UART RX scratch
     let mut tick = 0u32;
     // Front-control (arming) state.
@@ -233,6 +245,16 @@ fn main() -> ! {
             if n > 0 {
                 for pkt in at_rx.feed(&bf[..n], now_ms) {
                     println!("[dtu] RX complete packet {}B", pkt.len());
+                    // Feed the Link+Resource inbound (LRPROOF / part-requests /
+                    // proof) so the SensorReport Resource progresses.
+                    if let Ok(rp) = rns_core::packet::RawPacket::unpack(&pkt) {
+                        let now_f = START_EPOCH + now_ms as f64 / 1000.0;
+                        let replies = link_res.pump_inbound(&rp, now_f, &mut esp_rng);
+                        for r in replies {
+                            let seq = (hw_rng.random() & 0xf0) as u8;
+                            tx_packet(&mut tx, &mut rx2, &mut delay, &r, seq);
+                        }
+                    }
                 }
             }
         }
@@ -279,6 +301,26 @@ fn main() -> ! {
                 println!("[sprout] announce lxmf/delivery ({}B)", f.len());
                 tx_packet(&mut tx, &mut rx2, &mut delay, &f, rand_seq);
             }
+        }
+
+        // ── Link + Resource pump (shared with the Cardputer: `ResourcePump`) ──
+        // Push the queued SensorReport protobuf to the server's `lmao.data`
+        // link destination as an RNS Resource (the server's `on_resource_received`
+        // folds it into the Sprout chart).
+        let now_f = START_EPOCH + now_ms as f64 / 1000.0;
+        res_pump.tick(&mut link_res, now_ms, now_f, &mut esp_rng, &mut |p| {
+            let seq = (hw_rng.random() & 0xf0) as u8;
+            tx_packet(&mut tx, &mut rx2, &mut delay, p, seq);
+        });
+        match link_res.phase {
+            lma_link_resource::LinkPhase::Complete => println!(
+                "[link] RESOURCE COMPLETE ({}/{})",
+                link_res.sent_parts, link_res.total_parts
+            ),
+            lma_link_resource::LinkPhase::Failed => {
+                println!("[link] FAILED — retrying next cooldown");
+            }
+            _ => {}
         }
 
         // 5-min sensor bundle → LXMF SensorReport → server.
@@ -360,12 +402,17 @@ fn main() -> ! {
                 let seq = (now_ms % 100_000) as u32;
                 let report = lma_dtu::envelope::encode_sensor_report(&keys.node_id, seq, 0.0, &readings);
                 let env = lma_dtu::envelope::encode_envelope(&report);
-                let unix = START_EPOCH + now_ms as f64 / 1000.0;
-                if let Some(frame) = sender::message_to_server(&keys.identity, &mut esp_rng, &env, unix) {
-                    let tx_seq = (hw_rng.random() & 0xf0) as u8;
-                    println!("[sprout] TX SensorReport {}B (env {}B)", frame.len(), env.len());
-                    tx_packet(&mut tx, &mut rx2, &mut delay, &frame, tx_seq);
-                }
+                println!(
+                    "[sprout] SensorReport queued (env {}B) — will push as link Resource",
+                    env.len()
+                );
+                // The server's RF leg folds LMAOEnvelope{Sensor} Resources into
+                // the chart, so the SensorReport now rides as a Resource to the
+                // server's `lmao.data` link destination (the shared
+                // `ResourcePump` above), replacing the old opportunistic
+                // single-packet send the server's `on_resource_received` path
+                // never folded.
+                res_pump.set_payload(env);
             }
         }
 

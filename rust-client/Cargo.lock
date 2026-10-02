@@ -1321,6 +1321,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lma-link-resource"
+version = "0.1.0"
+dependencies = [
+ "leaf-resource",
+ "rns-core",
+ "rns-crypto",
+]
+
+[[package]]
 name = "lma-lxmf"
 version = "0.1.0"
 dependencies = [
@@ -1390,6 +1399,16 @@ dependencies = [
  "tonic-build",
  "tower 0.5.3",
  "tower-http",
+]
+
+[[package]]
+name = "lmao-sprout-resource-300b-e2e"
+version = "0.1.0"
+dependencies = [
+ "leaf-resource",
+ "lma-link-resource",
+ "rns-core",
+ "rns-crypto",
 ]
 
 [[package]]
