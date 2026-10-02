@@ -294,6 +294,41 @@ Measured on the deploy host (arm64): the one-time warm-builder cold build takes
 `.dockerignore` at the repo root excludes `rust-client/target` (~GB) from the
 build context, which alone cut ~6–7 min of tar/upload per deploy.
 
+
+### Cardputer chart display in Rust (2026-10-01)
+
+The Sprout chart the Cardputer's screen shows is now Rust end to end.  The
+MicroPython `cardputer_client/chart.py` renderer is recreated as the no_std
+crate `rust-client/crates/lma-chart`:
+
+- `parse_data_line` — the server's `DATA …` line (the RUST server already emits
+  it from `sprout.rs`, and the ACK piggybacks it) → a `ChartRecord`;
+- the same geometry/windows/colours as the Python original (240×135 plot box,
+  soil/humidity/temperature traces, band thresholds, watering ticks) drawn over
+  a two-primitive `Display` trait (`fill` + `pixel`) — lines, traces and the
+  embedded 8×8 font are the crate's own pixel logic, so a driver only supplies
+  a framebuffer;
+- host-tested (`cargo test -p lma-chart`, 27 tests ported from
+  `tests/test_chart.py`) + a `render_ppm` example that paints a `DATA` line to
+  a PPM for panel-design previews without hardware.
+
+The firmware (esp32s3) carries the panel: `rust-client/firmware/src/display.rs`
+is an ST7789 SPI3 driver (SCK=36/MOSI=35/CS=37/DC=34/BL=38 — the Cardputer ADV
+map Meshtastic's `m5stack_cardputer_adv/variant.h` documents) with an RGB565
+framebuffer.  `handle_lxmf_reply` parses the reply and `pump_rx` paints the
+result onto the LCD each time a fresh `DATA` line arrives (the previous
+serial-log substitute).  The driver is the open-source `mipidsi` 0.10 ST7789
+model (display on SPI2/FSPI, RST=33, offset 52,40 + Deg90 + inverted) — the
+same config the no_std Rust Cardputer-ADV reference `BotEkrem/echoputer` uses.
+Verified on-device (2026-10-02): the 240×135 panel displays the chart header.
+
+Reconciled to make the firmware build again: the crate split
+`leaf-lxmf` → `lma-lxmf` orphaned the firmware's five `leaf_lxmf::` calls and a
+dangling `leaf-lxmf` path dep.  All five functions already live in-firmware
+(`random_hash` was added from the µReticulum reference layout), so the dep is
+removed and the calls point at `crate::rns_link` instead.
+
+
 ### install_all `--stack` selector
 
 `tools/install_all.py --include-services` now takes `--stack {auto,python,
@@ -305,3 +340,4 @@ the old behavior of deploying both (honouring `--skip-server` /
 `--skip-rust-server`).  `install_rust_lmao_server` stays as-is: the warm
 builder + local-registry release + `k8s/lmao-server-rust-app.yaml` apply
 (contacts PVC + Deployment + Service) + rollout/pod-listener verification.
+

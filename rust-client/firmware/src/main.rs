@@ -28,6 +28,8 @@ pub mod sx1262_radio;
 pub mod rns_link;
 // Link initiator + Resource push to the server's lmao.data destination.
 pub mod link_resource;
+// Cardputer ST7789 panel driver + RGB565 framebuffer (the chart display).
+pub mod display;
 
 // no_std heap. rns-core packet building + the RNode split assembler allocate;
 // back them with a static linked-list heap.
@@ -70,7 +72,9 @@ fn main() -> ! {
     println!("[t1] chip revision: {}.{}", rev.major, rev.minor);
     println!("[t1] mac: {}", mac);
 
-    // SX1262 radio over SPI2 (HSPI) — Cardputer pins (see sx1262_radio.rs).
+    // SX1262 radio over SPI3 (HSPI) — Cardputer pins (see sx1262_radio.rs).
+    // The radio/EXT bus is HSPI/SPI3_HOST (per cardputer_pins.h + the ADV
+    // reference), leaving SPI2/FSPI free for the ST7789 panel.
     use esp_hal::gpio::{Input, InputConfig, Level, Output, OutputConfig};
     use esp_hal::spi::master::{Config as SpiCfg, Spi};
     use sx126x::Sx1262;
@@ -80,7 +84,7 @@ fn main() -> ! {
     // esp-hal's non-DMA blocking transfer would otherwise toggle CS per 64-byte
     // hardware-FIFO chunk (corrupting >64-byte transfers). Drive CS manually.
     let spi = Spi::new(
-        peripherals.SPI2,
+        peripherals.SPI3,
         SpiCfg::default(),
     )
     .expect("SPI config")
@@ -187,7 +191,7 @@ fn main() -> ! {
     // Real RNS identity: provision the node identity and derive its announce
     // destination hash (persistent across boots from the fixed seed).
     let (node_dest, node_identity) = crate::rns_link::node_destination_hash();
-    let lxmf_del = leaf_lxmf::lxmf_delivery_hash(&node_identity);
+    let lxmf_del = crate::rns_link::lxmf_delivery_hash(&node_identity);
     let mut lxmf_buf = [0u8; 32];
     for (i, b) in lxmf_del.iter().enumerate() {
         lxmf_buf[i * 2] = HEX[(b >> 4) as usize];
@@ -221,9 +225,64 @@ fn main() -> ! {
 
     let mut beat = 0u32;
     let mut now_ms = 0u32;
+
     // Cardputer → server Link + Resource push (issue #197). All packets ≤254 B.
     let mut link_res = crate::link_resource::LinkResource::new();
     let mut resource_started = false;
+
+    // The chart panel: ST7789V2 240x135 on SPI2/FSPI via the open-source
+    // mipidsi driver — SCK=36, MOSI=35, CS=37, DC=34, RST=33, BL=38 (the
+    // Cardputer-ADV panel config, same as the working no_std Rust reference).
+    // mipidsi's ST7789 model applies the 240×135 window (offset 52,40, Deg90,
+    // inverted colours) + reset during init, so no raw CASET/MADCTL hand-rolling.
+    use embedded_hal_bus::spi::ExclusiveDevice;
+    use mipidsi::interface::SpiInterface;
+    use mipidsi::models::ST7789;
+    use mipidsi::options::{ColorInversion, Orientation, Rotation};
+    use mipidsi::Builder;
+    let mut delay = esp_hal::delay::Delay::new();
+    let lcd_spi = Spi::new(
+        peripherals.SPI2,
+        SpiCfg::default().with_frequency(esp_hal::time::Rate::from_mhz(40)),
+    )
+    .expect("lcd SPI config")
+    .with_sck(peripherals.GPIO36)
+    .with_mosi(peripherals.GPIO35);
+    let dc = Output::new(peripherals.GPIO34, Level::Low, OutputConfig::default());
+    let cs = Output::new(peripherals.GPIO37, Level::High, OutputConfig::default());
+    let rst = Output::new(peripherals.GPIO33, Level::High, OutputConfig::default());
+    let mut bl = Output::new(peripherals.GPIO38, Level::Low, OutputConfig::default());
+    let mut spi_buf = [0u8; 4096];
+    let lcd_dev = ExclusiveDevice::new(lcd_spi, cs, delay).expect("excl device");
+    let di = SpiInterface::new(lcd_dev, dc, &mut spi_buf[..]);
+    let mut display = Builder::new(ST7789, di)
+        .display_size(135, 240)
+        .display_offset(52, 40)
+        .invert_colors(ColorInversion::Inverted)
+        .orientation(Orientation::new().rotate(Rotation::Deg90))
+        .reset_pin(rst)
+        .init(&mut delay)
+        .expect("st7789 init");
+    // Boot render: `lma_chart::draw` with no data paints the panel header +
+    // "waiting for samples" — drawn while the backlight is still OFF, then the
+    // rail comes up, so the very first thing the user sees is the ready chart
+    // (never a garbled GRAM flash). This is the visible confirmation the 240×135
+    // panel now drives via mipidsi (RST=33 + FSPI + correct window).
+    let boot_c = lma_chart::ChartRecord {
+        node: alloc::string::String::new(),
+        dry: -1,
+        wet: -1,
+        temp: alloc::vec::Vec::new(),
+        humidity: alloc::vec::Vec::new(),
+        samples: alloc::vec::Vec::new(),
+        water_mask: 0,
+    };
+    let mut boot_frame = crate::display::Frame;
+    lma_chart::draw(&mut boot_frame, &boot_c);
+    let _ = crate::display::blit(&mut display);
+    bl.set_high();
+    println!("[t6] st7789 init (240x135) — display ready for the chart");
+
     loop {
         beat = beat.wrapping_add(1);
         esp_hal::delay::Delay::new().delay_millis(100); // real 100 ms tick
@@ -282,6 +341,14 @@ fn main() -> ! {
                 link.pump_rx(now_ms, &node_identity, &mut |pkt: &rns_core::packet::RawPacket| {
                     let replies = lr.pump_inbound(pkt, now_f, &mut esp_rng);
                     to_tx.extend(replies);
+                }, &mut |c: &lma_chart::ChartRecord| {
+                    // The server's reply carried a fresh DATA line — paint the
+                    // Sprout chart into the framebuffer and blit the panel
+                    // (the cardputer display, now in Rust + mipidsi).
+                    let mut frame = crate::display::Frame;
+                    let points = lma_chart::draw(&mut frame, c);
+                    let _ = crate::display::blit(&mut display);
+                    println!("[t6] chart drawn: {points} trace segments");
                 });
             }
             // Once the link is up, push the big message as a Resource (once).
@@ -331,13 +398,13 @@ fn main() -> ! {
                 random5[..4].copy_from_slice(&a.to_le_bytes());
                 random5[4] = (rng.random() & 0xff) as u8;
                 let unix_time = (START_EPOCH + f64::from(now_ms) / 1000.0) as u64;
-                let rh = leaf_lxmf::random_hash(random5, unix_time);
+                let rh = crate::rns_link::random_hash(random5, unix_time);
                 let (app, aspect, label) = if beat % 200 == 0 {
                     ("lmao", "leaf", "lmao.leaf")
                 } else {
                     ("lxmf", "delivery", "lxmf.delivery")
                 };
-                let a = leaf_lxmf::announce_for(&node_identity, app, aspect, rh);
+                let a = crate::rns_link::announce_for(&node_identity, app, aspect, rh);
                 match a {
                     Some(pkt) => {
                         let n = pkt.len();
@@ -368,12 +435,10 @@ fn main() -> ! {
                 let hello = format!("Hello from Rust Cardputer leaf (seq {beat})");
                 let ts_ms = (START_EPOCH * 1000.0) as u64 + beat as u64 * 100;
                 let envelope =
-                    leaf_lxmf::build_text_envelope(node_id, &hello, ts_ms);
-                let sent = leaf_lxmf::build_message_to_server(
+                    crate::rns_link::build_text_envelope(node_id, &hello, ts_ms);
+                let sent = crate::rns_link::build_message_to_server(
                     &node_identity,
                     &mut crate::rns_link::EspRng(rng),
-                    &crate::rns_link::SERVER_LXMF_DELIVERY_HASH,
-                    &crate::rns_link::SERVER_PUBLIC_KEY,
                     &envelope,
                     START_EPOCH + beat as f64 / 10.0,
                 )
