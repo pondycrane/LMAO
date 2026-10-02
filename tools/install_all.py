@@ -34,6 +34,9 @@ import argparse
 import contextlib
 import os
 import re
+import shlex
+import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -223,6 +226,54 @@ def _flash_cardputer_native(port: str, result: DeviceResult,
     else:
         result.ok(f"Built + flashed native firmware on {port} (no DEST_HASH — announce-only)")
         print(f"  OK: native firmware flashed on {port} (no DEST_HASH — device will not send)")
+
+
+def _flash_cardputer_rust(port: str, result: DeviceResult) -> None:
+    """Build + flash the Rust esp32s3 firmware to the Cardputer.
+
+    Full-Rust stack: replaces the MicroPython runtime on the cardputer with
+    `rust-client/firmware` (the Rust link/radio + ST7789 chart display).  Uses
+    the repo's canonical `flash_firmware.sh` recipe: build the release image
+    with the esp toolchain (`export-esp.sh`), then `espflash flash --before
+    no-reset`.  Because the cardputer's USB-Serial-JTAG de-enumerates on a
+    DTR/RTS reset, the chip should be in download/bootloader mode (hold GO/BOOT
+    at USB attach) for espflash to attach — otherwise this reports FAIL.
+    """
+    print(f"\n--- Cardputer (rust): building + flashing Rust firmware on {port} ---")
+    if shutil.which("espflash") is None:
+        result.skip("espflash not found on PATH")
+        print("  SKIP: espflash not found on PATH")
+        return
+    print(
+        "  NOTE: this REPLACES the MicroPython runtime.  The Cardputer should be in\n"
+        "  download/bootloader mode (hold GO/BOOT at USB attach) for espflash."
+    )
+    firmware_dir = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "rust-client", "firmware"
+    )
+    cmd = (
+        "source ~/export-esp.sh 2>/dev/null || true; "
+        f"cd {shlex.quote(firmware_dir)} && "
+        "cargo build --release && "
+        "exec espflash flash --before no-reset "
+        f"--port {shlex.quote(port)} --chip esp32s3 --after hard-reset "
+        "target/xtensa-esp32s3-none-elf/release/lmao-firmware-t1"
+    )
+    try:
+        p = subprocess.run(["bash", "-lc", cmd], text=True, capture_output=True)
+    except Exception as exc:  # noqa: BLE001 - flash tooling varies; never kill the loop
+        result.fail(f"Rust firmware flash error: {exc}")
+        print(f"  FAIL: {exc}")
+        return
+    if p.returncode != 0:
+        tail = (p.stdout + "\n" + p.stderr).strip().splitlines()[-6:]
+        result.fail("espflash flash failed (see output)")
+        print("  FAIL: espflash flash failed")
+        for line in tail:
+            print("   ", line)
+        return
+    result.ok(f"Rust firmware flashed (esp32s3, {port})")
+    print("  OK: Rust firmware flashed")
 
 
 def _inject_dest_hash(ser, client_root: str) -> str:
@@ -810,6 +861,14 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "reserved for tight-heap hardware (Sprout/Atom Lite native client), "
         "so it is no longer the Cardputer default.",
     )
+    cp_group.add_argument(
+        "--rust-cardputer",
+        action="store_true",
+        help="Build + flash the Rust esp32s3 firmware (rust-client/firmware) to "
+        "the Cardputer, replacing the MicroPython client (full-Rust stack). "
+        "REPLACES the running MicroPython runtime; the Cardputer should be in "
+        "download/bootloader mode (hold GO/BOOT at USB attach) for espflash.",
+    )
     return parser.parse_args(argv)
 
 
@@ -848,6 +907,9 @@ def main(argv: list[str] | None = None) -> None:
         if not port:
             cp_result.skip("No Cardputer detected on USB")
             print("Cardputer: SKIP — not detected on USB")
+        elif args.rust_cardputer:
+            print("Cardputer: using Rust firmware (--rust-cardputer)")
+            _flash_cardputer_rust(port, cp_result)
         elif args.native_cardputer:
             print("Cardputer: using native C firmware (--native-cardputer)")
             _flash_cardputer_native(
