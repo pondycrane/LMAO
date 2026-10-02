@@ -77,7 +77,7 @@ spec:
             - name: RUST_LOG
               value: lmao_server_rs=info,rns_net=info,rns_core=info
             - name: LMAO_RNODE_PORT
-              value: /dev/ttyUSB0
+              value: /dev/ttyUSB1
             - name: LMAO_SERVER_RNS_IDENTITY_HEX
               value: 803763856683f9cc649c63dc45ae22d17d007e74e26afd176a04131a072b8160b2920e025efcbb88d3d84e002f07b0d84ad0192bec18f19d32c13d99894c857f
             - name: NATS_SERVER
@@ -103,7 +103,7 @@ spec:
             - name: contacts
               mountPath: /data
             - name: rnode
-              mountPath: /dev/ttyUSB0
+              mountPath: /dev/ttyUSB1
           resources:
             limits:
               memory: 512Mi
@@ -113,7 +113,7 @@ spec:
             claimName: lmao-server-rust-app-contacts
         - name: rnode
           hostPath:
-            path: /dev/ttyUSB0
+            path: /dev/ttyUSB1
 
 ---
 apiVersion: v1
