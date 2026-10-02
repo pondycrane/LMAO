@@ -119,7 +119,12 @@ pub fn tx_lines(packet: &[u8], seq: u8) -> Vec<TxLine> {
         let mut onair = Vec::with_capacity(onair_len);
         onair.push(if split { seq | 0x01 } else { seq });
         onair.extend_from_slice(&packet[off..off + chunk]);
-        out.push(("AT+PRECV=0".to_string(), 80));
+        // 600 ms pre-PSEND drain: the RAK3172 rejects AT+PSEND with AT_BUSY_ERROR
+        // if RX-disable (AT+PRECV=0) is still settling (native Reticulum waits
+        // ~580 ms: uart_wait_tx_done(300) + drain_ms(80) + line), and a rejected
+        // PSEND silently never radiates (the native logs per-frame OK/ERR; we
+        // just never heard from the RNode when this was 80 ms).
+        out.push(("AT+PRECV=0".to_string(), 600));
         out.push((alloc::format!("AT+PSEND={}", to_hex(&onair)), 1200));
         out.push(("AT+PRECV=65535".to_string(), 80));
         off += chunk;
