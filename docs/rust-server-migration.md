@@ -346,9 +346,12 @@ control engine is intentionally out of the send leg.
 `6f876d40fe1a3ca663be290108341230` to the server's `LMAO_ALLOWED_CLIENTS`
 (k8s/lmao-server.yaml + env) or `DeliveryHandler` drops its reports at the
 source gate.  Build/flash + port-identification notes: see
-`rust-client/firmware-sprout/README.md`.  Not yet flashed to hardware — the
-on-device verification (DTU TX → server RNode RX → chart fold) is the next
-step, mirroring the Cardputer panel's flash-verify loop.
+`rust-client/firmware-sprout/README.md`. **Flashed + verified 2026-10-02**: on
+this rev-1.1 chip the stock firmware build wasn't bootable (esp-hal 1.2.2
+defaults `ESP_HAL_CONFIG_MIN_CHIP_REVISION` to v3.0), fixed by setting it to
+v1.0 in the firmware's `.cargo/config.toml` — it now boots clean, configures
+the RAK3172 P2P, announces both destinations, and sends the first LXMF
+SensorReport (moisture 39.8 %, air 25.9 °C/68 %, 339 B) on the DTU.
 
 
 ### install_all `--stack` selector

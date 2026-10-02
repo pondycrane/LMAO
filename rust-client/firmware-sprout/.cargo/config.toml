@@ -14,3 +14,11 @@ rustflags = [
 
 [unstable]
 build-std = ["core", "alloc"]
+
+# This Sprout's ESP32 is silicon rev 1.1 (MAC c8:85:41:67:dd:34 — an early
+# D0WD). esp-hal 1.2.2 defaults `ESP_HAL_CONFIG_MIN_CHIP_REVISION` to v3.0 and
+# panics at boot on older silicon; lower it to v1.0 so the sender runs here.
+# (The IDF-6.1 bootloader also wants the app image rev ≥ v3 — see README's
+# "rev-1 silicon" note for the one-time flash patch.)
+[env]
+ESP_HAL_CONFIG_MIN_CHIP_REVISION = "100"
