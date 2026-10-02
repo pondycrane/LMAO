@@ -293,3 +293,15 @@ Measured on the deploy host (arm64): the one-time warm-builder cold build takes
 ~4.5 min wall (cargo 1m41s) — versus ~15–40 min per deploy before. A
 `.dockerignore` at the repo root excludes `rust-client/target` (~GB) from the
 build context, which alone cut ~6–7 min of tar/upload per deploy.
+
+### install_all `--stack` selector
+
+`tools/install_all.py --include-services` now takes `--stack {auto,python,
+rust}`, default **rust**: a plain services deploy builds/releases/installs
+only the Rust LMAO server (the future replacement) and skips the legacy
+Python `install_pi_server`/`deploy_lmao_server` image build.  Use
+`--stack python` to deploy the Python server instead, or `--stack auto` for
+the old behavior of deploying both (honouring `--skip-server` /
+`--skip-rust-server`).  `install_rust_lmao_server` stays as-is: the warm
+builder + local-registry release + `k8s/lmao-server-rust-app.yaml` apply
+(contacts PVC + Deployment + Service) + rollout/pod-listener verification.
