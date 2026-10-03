@@ -20,6 +20,16 @@ FROM lmao-server-rust-builder:1 AS builder
 WORKDIR /src/rust-client
 # Copy the real (possibly changed) server source; only changed crates rebuild.
 COPY rust-client/host /src/rust-client/host
+# The rns-net LRPROOF patch ([patch.crates-io] in the workspace Cargo.toml)
+# is materialized from the cargo registry cache by the vendored fetch script;
+# the builder's cached target already includes it, but re-run defensively so a
+# stale builder image cannot drop the fix.
+COPY rust-client/vendor/fetch-rns-net-patched.sh /src/rust-client/vendor/fetch-rns-net-patched.sh
+COPY rust-client/vendor/rns-net-0.7.2-fix.patch /src/rust-client/vendor/rns-net-0.7.2-fix.patch
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends patch \
+    && rm -rf /var/lib/apt/lists/* \
+    && bash /src/rust-client/vendor/fetch-rns-net-patched.sh
 RUN cargo build --release -p lmao-server-rs
 
 # ── Runtime ────────────────────────────────────────────────────────────────
