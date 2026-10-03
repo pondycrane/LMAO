@@ -1906,8 +1906,6 @@ dependencies = [
 [[package]]
 name = "rns-net"
 version = "0.7.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3593611d6d7472694306170ba5e8a552467a57140688c6ff75b9f62c8817a270"
 dependencies = [
  "bzip2",
  "libc",
