@@ -16,8 +16,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use rns_net::{
-    Callbacks, DestHash, InterfaceConfig, InterfaceId, LinkId, NodeConfig, PacketHash,
-    RNodeConfig, RNodeSubConfig, RnsNode, MODE_FULL,
+    Callbacks, DestHash, Destination, IdentityHash, InterfaceConfig, InterfaceId, LinkId,
+    NodeConfig, PacketHash, RNodeConfig, RNodeSubConfig, RnsNode, MODE_FULL,
 };
 use rns_crypto::identity::Identity;
 
@@ -196,7 +196,10 @@ fn rnode_config(cfg: &RfConfig) -> RNodeConfig {
 }
 
 /// Start the RF receive node (blocking). Returns the running [`RnsNode`].
-pub fn start_rf_node(state: SharedState, cfg: RfConfig) -> Result<RnsNode, Box<dyn std::error::Error>> {
+pub fn start_rf_node(
+    state: SharedState,
+    cfg: RfConfig,
+) -> Result<std::sync::Arc<RnsNode>, Box<dyn std::error::Error>> {
     let identity = match &cfg.identity_hex_64b {
         Some(hx) => {
             let raw = hex::decode(hx)?;
@@ -209,6 +212,10 @@ pub fn start_rf_node(state: SharedState, cfg: RfConfig) -> Result<RnsNode, Box<d
     let pb = identity.get_public_key().ok_or("no public key")?;
     let sig_prv: [u8; 32] = pk[32..].try_into().unwrap();
     let sig_pub: [u8; 32] = pb[32..].try_into().unwrap();
+    // A separate owned identity (rebuilt from the same key) the periodic
+    // lmao.data announce task can move into itself — the original `identity`
+    // is moved into the NodeConfig below.
+    let ann_identity = Identity::from_private_key(&pk);
 
     log::info!("LMAO server ed25519 pub = {}", hex::encode(&sig_pub));
 
@@ -288,10 +295,40 @@ pub fn start_rf_node(state: SharedState, cfg: RfConfig) -> Result<RnsNode, Box<d
         )),
     )?;
     node.register_link_destination(cfg.lma_data_hash, sig_prv, sig_pub, 2)?;
+
+    // Broadcast the server's `lmao.data` presence on a cadence so the Sprout's
+    // continuous-RX radio has a validated path to it + the server identity to
+    // run the link handshake against. The Python server did exactly this
+    // ("Server announce sent"); without it the Rust server never TXs on the
+    // RNode, so the Sprout can neither find a path nor LRPROOF back.
+    let id_hash = *ann_identity.hash();
+    let ann_dest = Destination::single_in("lmao", &["data"], IdentityHash(id_hash));
+    log::info!(
+        "announce lmao/data hash {} (registered link dest {})",
+        hex::encode(&ann_dest.hash.0),
+        hex::encode(&cfg.lma_data_hash)
+    );
+    let ann_interval = std::env::var("LMAO_ANNOUNCE_INTERVAL")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(30)
+        .max(1);
+    let shared = std::sync::Arc::new(node);
+    let task_node = std::sync::Arc::clone(&shared);
+    let _ann_task = tokio::spawn(async move {
+        let mut iv = tokio::time::interval(std::time::Duration::from_secs(ann_interval));
+        loop {
+            iv.tick().await;
+            if task_node.announce(&ann_dest, &ann_identity, None).is_ok() {
+                log::debug!("periodic lmao.data announce broadcast");
+            }
+        }
+    });
+
     log::info!(
         "RF receive listening on RNode {} for lmao.data dest {}",
         cfg.serial_port,
         hex::encode(cfg.lma_data_hash)
     );
-    Ok(node)
+    Ok(shared)
 }
