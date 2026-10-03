@@ -171,7 +171,7 @@ fn rnode_config(cfg: &RfConfig) -> RNodeConfig {
         outgoing: true,
         frequency: cfg.frequency,
         bandwidth: cfg.bandwidth,
-        txpower: 7,
+        txpower: 22,
         spreading_factor: cfg.spreading_factor,
         coding_rate: cfg.coding_rate,
         flow_control: false,
