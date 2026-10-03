@@ -1406,7 +1406,9 @@ name = "lmao-sprout-resource-300b-e2e"
 version = "0.1.0"
 dependencies = [
  "leaf-resource",
+ "lma-dtu",
  "lma-link-resource",
+ "radio-interface",
  "rns-core",
  "rns-crypto",
 ]

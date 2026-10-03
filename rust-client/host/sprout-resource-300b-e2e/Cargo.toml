@@ -18,7 +18,9 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+lma-dtu = { path = "../../crates/lma-dtu" }
 leaf-resource = { path = "../../crates/leaf-resource" }
 lma-link-resource = { path = "../../crates/lma-link-resource" }
+radio-interface = { path = "../../crates/radio-interface" }
 rns-core = "0.1.17"
 rns-crypto = "0.1.10"
