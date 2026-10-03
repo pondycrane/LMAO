@@ -4,3 +4,6 @@
 /target/
 /firmware/target/
 *.venv/
+
+# Patched rns-net is materialized from the cargo cache by vendor/fetch-rns-net-patched.sh
+/vendor/rns-net-0.7.2/

@@ -67,7 +67,10 @@ const ANNOUNCE_INTERVAL_MS: u32 = 30_000;
 /// Loop tick.
 const TICK_MS: u32 = 100;
 /// Cooldown before re-attempting a LINKREQUEST while the link is Idle/Failed.
-const LINK_RETRY_MS: u32 = 5_000;
+/// Must be SLOW enough that the RAK3172 half-duplex radio settles between
+/// frames: a 5 s retry kept the RAK busy toggling PRECV=0/PSEND/PRECV=65535,
+/// so even the 30 s announces stopped radiating on the shared channel.
+const LINK_RETRY_MS: u32 = 25_000;
 /// Backoff between Resource re-advertisements while a transfer is in flight
 /// (a ~212 B LoRa frame has ~300 ms airtime — advertising every tick would
 /// flood the half-duplex channel).
@@ -81,8 +84,20 @@ const MOISTURE_WET_COUNT: f32 = 1580.0;
 
 /// Write one AT line (appending CRLF) + flush.
 fn at_write(tx: &mut UartTx<'_, esp_hal::Blocking>, line: &str) {
-    let _ = tx.write(line.as_bytes());
-    let _ = tx.write(b"\r\n");
+    // esp-hal's blocking `UartTx::write` fills at most one 128-byte FIFO per
+    // call and returns the partial count — ignoring it silently truncates any
+    // command longer than 128 bytes (AT+PSEND payloads). Loop until every byte
+    // (incl. CRLF) is written.
+    let mut data = line.as_bytes();
+    while !data.is_empty() {
+        let n = tx.write(data).unwrap_or(0);
+        data = &data[n..];
+    }
+    let mut nl: &[u8] = b"\r\n";
+    while !nl.is_empty() {
+        let n = tx.write(nl).unwrap_or(0);
+        nl = &nl[n..];
+    }
     let _ = tx.flush();
 }
 
@@ -190,6 +205,17 @@ fn main() -> ! {
     .with_tx(peripherals.GPIO22)
     .with_rx(peripherals.GPIO19);
     let (mut rx2, mut tx) = uart_full.split();
+
+    // Recovery: software-reset the RAK3172 before configuring. The RAK's
+    // P2P radio can wedge (no RF out) after brownout/flash-reset events, and
+    // a firmware reboot alone does not clear it — `AT+RST` reloads the RUI3
+    // firmware + its flash radio config so the radio-set cmds below apply to a
+    // fresh controller (RAK boots in ~1-2 s; drain generously).
+    println!("[dtu] resetting RAK3172 (AT+RST)…");
+    at_write(&mut tx, "AT+RST");
+    // The RAK's reset boot takes ~2-3 s (RUI3 reload + flash config read);
+    // configuring during that window drops the commands, so wait it out.
+    at_drain(&mut rx2, &mut delay, 4000);
 
     // Configure the RAK3172 P2P mesh parameters (AT+PRECV=0 first, the set
     // cmds, then continuous RX on).
