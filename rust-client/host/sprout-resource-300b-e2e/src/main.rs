@@ -51,7 +51,7 @@ fn decrypt(d: &[u8]) -> Result<Vec<u8>, ()> {
 
 /// Route ONE whole packet over the emulated **RAK-RF frame transport** — the
 /// Sprout's real radio leg: `tx_lines` (the RAK `AT+PSEND` frame splitter at
-/// the measured 128-B cap) → `parse_rnode_frame` → the RNode `SplitAssembler`
+/// the 254-B DTU frame cap) → `parse_rnode_frame` → the RNode `SplitAssembler`
 /// (the server/urns RX side). Larger-than-one-frame packets genuinely split
 /// into multiple flagged frames and are reassembled here — i.e. "all frames
 /// received", no workaround. Returns every completed packet (normally exactly
@@ -101,9 +101,9 @@ fn run() {
     );
 
     // 2. Sprout side: Resource sender (advertise → serve parts → proof) with
-    //    the Sprout's real part SDU. Because the RAK's per-PSEND cap is 128 B
-    //    (measured: ≥160 rejected), EVERY 160-B part already spans two flagged
-    //    split frames — so the whole transfer is genuinely multiframe.
+    //    the Sprout's real part SDU. Each resource packet (≤254 B) fits one
+    //    RAK frame; >254-B packet splitting is covered separately by the
+    //    lma-dtu unit tests (`tx_split_two_frames_both_flagged`).
     let now = 1000.0f64;
     let link_rtt = 0.1;
     let mut rng = FixedRng::new(b"e2e-sprout-rng");
@@ -180,18 +180,14 @@ fn run() {
     assert_eq!(sha256(&data), HW_SHA256, "reassembled sha256 != pinned value");
 
     // 5. Every whole packet was reassembled from every TX'd frame — none lost,
-    //    none dropped — and the transfer was genuinely multiframe (more RAK
-    //    split-frames than whole packets).
+    //    none dropped (any frame loss across the real RAK transport fails this
+    //    accounting).
     assert_eq!(
         asm.completed() as usize, packets,
         "packet accounting: {packets} whole packets TX'd but {} reassembled",
         asm.completed()
     );
     assert_eq!(asm.dropped(), 0, "a frame was dropped by the reassembler");
-    assert!(
-        frames > packets,
-        "expected a multiframe transfer (each >128-B part spans 2+ RAK frames);          {frames} frames for {packets} packets"
-    );
 }
 
 fn crate_hex(b: &[u8]) -> String {
