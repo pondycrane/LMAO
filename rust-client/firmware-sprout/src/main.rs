@@ -206,24 +206,17 @@ fn main() -> ! {
     .with_rx(peripherals.GPIO19);
     let (mut rx2, mut tx) = uart_full.split();
 
-    // Recovery: software-reset the RAK3172 before configuring. The RAK's
-    // P2P radio can wedge (no RF out) after brownout/flash-reset events, and
-    // a firmware reboot alone does not clear it — `AT+RST` reloads the RUI3
-    // firmware + its flash radio config so the radio-set cmds below apply to a
-    // fresh controller (RAK boots in ~1-2 s; drain generously).
-    println!("[dtu] resetting RAK3172 (AT+RST)…");
-    at_write(&mut tx, "AT+RST");
-    // The RAK's reset boot takes ~2-3 s (RUI3 reload + flash config read);
-    // configuring during that window drops the commands, so wait it out.
-    at_drain(&mut rx2, &mut delay, 4000);
-
     // Configure the RAK3172 P2P mesh parameters (AT+PRECV=0 first, the set
-    // cmds, then continuous RX on).
+    // cmds, then continuous RX on) — exactly the native-client sequence that
+    // is proven to radiate on this hardware (an AT+RST here wedged the radio).
     for line in lma_dtu::at_dtu::boot_lines() {
         println!("[dtu] cfg: {line}");
         at_write(&mut tx, &line);
-        at_drain(&mut rx2, &mut delay, 120);
+        at_drain(&mut rx2, &mut delay, 350);
     }
+    // Settle before the first frames (native-client settles 250 ms so the
+    // radio is fully armed before any TX; toggling PRECV too early can wedge).
+    delay.delay_millis(250);
     println!("[dtu] RAK3172 P2P on-mesh, listening");
 
     // ── sensors: moisture (ADC1_CH4) + ENV III SHT30 (I2C0) ────────────────

@@ -311,12 +311,26 @@ pub fn start_rf_node(
     let ann_interval = std::env::var("LMAO_ANNOUNCE_INTERVAL")
         .ok()
         .and_then(|v| v.trim().parse::<u64>().ok())
-        .unwrap_or(30)
+        .unwrap_or(300) // 5 min — frequent enough for path discovery, sparse
+                        // enough not to self-mask the half-duplex RNode. A 30 s
+                        // @22 dBm broadcast phase-locked with the Sprout's 30 s
+                        // announce, so the RNode was in its own TX (deaf) every
+                        // time the Sprout transmitted — the RNode then could
+                        // not demodulate the Sprout at all.
         .max(1);
     let shared = std::sync::Arc::new(node);
     let task_node = std::sync::Arc::clone(&shared);
     let _ann_task = tokio::spawn(async move {
         let mut iv = tokio::time::interval(std::time::Duration::from_secs(ann_interval));
+        // Randomize the first tick (up to ~40% of the interval) so we never
+        // phase-lock into another node's periodic broadcast on a half-duplex
+        // RNode. Non-deterministic source: the current time in monotonic ns.
+        let ns = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let jitter_ms = (ns % (ann_interval as u128 * 400)) as u64; // ≤ ~40% of interval
+        tokio::time::sleep(std::time::Duration::from_millis(jitter_ms)).await;
         loop {
             iv.tick().await;
             if task_node.announce(&ann_dest, &ann_identity, None).is_ok() {
