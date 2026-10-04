@@ -107,9 +107,17 @@ pub fn event_hex(line: &str) -> Option<&str> {
     line.rfind(':').and_then(|c| line.get(c + 1..))
 }
 
+/// A bare-hex line (as the RAK3172 here emits for a received on-air frame):
+/// only hex digits, even length, and at least one byte — so AT responses
+/// (`OK`, `+EVT:TXP2P DONE`, `<AT+...>=<val>`) never match.
+pub fn is_bare_hex(line: &str) -> bool {
+    line.len() % 2 == 0 && line.len() >= 2 && line.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
 /// Convert a whole RNS packet into the ordered AT lines needed to TX it on
-/// air.  Per frame: RX off → `AT+PSEND=<hex>` (the RNode header + payload) →
-/// RX re-armed.  `seq` is the upper-nibble tag (any 4-bit value; random is
+/// air.  Per frame: `AT+PSEND=<hex>` (the RNode header + payload); the module
+/// auto-returns to continuous RX afterward (PRECV=65535 was armed at boot).
+///  `seq` is the upper-nibble tag (any 4-bit value; random is
 /// fine).  Packets > 254 B split into two frames, both flagged `seq|0x01`.
 pub fn tx_lines(packet: &[u8], seq: u8) -> Vec<TxLine> {
     let mut out = Vec::new();
@@ -122,15 +130,15 @@ pub fn tx_lines(packet: &[u8], seq: u8) -> Vec<TxLine> {
         let mut onair = Vec::with_capacity(onair_len);
         onair.push(if split { seq | 0x01 } else { seq });
         onair.extend_from_slice(&packet[off..off + chunk]);
-        // RAK3172 is half-duplex: after a TX the module only hears again once
-        // AT+PRECV=65535 re-arms RX. The post-PSEND drain was 1200 ms —
-        // exactly when the server's LRPROOF (~1-1.5 s after our LINKREQUEST)
-        // arrives — so the handshake always timed out (link Closed/Timeout)
-        // and the Resource never started. Drain just long enough for
-        // OK/+EVT:TXP2P DONE (~400 ms) then re-arm RX immediately.
-        out.push(("AT+PRECV=0".to_string(), 600));
-        out.push((alloc::format!("AT+PSEND={}", to_hex(&onair)), 120));
-        out.push(("AT+PRECV=65535".to_string(), 150));
+        // RAK3172 P2P auto-returns to continuous RX after a completed PSEND
+        // (as long as PRECV=65535 was armed at boot). The old per-frame
+        // PRECV=0/PSEND/PRECV=65535 toggling raced the module: the post-PSEND
+        // re-arm was sent at 120 ms while the RAK was still finishing a large
+        // frame (~300 ms airtime), so the command was lost and the RAK was left
+        // deaf — it could TX (announces reached the RNode) but never RX the
+        // server's LRPROOF, so every Link timed out. Emit PSEND alone; drain
+        // long enough for the TX to finish + the module to re-arm RX.
+        out.push((alloc::format!("AT+PSEND={}", to_hex(&onair)), 500));
         off += chunk;
         if off >= packet.len() {
             break;
@@ -203,6 +211,20 @@ impl AtRx {
                 return if got.is_empty() { None } else { Some(got) };
             }
         }
+        // The RAK3172 here emits each received on-air frame as a single bare
+        // hex line (no `+EVT:RXP2P` prefix). AT responses (`OK`,
+        // `+EVT:TXP2P DONE`, `<AT+...>=<val>`) are never bare even-length hex,
+        // so any bare hex line ≥ a nibble is a received frame. The TX-side
+        // PSEND echo never reaches us (at_drain discards it), so this cannot
+        // mistake a local transmission for a reception.
+        if is_bare_hex(line) {
+            if let Some(p) = from_hex(line) {
+                if !p.is_empty() {
+                    let got = self.push_onair(&p, now_ms);
+                    return if got.is_empty() { None } else { Some(got) };
+                }
+            }
+        }
         None
     }
 
@@ -256,14 +278,35 @@ mod tests {
     }
 
     #[test]
+    fn bare_hex_rx_frame_parsed() {
+        assert!(is_bare_hex("deadbeef"));
+        assert!(is_bare_hex("2108aedf"));
+        // AT responses / echoes are never bare even-length hex.
+        assert!(!is_bare_hex("OK"));
+        assert!(!is_bare_hex("+EVT:TXP2P DONE"));
+        assert!(!is_bare_hex("AT+SYNCWORD=1424"));
+        assert!(!is_bare_hex("0"));
+        assert!(!is_bare_hex("abc"));
+
+        // A bare-hex line is fed as an RX on-air frame: header 0x50 ‖ payload,
+        // reassembled like the +EVT path (single non-split frame).
+        let mut rx = AtRx::new();
+        let mut onair = vec![0x50u8];
+        onair.extend_from_slice(b"hello");
+        let line = alloc::format!("{}\n", to_hex(&onair));
+        let pkts = rx.feed(line.as_bytes(), 0);
+        assert_eq!(pkts.len(), 1);
+        assert_eq!(pkts[0], b"hello");
+    }
+
+    #[test]
     fn tx_single_frame() {
         let pkt = b"hello-sprout";
         let lines = tx_lines(pkt, 0xc0);
-        // PRECV off → PSEND (header 0xc0 ‖ payload) → PRECV on.
-        assert_eq!(lines[0].0, "AT+PRECV=0");
-        assert_eq!(lines[1].0, format!("AT+PSEND=c0{}", to_hex(pkt)));
-        assert_eq!(lines[2].0, "AT+PRECV=65535");
-        assert_eq!(lines.len(), 3);
+        // PSEND only: the RAK auto-returns to continuous RX after the TX
+        // (PRECV=65535 armed at boot), so no manual PRECV toggling per frame.
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].0, format!("AT+PSEND=c0{}", to_hex(pkt)));
     }
 
     #[test]
