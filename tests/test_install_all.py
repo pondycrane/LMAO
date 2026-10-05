@@ -1611,16 +1611,16 @@ class TestInstallIotIngestConsumer:
         with (
             patch("shutil.which", return_value="/usr/bin/docker"),
             patch("os.path.isfile", return_value=True),
-            # build, tag, push, apply all ok; rollout fails
+            # build, tag, push, apply, rollout restart ok; rollout status fails
             patch(
                 "subprocess.run",
-                side_effect=[mock_ok, mock_ok, mock_ok, mock_ok, mock_rollout_fail],
+                side_effect=[mock_ok, mock_ok, mock_ok, mock_ok, mock_ok, mock_rollout_fail],
             ),
         ):
             result = self._make_result()
             install_services.install_iot_ingest_consumer(result, "/fake/repo")
             assert result.status == "FAIL"
-            assert "rollout status" in result.detail
+            assert "rollout failed" in result.detail
 
     def test_fails_when_no_pod_running(self):
         """Result should be FAIL when no consumer pod reaches Running."""
@@ -1632,10 +1632,12 @@ class TestInstallIotIngestConsumer:
         with (
             patch("shutil.which", return_value="/usr/bin/docker"),
             patch("os.path.isfile", return_value=True),
-            # build, tag, push, apply, rollout ok; pod check returns Pending
+            # build, tag, push, apply, restart, rollout status ok; pod check Pending
             patch(
                 "subprocess.run",
-                side_effect=[mock_ok, mock_ok, mock_ok, mock_ok, mock_ok, mock_pods],
+                side_effect=[
+                    mock_ok, mock_ok, mock_ok, mock_ok, mock_ok, mock_ok, mock_pods
+                ],
             ),
         ):
             result = self._make_result()

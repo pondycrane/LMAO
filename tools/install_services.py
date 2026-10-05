@@ -370,6 +370,47 @@ def _tag_and_push(result: DeviceResult, local_tag: str, registry_image: str) -> 
         return False
 
 
+def _force_restart_and_wait(result: "DeviceResult", deployment: str) -> bool:
+    """Force-roll a mutable-``:latest`` Deployment so the freshly built image
+    is actually pulled and the rollout fully completes.
+
+    A ``kubectl apply`` of an *unchanged* spec (the Deployment references the
+    mutable ``:latest`` tag) creates **no** new ReplicaSet — the running pod
+    silently keeps the old image while ``rollout status`` reports success.
+    "install all" must mean the new code is live, so always restart the
+    Deployment before waiting for the rollout.
+
+    Returns True on a fully rolled-out Deployment; on failure marks *result*
+    FAIL, prints diagnostics, and returns False.
+    """
+    proc = _run_kubectl_step(
+        result,
+        "rollout restart",
+        ["kubectl", "rollout", "restart", f"deployment/{deployment}"],
+    )
+    if proc is None:
+        return False
+    print(f"  Forced rollout of {deployment} (fresh :latest image) ...")
+    try:
+        rp = subprocess.run(
+            ["kubectl", "rollout", "status", f"deployment/{deployment}", "--timeout=240s"],
+            capture_output=True,
+            text=True,
+            timeout=260,
+        )
+    except subprocess.SubprocessError as exc:
+        result.fail(f"rollout status error: {exc}")
+        print(f"  FAIL: {exc}")
+        return False
+    if rp.returncode != 0:
+        err = (rp.stderr or rp.stdout).strip().split("\n")[-3:]
+        result.fail(f"rollout failed: {'; '.join(err)}")
+        print(f"  FAIL: rollout — {'; '.join(err)}")
+        print(f"  Inspect with: kubectl logs deployment/{deployment}")
+        return False
+    return True
+
+
 def install_pi_server(result: DeviceResult, repo_root: str | None = None) -> None:
     """Build the lmao-server image and release it via the local registry.
 
@@ -696,20 +737,10 @@ def install_iot_ingest_consumer(result: DeviceResult, repo_root: str | None = No
     if proc is None:
         return
 
-    # Wait for the rollout so a broken deploy is reported [FAIL]
-    # instead of silently succeeding.
-    proc = _run_kubectl_step(
-        result,
-        "rollout status",
-        [
-            "kubectl",
-            "rollout",
-            "status",
-            "deployment/iot-ingest-consumer",
-            "--timeout=180s",
-        ],
-    )
-    if proc is None:
+    # Force the rollout so the freshly built :latest image is actually
+    # pulled — apply of an unchanged spec creates no ReplicaSet, so this
+    # would otherwise silently keep the old code running.
+    if not _force_restart_and_wait(result, "iot-ingest-consumer"):
         print(
             "  Rollout did not complete — check: "
             "kubectl describe deployment iot-ingest-consumer"
@@ -1229,27 +1260,13 @@ def deploy_lmao_server(result: DeviceResult, repo_root: str | None = None) -> No
         print(f"  FAIL: {exc}")
         return
 
-    # ── Wait for the rollout ──
-    print("  Waiting for rollout ...")
-    try:
-        proc = subprocess.run(
-            [
-                "kubectl", "rollout", "status", "deployment/lmao-server",
-                "--timeout=240s",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=260,
-        )
-        if proc.returncode != 0:
-            err = (proc.stderr or proc.stdout).strip().split("\n")[-3:]
-            result.fail(f"rollout failed: {'; '.join(err)}")
-            print(f"  FAIL: rollout — {'; '.join(err)}")
-            print("  Inspect with: kubectl logs deployment/lmao-server")
-            return
-    except subprocess.SubprocessError as exc:
-        result.fail(f"rollout status error: {exc}")
-        print(f"  FAIL: {exc}")
+    # ── Force the rollout ──
+    # Apply of an unchanged spec (mutable :latest tag) creates NO new
+    # ReplicaSet, so the pod would silently keep the old image. Force-restart
+    # so the freshly built image is actually pulled — "install all" must mean
+    # the new code is live.
+    if not _force_restart_and_wait(result, "lmao-server"):
+        print("  Inspect with: kubectl logs deployment/lmao-server")
         return
 
     # ── Retire the legacy Pi deployment (best-effort) ──
