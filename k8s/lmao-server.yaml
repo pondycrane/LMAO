@@ -7,7 +7,7 @@
 # Key properties:
 #   - hostNetwork: Reticulum's AutoInterface needs UDP multicast on the
 #     LAN (human_client discovery), so the pod shares the node network.
-#   - privileged + hostPath /dev/ttyUSB0: K8s has no native USB serial
+#   - privileged + hostPath /dev/ttyUSB1: K8s has no native USB serial
 #     support; this is the simplest passthrough. A device plugin (e.g.
 #     generic-device-plugin) would avoid privileged mode if ever needed.
 #   - Identity PVC: the LXMF identity lives at /data/lxmf (see
@@ -17,7 +17,7 @@
 #     stops matching (issue #70). Local backup: ~/lmao-identity-backup-*.
 #   - Recreate strategy: the PVC is RWO and the USB device is exclusive.
 #
-# Note: /dev/ttyUSB0 is stable here (only one USB-serial device on tp4),
+# Note: /dev/ttyUSB1 is stable here (only one USB-serial device on tp4),
 # but after a node reboot/replug the pod may need a restart if the
 # device re-enumerates:
 #   kubectl rollout restart deployment/lmao-server
@@ -82,7 +82,7 @@ spec:
             - name: NATS_SERVER
               value: "nats://nats-server.default.svc.cluster.local:4222"
             - name: LMAO_RNODE_PORT
-              value: "/dev/ttyUSB0"
+              value: "/dev/ttyUSB1"
             - name: LMAO_SERVER_IDENTITY_PATH
               value: "/data/lxmf"
             # Persist Reticulum transport state (known destinations) on the
@@ -108,7 +108,7 @@ spec:
               protocol: TCP
           volumeMounts:
             - name: rnode
-              mountPath: /dev/ttyUSB0
+              mountPath: /dev/ttyUSB1
             - name: identity
               mountPath: /data
           resources:
@@ -131,7 +131,7 @@ spec:
       volumes:
         - name: rnode
           hostPath:
-            path: /dev/ttyUSB0
+            path: /dev/ttyUSB1
         - name: identity
           persistentVolumeClaim:
             claimName: lmao-server-identity

@@ -2,11 +2,6 @@
 name = "radio-interface"
 version.workspace = true
 edition.workspace = true
-description = "LMAO leaf radio-interface: RNode LoRa RF frame demux/TX framing (T3) + the leaf Interface contract (ticket RF-leg)"
+description = "LMAO leaf radio-interface: RNode LoRa RF frame demux/TX framing (T3)"
 
 [dependencies]
-# rns-core default enables its `std` feature (→ rns-crypto/std), which breaks
-# the no_std xtensa firmware target. radio-interface only needs the no_std
-# `packet`/`RawPacket` path, so opt out of std here (the std host crates that
-# need rns-core's full transport still enable it via unification).
-rns-core = { version = "0.1.17", default-features = false }

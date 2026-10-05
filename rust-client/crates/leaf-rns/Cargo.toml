@@ -9,9 +9,3 @@ description = "LMAO leaf RNS: transport/Link wiring + duty-cycle link-window sch
 lma-identity = { path = "../lma-identity" }
 # radio-interface (T3, PR #175 — add when merged): frames the RNS interface the
 # link-window scheduler gates the radio RX of. Scheduling is framing-independent.
-
-[dev-dependencies]
-# Announce-construction verification (recipient-side validate) uses these
-# directly in the host test.
-rns-core = "0.1.17"
-rns-crypto = "0.1.10"

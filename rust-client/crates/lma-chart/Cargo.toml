@@ -1,8 +1,0 @@
-[package]
-name = "lma-chart"
-version.workspace = true
-edition.workspace = true
-description = "Cardputer Sprout chart renderer (no_std): parse the server's DATA line + draw the soil/humidity/temperature chart + watering markers over a two-primitive Display trait. Shared by the esp32s3 firmware and its host tests."
-
-[dependencies]
-# core + alloc only — no std, no panels; a driver supplies the framebuffer.
