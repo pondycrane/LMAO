@@ -75,17 +75,21 @@ The rig runs the native app (since #133); re-flashing replaces it. Flashing is
 a deliberate step — do it with the user present (full MicroPython factory
 backup: `/home/pondycrane/atom_lite_factory_backup_20260912.bin`):
 ```bash
-bazel run //smart_irrigation/native-client:flash_firmware          # port /dev/ttyUSB0
-bazel run //smart_irrigation/native-client:flash_firmware -- --port /dev/ttyACM0
-bazel run //smart_irrigation/native-client:flash_firmware -- --mode sprout-lite --plant monstera
+# --port is REQUIRED (no default — /dev/ttyUSB0 has been the dead-flash
+# Sprout-LITE node). Find the Sprout's port first:
+python3 tools/identify_device.py        # prints Cardputer / Sprout / Sprout-LITE per port
+bazel run //smart_irrigation/native-client:flash_firmware -- --port /dev/ttyUSB1
+bazel run //smart_irrigation/native-client:flash_firmware -- --port /dev/ttyUSB1 --mode sprout-lite --plant monstera
 # equivalent, standalone:
-idf.py -p /dev/ttyUSB0 flash    # inside the build container
-idf.py -p /dev/ttyUSB0 monitor
+idf.py -p /dev/ttyUSB1 flash    # inside the build container
+idf.py -p /dev/ttyUSB1 monitor
 ```
 `flash.sh` accepts the same `--mode`/`--plant` as `build.sh`; if the previously
 built image does not match them it rebuilds first, so the flashed image always
-is the requested mode/plant. To go back to MicroPython: restore the backup
-(esptool, 115200) then re-run the MicroPython install.
+is the requested mode/plant. It refuses an obvious wrong target (Cardputer /
+Sprout-LITE) before flashing unless `--force` is given. To go back to
+MicroPython: restore the backup (esptool, 115200) then re-run the MicroPython
+install.
 
 ## Acceptance for step 3
 PICO-D4 announces `lmao/sprout` over the DTU LoRa link; the production RNode
