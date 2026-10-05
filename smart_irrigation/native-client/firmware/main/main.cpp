@@ -120,6 +120,42 @@ static void on_announce_cb(const Bytes& dh, const Identity& peer, const Bytes&) 
     }
 }
 
+// Baked server identity (#142): the server retired periodic announces in favor
+// of on-demand path-requests, but native RNS path-request aborts on a PLAIN
+// destination (upstream RTReticulum), so this Sprout — which already carries the
+// server DEST_HASH — also carries the server's PUBLIC identity. `load_public_key`
+// lets send_sensor_report construct the server's lxmf.delivery Destination and
+// encrypt to it WITHOUT ever hearing an announce (independent of RAK RX too).
+static const char* SERVER_PUBKEY_HEX =
+    "1985ac0ef98f17d26671f2f9ea31c0593a90fec1a30579fa68545a0cc015942"
+    "0789018213f3115239d0ed1036cf3375ee75cd410318eda87fb9420ce7a4ca788";
+
+static Bytes baked_from_hex(const std::string& h) {
+    if (h.size() % 2) return Bytes();
+    std::string raw;
+    raw.reserve(h.size() / 2);
+    for (size_t i = 0; i < h.size(); i += 2) {
+        auto val = [](char c) -> uint8_t {
+            if (c >= '0' && c <= '9') return (uint8_t)(c - '0');
+            if (c >= 'a' && c <= 'f') return (uint8_t)(c - 'a' + 10);
+            if (c >= 'A' && c <= 'F') return (uint8_t)(c - 'A' + 10);
+            return 0;
+        };
+        raw.push_back((char)((val(h[i]) << 4) | val(h[i + 1])));
+    }
+    return Bytes((const uint8_t*)raw.data(), raw.size());
+}
+
+static void bake_server_identity() {
+    Identity srv;
+    srv.load_public_key(baked_from_hex(SERVER_PUBKEY_HEX));
+    if (s_ident_lock) xSemaphoreTake(s_ident_lock, portMAX_DELAY);
+    s_server_identity = srv;
+    s_have_server = true;
+    if (s_ident_lock) xSemaphoreGive(s_ident_lock);
+    ESP_LOGI(TAG, "server identity baked from pubkey (no announce needed)");
+}
+
 static void send_sensor_report(const Identity& my_identity, const Sht30Reading& air,
                                bool air_ok, bool with_pump, uint32_t pump_interval_s,
                                bool pump_active, float moisture_pct, bool moisture_valid,
@@ -180,10 +216,10 @@ static void send_sensor_report(const Identity& my_identity, const Sht30Reading& 
     Identity srv = s_server_identity;
     if (s_ident_lock) xSemaphoreGive(s_ident_lock);
     if (!have) {
-        // TODO(#130): native RNS path-request hits an RTReticulum PLAIN-dest
-        // abort (upstream). For now we discover the server via its periodic
-        // announce (server announces every ~60s).
-        ESP_LOGW(TAG, "server identity not learned yet — skipping LXMF send (awaiting server announce)");
+        // Defensive only — bake_server_identity() populates the server identity
+        // from the baked pubkey at boot, so this normally never fires. Native
+        // RNS path-request hits an RTReticulum PLAIN-dest abort (upstream).
+        ESP_LOGW(TAG, "server identity missing — skipping LXMF send");
         return;
     }
     Destination server_delivery(srv, Type::Destination::OUT, Type::Destination::SINGLE,
@@ -242,6 +278,7 @@ void app_main() {
 
 #if !SPROUT_LITE
     s_ident_lock = xSemaphoreCreateMutex();
+    bake_server_identity();  // construct the server identity from the baked pubkey
 
     auto dt = std::make_shared<UartAtInterface>();
     Transport::register_interface(dt);
