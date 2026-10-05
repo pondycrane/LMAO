@@ -54,6 +54,8 @@ except ImportError:
 try:
     from proto.lma_encoder import (
         FIELD_ACK,
+        UNIT_CELSIUS,
+        UNIT_PERCENT,
         decode_envelope,
         encode_command_ack,
         encode_command_envelope,
@@ -206,7 +208,7 @@ def make_sensor_message(identity_hex, seq, battery=3.7, strict=False):
         {
             "sensor_id": 1,
             "value": temp,
-            "unit": "C",
+            "unit": UNIT_CELSIUS,
             "timestamp_ms": int(time.time() * 1000),
         }
     ]
@@ -222,7 +224,7 @@ def make_sensor_message(identity_hex, seq, battery=3.7, strict=False):
                     {
                         "sensor_id": 2,
                         "value": humidity,
-                        "unit": "%",
+                        "unit": UNIT_PERCENT,
                         "timestamp_ms": int(time.time() * 1000),
                     }
                 )

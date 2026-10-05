@@ -254,13 +254,13 @@ class TestDuckDbStoreWrite:
         reading1 = MagicMock()
         reading1.sensor_id = 1
         reading1.value = 22.5
-        reading1.unit = "C"
+        reading1.unit = 2
         reading1.timestamp_ms = 1700000000000
 
         reading2 = MagicMock()
         reading2.sensor_id = 2
         reading2.value = 68.0
-        reading2.unit = "%"
+        reading2.unit = 1
         reading2.timestamp_ms = 1700000000001
 
         mock_envelope.sensor.readings = [reading1, reading2]
@@ -453,7 +453,7 @@ class TestStoreEnvelope:
         reading = MagicMock()
         reading.sensor_id = 1
         reading.value = 22.5
-        reading.unit = "C"
+        reading.unit = 2
         reading.timestamp_ms = 1700000000000
         mock_envelope.sensor.readings = [reading]
 
@@ -590,7 +590,7 @@ class TestBackwardCompat:
         reading = MagicMock()
         reading.sensor_id = 1
         reading.value = 20.0
-        reading.unit = "C"
+        reading.unit = 2
         reading.timestamp_ms = 1700000000000
         mock_envelope.sensor.readings = [reading]
 

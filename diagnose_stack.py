@@ -305,8 +305,8 @@ try:
             seq=42,
             battery=3.7,
             readings=[
-                {"sensor_id": 1, "value": 23.5, "unit": "", "timestamp_ms": 0},
-                {"sensor_id": 2, "value": 55.0, "unit": "", "timestamp_ms": 0},
+                {"sensor_id": 1, "value": 23.5, "unit": 0, "timestamp_ms": 0},
+                {"sensor_id": 2, "value": 55.0, "unit": 0, "timestamp_ms": 0},
             ],
         )
         print(f"  ✅ Cardputer encoder: {len(mp_encoded)} bytes")
@@ -376,8 +376,8 @@ try:
             seq=42,
             battery=3.7,
             readings=[
-                {"sensor_id": 1, "value": 23.5, "unit": "C", "timestamp_ms": 0},
-                {"sensor_id": 2, "value": 55.0, "unit": "%", "timestamp_ms": 0},
+                {"sensor_id": 1, "value": 23.5, "unit": 2, "timestamp_ms": 0},
+                {"sensor_id": 2, "value": 55.0, "unit": 1, "timestamp_ms": 0},
             ],
         )
         print("  \n  Step 1 — Cardputer encodes SensorReport:")
@@ -387,7 +387,7 @@ try:
         server_envelope = LMAOEnvelope()
         server_envelope.ParseFromString(cardputer_sensor_bytes)
         sensor_fields = [
-            f"sensor_id={r.sensor_id}, value={r.value}{r.unit}"
+            f"sensor_id={r.sensor_id}, value={r.value} unit={r.unit}"
             for r in server_envelope.sensor.readings
         ]
         print("  Step 2 — Server decodes SensorReport:")

@@ -88,13 +88,13 @@ class TestBuildSensorEnvelope:
         # First reading: temperature
         temp_reading = readings[0]
         assert temp_reading.sensor_id == 1
-        assert temp_reading.unit == "C"
+        assert temp_reading.unit == 2
         assert temp_reading.value == pytest.approx(30.0)
 
         # Second reading: humidity
         hum_reading = readings[1]
         assert hum_reading.sensor_id == 2
-        assert hum_reading.unit == "%"
+        assert hum_reading.unit == 1
         assert hum_reading.value == pytest.approx(80.0)
 
     def test_default_battery_value(self):
