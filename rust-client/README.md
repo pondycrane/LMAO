@@ -1,13 +1,11 @@
 # rust-client — the LMAO ESP32-S3 Rust client
 
-The Rust implementation of the LMAO **Cardputer leaf**. The old incremental
-Cardputer-client design doc was removed when the plan pivoted to a full-Rust
-**server** (`docs/rust-server-migration.md`); the client firmware in this tree
-remains the on-device stack it builds on. The standing mandate: the MicroPython
-Cardputer stays the live production node until the Rust stack is end-to-end;
-on-device legs are production-gated.
+The Rust implementation of the LMAO **Cardputer leaf** (design:
+[`docs/esp32-rust-client-design.md`](../docs/esp32-rust-client-design.md)).
+The standing mandate: the MicroPython Cardputer stays the live production node
+until the Rust stack is end-to-end; on-device legs are production-gated.
 
-## Layout (data-flow)
+## Layout (design §5 — data-flow)
 
 ```
 radio (esp-hal UART/SPI)
@@ -25,17 +23,13 @@ radio (esp-hal UART/SPI)
 | host/interop | Rust↔Python RNS Link+Resource interop harness | T0 — PASS |
 | firmware/ | no_std esp-hal boot (heartbeat) | T1 — boots on Cardputer |
 | crates/lma-identity | RNS identity + `lxmf/delivery` DEST | T2 — host PASS |
-| crates/radio-interface | RNode LoRa frame demux + leaf radio Interface contract (T3 / RF-leg) | T3 — host PASS |
+| crates/radio-interface | RNode LoRa frame demux/RF-framing | T3 — host PASS |
 | crates/leaf-rns | Link-window scheduler + resume queue | T4 — host PASS |
 | crates/lma-wire | prost `LmaoEnvelope`/`SensorReport` (from `proto/lma_messages.proto`, §6b) | T5 — host PASS |
 | crates/lma-lxmf | LXMF control path (pack/sign/verify) | T5 — host PASS |
 | crates/leaf-resource | RNS Resource over Link (rx/tx, resume) | T6 — host PASS |
 | crates/lma-framing | LMAF/successor framing reassembler on Resource (manifest→chunks→crc→verify→ack) | T8 — host PASS |
 | crates/leaf-power | power/duty polish: sleep-to-window, watchdog, heap guard | T9 — host PASS |
-| crates/sx126x | SX1262 LoRa driver core (bus-generic; RF-leg step 2) | RF-leg — host PASS |
-| crates/lma-link-resource | RNS Link initiator + Resource push (DRY: Cardputer + Sprout) | shared — PASS |
-| host/resource-500b-e2e | **Cardputer 500-B Resource → server** cross-check (RF-proven sha) | parity — PASS |
-| host/sprout-resource-300b-e2e | **Sprout 300-B Resource → server** (same wire format; heap-safe size) | parity — PASS |
 | host/leaf-e2e | **composed leaf pipeline** (§5 data-flow, host) | T7 — PASS |
 
 ## Gates
@@ -52,7 +46,6 @@ bazel run  //rust-client:test_lma_lxmf            # T5: LXMF control path (needs
 bazel run  //rust-client:test_leaf_resource       # T6: Resource over Link + RNS hashes
 bazel run  //rust-client:test_lma_framing         # T8: LMAF framing on Resource (needs PROTOC)
 bazel run  //rust-client:test_leaf_power          # T9: power/duty polish
-bazel run  //rust-client:test_sx126x             # RF-leg: SX1262 driver core
 bazel run  //rust-client:run_t0_gate -- --python <py>   # T0: live Python RNS interop
 ```
 

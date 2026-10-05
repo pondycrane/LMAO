@@ -3,21 +3,14 @@ resolver = "2"
 members = [
     "host/interop",
     "host/leaf-e2e",
-    "host/resource-500b-e2e",
-    "host/sprout-resource-300b-e2e",
-    "host/lmao-server-rs",
     "crates/lma-identity",
-    "crates/lma-dtu",
     "crates/leaf-rns",
     "crates/radio-interface",
-    "crates/lma-chart",
     "crates/lma-wire",
     "crates/lma-lxmf",
     "crates/leaf-resource",
     "crates/lma-framing",
     "crates/leaf-power",
-    "crates/lma-link-resource",
-    "crates/sx126x",
 ]
 
 [workspace.package]
@@ -29,14 +22,3 @@ license = "MIT OR Apache-2.0"
 panic = "abort"
 lto = true
 codegen-units = 1
-
-
-# Pin rns-net to the LRPROOF-patched source. The fix (responder LINK-dest
-# packets carry no route hint, so the server dropped LRPROOFs instead of
-# transmitting them) + per-frame RF RX/TX debug logging live in a small
-# committed patch; the patched crate is materialized from the local cargo
-# registry cache by `vendor/fetch-rns-net-patched.sh` (gitignored output).
-# Run that script once per fresh checkout before any cargo/bazel build. Keep
-# until upstream rns-net adopts the fix.
-[patch.crates-io]
-rns-net = { path = "vendor/rns-net-0.7.2" }

@@ -5,7 +5,7 @@ edition.workspace = true
 description = "T6: RNS Resource over Link on the leaf — rx/tx over rns-core Resource machinery"
 
 [dependencies]
-rns-core = { version = "0.1.17", default-features = false }
-rns-crypto = { version = "0.1.10", default-features = false }
+rns-core = "0.1.17"
+rns-crypto = "0.1.10"
 
 [dev-dependencies]
