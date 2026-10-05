@@ -597,15 +597,44 @@ _LAST_CHART_DATA = None
 _LOG_VIEW = False
 
 
+def _chart_loading(tft):
+    """Draw an empty chart frame with a 'loading chart data' hint.
+
+    Shown right after boot, before the first telemetry payload arrives, so the
+    BtnA/G0 chart view responds immediately instead of appearing stuck on the
+    log screen.
+    """
+    try:
+        if tft is None:
+            return
+        tft.fill(0x000000)  # screen clear (matches chart.draw)
+        tft.line(chart.PLOT_L, chart.PLOT_T, chart.PLOT_R, chart.PLOT_T, chart.GREY)
+        tft.line(chart.PLOT_L, chart.PLOT_B, chart.PLOT_R, chart.PLOT_B, chart.GREY)
+        tft.line(chart.PLOT_L, chart.PLOT_T, chart.PLOT_L, chart.PLOT_B, chart.GREY)
+        tft.line(chart.PLOT_R, chart.PLOT_T, chart.PLOT_R, chart.PLOT_B, chart.GREY)
+        tft.text("loading chart data...", 40, 62, chart.GREY)
+    except Exception:
+        pass
+
+
 def _show_chart_or_log(tft, status_lines):
     """Redraw the active view: the chart (if a payload is held and log view is
     unlocked) or the text status screen.  Also flips ``_CHART_ON_SCREEN`` so
     ``log()`` stops repainting the text screen over the chart.
+
+    While no telemetry payload has arrived yet (early boot) the chart view
+    shows an empty 'loading chart data' frame rather than falling back to the
+    text screen, so the BtnA/G0 chart view responds immediately.
     """
     global _LOG_VIEW, _CHART_ON_SCREEN
-    if not _LOG_VIEW and _LAST_CHART_DATA is not None and HAS_CHART:
-        result = chart.draw(tft, _LAST_CHART_DATA)
-        if not result["error"]:
+    if not _LOG_VIEW and HAS_CHART:
+        if _LAST_CHART_DATA is not None:
+            result = chart.draw(tft, _LAST_CHART_DATA)
+            if not result["error"]:
+                _CHART_ON_SCREEN = True
+                return
+        else:
+            _chart_loading(tft)
             _CHART_ON_SCREEN = True
             return
     _CHART_ON_SCREEN = False
