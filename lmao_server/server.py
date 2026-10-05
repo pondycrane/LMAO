@@ -470,33 +470,25 @@ class Server:
             # Decode content (protobuf first, UTF-8 fallback, byte-count placeholder)
             decode_lmao_message(content_bytes)
 
-            # Build and send a protobuf-encoded ACK reply
-            reply_text = (
-                f"ACK from LMAO Server — received your message ({len(content_bytes)} bytes)"
-            )
-            data_line = SPROUT_HISTORY.data_line()
-            if data_line:
-                # Piggyback the chart payload on the reply the client already
-                # solicits — no extra frames, no query protocol.
-                reply_text = f"{reply_text}\n{data_line}"
-            logger.info("Reply: %s", reply_text)
-
             if source_dest is not None and self.router is not None:
-                # Build protobuf envelope with TextMessage
-                reply_envelope = LMAOEnvelope()
-                reply_envelope.text.node_id = source_hash
-                reply_envelope.text.content = reply_text
-                reply_envelope.text.timestamp = int(time.time() * 1000)
-
-                reply_msg = LXMF.LXMessage(
-                    destination=source_dest,
-                    source=_identity_to_destination(self.server_identity),
-                    content=reply_envelope.SerializeToString(),
-                    title="p:Envelope",
-                    desired_method=LXMF.LXMessage.OPPORTUNISTIC,
-                )
-                self.router.handle_outbound(reply_msg)
-                logger.info("Reply sent.")
+                # Single-frame reply: the ChartBundle (LMAOEnvelope.chart) IS
+                # the receipt — returning the chart data proves the request
+                # was acked, so no standalone text ACK is needed.
+                chart = SPROUT_HISTORY.chart_bundle()
+                if chart is not None:
+                    chart_env = LMAOEnvelope()
+                    chart_env.chart.CopyFrom(chart)
+                    reply_msg = LXMF.LXMessage(
+                        destination=source_dest,
+                        source=_identity_to_destination(self.server_identity),
+                        content=chart_env.SerializeToString(),
+                        title="p:Envelope",
+                        desired_method=LXMF.LXMessage.OPPORTUNISTIC,
+                    )
+                    self.router.handle_outbound(reply_msg)
+                    logger.info("Reply sent (ChartBundle, %d samples).", len(chart.soil))
+                else:
+                    logger.info("No chart history yet — no reply sent.")
             else:
                 logger.warning("Could not send reply (no source destination or router).")
 
