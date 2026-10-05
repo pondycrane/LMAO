@@ -432,6 +432,107 @@ def decode_image_message(data):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+#  ChartBundle (field 23)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Repeated uint32 fields are PACKED on the wire (one length-delimited block of
+# concatenated varints); the generic _decode_proto_message does not unpack
+# them, so ChartBundle has a dedicated decoder.
+
+
+def encode_chart_bundle(
+    node_id, dry, wet, start_ms, period_ms, soil, temp, hum, watered, fmt=1
+):
+    """Encode a ChartBundle protobuf message (field numbers per the schema).
+
+    ``temp`` is tenths of C; ``soil``/``hum`` are percents; ``watered`` is a
+    bitmask over ``soil`` index (oldest first).  Returns bytes ready to be
+    wrapped in LMAOEnvelope.chart.
+    """
+    result = bytearray()
+
+    def packed(values):
+        return encode_length_delimited(b"".join(encode_varint(int(v)) for v in values))
+
+    result.extend(encode_field(1, 0, encode_varint(fmt)))
+    result.extend(encode_field(2, 2, encode_length_delimited(node_id.encode("utf-8"))))
+    result.extend(encode_field(3, 0, encode_varint(dry)))       # uint32
+    result.extend(encode_field(4, 0, encode_varint(wet)))       # uint32
+    result.extend(encode_field(5, 0, encode_varint(start_ms)))  # uint64
+    result.extend(encode_field(6, 0, encode_varint(period_ms)))  # uint32
+    result.extend(encode_field(7, 2, packed(soil)))
+    result.extend(encode_field(8, 2, packed(temp)))
+    result.extend(encode_field(9, 2, packed(hum)))
+    result.extend(encode_field(10, 0, encode_varint(watered)))  # uint64
+    return bytes(result)
+
+
+def _decode_packed_varints(block):
+    """Decode a packed-varint payload (length-delimited uint32 block) to ints."""
+    out = []
+    pos = 0
+    while pos < len(block):
+        v, n = decode_varint(block, pos)
+        out.append(v)
+        pos += n
+    return out
+
+
+def decode_chart_bundle(data):
+    """Decode a ChartBundle from protobuf bytes.
+
+    Returns dict with keys: format, node_id, dry, wet, start_ms, period_ms,
+    soil, temp, hum, watered.
+    """
+    r = {
+        "format": 0, "node_id": "", "dry": 0, "wet": 0,
+        "start_ms": 0, "period_ms": 0,
+        "soil": [], "temp": [], "hum": [], "watered": 0,
+    }
+    _MAP = {1: "format", 3: "dry", 4: "wet", 5: "start_ms", 6: "period_ms", 10: "watered"}
+    _LIST = {7: "soil", 8: "temp", 9: "hum"}
+    pos = 0
+    while pos < len(data):
+        tag, tlen = decode_varint(data, pos)
+        pos += tlen
+        f = tag >> 3
+        wt = tag & 0x07
+        if wt == 0:
+            v, n = decode_varint(data, pos)
+            pos += n
+            if f in _MAP:
+                r[_MAP[f]] = v
+            elif f in _LIST:
+                r[_LIST[f]].append(v)  # tolerates unpacked repeated encoding too
+        elif wt == 2:
+            length, llen = decode_varint(data, pos)
+            pos += llen
+            blob = data[pos : pos + length]
+            pos += length
+            if f == 2:
+                r["node_id"] = blob.decode("utf-8")
+            elif f in _LIST:
+                r[_LIST[f]].extend(_decode_packed_varints(blob))
+            # else: unknown field, already consumed
+        elif wt == 5:
+            pos += 4
+        else:
+            break
+    return r
+
+
+def encode_chart_envelope(node_id, dry, wet, start_ms, period_ms, soil, temp, hum, watered, fmt=1):
+    """Wrap a ChartBundle in an LMAOEnvelope (field 23, wire type 2).
+
+    Returns the full LMAOEnvelope bytes ready for LXMF Content.
+    """
+    bundle = encode_chart_bundle(
+        node_id, dry, wet, start_ms, period_ms, soil, temp, hum, watered, fmt
+    )
+    return encode_field(FIELD_CHART, 2, encode_length_delimited(bundle))
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 #  CallSignal (field 30)
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -481,6 +582,7 @@ FIELD_ACK = 12
 FIELD_TEXT = 20
 FIELD_AUDIO = 21
 FIELD_IMAGE = 22
+FIELD_CHART = 23
 FIELD_CALL = 30
 
 # Decoder dispatch table: field_number → decoder function
@@ -491,6 +593,7 @@ _DECODERS = {
     FIELD_TEXT: decode_text_message,
     FIELD_AUDIO: decode_audio_message,
     FIELD_IMAGE: decode_image_message,
+    FIELD_CHART: decode_chart_bundle,
     FIELD_CALL: decode_call_signal,
 }
 

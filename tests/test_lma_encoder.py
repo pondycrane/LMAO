@@ -632,6 +632,62 @@ class TestCommandEnvelope:
         assert result["params"] == params
 
 
+# ── ChartBundle (field 23) ────────────────────────────────────────
+
+
+class TestChartBundle:
+    """ChartBundle encode/decode + oneof dispatch vs the generated pb2."""
+
+    def test_roundtrip(self):
+        bundle = enc.encode_chart_bundle(
+            "e824ad2d", 37, 53, 1700000000000, 300000,
+            [40, 41, 42], [246, 249, 251], [59, 60, 60], 0b100,
+        )
+        dec = enc.decode_chart_bundle(bundle)
+        assert dec["node_id"] == "e824ad2d"
+        assert dec["soil"] == [40, 41, 42]
+        assert dec["temp"] == [246, 249, 251]
+        assert dec["hum"] == [59, 60, 60]
+        assert dec["watered"] == 0b100
+        assert dec["period_ms"] == 300000
+        assert dec["format"] == 1
+
+    def test_envelope_dispatch(self):
+        env = enc.encode_chart_envelope("e824ad2d", 37, 53, 0, 300000, [40], [250], [60], 0)
+        assert enc.decode_envelope(env)["soil"] == [40]
+
+    def test_wire_compat_with_pb2(self):
+        """Server (pb2) encode ↔ MicroPython decoder, and vice-versa.
+
+        The generated pb2 emits PACKED repeated varints; the MicroPython
+        decoder must match that layout exactly (this is the wire contract).
+        """
+        import sys
+
+        sys.path.insert(0, "proto")
+        from lma_messages_pb2 import LMAOEnvelope
+
+        env = LMAOEnvelope()
+        env.chart.node_id = "e824ad2d"
+        env.chart.dry = 37
+        env.chart.wet = 53
+        env.chart.soil.extend([40, 41, 42])
+        env.chart.temp.extend([246])
+        env.chart.hum.extend([59])
+        env.chart.watered = 0b101
+        dec = enc.decode_envelope(env.SerializeToString())
+        assert dec["soil"] == [40, 41, 42]
+        assert dec["watered"] == 0b101
+        assert dec["temp"] == [246]
+
+        # reverse: MicroPython-encoded bytes parse under the generated pb2
+        wire = enc.encode_chart_envelope("n", 1, 2, 0, 300000, [7, 8], [240], [60], 3)
+        env2 = LMAOEnvelope()
+        env2.ParseFromString(wire)
+        assert list(env2.chart.soil) == [7, 8]
+        assert env2.chart.watered == 3
+
+
 if __name__ == "__main__":
     import sys
 

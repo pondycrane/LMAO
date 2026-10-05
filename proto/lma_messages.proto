@@ -13,12 +13,33 @@ message LMAOEnvelope {
     TextMessage     text    = 20;
     AudioMessage    audio   = 21;
     ImageMessage    image   = 22;
+    ChartBundle     chart   = 23;   // server -> Cardputer chart downlink
     CallSignal      call    = 30;
     LmafManifest    manifest    = 40;
     LmafChunk       chunk       = 41;
     LmafAck         ack_lmaf    = 42;
     LmafCapability  capability  = 43;
   }
+}
+
+// --- Grow-node chart downlink (server -> Cardputer) ---
+//
+// One node's soil-moisture / air-temperature / air-humidity history, sent on
+// the reply so the Cardputer can render the chart.  Deliberately single-packet
+// (~295 B LXMF content cap): values are compact uint32 percents (temp in
+// tenths of C), and the time axis is reconstructed from start_ms + period_ms
+// + array index instead of a uint64 timestamp per sample.
+message ChartBundle {
+  uint32 format    = 1;   // chart payload format version (1)
+  string node_id   = 2;   // which grow node the series belongs to
+  uint32 dry       = 3;   // irrigation dry threshold, in %
+  uint32 wet       = 4;   // irrigation wet threshold, in %
+  uint64 start_ms  = 5;   // epoch ms of the first sample (nominal)
+  uint32 period_ms = 6;   // nominal sample spacing (5 min) -> gaps detectable
+  repeated uint32 soil = 7;  // soil moisture %, newest last (up to 30)
+  repeated uint32 temp = 8;  // air temperature in tenths of C, newest last
+  repeated uint32 hum  = 9;  // air humidity %, newest last
+  uint64 watered       = 10; // bit i = pump ran during soil[i] (oldest first)
 }
 
 // --- IoT Sensor ---
