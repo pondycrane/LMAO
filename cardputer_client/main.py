@@ -429,6 +429,50 @@ def _reset_device(reason, tft=None, status_lines=None):
     machine.reset()
 
 
+# ---- Independent heap + send-stall supervisors (issue #71, hardened) ----
+#
+# The original #71 heap maintenance ran INSIDE _periodic_send, so a stalled
+# send task silently stopped gc.collect()+probe -> the node went dark for
+# minutes (send-stall) then intermittently OOM-reset. The hardware watchdog
+# (#74) cannot help: it only fires on event-loop STARVATION, and the feeder is
+# a separate task that keeps running, so a single blocked send task never
+# trips it. Two INDEPENDENT supervisors recover the node regardless of the
+# send loop's health:
+#   1. heap  : gc.collect() + a contiguous-block probe on its own cadence;
+#              resets deterministically when the heap can no longer RX.
+#   2. stall : resets with a clear reason if the send loop has not completed
+#              a cycle within SEND_STALL_LIMIT x interval.
+
+_SEND_STALL_LIMIT = 3        # consecutive missed intervals before a stall reset
+_last_send_completed = 0.0   # time.time() of the last successful send cycle
+
+
+async def _heap_watchdog(_cfg):
+    import uasyncio as _uasyncio
+
+    while True:
+        gc.collect()
+        if not _heap_can_alloc():
+            _reset_device("Heap exhausted/fragmented (supervisor)")
+            return  # unreachable on hardware (reset does not return)
+        await _uasyncio.sleep(max(5, _cfg["interval_seconds"] // 2))
+
+
+async def _send_stall_watchdog(_cfg):
+    import uasyncio as _uasyncio
+
+    while True:
+        await _uasyncio.sleep(_cfg["interval_seconds"])
+        if _last_send_completed and (
+            time.time()
+            > _last_send_completed + _SEND_STALL_LIMIT * _cfg["interval_seconds"]
+        ):
+            _reset_device(
+                f"send loop stalled (no cycle in {_SEND_STALL_LIMIT}x interval)"
+            )
+            return  # unreachable on hardware (reset does not return)
+
+
 # ---- LXMF message handler ----
 
 # Module-level vars set by main() so handle_reply can access them
@@ -880,7 +924,7 @@ async def _periodic_send(
     """
     import uasyncio as asyncio
 
-    global _CHART_ON_SCREEN
+    global _CHART_ON_SCREEN, _last_send_completed
 
     seq = 0
     MAX_CONSECUTIVE_ERRORS = 10
@@ -921,9 +965,9 @@ async def _periodic_send(
             except Exception:
                 pass
 
-            if not _heap_can_alloc():
-                _reset_device("Heap exhausted/fragmented", tft, status_lines)
-                break  # unreachable on hardware (reset does not return)
+            # Heap probe/reset is now handled by the independent _heap_watchdog
+            # task (runs even if this send loop stalls). Keep the per-cycle
+            # gc.collect() here: it also helps the send path's lazy imports.
 
             seq += 1
             hello_text = f"Hello from Cardputer — seq {seq}"
@@ -990,8 +1034,19 @@ async def _periodic_send(
 
             if chart_data is not None:
                 global _LAST_CHART_DATA, _LOG_VIEW
+                prev = _LAST_CHART_DATA
                 _LAST_CHART_DATA = chart_data
-                if not _LOG_VIEW:
+                unchanged = (
+                    prev is not None
+                    and prev["samples"] == chart_data["samples"]
+                    and prev["humidity"] == chart_data["humidity"]
+                    and prev["temp"] == chart_data["temp"]
+                )
+                if unchanged and _CHART_ON_SCREEN:
+                    # Identical series already on screen — skip the full M5.Lcd
+                    # re-render (largest per-cycle heap churn, issue #71 driver).
+                    pass
+                elif not _LOG_VIEW:
                     # Auto view: the chart owns the screen unless it fails.
                     result = chart.draw(tft, chart_data)
                     if result["error"]:
@@ -1025,8 +1080,10 @@ async def _periodic_send(
                     None,  # serial-only; the view above already owns the screen
                 )
 
-            # Success — reset error counter and sleep the normal interval.
+            # Success — reset error counter, note the heartbeat for the
+            # independent send-stall supervisor, and sleep the interval.
             consecutive_errors = 0
+            _last_send_completed = time.time()
             await asyncio.sleep(config["interval_seconds"])
 
         except asyncio.CancelledError:
@@ -1115,6 +1172,12 @@ async def _async_runtime(
     # Hardware watchdog feeder — only task whose starvation is fatal.
     if wdt is not None:
         asyncio.create_task(_feed_watchdog(wdt))
+
+    # Independent heap + send-stall supervisors (issue #71, hardened): recover
+    # the node even if the send loop stalls; heap maintenance no longer lives
+    # inside the fragile send task.
+    asyncio.create_task(_heap_watchdog(config))
+    asyncio.create_task(_send_stall_watchdog(config))
 
     # BtnA/G0 view toggle (chart <-> text log).  Guards its own hardware, so
     # it is a silent no-op on hosts without an ESP32 GPIO0.
