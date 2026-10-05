@@ -67,19 +67,19 @@ bazel run //tools:install_all -- --setup-registry --include-services --skip-rnod
 - **`--include-services`** → builds/pushes `lmao-server` + `lmao-iot-ingest`,
   applies the K8s manifests, and deploys the in-cluster `lmao-server`.
 
-⚠️ **Gotcha — applying unchanged `:latest` does not roll the pod.** The
-`k8s/lmao-server.yaml` Deployment references the mutable tag
-`192.168.50.153:5000/lmao-server:latest`. `install_all`'s `kubectl apply` of an
-*identical* spec creates no rollout, so **the running pod keeps the OLD code**
-and the "Deployment rolled out" banner is misleading. After any service
-deploy, ALWAYS force the rollover and verify:
+Given the Deployment references the mutable tag
+`192.168.50.153:5000/lmao-server:latest`, `install_all` **force-restarts**
+(`kubectl rollout restart`) each Deployment after applying, so a `:latest`
+change actually goes live instead of silently keeping the old pod (the
+"unchanged spec ⇒ no rollout" trap — fixed in
+`tools/install_services.py` `_force_restart_and_wait`). After any deploy,
+verify the pod is on the intended code and DEST_HASH is unchanged:
 
 ```bash
-kubectl rollout restart deployment/lmao-server \
-  && kubectl rollout status deployment/lmao-server --timeout=240s
+kubectl rollout status deployment/lmao-server --timeout=240s
 POD=$(kubectl get pods -l app=lmao-server -o jsonpath='{.items[0].metadata.name}')
-kubectl logs "$POD" | grep "Delivery destination"     # DEST_HASH must be unchanged (identity PVC, #70/#93)
-kubectl logs "$POD" | grep -E "DATA .*" | tail -1      # confirm the new server payload is being served
+kubectl logs "$POD" | grep "Delivery destination"            # DEST_HASH unchanged (identity PVC, #70/#93)
+kubectl logs "$POD" | grep -E "Reply sent|DATA .*" | tail -1 # confirm the new server payload is served
 ```
 
 Notes:
