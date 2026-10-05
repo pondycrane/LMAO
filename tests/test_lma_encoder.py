@@ -285,15 +285,15 @@ class TestSensorReport:
     def test_round_trip_with_readings(self):
         """Encode/decode SensorReport with multiple readings."""
         readings = [
-            {"sensor_id": 1, "value": 23.5, "unit": "C", "timestamp_ms": 1000},
-            {"sensor_id": 2, "value": 65.0, "unit": "%", "timestamp_ms": 1001},
+            {"sensor_id": 1, "value": 23.5, "unit": 2, "timestamp_ms": 1000},
+            {"sensor_id": 2, "value": 65.0, "unit": 1, "timestamp_ms": 1001},
         ]
         encoded = enc.encode_sensor_report("node", 0, 4.2, readings)
         decoded = enc.decode_sensor_report(encoded)
         assert abs(decoded["battery"] - 4.2) < 0.001
         assert len(decoded["readings"]) == 2
         assert decoded["readings"][0]["sensor_id"] == 1
-        assert decoded["readings"][1]["unit"] == "%"
+        assert decoded["readings"][1]["unit"] == 1
 
     def test_envelope_dispatch(self):
         """decode_envelope dispatches field 10 to SensorReport decoder."""
@@ -306,13 +306,13 @@ class TestSensorReport:
     def test_sensor_envelope_round_trip(self):
         """encode_sensor_envelope → decode_envelope round-trip with identity hex."""
         identity_hex = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6"  # 32-char hex
-        readings = [{"sensor_id": 1, "value": 25.0, "unit": "C", "timestamp_ms": 1000}]
+        readings = [{"sensor_id": 1, "value": 25.0, "unit": 2, "timestamp_ms": 1000}]
         envelope = enc.encode_sensor_envelope(identity_hex, 7, 3.7, readings)
         result = enc.decode_envelope(envelope)
         assert result is not None
         assert result["node_id"] == identity_hex
         assert result["readings"][0]["value"] == 25.0
-        assert result["readings"][0]["unit"] == "C"
+        assert result["readings"][0]["unit"] == 2
 
 
 class TestCommandRequest:
@@ -539,8 +539,8 @@ class TestEncodeSensorEnvelope:
     def test_round_trip_envelope_to_sensor_report(self):
         """Envelope → decode → verify all fields including readings."""
         readings = [
-            {"sensor_id": 1, "value": 25.5, "unit": "C", "timestamp_ms": 1000},
-            {"sensor_id": 2, "value": 68.0, "unit": "%", "timestamp_ms": 1000},
+            {"sensor_id": 1, "value": 25.5, "unit": 2, "timestamp_ms": 1000},
+            {"sensor_id": 2, "value": 68.0, "unit": 1, "timestamp_ms": 1000},
         ]
         envelope = enc.encode_sensor_envelope("node-xyz", 42, 3.9, readings)
         decoded = enc.decode_envelope(envelope)
@@ -551,11 +551,11 @@ class TestEncodeSensorEnvelope:
         assert len(decoded["readings"]) == 2
         assert decoded["readings"][0]["sensor_id"] == 1
         assert decoded["readings"][0]["value"] == pytest.approx(25.5)
-        assert decoded["readings"][0]["unit"] == "C"
+        assert decoded["readings"][0]["unit"] == 2
         assert decoded["readings"][0]["timestamp_ms"] == 1000
         assert decoded["readings"][1]["sensor_id"] == 2
         assert decoded["readings"][1]["value"] == pytest.approx(68.0)
-        assert decoded["readings"][1]["unit"] == "%"
+        assert decoded["readings"][1]["unit"] == 1
         assert decoded["readings"][1]["timestamp_ms"] == 1000
 
 
