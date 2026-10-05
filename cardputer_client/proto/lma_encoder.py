@@ -164,13 +164,29 @@ def _decode_proto_message(data, field_map):
 #  SensorReport (field 10)
 # ═══════════════════════════════════════════════════════════════════════════════
 
+# Unit enum (proto ``Unit``) — mirrors lma_messages.proto; stored as varint on
+# the wire (field 3 of SensorReading).  Keep in sync with the schema.
+UNIT_UNSPECIFIED = 0
+UNIT_PERCENT = 1
+UNIT_CELSIUS = 2
+UNIT_HECTOPASCAL = 3
+UNIT_SECONDS = 4
+UNIT_VOLTS = 5
+UNIT_DBM = 6
+UNIT_BOOL = 7
+
 
 def encode_sensor_reading(sensor_id, value, unit, timestamp_ms):
-    """Encode a single SensorReading sub-message."""
+    """Encode a single SensorReading sub-message.
+
+    ``unit`` is a proto ``Unit`` enum int (wire type 0, varint) — not a string.
+    UNIT_UNSPECIFIED (0) is omitted entirely so unitless readings stay small.
+    """
     result = bytearray()
     result.extend(encode_field(1, 0, encode_varint(sensor_id)))  # uint32
     result.extend(encode_field(2, 5, _encode_float(value)))  # float
-    result.extend(encode_field(3, 2, encode_length_delimited(unit.encode("utf-8"))))  # string
+    if unit:  # non-zero enum -> emit; UNIT_UNSPECIFIED is the default
+        result.extend(encode_field(3, 0, encode_varint(int(unit))))  # Unit enum
     result.extend(encode_field(4, 0, encode_varint(timestamp_ms)))  # uint64
     return bytes(result)
 
@@ -197,7 +213,7 @@ def decode_sensor_reading(data):
         {
             1: (0, "sensor_id", int, 0),
             2: (5, "value", None, 0.0),
-            3: (2, "unit", lambda b: b.decode("utf-8", "replace"), ""),
+            3: (0, "unit", int, 0),  # Unit enum (varint); default UNSPECIFIED
             4: (0, "timestamp_ms", int, 0),
         },
     )

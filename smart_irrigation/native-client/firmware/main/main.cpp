@@ -170,14 +170,14 @@ static void send_sensor_report(const Identity& my_identity, const Sht30Reading& 
     std::vector<std::string> readings;
 
     if (air_ok) {
-        readings.push_back(lma_encoder::encode_reading(3, air.temp_c, "C", now_ms));
-        readings.push_back(lma_encoder::encode_reading(2, air.hum_pct, "%", now_ms));
+        readings.push_back(lma_encoder::encode_reading(3, air.temp_c, lma_encoder::UNIT_CELSIUS, now_ms));
+        readings.push_back(lma_encoder::encode_reading(2, air.hum_pct, lma_encoder::UNIT_PERCENT, now_ms));
     } else {
         ESP_LOGW(TAG, "SHT30 read failed (Port A contact? #124) — bundle continues without air T/H");
     }
 
     if (moisture_valid) {
-        readings.push_back(lma_encoder::encode_reading(4, moisture_pct, "%", now_ms));
+        readings.push_back(lma_encoder::encode_reading(4, moisture_pct, lma_encoder::UNIT_PERCENT, now_ms));
         ESP_LOGI(TAG, "moisture=%.1f%%", moisture_pct);
     }
 
@@ -186,16 +186,16 @@ static void send_sensor_report(const Identity& my_identity, const Sht30Reading& 
     // config instead of a copy that can drift, and records the thresholds each
     // sample was judged against in the training stream.
     readings.push_back(lma_encoder::encode_reading(
-        10, (float)profile.dry_q8() / 256.0f, "%", now_ms));
+        10, (float)profile.dry_q8() / 256.0f, lma_encoder::UNIT_PERCENT, now_ms));
     readings.push_back(lma_encoder::encode_reading(
-        11, (float)profile.wet_q8() / 256.0f, "%", now_ms));
+        11, (float)profile.wet_q8() / 256.0f, lma_encoder::UNIT_PERCENT, now_ms));
 
     // sensor_id 6/7 are the ML watering-event tags and must describe what the
     // pump physically did — in dry run (actuation disabled) they are omitted
     // rather than filled with the engine's intention.
     if (with_pump) {
-        readings.push_back(lma_encoder::encode_reading(6, (float)pump_interval_s, "s", now_ms));
-        readings.push_back(lma_encoder::encode_reading(7, pump_active ? 1.0f : 0.0f, "bool", now_ms));
+        readings.push_back(lma_encoder::encode_reading(6, (float)pump_interval_s, lma_encoder::UNIT_SECONDS, now_ms));
+        readings.push_back(lma_encoder::encode_reading(7, pump_active ? 1.0f : 0.0f, lma_encoder::UNIT_BOOL, now_ms));
     }
 
     if (readings.empty()) {

@@ -33,11 +33,11 @@ namespace {
 namespace lma_encoder {
 
     std::string encode_reading(uint32_t sensor_id, float value,
-                               const std::string& unit, uint64_t timestamp_ms) {
+                               Unit unit, uint64_t timestamp_ms) {
         std::string r;
         field_varint(r, 1, sensor_id);
         field_fixed32(r, 2, value);
-        field_len(r, 3, unit);
+        if (unit != UNIT_UNSPECIFIED) field_varint(r, 3, (uint64_t)unit);
         field_varint(r, 4, timestamp_ms);
         return r;
     }

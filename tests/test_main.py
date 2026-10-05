@@ -348,7 +348,7 @@ class TestMakeSensorMessage:
         assert len(readings) == 1
         reading = readings[0]
         assert reading["sensor_id"] == 1
-        assert reading["unit"] == "C"
+        assert reading["unit"] == 2
         assert "value" in reading
         assert "timestamp_ms" in reading
 
@@ -607,13 +607,13 @@ class TestMakeSensorMessageWithHumidity:
         """Reading[0] has sensor_id=1 (temperature)."""
         readings = self._call_with_humidity(sensor_type="DHT20")
         assert readings[0]["sensor_id"] == 1
-        assert readings[0]["unit"] == "C"
+        assert readings[0]["unit"] == 2
 
     def test_second_reading_is_humidity_with_sensor_id_2(self):
         """Reading[1] has sensor_id=2 (humidity, unit='%')."""
         readings = self._call_with_humidity(sensor_type="DHT20", humidity=68.0)
         assert readings[1]["sensor_id"] == 2
-        assert readings[1]["unit"] == "%"
+        assert readings[1]["unit"] == 1
         assert readings[1]["value"] == 68.0
 
     def test_single_reading_when_sensor_type_is_none(self):
@@ -778,7 +778,7 @@ class TestPeriodicSendBackoff:
         with (
             patch.object(lmao_client, "log") as mock_log,
             patch.object(lmao_client.sys, "print_exception", create=True),
-            patch.object(lmao_client, "make_poc_message", return_value=b"ok", create=True),
+            patch.object(lmao_client, "make_sensor_message", return_value=b"ok", create=True),
             patch.object(asyncio, "sleep", fast_sleep),
         ):
             try:
@@ -860,7 +860,7 @@ class TestPeriodicSendBackoff:
         with (
             patch.object(lmao_client, "log"),
             patch.object(lmao_client.sys, "print_exception", create=True),
-            patch.object(lmao_client, "make_poc_message", return_value=b"ok", create=True),
+            patch.object(lmao_client, "make_sensor_message", return_value=b"ok", create=True),
             patch.object(asyncio, "sleep", tracking_sleep),
         ):
             try:
@@ -925,7 +925,7 @@ class TestPeriodicSendBackoff:
         with (
             patch.object(lmao_client, "log"),
             patch.object(lmao_client.sys, "print_exception", create=True),
-            patch.object(lmao_client, "make_poc_message", return_value=b"ok", create=True),
+            patch.object(lmao_client, "make_sensor_message", return_value=b"ok", create=True),
             patch.object(asyncio, "sleep", tracking_sleep),
         ):
             try:
@@ -982,7 +982,7 @@ class TestPeriodicSendBackoff:
             patch.object(lmao_client, "log") as mock_log,
             patch.object(lmao_client.sys, "print_exception", create=True),
             patch.object(lmao_client, "HAS_PROTO", True),
-            patch.object(lmao_client, "make_poc_message", return_value=b"ok", create=True),
+            patch.object(lmao_client, "make_sensor_message", return_value=b"ok", create=True),
             patch.object(asyncio, "sleep", tracking_sleep),
         ):
             try:
@@ -1031,7 +1031,7 @@ class TestPeriodicSendBackoff:
         with (
             patch.object(lmao_client, "log") as mock_log,
             patch.object(lmao_client.sys, "print_exception", create=True),
-            patch.object(lmao_client, "make_poc_message", return_value=b"ok", create=True),
+            patch.object(lmao_client, "make_sensor_message", return_value=b"ok", create=True),
         ):
             await lmao_client._periodic_send(
                 tft=None,
@@ -1102,7 +1102,7 @@ class TestHeapRecovery:
                     router=mock_router,
                     identity_hex="test",
                     dest_hash=b"\x00" * 16,
-                    send_sensor=False,
+                    send_sensor=True,
                     has_proto=True,
                     config=config,
                     pending_replies=[],
@@ -1132,7 +1132,7 @@ class TestHeapRecovery:
         with (
             patch.object(lmao_client, "log") as mock_log,
             patch.object(lmao_client.sys, "print_exception", create=True),
-            patch.object(lmao_client, "make_poc_message", return_value=b"ok", create=True),
+            patch.object(lmao_client, "make_sensor_message", return_value=b"ok", create=True),
             patch.object(lmao_client, "_reset_device") as mock_reset,
         ):
             await asyncio.wait_for(
@@ -1142,7 +1142,7 @@ class TestHeapRecovery:
                     router=mock_router,
                     identity_hex="test",
                     dest_hash=b"\x00" * 16,
-                    send_sensor=False,
+                    send_sensor=True,
                     has_proto=True,
                     config=config,
                     pending_replies=[],
@@ -1184,7 +1184,7 @@ class TestHeapRecovery:
         with (
             patch.object(lmao_client, "log") as mock_log,
             patch.object(lmao_client.sys, "print_exception", create=True),
-            patch.object(lmao_client, "make_poc_message", return_value=b"ok", create=True),
+            patch.object(lmao_client, "make_sensor_message", return_value=b"ok", create=True),
             patch.object(lmao_client, "_reset_device") as mock_reset,
             patch.object(asyncio, "sleep", fast_sleep),
         ):
@@ -1195,7 +1195,7 @@ class TestHeapRecovery:
                     router=mock_router,
                     identity_hex="test",
                     dest_hash=b"\x00" * 16,
-                    send_sensor=False,
+                    send_sensor=True,
                     has_proto=True,
                     config=config,
                     pending_replies=[],

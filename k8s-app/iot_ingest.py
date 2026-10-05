@@ -88,13 +88,13 @@ def build_sensor_envelope(node_id: str, temperature: float, humidity: float) -> 
     reading_temp = envelope.sensor.readings.add()
     reading_temp.sensor_id = 1
     reading_temp.value = temperature
-    reading_temp.unit = "C"
+    reading_temp.unit = 2  # UNIT_CELSIUS
     reading_temp.timestamp_ms = int(time.time() * 1000)
 
     reading_hum = envelope.sensor.readings.add()
     reading_hum.sensor_id = 2
     reading_hum.value = humidity
-    reading_hum.unit = "%"
+    reading_hum.unit = 1  # UNIT_PERCENT
     reading_hum.timestamp_ms = int(time.time() * 1000)
 
     return envelope.SerializeToString()
