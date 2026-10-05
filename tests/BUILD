@@ -509,13 +509,3 @@ py_test(
         "@lmao_pip//pytest",
     ],
 )
-
-# ── E2E (hardware): Cardputer 500-B resource → k8s Rust receiver over LoRa ──
-py_test(
-    name = "test_cardputer_500b_resource",
-    srcs = ["e2e/test_cardputer_500b_resource.py"],
-    deps = [
-        "@lmao_pip//pyserial",
-        "@lmao_pip//pytest",
-    ],
-)

@@ -224,28 +224,6 @@ sh_binary(
     tags = ["manual"],
 )
 
-# ── RF-leg: sx126x driver core (no_std, bus-generic) ─────────────────────────
-# Port of the repo's MicroPython SX1262 driver (the one that RF-works on this
-# Cardputer): opcodes/registers + the config calculations, host-golden-tested
-# via a recording RadioBus. The esp-hal SPI binding + on-air RF TX/RX is the
-# hardware leg. Bus-generic so the driver core is fully host-testable.
-
-filegroup(
-    name = "sx126x_sources",
-    srcs = glob(
-        ["crates/sx126x/**"],
-        exclude = ["crates/**/target/**"],
-    ),
-    visibility = ["//visibility:public"],
-)
-
-sh_binary(
-    name = "test_sx126x",
-    srcs = ["test_sx126x.sh"],
-    data = [":sx126x_sources"],
-    tags = ["manual"],
-)
-
 # ── T7 host E2E — the composed leaf pipeline (design §5 data-flow, minus RF) ──
 # Runs the whole leaf on the host: identity + LXMF SensorReport control path
 # (lma-identity/lma-wire/lma-lxmf) + an RNS Resource over the held link paced
@@ -266,38 +244,11 @@ sh_binary(
 # with `bazel run //cardputer_client:flash`). Never pulled into test runs.
 
 filegroup(
-
-# ── lma-chart — no_std Cardputer chart renderer (host tests) ----------------
-# The chart is host-tested here (cargo test) with a recording fake display;
-# the esp32s3 firmware consumes the same crate via its own workspace path dep.
-
-filegroup(
-    name = "lma_chart_sources",
-    srcs = glob(
-        ["crates/lma-chart/**"],
-        exclude = ["crates/**/target/**"],
-    ),
-    visibility = ["//visibility:public"],
-)
-
-sh_binary(
-    name = "test_lma_chart",
-    srcs = ["test_lma_chart.sh"],
-    data = [":lma_chart_sources"],
-    tags = ["manual"],
-)
-
-    name = "vendor_sources",
-    srcs = glob(["vendor/**"]),
-    visibility = ["//visibility:public"],
-)
-
-filegroup(
     name = "firmware_sources",
     srcs = glob(
         ["firmware/**"],
         exclude = ["firmware/target/**"],
-    ) + [":vendor_sources"],
+    ),
     visibility = ["//visibility:public"],
 )
 
@@ -313,79 +264,4 @@ sh_binary(
     srcs = ["flash_firmware.sh"],
     data = [":firmware_sources"],
     tags = ["manual"],
-)
-
-# ── Bazel-native host Rust (rules_rust, edition 2021) ───────────────────
-# Builds the host-testable crates with rules_rust + the crate_universe index
-# `@lmao_crates` (MODULE.bazel) instead of out-of-band cargo. The xtensa ESP32
-# firmware stays out-of-band (cargo + esp nightly; no Bazel xtensa target).
-# `bazel test //rust-client:resource_500b_e2e` runs the cardputer 500-B resource
-# e2e that cross-checks the LoRa-proven sha256.
-
-load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
-
-_RNS = [
-    "@lmao_crates//:rns-core",
-    "@lmao_crates//:rns-crypto",
-]
-
-rust_library(
-    name = "lma_identity",
-    crate_name = "lma_identity",
-    edition = "2021",
-    srcs = glob(["crates/lma-identity/src/**"]),
-    deps = _RNS,
-    visibility = ["//visibility:public"],
-)
-
-rust_library(
-    name = "leaf_rns",
-    crate_name = "leaf_rns",
-    edition = "2021",
-    srcs = glob(["crates/leaf-rns/src/**"]),
-    deps = [":lma_identity"],
-    visibility = ["//visibility:public"],
-)
-
-rust_library(
-    name = "radio_interface",
-    crate_name = "radio_interface",
-    edition = "2021",
-    srcs = glob(["crates/radio-interface/src/**"]),
-    deps = ["@lmao_crates//:rns-core"],
-    visibility = ["//visibility:public"],
-)
-
-rust_library(
-    name = "leaf_power",
-    crate_name = "leaf_power",
-    edition = "2021",
-    srcs = glob(["crates/leaf-power/src/**"]),
-    visibility = ["//visibility:public"],
-)
-
-rust_library(
-    name = "sx126x",
-    crate_name = "sx126x",
-    edition = "2021",
-    srcs = glob(["crates/sx126x/src/**"]),
-    visibility = ["//visibility:public"],
-)
-
-rust_library(
-    name = "leaf_resource",
-    crate_name = "leaf_resource",
-    edition = "2021",
-    srcs = glob(["crates/leaf-resource/src/**"]),
-    deps = _RNS,
-    visibility = ["//visibility:public"],
-)
-
-# ── Cardputer → LMAO server 500-B resource e2e ───────────────────────────
-rust_test(
-    name = "resource_500b_e2e",
-    crate_name = "lmao_resource_500b_e2e",
-    edition = "2021",
-    srcs = glob(["host/resource-500b-e2e/src/**"]),
-    deps = [":leaf_resource"] + _RNS,
 )

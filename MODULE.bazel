@@ -11,43 +11,6 @@ bazel_dep(name = "rules_proto", version = "7.1.0")
 bazel_dep(name = "protobuf", version = "29.3")
 bazel_dep(name = "rules_python", version = "1.2.0")
 
-# ── Rust host workspace (rules_rust + crate_universe) ────────────────
-# Bazel-ifies the host-testable rust-client workspace (crates/* + host/*
-# e2e binaries). The xtensa ESP32 firmware stays out-of-band via cargo +
-# the esp nightly toolchain (no Bazel support for the xtensa target) —
-# same convention the repo already documents in rust-client/BUILD.
-
-bazel_dep(name = "rules_rust", version = "0.74.0")
-
-rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
-rust.toolchain(edition = "2021")
-use_repo(rust, "rust_toolchains")
-register_toolchains("@rust_toolchains//:all")
-
-crate = use_extension("@rules_rust//crate_universe:extension.bzl", "crate")
-crate.from_cargo(
-    name = "lmao_crates",
-    lockfile = "//:cargo-bazel-lock.json",
-    cargo_lockfile = "//rust-client:Cargo.lock",
-    manifests = [
-        "//rust-client:Cargo.toml",
-        "//rust-client:host/interop/Cargo.toml",
-        "//rust-client:host/leaf-e2e/Cargo.toml",
-        "//rust-client:host/resource-500b-e2e/Cargo.toml",
-        "//rust-client:host/lmao-server-rs/Cargo.toml",
-        "//rust-client:crates/lma-identity/Cargo.toml",
-        "//rust-client:crates/leaf-rns/Cargo.toml",
-        "//rust-client:crates/radio-interface/Cargo.toml",
-        "//rust-client:crates/lma-wire/Cargo.toml",
-        "//rust-client:crates/lma-lxmf/Cargo.toml",
-        "//rust-client:crates/leaf-resource/Cargo.toml",
-        "//rust-client:crates/lma-framing/Cargo.toml",
-        "//rust-client:crates/leaf-power/Cargo.toml",
-        "//rust-client:crates/sx126x/Cargo.toml",
-    ],
-)
-use_repo(crate, "lmao_crates")
-
 # ── Python toolchain ─────────────────────────────────────────────────
 
 python = use_extension("@rules_python//python/extensions:python.bzl", "python")
