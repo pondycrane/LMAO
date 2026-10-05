@@ -54,13 +54,14 @@ except ImportError:
 try:
     from proto.lma_encoder import (
         FIELD_ACK,
+        UNIT_CELSIUS,
+        UNIT_PERCENT,
         decode_envelope,
         encode_command_ack,
         encode_command_envelope,
         encode_field,
         encode_length_delimited,
         encode_sensor_envelope,
-        make_poc_message,
         parse_poc_message,
     )
 
@@ -206,7 +207,7 @@ def make_sensor_message(identity_hex, seq, battery=3.7, strict=False):
         {
             "sensor_id": 1,
             "value": temp,
-            "unit": "C",
+            "unit": UNIT_CELSIUS,
             "timestamp_ms": int(time.time() * 1000),
         }
     ]
@@ -222,7 +223,7 @@ def make_sensor_message(identity_hex, seq, battery=3.7, strict=False):
                     {
                         "sensor_id": 2,
                         "value": humidity,
-                        "unit": "%",
+                        "unit": UNIT_PERCENT,
                         "timestamp_ms": int(time.time() * 1000),
                     }
                 )
@@ -1009,36 +1010,14 @@ async def _periodic_send(
             # gc.collect() here: it also helps the send path's lazy imports.
 
             seq += 1
-            hello_text = f"Hello from Cardputer — seq {seq}"
 
             if not has_proto:
                 log("Proto encoder not available — cannot send", tft, status_lines)
             elif dest_hash is None:
                 log("No destination configured — not sending", tft, status_lines)
             else:
-                content = make_poc_message(
-                    identity_hex, hello_text, timestamp=int(time.time() * 1000)
-                )
-                # Send via urns LXMF router.  OPPORTUNISTIC delivery: it needs
-                # no link state — the Cardputer's UIFlow2 heap cannot afford an
-                # OutLink (the link lookup alone raised "MemoryError allocating
-                # 136 bytes"), and the LMAO server replies opportunistically
-                # anyway.  Collect first: Reticulum's startup churn otherwise
-                # leaves the heap too fragmented for the send path's lazy
-                # imports (urns.link / urns.transport).
-                gc.collect()
-                msg = router.send_message(
-                    destination_hash=dest_hash,
-                    content=content,
-                    title="p:Envelope",
-                    desired_method=LXMessage.OPPORTUNISTIC,
-                )
-                if msg:
-                    log(f"Sent: {hello_text}", tft, status_lines)
-                else:
-                    log("Send returned None", tft, status_lines)
-
-                # Also send SensorReport if enabled
+                # SensorReport only — the old "Hello from Cardputer" POC text
+                # was redundant (the server keys off the sensor payload).
                 if send_sensor:
                     try:
                         sensor_content = make_sensor_message(identity_hex, seq)

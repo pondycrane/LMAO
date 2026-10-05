@@ -66,10 +66,25 @@ message SensorReport {
 //   sensor_id 10 = profile dry threshold    unit "%"    Sprout plant profile
 //   sensor_id 11 = profile wet threshold    unit "%"    Sprout plant profile
 // Add new measurement types with sensor_id >= 10 and document them here.
+// Canonical unit for a sensor reading (replaces the old free-text string).
+// Keep in sync with the sensor_id registry above — a reading's unit is implied
+// by its sensor_id; this enum makes it explicit + typed on the wire.
+enum Unit {
+  UNIT_UNSPECIFIED  = 0;  // unknown / not set
+  UNIT_PERCENT      = 1;  // soil moisture, humidity, profile dry/wet
+  UNIT_CELSIUS      = 2;  // air temp, die temp
+  UNIT_HECTOPASCAL  = 3;  // barometric pressure (sensor 5)
+  UNIT_SECONDS      = 4;  // pump duration (sensor 6)
+  UNIT_VOLTS        = 5;  // battery voltage (sensor 8)
+  UNIT_DBM          = 6;  // RSSI (sensor 9)
+  UNIT_BOOL         = 7;  // pump active flag (sensor 7), 0/1
+}
+
 message SensorReading {
   uint32 sensor_id   = 1;
   float  value       = 2;
-  string unit        = 3;
+  Unit   unit        = 3;  // was `string unit`; now the typed enum (field 3,
+                           // wire type string->varint — breaking co-redeploy)
   uint64 timestamp_ms = 4;
 }
 

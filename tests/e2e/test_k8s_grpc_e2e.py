@@ -683,7 +683,7 @@ async def main():
     for fname, fnum, ftype in [
         ("sensor_id", 1, descriptor_pb2.FieldDescriptorProto.TYPE_INT32),
         ("value", 2, descriptor_pb2.FieldDescriptorProto.TYPE_FLOAT),
-        ("unit", 3, descriptor_pb2.FieldDescriptorProto.TYPE_STRING),
+        ("unit", 3, descriptor_pb2.FieldDescriptorProto.TYPE_ENUM),
         ("timestamp_ms", 4, descriptor_pb2.FieldDescriptorProto.TYPE_INT64),
     ]:
         f = msg_reading.field.add()
@@ -733,7 +733,7 @@ async def main():
     r = env.sensor.readings.add()
     r.sensor_id = 1
     r.value = 99.5
-    r.unit = "C"
+    r.unit = 2
     r.timestamp_ms = int(time.time() * 1000)
     payload = env.SerializeToString()
 
@@ -752,7 +752,7 @@ async def main():
 
     assert received.sensor.node_id == "e2e-nats-test-node"
     assert received.sensor.readings[0].value == 99.5
-    assert received.sensor.readings[0].unit == "C"
+    assert received.sensor.readings[0].unit == 2
 
     await msg.ack()
     await nc.drain()

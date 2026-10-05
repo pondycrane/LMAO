@@ -40,6 +40,18 @@ from typing import Any
 
 _logger = logging.getLogger(__name__)
 
+# proto Unit enum -> unit symbol (field 3 of SensorReading is a typed enum now;
+# the DB column stays TEXT and stores the symbol for backward compatibility).
+_UNIT_SYMBOL = {
+    1: "%",     # UNIT_PERCENT
+    2: "C",     # UNIT_CELSIUS
+    3: "hPa",   # UNIT_HECTOPASCAL
+    4: "s",     # UNIT_SECONDS
+    5: "V",     # UNIT_VOLTS
+    6: "dBm",   # UNIT_DBM
+    7: "",      # UNIT_BOOL
+}
+
 # ---------------------------------------------------------------------------
 # Lazy import of duckdb — graceful fallback when absent
 # ---------------------------------------------------------------------------
@@ -405,7 +417,7 @@ class DuckDbStore:
                     sensor.battery,
                     reading.sensor_id,
                     reading.value,
-                    reading.unit,
+                    _UNIT_SYMBOL.get(int(reading.unit), ""),
                     now_ms,
                 )
             )

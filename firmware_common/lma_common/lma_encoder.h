@@ -9,6 +9,20 @@
 // LXMF handler + ingest (#127) accept it unchanged.
 namespace lma_encoder {
 
+    // Unit enum (proto ``Unit``) — the typed replacement for the old unit
+    // string on SensorReading.unit (field 3 is now a varint enum, not a
+    // length-delimited string). Keep in sync with proto/lma_messages.proto.
+    enum Unit : uint8_t {
+        UNIT_UNSPECIFIED = 0,
+        UNIT_PERCENT = 1,
+        UNIT_CELSIUS = 2,
+        UNIT_HECTOPASCAL = 3,
+        UNIT_SECONDS = 4,
+        UNIT_VOLTS = 5,
+        UNIT_DBM = 6,
+        UNIT_BOOL = 7,
+    };
+
     // LMAOEnvelope{ oneof payload { SensorReport sensor = 10 } }
     std::string encode_envelope(const std::string& sensor_report_bytes);
 
@@ -17,8 +31,9 @@ namespace lma_encoder {
                                      uint32_t seq, float battery,
                                      const std::vector<std::string>& readings);
 
-    // SensorReading{ sensor_id=1, value=2(float), unit=3, timestamp_ms=4 }
+    // SensorReading{ sensor_id=1, value=2(float), unit=3(Unit enum varint),
+    //                timestamp_ms=4 }
     std::string encode_reading(uint32_t sensor_id, float value,
-                               const std::string& unit, uint64_t timestamp_ms);
+                               Unit unit, uint64_t timestamp_ms);
 
 }
