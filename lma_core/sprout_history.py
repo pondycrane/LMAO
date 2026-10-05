@@ -253,7 +253,7 @@ class SproutHistory:
         """
         if not self._moisture:
             return None
-        from lma_messages_pb2 import ChartBundle as _CB
+        from proto.lma_messages_pb2 import ChartBundle as _CB
 
         period_ms = 5 * 60 * 1000
         n = len(self._moisture)
