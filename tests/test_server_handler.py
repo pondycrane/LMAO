@@ -48,10 +48,31 @@ def server_with_mocks():
     cleanup_common_mocks()
 
 
+
+def _seed_chart():
+    """Fold one real soil SensorReport into SPROUT_HISTORY so the single-frame
+    ChartBundle reply fires — the returned chart data is the receipt; without
+    soil samples the server sends no reply."""
+    import sys as _sys
+
+    if "proto" not in _sys.path:
+        _sys.path.insert(0, "proto")
+    from lmao_server import server as _srv
+    from lma_messages_pb2 import SensorReport
+
+    rep = SensorReport()
+    rep.node_id = "e824ad2d"
+    r = rep.readings.add()
+    r.sensor_id = 4
+    r.value = 40.0
+    _srv.SPROUT_HISTORY.update(rep)
+
+
 class TestHandleLXMFDelivery:
     def test_reply_sent_for_valid_message(self, server_with_mocks):
         """Handle valid message and verify reply is sent with correct content."""
         server = server_with_mocks
+        _seed_chart()
 
         msg = MagicMock()
         msg.get_source.return_value = MagicMock()
@@ -111,6 +132,7 @@ class TestHandleLXMFDelivery:
     def test_handles_empty_content(self, server_with_mocks):
         """Handle message with empty content."""
         server = server_with_mocks
+        _seed_chart()
 
         msg = MagicMock()
         msg.get_source.return_value = MagicMock()
@@ -148,6 +170,7 @@ class TestHandleLXMFDelivery:
     def test_protobuf_decode_success_path(self, server_with_mocks):
         """Verify protobuf-decoded content is used when ParseFromString succeeds."""
         server = server_with_mocks
+        _seed_chart()
 
         # Reconfigure mock to simulate successful protobuf decode
         mock_envelope = MagicMock()
@@ -171,6 +194,7 @@ class TestHandleLXMFDelivery:
     def test_protobuf_decode_non_text_field(self, server_with_mocks):
         """Verify fallback when protobuf succeeds but has no text field."""
         server = server_with_mocks
+        _seed_chart()
 
         # Reconfigure mock: ParseFromString succeeds but HasField('text') is False
         mock_envelope = MagicMock()
@@ -189,6 +213,7 @@ class TestHandleLXMFDelivery:
     def test_handles_binary_content(self, server_with_mocks):
         """Handler should not crash on binary non-decodable content."""
         server = server_with_mocks
+        _seed_chart()
 
         msg = MagicMock()
         msg.get_source.return_value = MagicMock()
@@ -254,6 +279,7 @@ class TestHandleLXMFDelivery:
         """When protobuf decode fails and content is not valid UTF-8,
         the handler shows a byte-count placeholder instead."""
         server = server_with_mocks
+        _seed_chart()
 
         # Fixture already has ParseFromString side_effect = DecodeError
         msg = MagicMock()

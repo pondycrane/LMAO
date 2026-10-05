@@ -36,6 +36,8 @@ and the Cardputer displays them without a staleness marker (a marker would
 need an extra wire flag).
 """
 
+import time
+
 DEFAULT_MAXLEN = 30
 
 # The server replies to the Cardputer over LoRa with an LXMF OPPORTUNISTIC
@@ -73,6 +75,9 @@ class SproutHistory:
         self._dry = None
         self._wet = None
         self._node = None
+        # Server wall-clock ms of the most recent real Sprout report that
+        # pushed a soil sample (used to estimate the ChartBundle time axis).
+        self._last_seen_ms = 0
 
     def fold_samples(self, node, samples):
         """Fold one report's ``(sensor_id, value)`` samples into the history.
@@ -110,6 +115,7 @@ class SproutHistory:
             elif sensor_id == SENSOR_PROFILE_WET:
                 wet = value
         if moisture_seen:
+            self._last_seen_ms = int(time.time() * 1000)
             # Air readings only count when the report is a true Sprout report
             # (it carries a moisture sample) — see the ownership rule above.
             if air_temp is not None:
@@ -207,6 +213,7 @@ class SproutHistory:
         self._dry = None
         self._wet = None
         self._node = None
+        self._last_seen_ms = 0
 
     @staticmethod
     def _series_tokens(values, limit):
@@ -235,3 +242,36 @@ class SproutHistory:
                 mask |= 1 << i
         tokens.append(str(mask))
         return " ".join(tokens)
+
+    def chart_bundle(self):
+        """Return a protobuf ChartBundle (LMAOEnvelope.chart, server->Cardputer)
+        for the current history, or None when no soil samples are known yet.
+
+        temp is emitted in tenths of C to keep band resolution; start_ms is
+        estimated as (last report time) - (n-1)*period under a nominal 5-min
+        cadence (the server does not store per-sample timestamps).
+        """
+        if not self._moisture:
+            return None
+        from lma_messages_pb2 import ChartBundle as _CB
+
+        period_ms = 5 * 60 * 1000
+        n = len(self._moisture)
+        b = _CB()
+        b.format = 1
+        b.node_id = (self._node or "")[:8]
+        b.dry = int(round(self._dry)) if self._dry is not None else 0
+        b.wet = int(round(self._wet)) if self._wet is not None else 0
+        b.period_ms = period_ms
+        b.start_ms = int(
+            (self._last_seen_ms or int(time.time() * 1000)) - (n - 1) * period_ms
+        )
+        b.soil.extend(int(round(v)) for v in self._moisture)
+        b.temp.extend(int(round(v * 10)) for v in self._temp[-DATA_AIR_MAX_SAMPLES:])
+        b.hum.extend(int(round(v)) for v in self._humidity[-DATA_AIR_MAX_SAMPLES:])
+        water = 0
+        for i, active in enumerate(self._pump):
+            if active:
+                water |= 1 << i
+        b.watered = water
+        return b
