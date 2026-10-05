@@ -361,6 +361,56 @@ class TestDraw:
         assert chart.draw(None, self._data())["error"] == "no display"
 
 
+class TestParseBundle:
+    """parse_bundle: ChartBundle dict → chart-draw shape."""
+
+    def test_converts_and_scales(self):
+        b = {
+            "node_id": "e824ad2d", "dry": 37, "wet": 53,
+            "soil": [40, 41, 42], "temp": [246, 251], "hum": [59, 60],
+            "watered": 0b100,
+        }
+        d = chart.parse_bundle(b)
+        assert d["samples"] == [40, 41, 42]
+        assert d["temp"] == [24.6, 25.1]          # tenths → C
+        assert d["humidity"] == [59, 60]
+        assert d["water"] == [False, False, True]  # bit 2 set
+        assert d["dry"] == 37 and d["wet"] == 53
+
+    def test_rejects_empty(self):
+        assert chart.parse_bundle(None) is None
+        assert chart.parse_bundle({"soil": []}) is None
+        assert chart.parse_bundle({"soil": [40], "node_id": "abc"})["node"] == "abc"
+
+    def test_end_to_end_from_server_history(self):
+        """SproutHistory.chart_bundle → pb2 wire → MicroPython decode → draw."""
+        import sys
+
+        sys.path.insert(0, "cardputer_client/proto")
+        sys.path.insert(0, "proto")
+        from lma_core.sprout_history import SproutHistory
+        from cardputer_client.proto import lma_encoder as enc
+        import lma_messages_pb2 as pb
+
+        h = SproutHistory()
+
+        def rep(soil, temp, hum, pump):
+            r = pb.SensorReport(); r.node_id = "e824ad2d"
+            for sid, v in [(4, soil), (3, temp), (2, hum), (7, pump)]:
+                x = r.readings.add(); x.sensor_id = sid; x.value = v
+            return r
+
+        for s, t, hu, p in [(40, 24.6, 59, 0), (41, 24.9, 60, 0), (42, 25.1, 60, 1)]:
+            h.update(rep(s, t, hu, p))
+
+        env = pb.LMAOEnvelope(); env.chart.CopyFrom(h.chart_bundle())
+        dec = enc.decode_envelope(env.SerializeToString())
+        d = chart.parse_bundle(dec)
+        assert d["samples"] == [40, 41, 42]
+        assert d["temp"] == [24.6, 24.9, 25.1]
+        assert d["water"] == [False, False, True]
+
+
 if __name__ == "__main__":
     import sys
 

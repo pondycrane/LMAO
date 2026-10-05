@@ -114,6 +114,32 @@ def parse_data_line(text):
     return None
 
 
+def parse_bundle(bundle):
+    """Convert a decoded ChartBundle dict (proto field 23) into the chart-draw
+    shape (same keys parse_data_line returns), or None when the bundle carries
+    no soil samples.
+
+    ``temp`` arrives in tenths of C and is converted back to C floats; the
+    ``watered`` bitmask becomes the ``water`` bool-per-sample list.
+    """
+    if not bundle:
+        return None
+    soil = bundle.get("soil") or []
+    if not soil:
+        return None
+    temp = [t / 10.0 for t in (bundle.get("temp") or [])]
+    watered = bundle.get("watered", 0)
+    return {
+        "node": bundle.get("node_id", "")[:8],
+        "dry": int(bundle.get("dry", 0)),
+        "wet": int(bundle.get("wet", 0)),
+        "temp": temp,
+        "humidity": [int(h) for h in (bundle.get("hum") or [])],
+        "samples": [int(s) for s in soil],
+        "water": [bool(watered & (1 << i)) for i in range(len(soil))],
+    }
+
+
 def y_window(dry, wet, *series):
     """Percent range [lo, hi] to draw, always including the band.
 

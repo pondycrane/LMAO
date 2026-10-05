@@ -570,6 +570,16 @@ def handle_reply(message):
                 # Unknown action — log but don't crash
                 print(f"handle_reply: unknown command action '{action}' (id={cmd_id}) — ignoring")
                 return
+
+            # ChartBundle downlink (field 23): buffer the parsed chart for the
+            # send loop to render. A chart envelope carries no text content, so
+            # it would otherwise be dropped silently.
+            if isinstance(result, dict) and "soil" in result:
+                cb = chart.parse_bundle(result) if HAS_CHART else None
+                if cb is not None:
+                    pending_replies.append(cb)
+                    print(f"\n>>> CHART bundle ({len(cb['samples'])} samples)")
+                return
         except Exception as cmd_err:
             print(f"handle_reply: CommandRequest decode error: {cmd_err}")
             sys.print_exception(cmd_err)
@@ -1054,6 +1064,11 @@ async def _periodic_send(
             # status screen, so a later text reply must not land on top of it.
             chart_data = None
             for reply in pending_replies:
+                if isinstance(reply, dict):
+                    # Already-parsed ChartBundle (proto field 23) — render as-is.
+                    if HAS_CHART:
+                        chart_data = reply
+                    continue
                 data = chart.parse_data_line(reply) if HAS_CHART else None
                 if data is not None:
                     chart_data = data  # a later record is the fresher one
