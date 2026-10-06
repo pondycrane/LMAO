@@ -46,10 +46,11 @@ class TestLMAOGrpcService:
         request = MagicMock()
         request.envelope = b"valid-envelope"
 
-        # Envelope carries a CommandRequest whose target is the destination
+        # Envelope carries a Request{command} whose target is the destination
         mock_env = sys.modules["lma_core"].LMAOEnvelope.return_value
         mock_env.HasField.return_value = True
-        mock_env.command.target = "a1b2c3d4"
+        mock_env.request.HasField.return_value = True
+        mock_env.request.command.target = "a1b2c3d4"
 
         # Mock Identity.recall
         mock_dest = MagicMock()
@@ -105,7 +106,8 @@ class TestLMAOGrpcService:
 
         mock_env = sys.modules["lma_core"].LMAOEnvelope.return_value
         mock_env.HasField.return_value = True
-        mock_env.command.target = "bad-hash"
+        mock_env.request.HasField.return_value = True
+        mock_env.request.command.target = "bad-hash"
 
         # recall raises
         sys.modules["RNS"].Identity.recall.side_effect = ValueError("bad hash")
@@ -148,7 +150,8 @@ class TestLMAOGrpcService:
 
         mock_env = sys.modules["lma_core"].LMAOEnvelope.return_value
         mock_env.HasField.return_value = True
-        mock_env.command.target = "a1b2c3d4"
+        mock_env.request.HasField.return_value = True
+        mock_env.request.command.target = "a1b2c3d4"
 
         mock_dest = MagicMock()
         sys.modules["RNS"].Identity.recall.return_value = mock_dest

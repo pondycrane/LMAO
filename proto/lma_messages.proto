@@ -6,19 +6,25 @@ package lma;
 // Use Title="p:Envelope" in LXMF to signal protobuf-encoded Content.
 
 message LMAOEnvelope {
+  // Requester correlation — the server echoes this on any reply (DeliveryAck).
+  uint32 seq         = 1;
+  // Delivery-confirmation request: the server replies a DeliveryAck when set.
+  bool   request_ack = 2;
+  // The intent axis (fetch data / run a command), a sibling of the payload.
+  Request request    = 3;
+
   oneof payload {
-    SensorReport    sensor  = 10;
-    CommandRequest  command = 11;
-    CommandAck      ack     = 12;
-    TextMessage     text    = 20;
-    AudioMessage    audio   = 21;
-    ImageMessage    image   = 22;
-    ChartBundle     chart   = 23;   // server -> Cardputer chart downlink
-    CallSignal      call    = 30;
-    LmafManifest    manifest    = 40;
-    LmafChunk       chunk       = 41;
-    LmafAck         ack_lmaf    = 42;
-    LmafCapability  capability  = 43;
+    SensorReport    sensor       = 10;   // push telemetry (one-way; no reply implied)
+    DeliveryAck     ack          = 12;   // unified ack (delivery confirm + command result)
+    TextMessage     text         = 20;
+    AudioMessage    audio        = 21;
+    ImageMessage    image        = 22;
+    ChartBundle     chart        = 23;   // server -> client history data
+    CallSignal      call         = 30;
+    LmafManifest    manifest     = 40;
+    LmafChunk       chunk        = 41;
+    LmafAck         ack_lmaf     = 42;
+    LmafCapability  capability   = 43;
   }
 }
 
@@ -88,22 +94,50 @@ message SensorReading {
   uint64 timestamp_ms = 4;
 }
 
-// --- Commands ---
-
-message CommandRequest {
-  string cmd_id     = 1;
-  string target     = 2;
-  string action     = 3;
-  map<string, string> params = 4;
-  uint64 issued_ms  = 5;
-  uint64 expires_ms = 6;
+// --- Requests (the intent axis) ---
+//
+// One logical ask per envelope (LMAOEnvelope.request). New request intents are
+// added as fields of Request.kind — LMAOEnvelope itself never changes.
+message Request {
+  oneof kind {
+    HistoryRequest  history = 1;   // "give me chart history data"
+    CommandRequest  command = 2;   // "run a command on target"
+  }
 }
 
-message CommandAck {
-  string cmd_id     = 1;
-  string node_id    = 2;
-  bool   success    = 3;
-  string message    = 4;
+// Chart/history fetch. Empty `count`/`series` mean "full window / all series";
+// `since_ms` makes it delta-friendly: the display asks only for samples it has
+// not seen yet, so the reply stays small regardless of history length.
+message HistoryRequest {
+  uint32          count    = 1;   // last N samples (0 = full available window)
+  uint64          since_ms = 2;   // only samples at/after this epoch ms
+  repeated Series series   = 3;   // which series to include (empty = all)
+}
+
+// The series a HistoryRequest can select from (maps onto ChartBundle fields).
+enum Series {
+  SERIES_UNKNOWN = 0;
+  SOIL           = 1;   // ChartBundle.soil
+  AIR_TEMP       = 2;   // ChartBundle.temp (delivered in tenths of C)
+  AIR_HUMIDITY   = 3;   // ChartBundle.hum
+  PUMP           = 4;   // ChartBundle.watered mask history
+}
+
+// The ONLY ack payload type: delivery confirmation + command result, unified.
+// The server echoes the acknowledged request's LMAOEnvelope.seq.
+message DeliveryAck {
+  uint32   seq       = 1;
+  uint64   server_ms = 2;   // server wallclock at ack time
+  bool     success   = 3;   // delivered/OK, or the command outcome
+  string   message   = 4;   // optional detail (command result / error)
+  string   node_id   = 5;   // optional: node the ack concerns (command target)
+}
+
+message CommandRequest {
+  string   target     = 1;   // node the command addresses
+  string   action     = 2;   // what to do
+  map<string,string> params = 3;   // command arguments
+  uint64   issued_ms  = 4;   // when the command was issued (sender clock)
 }
 
 // --- Human Communication ---

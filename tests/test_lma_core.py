@@ -187,11 +187,14 @@ class TestLmaCoreImportError:
 
         expected = [
             "LMAOEnvelope",
+            "Request",
+            "HistoryRequest",
+            "Series",
+            "DeliveryAck",
             "TextMessage",
             "SensorReport",
             "SensorReading",
             "CommandRequest",
-            "CommandAck",
             "AudioMessage",
             "ImageMessage",
             "CallSignal",
