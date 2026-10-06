@@ -73,7 +73,7 @@ def _patch_imports():
         ),
         "flash_cardputer_native": patch.object(
             install_all, "_flash_cardputer_native",
-            side_effect=lambda port, result, inject_dest_hash=True: result.ok(
+            side_effect=lambda port, result, inject_dest_hash=True, device_name=None: result.ok(
                 f"mocked native flash on {port}"
             ),
         ),
@@ -652,7 +652,20 @@ class TestFlashCardputerClient:
         install_all._flash_cardputer_client(
             "/dev/ttyACM0", "/fake/root", result, inject_dest_hash=False
         )
-        self.mocks["inject_client_identity"].assert_called_once_with(self.mock_ser)
+        self.mocks["inject_client_identity"].assert_called_once_with(self.mock_ser, None)
+        assert result.status == "OK"
+
+    def test_named_flash_passes_device_name_to_identity(self):
+        """--device-name resolves the per-device identity (name threaded to the
+        identity injector so the private key comes from devs/<name>)."""
+        result = self._make_result()
+        install_all._flash_cardputer_client(
+            "/dev/ttyACM0", "/fake/root", result,
+            inject_dest_hash=False, device_name="kitchen",
+        )
+        self.mocks["inject_client_identity"].assert_called_once_with(
+            self.mock_ser, "kitchen"
+        )
         assert result.status == "OK"
 
     def test_client_identity_pinning_failure_sets_fail(self):
