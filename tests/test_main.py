@@ -1238,28 +1238,28 @@ class TestCommandRequestHandling:
             ), patch.object(
                 lmao_client, "decode_envelope", create=True
             ) as mock_decode, patch.object(
-                lmao_client, "encode_command_ack", create=True
+                lmao_client, "encode_delivery_ack_envelope", create=True
             ) as mock_ack_enc, patch.object(
-                lmao_client, "encode_field", create=True
-            ) as mock_field_enc, patch.object(
-                lmao_client, "encode_length_delimited", create=True
-            ) as mock_len_delim, patch.object(
                 lmao_client, "_reset_device"
             ) as mock_reset, patch.object(
                 lmao_client.time, "sleep"
             ) as mock_sleep:
 
-                # Mock decode_envelope to return a CommandRequest dict
+                # Mock decode_envelope to return the new envelope.request dict shape
                 mock_decode.return_value = {
-                    "cmd_id": "c1",
-                    "target": "test-node-hex",
-                    "action": "reboot",
-                    "expires_ms": 0,
-                    "params": {},
+                    "seq": 5,
+                    "request_ack": False,
+                    "request": {
+                        "kind": "command",
+                        "command": {
+                            "target": "test-node-hex",
+                            "action": "reboot",
+                            "params": {},
+                        },
+                    },
+                    "payload": None,
                 }
                 mock_ack_enc.return_value = b"fake-ack"
-                mock_field_enc.return_value = b"fake-envelope"
-                mock_len_delim.return_value = b"fake-len"
 
                 msg = MagicMock()
                 msg.source_hash = b"\x01" * 16
@@ -1293,11 +1293,17 @@ class TestCommandRequestHandling:
             ) as mock_reset:
 
                 mock_decode.return_value = {
-                    "cmd_id": "c1",
-                    "target": "other-node",  # wrong target
-                    "action": "reboot",
-                    "expires_ms": 0,
-                    "params": {},
+                    "seq": 5,
+                    "request_ack": False,
+                    "request": {
+                        "kind": "command",
+                        "command": {
+                            "target": "other-node",  # wrong target
+                            "action": "reboot",
+                            "params": {},
+                        },
+                    },
+                    "payload": None,
                 }
 
                 msg = MagicMock()
@@ -1306,41 +1312,6 @@ class TestCommandRequestHandling:
                 lmao_client.handle_reply(msg)
 
                 # Reset must NOT be called
-                mock_reset.assert_not_called()
-        finally:
-            lmao_client._NODE_IDENTITY_HEX = orig_identity
-
-    def test_expired_command_ignored(self):
-        """CommandRequest with expired expires_ms is ignored."""
-        lmao_client.pending_replies.clear()
-
-        orig_identity = lmao_client._NODE_IDENTITY_HEX
-        try:
-            lmao_client._NODE_IDENTITY_HEX = "my-node"
-
-            with patch.object(
-                lmao_client, "HAS_PROTO", True
-            ), patch.object(
-                lmao_client, "decode_envelope", create=True
-            ) as mock_decode, patch.object(
-                lmao_client, "_reset_device"
-            ) as mock_reset:
-
-                # expires_ms is in the past
-                mock_decode.return_value = {
-                    "cmd_id": "c1",
-                    "target": "my-node",
-                    "action": "reboot",
-                    "expires_ms": 1,  # very old expiry
-                    "params": {},
-                }
-
-                msg = MagicMock()
-                msg.content = b"envelope"
-
-                lmao_client.handle_reply(msg)
-
-                # Reset must NOT be called (expired)
                 mock_reset.assert_not_called()
         finally:
             lmao_client._NODE_IDENTITY_HEX = orig_identity
@@ -1362,12 +1333,45 @@ class TestCommandRequestHandling:
             ) as mock_reset:
 
                 mock_decode.return_value = {
-                    "cmd_id": "c1",
-                    "target": "my-node",
-                    "action": "spray",  # unknown action
-                    "expires_ms": 0,
-                    "params": {},
+                    "seq": 5,
+                    "request_ack": False,
+                    "request": {
+                        "kind": "command",
+                        "command": {
+                            "target": "my-node",
+                            "action": "spray",  # unknown action
+                            "params": {},
+                        },
+                    },
+                    "payload": None,
                 }
+
+                msg = MagicMock()
+                msg.content = b"envelope"
+
+                # Should not raise and should not reset
+                lmao_client.handle_reply(msg)
+                mock_reset.assert_not_called()
+        finally:
+            lmao_client._NODE_IDENTITY_HEX = orig_identity
+
+    def test_decode_error_falls_through(self):
+        """decode_envelope raising is caught — no crash, no reset."""
+        lmao_client.pending_replies.clear()
+
+        orig_identity = lmao_client._NODE_IDENTITY_HEX
+        try:
+            lmao_client._NODE_IDENTITY_HEX = "my-node"
+
+            with patch.object(
+                lmao_client, "HAS_PROTO", True
+            ), patch.object(
+                lmao_client, "decode_envelope", create=True
+            ) as mock_decode, patch.object(
+                lmao_client, "_reset_device"
+            ) as mock_reset:
+
+                mock_decode.side_effect = RuntimeError("bad envelope")
 
                 msg = MagicMock()
                 msg.content = b"envelope"
@@ -1394,27 +1398,27 @@ class TestCommandRequestHandling:
             ), patch.object(
                 lmao_client, "decode_envelope", create=True
             ) as mock_decode, patch.object(
-                lmao_client, "encode_command_ack", create=True
+                lmao_client, "encode_delivery_ack_envelope", create=True
             ) as mock_ack_enc, patch.object(
-                lmao_client, "encode_field", create=True
-            ) as mock_field_enc, patch.object(
-                lmao_client, "encode_length_delimited", create=True
-            ) as mock_len_delim, patch.object(
                 lmao_client, "_reset_device"
             ) as mock_reset, patch.object(
                 lmao_client.time, "sleep"
             ):
 
                 mock_decode.return_value = {
-                    "cmd_id": "c1",
-                    "target": "",  # broadcast
-                    "action": "reboot",
-                    "expires_ms": 0,
-                    "params": {},
+                    "seq": 5,
+                    "request_ack": False,
+                    "request": {
+                        "kind": "command",
+                        "command": {
+                            "target": "",  # broadcast
+                            "action": "reboot",
+                            "params": {},
+                        },
+                    },
+                    "payload": None,
                 }
                 mock_ack_enc.return_value = b"fake-ack"
-                mock_field_enc.return_value = b"fake-envelope"
-                mock_len_delim.return_value = b"fake-len"
 
                 msg = MagicMock()
                 msg.source_hash = b"\x01" * 16

@@ -430,10 +430,11 @@ class TestSchemaRegistry:
         all_calls = [args[0][0] for args in mock_conn.execute.call_args_list]
         ack_ddl = next(c for c in all_calls if "command_acks" in c)
         assert "CREATE TABLE IF NOT EXISTS" in ack_ddl
-        assert "cmd_id" in ack_ddl
+        assert "seq" in ack_ddl
         assert "node_id" in ack_ddl
         assert "success" in ack_ddl
         assert "msg" in ack_ddl
+        assert "server_ms" in ack_ddl
 
 
 class TestStoreEnvelope:
@@ -503,10 +504,11 @@ class TestStoreEnvelope:
 
         mock_envelope = MagicMock()
         mock_envelope.WhichOneof = MagicMock(return_value="ack")
-        mock_envelope.ack.cmd_id = "cmd-123"
+        mock_envelope.ack.seq = 123
         mock_envelope.ack.node_id = "node-b"
         mock_envelope.ack.success = True
         mock_envelope.ack.message = "All good"  # proto field name
+        mock_envelope.ack.server_ms = 1700000000999
 
         mock_conn.executemany.reset_mock()
 
@@ -517,10 +519,11 @@ class TestStoreEnvelope:
         sql, rows = mock_conn.executemany.call_args[0]
         assert "INSERT INTO command_acks" in sql
         assert len(rows) == 1
-        assert rows[0][0] == "cmd-123"
+        assert rows[0][0] == 123
         assert rows[0][1] == "node-b"
         assert rows[0][2] is True
         assert rows[0][3] == "All good"  # stored as msg
+        assert rows[0][4] == 1700000000999
 
     @pytest.mark.asyncio
     async def test_store_envelope_unknown_oneof_noop(self, initialized_store):

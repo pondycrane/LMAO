@@ -53,14 +53,10 @@ except ImportError:
 # Proto encoder (optional — gracefully degrades if not on device)
 try:
     from proto.lma_encoder import (
-        FIELD_ACK,
         UNIT_CELSIUS,
         UNIT_PERCENT,
         decode_envelope,
-        encode_command_ack,
-        encode_command_envelope,
-        encode_field,
-        encode_length_delimited,
+        encode_delivery_ack_envelope,
         encode_sensor_envelope,
         parse_poc_message,
     )
@@ -70,11 +66,8 @@ except ImportError:
     HAS_PROTO = False
     parse_poc_message = None  # type: ignore[assignment]
     decode_envelope = None  # type: ignore[assignment]
-    encode_command_ack = None  # type: ignore[assignment]
-    encode_command_envelope = None  # type: ignore[assignment]
-    encode_field = None  # type: ignore[assignment]
-    encode_length_delimited = None  # type: ignore[assignment]
-    FIELD_ACK = None  # type: ignore[assignment]
+    encode_delivery_ack_envelope = None  # type: ignore[assignment]
+    encode_sensor_envelope = None  # type: ignore[assignment]
 
 # Feature flag to disable SensorReport sending; defaults True for backward compatibility
 SEND_SENSOR = True
@@ -489,9 +482,9 @@ def handle_reply(message):
     in ``pending_replies`` for the main loop to drain — do NOT
     add blocking calls or locking here.
 
-    When a CommandRequest is decoded (field 11 in the LMAOEnvelope),
-    the handler validates target and expiry and, on a REBOOT action,
-    sends a CommandAck and hard-resets the device (issue #78).
+    When a command arrives (LMAOEnvelope.request.kind = command),
+    the handler validates the target and, on a REBOOT action,
+    sends a DeliveryAck and hard-resets the device (issue #78).
     """
     content = ""
     source_info = "unknown"
@@ -509,80 +502,67 @@ def handle_reply(message):
         sys.print_exception(e)
         return  # Don't add empty content to pending_replies
 
-    # ── CommandRequest detection (issue #78) ─────────────────
-    # Check whether the envelope contains a CommandRequest (field 11).
+    # ── Inbound request handling (issue #78): envelope.request (history/command)
     if HAS_PROTO and decode_envelope is not None:
         try:
             raw = message.content if hasattr(message, "content") else b""
             result = decode_envelope(raw)
-            if isinstance(result, dict) and "cmd_id" in result:
-                self_hex = _NODE_IDENTITY_HEX or ""
-                target = result.get("target", "")
-                action = result.get("action", "")
-                expires_ms = result.get("expires_ms", 0)
-                cmd_id = result.get("cmd_id", "")
 
-                # Validate target: must be empty (broadcast) or match this node
+            # ChartBundle downlink (payload field 23): buffer the parsed chart
+            # for the send loop to render. A chart envelope carries no text
+            # content, so it would otherwise be dropped silently.
+            if isinstance(result, dict) and result.get("payload") == "chart":
+                cb = chart.parse_bundle(result) if HAS_CHART else None
+                if cb is not None:
+                    pending_replies.append(cb)
+                    print(f"\n>>> CHART bundle ({len(cb['samples'])} samples)")
+                return
+
+            # A command arrives via envelope.request (Request.kind.command). Its
+            # correlation is the envelope seq, echoed back in the DeliveryAck.
+            req = result.get("request") if isinstance(result, dict) else None
+            if isinstance(req, dict) and req.get("kind") == "command":
+                cmd = req.get("command") or {}
+                seq = result.get("seq", 0)
+                self_hex = _NODE_IDENTITY_HEX or ""
+                target = cmd.get("target", "")
+                action = cmd.get("action", "")
+
+                # Validate target: must be blank (broadcast) or match this node
                 if target and target != self_hex:
                     print(
-                        f"handle_reply: ignoring CommandRequest {cmd_id} "
-                        f"— target mismatch (got {target}, node is {self_hex})"
+                        f"handle_reply: ignoring command — target mismatch "
+                        f"(got {target}, node is {self_hex})"
                     )
                     return
 
-                # Validate expiry: 0 = no expiry, otherwise must be in the future
-                now_ms = time.ticks_ms() if hasattr(time, "ticks_ms") else int(time.time() * 1000)
-                if expires_ms and expires_ms < now_ms:
-                    print(
-                        f"handle_reply: ignoring expired CommandRequest {cmd_id} "
-                        f"(expired at {expires_ms}, now {now_ms})"
-                    )
-                    return
-
-                action_lower = action.lower()
+                action_lower = (action or "").lower()
                 if action_lower == "reboot":
-                    print(f"handle_reply: REBOOT command received (id={cmd_id})")
-                    # Send best-effort CommandAck before resetting
-                    if (
-                        _ROUTER is not None
-                        and encode_command_ack is not None
-                        and encode_field is not None
-                    ):
+                    print("handle_reply: REBOOT command received")
+                    # Send best-effort DeliveryAck before resetting
+                    if _ROUTER is not None and encode_delivery_ack_envelope is not None:
                         try:
-                            ack_bytes = encode_command_ack(cmd_id, self_hex, True, "Rebooting")
-                            ack_envelope = encode_field(
-                                FIELD_ACK,
-                                2,
-                                encode_length_delimited(ack_bytes),  # noqa: F821
+                            ack_envelope = encode_delivery_ack_envelope(
+                                seq, self_hex, True, "Rebooting"
                             )
                             _ROUTER.send_message(
                                 destination_hash=message.source_hash,
                                 content=ack_envelope,
                                 title="p:Envelope",
                             )
-                            print("handle_reply: CommandAck sent")
+                            print("handle_reply: DeliveryAck sent")
                         except Exception as ack_err:
-                            print(f"handle_reply: failed to send CommandAck: {ack_err}")
+                            print(f"handle_reply: failed to send DeliveryAck: {ack_err}")
                     # Log, wait for radio TX flush, then reset
                     time.sleep(2)
                     _reset_device("Remote REBOOT command received")
                     return
 
                 # Unknown action — log but don't crash
-                print(f"handle_reply: unknown command action '{action}' (id={cmd_id}) — ignoring")
-                return
-
-            # ChartBundle downlink (field 23): buffer the parsed chart for the
-            # send loop to render. A chart envelope carries no text content, so
-            # it would otherwise be dropped silently.
-            if isinstance(result, dict) and "soil" in result:
-                cb = chart.parse_bundle(result) if HAS_CHART else None
-                if cb is not None:
-                    pending_replies.append(cb)
-                    print(f"\n>>> CHART bundle ({len(cb['samples'])} samples)")
+                print(f"handle_reply: unknown command action '{action}' — ignoring")
                 return
         except Exception as cmd_err:
-            print(f"handle_reply: CommandRequest decode error: {cmd_err}")
+            print(f"handle_reply: inbound request decode error: {cmd_err}")
             sys.print_exception(cmd_err)
             # Fall through — still append text content if any
 
@@ -883,7 +863,7 @@ def main():
             time.sleep(1)
 
     # Store router and identity at module level so handle_reply() can
-    # send CommandAck and validate target for incoming CommandRequest (issue #78).
+    # send a DeliveryAck and validate the target for an inbound server command (issue #78).
     global _ROUTER, _NODE_IDENTITY_HEX
     _ROUTER = router
     _NODE_IDENTITY_HEX = identity_hex
