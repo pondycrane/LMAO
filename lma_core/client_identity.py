@@ -33,6 +33,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import os
+import re
 import tempfile
 
 from lma_core.rns_di import RNS
@@ -44,6 +45,13 @@ _logger = logging.getLogger(__name__)
 # identity store (lma_core/server_identity.DEFAULT_IDENTITY_DIR): this is the
 # device identity that ends up in /flash/rns/identity, not the server's.
 DEFAULT_IDENTITY_DIR = os.path.expanduser("~/.local/share/lmao_client/lxmf")
+
+# Per-device identity store: one private identity file per named device
+# (``devs/<name>/identity``).  Kept outside the repo (never committed); the
+# directory is owner-only (0700) because these are the private keys.  The
+# public record (name / delivery_hash / pubkey) lives in the server-side
+# contact book — never the private key itself.
+DEVICE_IDENTITY_ROOT = os.path.expanduser("~/.local/share/lmao_client/devs")
 
 _IDENTITY_FILENAME = "identity"
 
@@ -171,4 +179,64 @@ def ensure_client_delivery_destination_hash(identity_dir: str | None = None) -> 
     ``LMAO_ALLOWED_CLIENTS`` — the same hash install_all pins onto the device.
     """
     identity, _ = ensure_client_identity(identity_dir)
+    return delivery_destination_hash_hex(identity)
+
+
+# ---------------------------------------------------------------------------
+# Per-device (named) identity store — "identity by human-readable name".
+# One private RNS identity file per device name under DEVICE_IDENTITY_ROOT;
+# the public record (name / delivery_hash / pubkey) is the server contact
+# book.  The private key is NEVER committed nor stored in the directory DB.
+# ---------------------------------------------------------------------------
+
+
+def device_identity_dir(name: str) -> str:
+    """The private-identity directory for a named device ``devs/<name>``.
+
+    The name is sanitized to a safe path token ([A-Za-z0-9_.-]) so a hostile
+    or accidental name cannot escape the identity root via path traversal.
+    """
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(name)).strip("._")
+    if not safe:
+        raise ValueError(f"Invalid device name: {name!r}")
+    return os.path.join(DEVICE_IDENTITY_ROOT, safe)
+
+
+def _chmod_private(root: str) -> None:
+    """Ensure a private identity directory is owner-only (0700)."""
+    try:
+        os.chmod(root, 0o700)
+    except OSError:  # pragma: no cover - best-effort perms
+        _logger.warning("Could not chmod 0700 %s", root)
+
+
+def ensure_device_identity(name: str):
+    """Ensure the private identity for a named device exists and return it.
+
+    Returns ``(identity, identity_file)`` — mints a fresh per-name identity on
+    first use, reuses the persisted file on later flashes of the same name, so
+    the device's ``lxmf/delivery`` hash is stable across re-flashes.
+    """
+    identity_dir = device_identity_dir(name)
+    _chmod_private(identity_dir)
+    identity, identity_file = ensure_client_identity(identity_dir)
+    _chmod_private(identity_dir)
+    return identity, identity_file
+
+
+def adopt_device_identity_bytes(data: bytes, name: str):
+    """Adopt an existing on-device identity into the named device's store.
+
+    Used on the first flash of a device under this scheme so its currently
+    allow-listed hash keeps working (no drift).  Returns ``(identity, file)``
+    on success, ``None`` when *data* is not a valid RNS identity file.
+    """
+    identity_dir = device_identity_dir(name)
+    _chmod_private(identity_dir)
+    return adopt_client_identity_bytes(data, identity_dir)
+
+
+def device_delivery_destination_hash(name: str) -> str:
+    """The delivery hash of a named device's identity (for ALLOWED_CLIENTS)."""
+    identity, _ = ensure_device_identity(name)
     return delivery_destination_hash_hex(identity)
