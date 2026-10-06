@@ -57,6 +57,8 @@ try:
         UNIT_PERCENT,
         decode_envelope,
         encode_delivery_ack_envelope,
+        encode_history_request,
+        encode_request_envelope,
         encode_sensor_envelope,
         parse_poc_message,
     )
@@ -67,6 +69,8 @@ except ImportError:
     parse_poc_message = None  # type: ignore[assignment]
     decode_envelope = None  # type: ignore[assignment]
     encode_delivery_ack_envelope = None  # type: ignore[assignment]
+    encode_history_request = None  # type: ignore[assignment]
+    encode_request_envelope = None  # type: ignore[assignment]
     encode_sensor_envelope = None  # type: ignore[assignment]
 
 # Feature flag to disable SensorReport sending; defaults True for backward compatibility
@@ -1015,9 +1019,31 @@ async def _periodic_send(
                         sys.print_exception(sensor_err)
                         log(f"Sensor send failed: {sensor_err}", tft, status_lines)
 
-            # Drain pending replies.  A DATA line carries the Sprout moisture
-            # series (the server piggybacks it on this ACK, so the chart costs
-            # no extra airtime); anything else is a plain status line.
+                # Fetch the chart (decoupled intent: the display pulls history
+                # explicitly — the server replies a ChartBundle to
+                # request.history and nothing otherwise). request_ack stays off:
+                # the chart itself is the data we want.
+                if encode_history_request is not None and encode_request_envelope is not None:
+                    try:
+                        history_bytes = encode_history_request(count=0, since_ms=0, series=())
+                        chart_req = encode_request_envelope(seq, "history", history_bytes)
+                        msg3 = router.send_message(
+                            destination_hash=dest_hash,
+                            content=chart_req,
+                            title="p:Envelope",
+                            desired_method=LXMessage.OPPORTUNISTIC,
+                        )
+                        if msg3:
+                            log(f"Chart request sent (seq={seq})", tft, status_lines)
+                        else:
+                            log("Chart request returned None", tft, status_lines)
+                    except Exception as chart_err:
+                        sys.print_exception(chart_err)
+                        log(f"Chart request failed: {chart_err}", tft, status_lines)
+
+            # Drain pending replies.  A ChartBundle (proto field 23) carries the
+            # soil/temp/humidity series to draw; anything else is a plain status
+            # line.
             #
             # The chart is drawn AFTER the whole drain: log() repaints the text
             # status screen, so a later text reply must not land on top of it.
