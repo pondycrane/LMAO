@@ -73,8 +73,10 @@ except ImportError:
     encode_request_envelope = None  # type: ignore[assignment]
     encode_sensor_envelope = None  # type: ignore[assignment]
 
-# Feature flag to disable SensorReport sending; defaults True for backward compatibility
-SEND_SENSOR = True
+# Feature flag to disable SensorReport sending; the cardputer's own
+# temp/humidity is not useful server-side (the Sprout is the soil/air source),
+# so the display only fetches charts. Flip to True to resume reporting.
+SEND_SENSOR = False
 
 # Default interval and sensor settings; updated from config.py at boot time.
 # Module-level defaults allow make_sensor_message() to function even when
@@ -935,7 +937,7 @@ async def _periodic_send(
     config,
     pending_replies,
 ):
-    """Periodic send loop: sends Hello + SensorReport on interval.
+    """Periodic send loop: fetches the chart (and SensorReport if send_sensor).
 
     Defined at module level (not nested) to avoid MicroPython closure
     scoping issues with async functions and local variable references.
@@ -1168,7 +1170,8 @@ async def _async_runtime(
     wdt=None,
 ):
     """Async runtime: runs the Reticulum event loop (job_loop + poll_loop)
-    alongside a periodic send task for Hello and SensorReport messages.
+    alongside a periodic send task that fetches the chart (and SensorReport if
+send_sensor is enabled).
 
     Previously the send loop ran synchronously with ``time.sleep()`` but
     never started ``rns.run()``, so the LoRa ``poll_loop()`` could not
