@@ -1,0 +1,104 @@
+# Dedicated in-cluster Postgres for the LMAO contact book (migrated from
+# SQLite). Single-instance StatefulSet on local-path storage, pinned to tp4
+# (co-located with the lmao-server/RNode pod). Credentials live in the
+# lmao-postgres Secret and are consumed by both this pod and the lmao-server
+# deployment (which builds its DSN from LMAO_CONTACTS_PG_* env parts —
+# see lma_core/contact_book_pg.py#compose_postgres_dsn).
+#
+# Lab default password, generated for this bench; rotate in the Secret if the
+# cluster is ever exposed beyond the operator's LAN.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: lmao-postgres
+  namespace: default
+  labels:
+    app: lmao-postgres
+type: Opaque
+stringData:
+  POSTGRES_USER: lmao
+  POSTGRES_PASSWORD: BwJz3E66uEomseQQeoCnto5iPsgsb2Rn
+  POSTGRES_DB: lmao
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: default
+  labels:
+    app: lmao-postgres
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app: lmao-postgres
+  template:
+    metadata:
+      labels:
+        app: lmao-postgres
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: tp4
+      containers:
+        - name: postgres
+          image: 192.168.50.153:5000/postgres:16-alpine
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: postgres
+              containerPort: 5432
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: lmao-postgres
+                  key: POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: lmao-postgres
+                  key: POSTGRES_PASSWORD
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef:
+                  name: lmao-postgres
+                  key: POSTGRES_DB
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "lmao", "-d", "lmao"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "lmao", "-d", "lmao"]
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          volumeMounts:
+            - name: postgres-data
+              mountPath: /var/lib/postgresql/data
+  volumeClaimTemplates:
+    - metadata:
+        name: postgres-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: local-path
+        resources:
+          requests:
+            storage: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: default
+  labels:
+    app: lmao-postgres
+spec:
+  type: ClusterIP
+  selector:
+    app: lmao-postgres
+  ports:
+    - port: 5432
+      targetPort: 5432
+      protocol: TCP
+      name: postgres

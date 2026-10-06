@@ -823,6 +823,7 @@ def install_k8s_services(result: DeviceResult, repo_root: str | None = None) -> 
 
     manifests = [
         os.path.join("k8s", "nats-server.yaml"),
+        os.path.join("k8s", "postgres.yaml"),
     ]
 
     applied: list[str] = []

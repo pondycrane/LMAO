@@ -40,6 +40,7 @@ RUN pip install --no-cache-dir \
     nats-py \
     protobuf \
     aiohttp==3.14.3 \
+    psycopg[binary] \
     rns==1.3.5 \
     lxmf==1.0.1
 
