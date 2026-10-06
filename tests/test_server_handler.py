@@ -28,6 +28,10 @@ def server_with_mocks():
     mock_envelope = MagicMock()
     mock_envelope.ParseFromString.side_effect = DecodeError("Test decode error")
     mock_envelope.SerializeToString.return_value = b"mock-serialized-envelope"
+    # Decoupled-reply protocol: a plain envelope with no request_ack and no
+    # request.history draws no reply, so default the mock to that state.
+    mock_envelope.HasField.return_value = False
+    mock_envelope.request_ack = False
     sys.modules["lma_core"].LMAOEnvelope.return_value = mock_envelope
 
     from lmao_server import server
@@ -70,9 +74,13 @@ def _seed_chart():
 
 class TestHandleLXMFDelivery:
     def test_reply_sent_for_valid_message(self, server_with_mocks):
-        """Handle valid message and verify reply is sent with correct content."""
+        """Handle valid message with request_ack set and verify the DeliveryAck
+        reply is sent with correct content."""
         server = server_with_mocks
-        _seed_chart()
+        # request_ack=True requests a DeliveryAck reply echoing envelope.seq.
+        # A plain sensor-only envelope (no request_ack, no request.history)
+        # draws no reply, so this is how the reply path is exercised.
+        sys.modules["lma_core"].LMAOEnvelope.return_value.request_ack = True
 
         msg = MagicMock()
         msg.get_source.return_value = MagicMock()
@@ -105,6 +113,35 @@ class TestHandleLXMFDelivery:
         assert reply_content is not None, "Reply must have content"
         assert len(reply_content) > 0, "Reply envelope must not be empty"
 
+    def test_history_request_replies_with_chart(self, server_with_mocks):
+        """A request.history envelope is answered with a ChartBundle."""
+        server = server_with_mocks
+        _seed_chart()
+
+        # Reconfigure mock: envelope carries request.history (count/since/series)
+        mock_envelope = MagicMock()
+        mock_envelope.HasField.return_value = True
+        mock_envelope.request.HasField.return_value = True
+        mock_envelope.request.history.count = 1
+        mock_envelope.request.history.since_ms = 0
+        mock_envelope.request.history.series = []
+        mock_envelope.request_ack = False
+        sys.modules["lma_core"].LMAOEnvelope.return_value = mock_envelope
+
+        msg = MagicMock()
+        msg.get_source.return_value = MagicMock()
+        msg.get_source.return_value.hash = b"\x0a" * 16
+        msg.content = b"history-request-bytes"
+        msg.title_as_string.return_value = "p:Envelope"
+
+        server.handle_lxmf_delivery(msg)
+
+        # Exactly one outbound: the ChartBundle reply (not the DeliveryAck).
+        server.router.handle_outbound.assert_called_once()
+        call_kwargs = sys.modules["LXMF"].LXMessage.call_args.kwargs
+        assert call_kwargs["title"] == "p:Envelope"
+        assert call_kwargs["destination"] is msg.get_source.return_value
+
     def test_no_reply_when_no_source(self, server_with_mocks):
         """Handle message with no source identity gracefully."""
         server = server_with_mocks
@@ -130,9 +167,9 @@ class TestHandleLXMFDelivery:
         server.handle_lxmf_delivery(msg)
 
     def test_handles_empty_content(self, server_with_mocks):
-        """Handle message with empty content."""
+        """Handle message with empty content — a plain payload with no request
+        draws no reply."""
         server = server_with_mocks
-        _seed_chart()
 
         msg = MagicMock()
         msg.get_source.return_value = MagicMock()
@@ -141,7 +178,7 @@ class TestHandleLXMFDelivery:
         msg.title_as_string.return_value = "p:Envelope"
 
         server.handle_lxmf_delivery(msg)
-        server.router.handle_outbound.assert_called_once()
+        server.router.handle_outbound.assert_not_called()
 
     def test_handles_missing_content(self, server_with_mocks):
         """Handler should not crash on messages missing 'content' attribute."""
@@ -168,13 +205,14 @@ class TestHandleLXMFDelivery:
         server.router.handle_outbound.assert_not_called()
 
     def test_protobuf_decode_success_path(self, server_with_mocks):
-        """Verify protobuf-decoded content is used when ParseFromString succeeds."""
+        """A successfully-decoded plain envelope (no request_ack, no
+        request.history) draws no reply."""
         server = server_with_mocks
-        _seed_chart()
 
         # Reconfigure mock to simulate successful protobuf decode
         mock_envelope = MagicMock()
-        mock_envelope.HasField.return_value = True
+        mock_envelope.HasField.return_value = False
+        mock_envelope.request_ack = False
         mock_envelope.text.content = "Hello from protobuf"
         sys.modules["lma_core"].LMAOEnvelope.return_value = mock_envelope
 
@@ -186,19 +224,18 @@ class TestHandleLXMFDelivery:
 
         server.handle_lxmf_delivery(msg)
 
-        # Verify reply was sent
-        server.router.handle_outbound.assert_called_once()
-        call_kwargs = sys.modules["LXMF"].LXMessage.call_args.kwargs
-        assert call_kwargs["title"] == "p:Envelope"
+        # No reply was requested
+        server.router.handle_outbound.assert_not_called()
 
     def test_protobuf_decode_non_text_field(self, server_with_mocks):
-        """Verify fallback when protobuf succeeds but has no text field."""
+        """A non-text plain payload (no request_ack, no request.history)
+        draws no reply."""
         server = server_with_mocks
-        _seed_chart()
 
         # Reconfigure mock: ParseFromString succeeds but HasField('text') is False
         mock_envelope = MagicMock()
         mock_envelope.HasField.return_value = False
+        mock_envelope.request_ack = False
         sys.modules["lma_core"].LMAOEnvelope.return_value = mock_envelope
 
         msg = MagicMock()
@@ -208,12 +245,12 @@ class TestHandleLXMFDelivery:
         msg.title_as_string.return_value = "p:Envelope"
 
         server.handle_lxmf_delivery(msg)
-        server.router.handle_outbound.assert_called_once()
+        server.router.handle_outbound.assert_not_called()
 
     def test_handles_binary_content(self, server_with_mocks):
-        """Handler should not crash on binary non-decodable content."""
+        """Handler should not crash on binary non-decodable content — a plain
+        payload with no request draws no reply."""
         server = server_with_mocks
-        _seed_chart()
 
         msg = MagicMock()
         msg.get_source.return_value = MagicMock()
@@ -222,16 +259,20 @@ class TestHandleLXMFDelivery:
         msg.title_as_string.return_value = "p:Envelope"
 
         server.handle_lxmf_delivery(msg)
-        server.router.handle_outbound.assert_called_once()
+        server.router.handle_outbound.assert_not_called()
 
     def test_protobuf_decode_uses_content_from_text_field(self, server_with_mocks, caplog):
         """When protobuf decode succeeds and HasField('text') is True,
         the content from text.content is used as display_text."""
         server = server_with_mocks
 
-        # Reconfigure mock to simulate successful protobuf decode
+        # Reconfigure mock to simulate successful protobuf decode. HasField is
+        # True so the text field is recognized as present; request.HasField is
+        # False so the plain envelope draws no reply (no history/ack branch).
         mock_envelope = MagicMock()
         mock_envelope.HasField.return_value = True
+        mock_envelope.request.HasField.return_value = False
+        mock_envelope.request_ack = False
         mock_envelope.text.content = "Decoded protobuf text"
         sys.modules["lma_core"].LMAOEnvelope.return_value = mock_envelope
 
@@ -256,6 +297,7 @@ class TestHandleLXMFDelivery:
         # Reconfigure mock: ParseFromString succeeds but HasField('text') is False
         mock_envelope = MagicMock()
         mock_envelope.HasField.return_value = False
+        mock_envelope.request_ack = False
         sys.modules["lma_core"].LMAOEnvelope.return_value = mock_envelope
 
         msg = MagicMock()
@@ -277,9 +319,9 @@ class TestHandleLXMFDelivery:
 
     def test_protobuf_decode_binary_invalid_utf8(self, server_with_mocks):
         """When protobuf decode fails and content is not valid UTF-8,
-        the handler shows a byte-count placeholder instead."""
+        the handler shows a byte-count placeholder instead. A plain payload
+        with no request_ack / request.history draws no reply."""
         server = server_with_mocks
-        _seed_chart()
 
         # Fixture already has ParseFromString side_effect = DecodeError
         msg = MagicMock()
@@ -288,15 +330,9 @@ class TestHandleLXMFDelivery:
         msg.content = b"\xff\xfe\x00\x01"  # intentionally invalid UTF-8
         msg.title_as_string.return_value = "p:Envelope"
 
-        # Handler should not crash, and should still send a reply
+        # Handler should not crash; no reply is requested for a plain payload
         server.handle_lxmf_delivery(msg)
-        server.router.handle_outbound.assert_called_once()
-
-        # Verify the reply content includes the byte-count placeholder
-        call_kwargs = sys.modules["LXMF"].LXMessage.call_args.kwargs
-        reply_content = call_kwargs.get("content")
-        assert reply_content is not None
-        assert len(reply_content) > 0, "Reply envelope must not be empty"
+        server.router.handle_outbound.assert_not_called()
 
     def test_unauthorized_sender_dropped(self, server_with_mocks, caplog):
         """Senders outside the allow-list are dropped (PR #132): no reply, no

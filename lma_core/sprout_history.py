@@ -243,35 +243,59 @@ class SproutHistory:
         tokens.append(str(mask))
         return " ".join(tokens)
 
-    def chart_bundle(self):
+    def chart_bundle(self, count=0, since_ms=0, series=()):
         """Return a protobuf ChartBundle (LMAOEnvelope.chart, server->Cardputer)
-        for the current history, or None when no soil samples are known yet.
+        for the current history, or None when no soil samples are known / the
+        requested window is empty.
 
-        temp is emitted in tenths of C to keep band resolution; start_ms is
-        estimated as (last report time) - (n-1)*period under a nominal 5-min
-        cadence (the server does not store per-sample timestamps).
+        ``count`` keeps only the last N samples; ``since_ms`` keeps samples whose
+        (estimated) sample time is >= that epoch ms (delta fetch); ``series``
+        selects a subset of Series (empty = all). temp is emitted in tenths of C;
+        start_ms is estimated from the last report under a nominal 5-min cadence
+        (the server does not store per-sample timestamps).
         """
         if not self._moisture:
             return None
-        from proto.lma_messages_pb2 import ChartBundle as _CB
+        from proto.lma_messages_pb2 import ChartBundle as _CB, Series as _Series
 
         period_ms = 5 * 60 * 1000
         n = len(self._moisture)
+        last_seen = self._last_seen_ms or int(time.time() * 1000)
+        start_ms = int(last_seen - (n - 1) * period_ms)
+
+        # Apply since_ms (per-sample estimated time) then count (last N).
+        indices = range(n)
+        if since_ms:
+            indices = [i for i in indices
+                       if last_seen - (n - 1 - i) * period_ms >= since_ms]
+            if not indices:
+                return None
+        if count:
+            indices = list(indices)[-count:]
+
         b = _CB()
         b.format = 1
         b.node_id = (self._node or "")[:8]
         b.dry = int(round(self._dry)) if self._dry is not None else 0
         b.wet = int(round(self._wet)) if self._wet is not None else 0
         b.period_ms = period_ms
-        b.start_ms = int(
-            (self._last_seen_ms or int(time.time() * 1000)) - (n - 1) * period_ms
-        )
-        b.soil.extend(int(round(v)) for v in self._moisture)
-        b.temp.extend(int(round(v * 10)) for v in self._temp[-DATA_AIR_MAX_SAMPLES:])
-        b.hum.extend(int(round(v)) for v in self._humidity[-DATA_AIR_MAX_SAMPLES:])
-        water = 0
-        for i, active in enumerate(self._pump):
-            if active:
-                water |= 1 << i
-        b.watered = water
+        b.start_ms = start_ms
+        want_soil = (not series) or _Series.SOIL in series
+        want_temp = (not series) or _Series.AIR_TEMP in series
+        want_hum = (not series) or _Series.AIR_HUMIDITY in series
+        want_pump = (not series) or _Series.PUMP in series
+        if want_soil:
+            b.soil.extend(int(round(self._moisture[i])) for i in indices)
+        if want_temp:
+            b.temp.extend(int(round(self._temp[i] * 10))
+                          for i in indices if i < len(self._temp))
+        if want_hum:
+            b.hum.extend(int(round(self._humidity[i]))
+                         for i in indices if i < len(self._humidity))
+        if want_pump:
+            water = 0
+            for off, i in enumerate(indices):
+                if i < len(self._pump) and self._pump[i]:
+                    water |= 1 << off  # index-aligned with the selected soil window
+            b.watered = water
         return b

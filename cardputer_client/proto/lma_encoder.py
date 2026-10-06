@@ -6,17 +6,17 @@ This hand-coded encoder handles all LMAOEnvelope payload types defined
 in proto/lma_messages.proto.
 
 Wire format:
-  LMAOEnvelope:  oneof payload → field number + wire type 2 (length-delimited)
-    → bytes of sub-message
+  LMAOEnvelope:  envelope control (seq=1, request_ack=2, request=3) +
+    oneof payload → field number + wire type 2 (length-delimited) → bytes
 
 Supported sub-messages:
-  SensorReport    (field 10)
-  CommandRequest  (field 11)
-  CommandAck      (field 12)
-  TextMessage     (field 20)
-  AudioMessage    (field 21)
-  ImageMessage    (field 22)
-  CallSignal      (field 30)
+  Request           (field 3; kind: HistoryRequest=1 / CommandRequest=2)
+  SensorReport      (field 10)
+  DeliveryAck       (field 12)  — unified ack (delivery confirm + command result)
+  TextMessage       (field 20)
+  AudioMessage      (field 21)
+  ImageMessage      (field 22)
+  CallSignal        (field 30)
 """
 
 import struct as _struct
@@ -240,24 +240,22 @@ def decode_sensor_report(data):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-def encode_command_request(cmd_id, target, action, params, issued_ms, expires_ms):
+def encode_command_request(target, action, params, issued_ms=0):
     """Encode a CommandRequest protobuf message.
 
     params is a dict of string→string.
     """
     result = bytearray()
-    result.extend(encode_field(1, 2, encode_length_delimited(cmd_id.encode("utf-8"))))  # string
-    result.extend(encode_field(2, 2, encode_length_delimited(target.encode("utf-8"))))  # string
-    result.extend(encode_field(3, 2, encode_length_delimited(action.encode("utf-8"))))  # string
-    # map<string, string> params = 4 — encoded as repeated length-delimited entries
-    # each entry is a sub-message: key (field 1) + value (field 2)
+    result.extend(encode_field(1, 2, encode_length_delimited(target.encode("utf-8"))))  # string
+    result.extend(encode_field(2, 2, encode_length_delimited(action.encode("utf-8"))))  # string
+    # map<string, string> params = 3 — encoded as repeated length-delimited entries
     for k, v in params.items():
         entry = bytearray()
         entry.extend(encode_field(1, 2, encode_length_delimited(k.encode("utf-8"))))
         entry.extend(encode_field(2, 2, encode_length_delimited(v.encode("utf-8"))))
-        result.extend(encode_field(4, 2, encode_length_delimited(bytes(entry))))
-    result.extend(encode_field(5, 0, encode_varint(issued_ms)))  # uint64
-    result.extend(encode_field(6, 0, encode_varint(expires_ms)))  # uint64
+        result.extend(encode_field(3, 2, encode_length_delimited(bytes(entry))))
+    if issued_ms:
+        result.extend(encode_field(4, 0, encode_varint(issued_ms)))  # uint64
     return bytes(result)
 
 
@@ -288,50 +286,129 @@ def _decode_map_entry(data):
 def decode_command_request(data):
     """Decode a CommandRequest from protobuf bytes.
 
-    Returns dict with keys: cmd_id, target, action, params (dict), issued_ms, expires_ms.
+    Returns dict with keys: target, action, params (dict), issued_ms.
     """
     return _decode_proto_message(
         data,
         {
-            1: (2, "cmd_id", lambda b: b.decode("utf-8", "replace"), ""),
-            2: (2, "target", lambda b: b.decode("utf-8", "replace"), ""),
-            3: (2, "action", lambda b: b.decode("utf-8", "replace"), ""),
-            4: (2, "params", lambda b: dict([_decode_map_entry(b)]), {}, _REPEATED),
-            5: (0, "issued_ms", int, 0),
-            6: (0, "expires_ms", int, 0),
+            1: (2, "target", lambda b: b.decode("utf-8", "replace"), ""),
+            2: (2, "action", lambda b: b.decode("utf-8", "replace"), ""),
+            3: (2, "params", lambda b: dict([_decode_map_entry(b)]), {}, _REPEATED),
+            4: (0, "issued_ms", int, 0),
         },
     )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  CommandAck (field 12)
+#  DeliveryAck (field 12) — the unified ack (delivery confirm + command result)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-def encode_command_ack(cmd_id, node_id, success, message):
-    """Encode a CommandAck protobuf message."""
+def encode_delivery_ack(seq, server_ms=0, success=True, message="", node_id=""):
+    """Encode a DeliveryAck protobuf message."""
     result = bytearray()
-    result.extend(encode_field(1, 2, encode_length_delimited(cmd_id.encode("utf-8"))))  # string
-    result.extend(encode_field(2, 2, encode_length_delimited(node_id.encode("utf-8"))))  # string
-    result.extend(encode_field(3, 0, encode_varint(1 if success else 0)))  # bool (varint)
-    result.extend(encode_field(4, 2, encode_length_delimited(message.encode("utf-8"))))  # string
+    if seq:
+        result.extend(encode_field(1, 0, encode_varint(seq)))  # uint32
+    if server_ms:
+        result.extend(encode_field(2, 0, encode_varint(server_ms)))  # uint64
+    if success:
+        result.extend(encode_field(3, 0, encode_varint(1)))  # bool (varint)
+    if message:
+        result.extend(encode_field(4, 2, encode_length_delimited(message.encode("utf-8"))))
+    if node_id:
+        result.extend(encode_field(5, 2, encode_length_delimited(node_id.encode("utf-8"))))
     return bytes(result)
 
 
-def decode_command_ack(data):
-    """Decode a CommandAck from protobuf bytes.
+def decode_delivery_ack(data):
+    """Decode a DeliveryAck from protobuf bytes.
 
-    Returns dict with keys: cmd_id, node_id, success (bool), message.
+    Returns dict with keys: seq, server_ms, success (bool), message, node_id.
     """
     return _decode_proto_message(
         data,
         {
-            1: (2, "cmd_id", lambda b: b.decode("utf-8", "replace"), ""),
-            2: (2, "node_id", lambda b: b.decode("utf-8", "replace"), ""),
+            1: (0, "seq", int, 0),
+            2: (0, "server_ms", int, 0),
             3: (0, "success", bool, False),
             4: (2, "message", lambda b: b.decode("utf-8", "replace"), ""),
+            5: (2, "node_id", lambda b: b.decode("utf-8", "replace"), ""),
         },
     )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  HistoryRequest (inside Request.kind.history) — chart/query fetch
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def encode_history_request(count=0, since_ms=0, series=()):
+    """Encode a HistoryRequest protobuf message.
+
+    series is an iterable of Series enum ints; empty means all.
+    """
+    result = bytearray()
+    if count:
+        result.extend(encode_field(1, 0, encode_varint(count)))  # uint32
+    if since_ms:
+        result.extend(encode_field(2, 0, encode_varint(since_ms)))  # uint64
+    for s in series:
+        result.extend(encode_field(3, 0, encode_varint(s)))  # repeated Series (varint)
+    return bytes(result)
+
+
+def decode_history_request(data):
+    """Decode a HistoryRequest from protobuf bytes.
+
+    Returns dict with keys: count, since_ms, series (list of ints).
+    """
+    return _decode_proto_message(
+        data,
+        {
+            1: (0, "count", int, 0),
+            2: (0, "since_ms", int, 0),
+            3: (0, "series", int, 0, _REPEATED),
+        },
+    )
+
+
+def encode_request_message(kind, inner_bytes):
+    """Encode a Request message { oneof kind { history = 1; command = 2 } }."""
+    if kind == "history":
+        return encode_field(1, 2, encode_length_delimited(inner_bytes))
+    if kind == "command":
+        return encode_field(2, 2, encode_length_delimited(inner_bytes))
+    raise ValueError(f"Unknown request kind: {kind!r}")
+
+
+def decode_request_message(data):
+    """Decode a Request message.
+
+    Returns None, or dict {"kind": "history"|"command", <inner fields>}.
+    """
+    pos = 0
+    while pos < len(data):
+        tag, tag_len = decode_varint(data, pos)
+        pos += tag_len
+        field_number = tag >> 3
+        wire_type = tag & 0x07
+        if wire_type == 2:
+            length, llen = decode_varint(data, pos)
+            pos += llen
+            blob = data[pos : pos + length]
+            pos += length
+            if field_number == 1:
+                return {"kind": "history", "history": decode_history_request(blob)}
+            if field_number == 2:
+                return {"kind": "command", "command": decode_command_request(blob)}
+        elif wire_type == 0:
+            _, vlen = decode_varint(data, pos)
+            pos += vlen
+        elif wire_type == 5:
+            pos += 4
+        else:
+            break
+    return None
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -591,21 +668,22 @@ def decode_call_signal(data):
 #  Envelope (top-level wrapper)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-# Field numbers for oneof dispatch
+# Field numbers: envelope control (outside the payload oneof) + oneof dispatch
+FIELD_SEQ = 1          # uint32 — requester correlation
+FIELD_REQUEST_ACK = 2  # bool — ask for a DeliveryAck
+FIELD_REQUEST = 3      # Request — intent (history / command)
 FIELD_SENSOR = 10
-FIELD_COMMAND = 11
-FIELD_ACK = 12
+FIELD_ACK = 12         # DeliveryAck
 FIELD_TEXT = 20
 FIELD_AUDIO = 21
 FIELD_IMAGE = 22
 FIELD_CHART = 23
 FIELD_CALL = 30
 
-# Decoder dispatch table: field_number → decoder function
+# Decoder dispatch table: oneof payload field_number → decoder function
 _DECODERS = {
     FIELD_SENSOR: decode_sensor_report,
-    FIELD_COMMAND: decode_command_request,
-    FIELD_ACK: decode_command_ack,
+    FIELD_ACK: decode_delivery_ack,
     FIELD_TEXT: decode_text_message,
     FIELD_AUDIO: decode_audio_message,
     FIELD_IMAGE: decode_image_message,
@@ -622,29 +700,64 @@ def encode_envelope_text(textmessage_bytes):
     return encode_field(FIELD_TEXT, 2, encode_length_delimited(textmessage_bytes))
 
 
-def encode_sensor_envelope(node_id, seq, battery, readings):
+def encode_sensor_envelope(node_id, seq, battery, readings, request_ack=False):
     """Wrap a SensorReport in an LMAOEnvelope (field 10, wire type 2).
 
-    Returns the full LMAOEnvelope bytes ready for LXMF Content.
+    When request_ack is set, also emits the envelope seq (field 1) + request_ack
+    (field 2) so the server replies a DeliveryAck for this report.
     """
+    result = bytearray()
+    if request_ack:
+        if seq:
+            result.extend(encode_field(FIELD_SEQ, 0, encode_varint(seq)))
+        result.extend(encode_field(FIELD_REQUEST_ACK, 0, encode_varint(1)))
     sensor_bytes = encode_sensor_report(node_id, seq, battery, readings)
-    return encode_field(FIELD_SENSOR, 2, encode_length_delimited(sensor_bytes))
+    result.extend(encode_field(FIELD_SENSOR, 2, encode_length_delimited(sensor_bytes)))
+    return bytes(result)
 
 
-def encode_command_envelope(cmd_id, target, action, params, issued_ms, expires_ms):
-    """Wrap a CommandRequest in an LMAOEnvelope (field 11, wire type 2).
+def encode_request_envelope(seq, kind, inner_bytes, request_ack=False):
+    """Wrap a Request (history/command) in an LMAOEnvelope (field 3).
 
-    Returns the full LMAOEnvelope bytes ready for LXMF Content.
+    Emits the envelope seq (field 1) + optional request_ack (field 2), then the
+    Request message (field 3). Returns the full LMAOEnvelope bytes.
     """
-    cmd_bytes = encode_command_request(cmd_id, target, action, params, issued_ms, expires_ms)
-    return encode_field(FIELD_COMMAND, 2, encode_length_delimited(cmd_bytes))
+    result = bytearray()
+    if seq:
+        result.extend(encode_field(FIELD_SEQ, 0, encode_varint(seq)))
+    if request_ack:
+        result.extend(encode_field(FIELD_REQUEST_ACK, 0, encode_varint(1)))
+    req_bytes = encode_request_message(kind, inner_bytes)
+    result.extend(encode_field(FIELD_REQUEST, 2, encode_length_delimited(req_bytes)))
+    return bytes(result)
+
+
+def encode_delivery_ack_envelope(seq, node_id="", success=True, message="", server_ms=0):
+    """Wrap a DeliveryAck in an LMAOEnvelope (field 12)."""
+    ack_bytes = encode_delivery_ack(seq, server_ms, success, message, node_id)
+    return encode_field(FIELD_ACK, 2, encode_length_delimited(ack_bytes))
+
+
+_FIELD_NAMES = {
+    FIELD_SENSOR: "sensor",
+    FIELD_ACK: "ack",
+    FIELD_TEXT: "text",
+    FIELD_AUDIO: "audio",
+    FIELD_IMAGE: "image",
+    FIELD_CHART: "chart",
+    FIELD_CALL: "call",
+}
 
 
 def decode_envelope(data):
-    """Decode an LMAOEnvelope, dispatching to the correct sub-message decoder.
+    """Decode an LMAOEnvelope.
 
-    Returns the decoded sub-message dict, or None if no recognized field found.
+    Returns a dict carrying the envelope-control keys (``seq``, ``request_ack``)
+    plus either a ``request`` dict (when LMAOEnvelope.request is set) or the
+    decoded oneof payload fields with a ``payload`` name key. Returns None when
+    nothing decodable was found.
     """
+    out = {"seq": 0, "request_ack": False, "request": None, "payload": None}
     pos = 0
     while pos < len(data):
         tag, tag_len = decode_varint(data, pos)
@@ -657,20 +770,29 @@ def decode_envelope(data):
             pos += llen
             value = data[pos : pos + length]
             pos += length
+            if field_number == FIELD_REQUEST:
+                out["request"] = decode_request_message(value)
+                continue
             decoder = _DECODERS.get(field_number)
             if decoder is not None:
-                return decoder(value)
-            # Unknown field — skip
-        elif wire_type == 0:  # Varint — skip
-            _, vlen = decode_varint(data, pos)
+                out["payload"] = _FIELD_NAMES.get(field_number)
+                out.update(decoder(value))
+            # else: unknown field — skip
+        elif wire_type == 0:  # Varint — seq / request_ack
+            v, vlen = decode_varint(data, pos)
             pos += vlen
+            if field_number == FIELD_SEQ:
+                out["seq"] = v
+            elif field_number == FIELD_REQUEST_ACK:
+                out["request_ack"] = bool(v)
         elif wire_type == 5:  # Fixed32 — skip 4 bytes
             pos += 4
         else:
-            # Skip unknown wire type
             break
 
-    return None
+    if out["request"] is None and out["payload"] is None:
+        return None
+    return out
 
 
 # ---- Convenience function for the POC ----

@@ -876,7 +876,7 @@ curl -s localhost:8080/schema/text_messages | python -m json.tool
 |-------|-------------|-------------|-------------|
 | `sensor_readings` | SensorReport | sensor (10) | Temperature, humidity, and other sensor readings |
 | `text_messages` | TextMessage | text (20) | Human-to-human LoRa text messages |
-| `command_acks` | CommandAck | ack (12) | Command acknowledgment status |
+| `command_acks` | DeliveryAck | ack (12) | Unified ack (delivery confirm + command result) |
 
 ### Caveats
 
@@ -1186,9 +1186,9 @@ See [`proto/lma_messages.proto`](proto/lma_messages.proto) and [`proto/lma_grpc.
 | Message Type | Field ID | Purpose | Wire Size (typical) |
 |-------------|----------|---------|---------------------|
 | `TextMessage` | 20 | Human-to-human text (node_id, content, timestamp) | ~45 B |
-| `SensorReport` | 10 | IoT sensor readings (node_id, seq, battery, readings[]) | ~30-150 B |
-| `CommandRequest` | 11 | Server-to-node commands (cmd_id, target, action, params) | ~50-200 B |
-| `CommandAck` | 12 | Node command acknowledgements (cmd_id, node_id, success, msg) | ~40 B |
+| `SensorReport` | 10 | IoT sensor readings (node_id, seq, battery, readings[]) — one-way | ~30-150 B |
+| `Request` | 3 | Intent: `history` (chart fetch: count/since_ms/series) or `command` | ~10-60 B |
+| `DeliveryAck` | 12 | Unified ack (delivery confirm + command result: seq/server_ms/success/message/node_id) | ~15-45 B |
 | `AudioMessage` | 21 | Voice clips (node_id, audio_data, codec, duration_ms) | varies (WiFi) |
 | `ImageMessage` | 22 | Image transfers (node_id, image_data, format, width, height) | varies (WiFi) |
 | `CallSignal` | 30 | WebRTC call signaling (OFFER/ANSWER/ICE/HANGUP/KEEPALIVE) | ~100-500 B |
