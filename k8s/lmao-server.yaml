@@ -102,6 +102,28 @@ spec:
             # CNI interfaces (multicast-echo errors, useless announces).
             - name: LMAO_AUTOIFACE_DEVICES
               value: "wlan0"
+            # Contact book Postgres (dedicated in-cluster service,
+            # k8s/postgres.yaml). The DSN is composed from these parts so the
+            # password lives in the Secret, not the manifest; unset → SQLite.
+            - name: LMAO_CONTACTS_PG_HOST
+              value: "postgres.default.svc.cluster.local"
+            - name: LMAO_CONTACTS_PG_PORT
+              value: "5432"
+            - name: LMAO_CONTACTS_PG_USER
+              valueFrom:
+                secretKeyRef:
+                  name: lmao-postgres
+                  key: POSTGRES_USER
+            - name: LMAO_CONTACTS_PG_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: lmao-postgres
+                  key: POSTGRES_PASSWORD
+            - name: LMAO_CONTACTS_PG_DB
+              valueFrom:
+                secretKeyRef:
+                  name: lmao-postgres
+                  key: POSTGRES_DB
           ports:
             - name: grpc
               containerPort: 50051
