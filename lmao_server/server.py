@@ -28,6 +28,11 @@ from google.protobuf.message import DecodeError
 
 from lma_core import LMAOEnvelope
 from lma_core.contact_book import ContactBook
+from lma_core.contact_book_pg import (
+    backfill_sqlite_to_pg,
+    compose_postgres_dsn,
+    open_contact_book,
+)
 from lma_core.message_utils import decode_lmao_message
 from lma_core.rns_di import LXMF, RNS
 from lma_core.rns_init import init_rns_and_lxmf as _shared_init
@@ -817,26 +822,44 @@ async def async_main():
     server_identity, router = _init_rns_and_lxmf(rnode_port)
 
     # ── Central contact book (issue #151) ─────────────────────────
-    # SQLite receiver directory: the server learns devices as they report and
-    # sends them downlinks even before/without a caps broadcast.  Persists in
-    # the server's data directory next to the identity store.
+    # Receiver directory. Served from the dedicated in-cluster Postgres
+    # service (k8s/postgres.yaml) when LMAO_CONTACTS_URL or LMAO_CONTACTS_PG_*
+    # is set (the legacy SQLite file is backfilled into it, idempotent);
+    # otherwise the original SQLite file is used (dev / non-cluster runs).
     global CONTACTS
-    contacts_db = os.environ.get("LMAO_CONTACTS_DB")
-    if contacts_db is None:
+
+    def _default_sqlite_path() -> str:
         _id_dir = os.path.dirname(
             os.environ.get(
                 "LMAO_SERVER_IDENTITY_PATH",
                 os.path.expanduser("~/.local/share/lmao_server/lxmf"),
             )
         )
-        contacts_db = os.path.join(_id_dir, "contacts.db")
-    try:
-        os.makedirs(os.path.dirname(contacts_db) or ".", exist_ok=True)
-        CONTACTS = ContactBook(contacts_db)
-        logger.info("Contact book ready at %s", contacts_db)
-    except Exception as e:
-        CONTACTS = None
-        logger.warning("Contact book unavailable (%s) — downlink requires caps", e)
+        return os.path.join(_id_dir, "contacts.db")
+
+    contacts_dsn = compose_postgres_dsn()
+    if contacts_dsn is not None:
+        try:
+            migrated = backfill_sqlite_to_pg(
+                os.environ.get("LMAO_CONTACTS_DB") or _default_sqlite_path(),
+                contacts_dsn,
+            )
+            if migrated:
+                logger.info("Backfilled %d contact(s) from SQLite into Postgres", migrated)
+            CONTACTS = open_contact_book(contacts_dsn)
+            logger.info("Contact book ready (Postgres) at %s", contacts_dsn)
+        except Exception as e:
+            CONTACTS = None
+            logger.warning("Contact book unavailable (%s) — downlink requires caps", e)
+    else:
+        contacts_db = os.environ.get("LMAO_CONTACTS_DB") or _default_sqlite_path()
+        try:
+            os.makedirs(os.path.dirname(contacts_db) or ".", exist_ok=True)
+            CONTACTS = ContactBook(contacts_db)
+            logger.info("Contact book ready at %s", contacts_db)
+        except Exception as e:
+            CONTACTS = None
+            logger.warning("Contact book unavailable (%s) — downlink requires caps", e)
 
     # Create Server instance (wraps router + identity)
     lmao_server = Server(config_dict=cfg_dict)

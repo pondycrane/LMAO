@@ -490,9 +490,12 @@ See [`k8s-app/iot_ingest.py`](k8s-app/iot_ingest.py) for a complete example.
 
 ### 7b. Contact book — receiver directory (HTTP)
 
-The server keeps a central **contact book** (a SQLite table
-`~/.local/share/lmao_server/contacts.db` persisted across restarts) of devices
-on the LMAO network: their delivery hash, public key, device type and name. A
+The server keeps a central **contact book** of devices on the LMAO network:
+their delivery hash, public key, device type and name. It lives in the
+dedicated in-cluster Postgres service (`k8s/postgres.yaml`,
+`LMAO_CONTACTS_URL` / `LMAO_CONTACTS_PG_*` env; a legacy SQLite
+`contacts.db` is backfilled into it on startup). Outside the cluster the book
+falls back to a SQLite table (`~/.local/share/lmao_server/contacts.db`). A
 device is learned automatically the first time it reports, and can be
 renamed/retyped via the API below. This replaces the per-device on-air LMAF
 `caps` broadcast as the "who can I reach" signal — the server sends a downlink
@@ -1122,6 +1125,7 @@ The registry is configured via environment variables:
 ├── k8s/                               # Kubernetes manifests
 │   ├── lmao-server.yaml               # In-cluster server: Deployment + identity PVC + Service
 │   ├── nats-server.yaml               # NATS Deployment + Service + ConfigMap (JetStream)
+│   ├── postgres.yaml                  # Dedicated Postgres for the contact book (StatefulSet + PVC + Service + Secret)
 │   └── iot-ingest.yaml                # Persistent IoT Ingest Consumer (NATS→DuckDB)
 │
 ├── k8s-app/                           # Example K8s pod application
