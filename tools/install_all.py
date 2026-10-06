@@ -454,7 +454,13 @@ def _register_contact_book(device_name: str, delivery_hash: str,
     import json
     import urllib.request
 
-    base = os.environ.get("LMAO_CONTACTS_API", "http://127.0.0.1:8081").rstrip("/")
+    # Best-effort registration: POST the public record to the server's Contacts
+    # API. Off-node flashes need LMAO_CONTACTS_API set to a reachable address
+    # (e.g. a kubectl port-forward, or a host on the cluster's network); the
+    # delivery hash is always printed regardless so it can be allow-listed.
+    base = os.environ.get(
+        "LMAO_CONTACTS_API", "http://127.0.0.1:8081"
+    ).rstrip("/")
     url = f"{base}/contacts"
 
     def _report(exc=None):
