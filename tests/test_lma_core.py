@@ -207,3 +207,24 @@ if __name__ == "__main__":
     import pytest as _pytest
 
     sys.exit(_pytest.main([__file__] + sys.argv[1:]))
+
+
+def test_device_identity_dir_sanitizes_name():
+    """device_identity_dir maps a human name to a safe per-device path token."""
+    from lma_core import client_identity as ci
+
+    d = ci.device_identity_dir("bed-side 1")
+    assert d.startswith(ci.DEVICE_IDENTITY_ROOT)
+    # no path separators from the name can escape the root
+    rel = d[len(ci.DEVICE_IDENTITY_ROOT) + 1:]
+    assert "/" not in rel and ".." not in rel.split("_")
+
+
+def test_device_identity_dir_rejects_empty():
+    """A name that sanitizes to nothing (e.g. '..' or all special chars) is invalid."""
+    from lma_core import client_identity as ci
+
+    import pytest as _pytest
+    for bad in ("..", "///", "..."):
+        with _pytest.raises(ValueError):
+            ci.device_identity_dir(bad)

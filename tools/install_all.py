@@ -110,7 +110,8 @@ class DeviceResult:
 
 
 def _flash_cardputer_native(port: str, result: DeviceResult,
-                            inject_dest_hash: bool = True) -> None:
+                            inject_dest_hash: bool = True,
+                            device_name: str | None = None) -> None:
     """Build + flash the native C Cardputer firmware (PR1 sensor node).
 
     The firmware lives in cardputer_client/firmware/.  build.sh stages the app
@@ -149,14 +150,16 @@ def _flash_cardputer_native(port: str, result: DeviceResult,
             print(f"  FAIL: DEST_HASH resolution failed — {exc}")
             return
 
-    # Pin the canonical client identity (no-drift, lma_core/client_identity.py):
-    # the same 64-byte private key the MicroPython client uses is baked into the
-    # native build via LMAO_NODE_IDENTITY_HEX, so both runtimes of this board
-    # share one delivery hash that survives re-flashes and NVS erases.
+    # Pin the client identity (no-drift, lma_core/client_identity.py): the same
+    # 64-byte private key the MicroPython client uses is baked into the native
+    # build via LMAO_NODE_IDENTITY_HEX, so both runtimes of this board share one
+    # delivery hash that survives re-flashes and NVS erases. With --device-name
+    # the per-device identity is used (identity by human-readable name).
     print("  Pinning client identity (native) ...")
     try:
-        env["LMAO_NODE_IDENTITY_HEX"] = _canonical_client_private_key_hex()
-        print("    native node identity pinned to the canonical client identity")
+        env["LMAO_NODE_IDENTITY_HEX"] = _device_client_private_key_hex(device_name)
+        label = f"device {device_name!r}" if device_name else "canonical"
+        print(f"    native node identity pinned to the {label} client identity")
     except Exception as exc:
         result.fail(f"Client identity resolution failed: {exc}")
         print(f"  FAIL: client identity resolution failed — {exc}")
@@ -358,61 +361,131 @@ def _write_device_identity(ser, identity_bytes) -> None:
         )
 
 
-def _inject_client_identity(ser) -> str:
+def _inject_client_identity(ser, device_name=None):
     """Pin the LMAO client identity onto the Cardputer (no-drift scheme).
 
-    The canonical client identity lives on the host at
-    ``~/.local/share/lmao_client/lxmf/identity`` (lma_core/client_identity.py).
-    On the *first* install under this scheme an existing on-device identity is
+    With *device_name*, the identity is resolved/minted per-name from the
+    private device store (``~/.local/share/lmao_client/devs/<name>/identity``)
+    so a named device keeps one stable ``lxmf/delivery`` hash across flashes —
+    the "identity by human-readable name" flow.  Without it, the single
+    canonical client identity is used (backward compatible).
+
+    Mode: on the *first* install of a store, an existing on-device identity is
     adopted so the currently allow-listed hash keeps working; thereafter the
-    canonical identity file is written to ``/flash/rns/identity`` on every
-    flash — so a wiped device comes back with the same ``lxmf/delivery`` hash
-    instead of drifting into needing a fresh ALLOWED_CLIENTS entry.
+    identity file is written to ``/flash/rns/identity`` on every flash.
 
     Returns the pinned delivery hash (hex) to compare against the server's
     allow-list.  Raises on any failure.
     """
     from lma_core.client_identity import (
         adopt_client_identity_bytes,
+        adopt_device_identity_bytes,
         ensure_client_identity,
+        ensure_device_identity,
         identity_file_path,
     )
     from lma_core.server_identity import delivery_destination_hash_hex
 
-    canonical_path = identity_file_path()
-    if not os.path.isfile(canonical_path):
+    if device_name:
+        from lma_core.client_identity import device_identity_dir
+
+        def _adopt(device_bytes):
+            return adopt_device_identity_bytes(device_bytes, device_name)
+
+        def _ensure():
+            return ensure_device_identity(device_name)
+
+        store_path = identity_file_path(device_identity_dir(device_name))
+        store_label = f"named device {device_name!r}"
+    else:
+        _adopt = adopt_client_identity_bytes
+        _ensure = ensure_client_identity
+        store_path = identity_file_path()
+        store_label = "canonical"
+
+    if not os.path.isfile(store_path):
         device_hex = _read_device_identity_hex(ser)
         if device_hex:
             try:
                 device_bytes = bytes.fromhex(device_hex)
             except (ValueError, TypeError):
                 device_bytes = None
-            if device_bytes is not None and adopt_client_identity_bytes(device_bytes) is not None:
-                print("    adopted existing on-device identity as canonical (no drift)")
+            if device_bytes is not None and _adopt(device_bytes) is not None:
+                print(f"    adopted existing on-device identity as {store_label} (no drift)")
 
-    identity, path = ensure_client_identity()
+    identity, path = _ensure()
     with open(path, "rb") as f:
-        canonical_bytes = f.read()
-    _write_device_identity(ser, canonical_bytes)
+        store_bytes = f.read()
+    _write_device_identity(ser, store_bytes)
     return delivery_destination_hash_hex(identity)
 
 
-def _canonical_client_private_key_hex() -> str:
-    """64-byte private-key hex of the canonical client identity (native bake).
+def _device_client_private_key_hex(device_name=None) -> str:
+    """64-byte private-key hex of the (named or canonical) client identity.
 
     The native Cardputer firmware bakes this as ``LMAO_NODE_IDENTITY_HEX`` so
     it uses the *same* pinned identity as the MicroPython client of this board
     — one delivery hash for both runtimes, hence one allow-list entry that
-    never drifts across firmware types.
+    never drifts across firmware types. With *device_name* the per-device
+    identity is used; otherwise the canonical one.
     """
-    from lma_core.client_identity import ensure_client_identity
+    from lma_core.client_identity import (
+        ensure_client_identity,
+        ensure_device_identity,
+    )
 
-    identity, _ = ensure_client_identity()
+    if device_name:
+        identity, _ = ensure_device_identity(device_name)
+    else:
+        identity, _ = ensure_client_identity()
     return identity.get_private_key().hex()
 
 
+def _register_contact_book(device_name: str, delivery_hash: str,
+                           device_type: str = "cardputer") -> None:
+    """Best-effort: publish a named device's PUBLIC record to the server contact book.
+
+    POST ``{name, delivery_hash, device_type}`` to the server's Contacts API
+    (the HTTP directory over the server-side SQLite contact book). The private
+    key never leaves the per-name host store — only the address is published.
+    The server base is configurable via ``LMAO_CONTACTS_API``; if unreachable
+    the hash is still printed so it can be added to ``ALLOWED_CLIENTS``.
+    """
+    import json
+    import urllib.request
+
+    # Best-effort registration: POST the public record to the server's Contacts
+    # API. Off-node flashes need LMAO_CONTACTS_API set to a reachable address
+    # (e.g. a kubectl port-forward, or a host on the cluster's network); the
+    # delivery hash is always printed regardless so it can be allow-listed.
+    base = os.environ.get(
+        "LMAO_CONTACTS_API", "http://127.0.0.1:8081"
+    ).rstrip("/")
+    url = f"{base}/contacts"
+
+    def _report(exc=None):
+        print(f"  contact book: add {device_name} hash to ALLOWED_CLIENTS: {delivery_hash}")
+        if exc:
+            print(f"    (could not POST to {url}: {exc})")
+
+    payload = json.dumps(
+        {"delivery_hash": delivery_hash, "name": device_name,
+         "type": device_type}
+    ).encode()
+    req = urllib.request.Request(
+        url, data=payload, method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            print(f"  contact book: registered {device_name} -> {delivery_hash[:12]}… "
+                  f"(HTTP {resp.status})")
+    except Exception as exc:  # never fail the flash on an unreachable API
+        _report(exc)
+
+
 def _flash_cardputer_client(port: str, client_root: str, result: DeviceResult,
-                            inject_dest_hash: bool = True) -> None:
+                            inject_dest_hash: bool = True, device_name: str | None = None) -> None:
     """Flash the LMAO MicroPython client to a Cardputer on *port*.
 
     Opens the serial connection, enters raw REPL, verifies the device,
@@ -519,8 +592,9 @@ def _flash_cardputer_client(port: str, client_root: str, result: DeviceResult,
         # mint a fresh identity and require a new ALLOWED_CLIENTS entry).
         print("  Pinning client identity ...")
         try:
-            client_hash = _inject_client_identity(ser)
-            print(f"    client lxmf/delivery hash = {client_hash} "
+            client_hash = _inject_client_identity(ser, device_name)
+            label = f"device {device_name!r}" if device_name else "canonical"
+            print(f"    client {label} lxmf/delivery hash = {client_hash} "
                   "(keep in server ALLOWED_CLIENTS)")
         except Exception as exc:
             result.fail(f"Client identity pinning failed: {exc}")
@@ -727,6 +801,14 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Serial port for Cardputer (e.g. /dev/ttyACM0). Auto-detected when omitted.",
     )
     parser.add_argument(
+        "--device-name",
+        default=None,
+        help="Human-readable name for the cardputer (e.g. 'kitchen'). Resolves/mints the "
+        "device's private identity by name (~/.local/share/lmao_client/devs/<name>) and "
+        "registers the public record in the server contact book. Omitting it falls back "
+        "to the single shared canonical client identity.",
+    )
+    parser.add_argument(
         "--rnode-port",
         default=None,
         help="Serial port for RNode/Heltec (e.g. /dev/ttyUSB0). Auto-detected when omitted.",
@@ -834,6 +916,7 @@ def main(argv: list[str] | None = None) -> None:
             print("Cardputer: using native C firmware (--native-cardputer)")
             _flash_cardputer_native(
                 port, cp_result, inject_dest_hash=not args.skip_dest_hash,
+                device_name=args.device_name,
             )
         else:
             # MicroPython is the Cardputer's default runtime: its LoRa/MicroPython
@@ -847,7 +930,21 @@ def main(argv: list[str] | None = None) -> None:
                 _flash_cardputer_client(
                     port, client_root, cp_result,
                     inject_dest_hash=not args.skip_dest_hash,
+                    device_name=args.device_name,
                 )
+
+        # Register the named device's public record in the server contact book
+        # (source of truth for the human-readable name -> delivery hash). The
+        # private key stays in the per-name host store; only the hash + name are
+        # published. Best-effort — the hash is always printed for ALLOWED_CLIENTS.
+        if args.device_name is not None and cp_result.status == "OK":
+            try:
+                from lma_core.client_identity import device_delivery_destination_hash
+
+                dev_hash = device_delivery_destination_hash(args.device_name)
+                _register_contact_book(args.device_name, dev_hash)
+            except Exception as exc:
+                print(f"  WARNING: contact-book registration skipped: {exc}")
 
     # ── RNode ──
     rn_result = DeviceResult("RNode (Heltec)")
