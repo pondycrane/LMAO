@@ -84,8 +84,9 @@ class ContactBook:
                 ON CONFLICT(delivery_hash) DO UPDATE SET
                     device_name = CASE WHEN excluded.device_name
                                         LIKE excluded.device_type || '-%'
-                                       THEN excluded.device_name
-                                       ELSE contacts.device_name END,
+                                       THEN contacts.device_name   -- auto default: keep operator-set name
+                                       ELSE excluded.device_name   -- custom: honor the friendly name
+                                       END,
                     device_type = excluded.device_type,
                     pubkey_hex = COALESCE(excluded.pubkey_hex, contacts.pubkey_hex),
                     identity_hash = COALESCE(excluded.identity_hash, contacts.identity_hash),
