@@ -24,11 +24,14 @@ _logger = logging.getLogger(__name__)
 _PROTO_NAMES = frozenset(
     {
         "LMAOEnvelope",
+        "Request",
+        "HistoryRequest",
+        "Series",
+        "DeliveryAck",
         "TextMessage",
         "SensorReport",
         "SensorReading",
         "CommandRequest",
-        "CommandAck",
         "AudioMessage",
         "ImageMessage",
         "CallSignal",

@@ -318,55 +318,56 @@ class TestSensorReport:
 class TestCommandRequest:
     def test_round_trip_simple(self):
         """Encode/decode CommandRequest with no params."""
-        encoded = enc.encode_command_request("cmd1", "target1", "reboot", {}, 100, 200)
+        encoded = enc.encode_command_request("target1", "reboot", {}, 100)
         decoded = enc.decode_command_request(encoded)
-        assert decoded["cmd_id"] == "cmd1"
         assert decoded["target"] == "target1"
         assert decoded["action"] == "reboot"
         assert decoded["params"] == {}
         assert decoded["issued_ms"] == 100
-        assert decoded["expires_ms"] == 200
 
     def test_round_trip_with_params(self):
         """Encode/decode CommandRequest with map params."""
         params = {"duration": "60", "valve": "open"}
-        encoded = enc.encode_command_request("c2", "t2", "spray", params, 0, 0)
+        encoded = enc.encode_command_request("t2", "spray", params)
         decoded = enc.decode_command_request(encoded)
         assert decoded["params"] == params
 
     def test_envelope_dispatch(self):
-        """decode_envelope dispatches field 11 to CommandRequest decoder."""
-        inner = enc.encode_command_request("c", "t", "a", {}, 0, 0)
-        envelope = enc.encode_field(11, 2, enc.encode_length_delimited(inner))
+        """decode_envelope carries the command inside envelope.request."""
+        inner = enc.encode_command_request("t", "a", {})
+        envelope = enc.encode_request_envelope(7, "command", inner)
         result = enc.decode_envelope(envelope)
         assert result is not None
-        assert result["cmd_id"] == "c"
+        assert result["request"]["kind"] == "command"
+        assert result["request"]["command"]["action"] == "a"
 
 
-class TestCommandAck:
+class TestDeliveryAck:
     def test_round_trip_success(self):
-        """Encode/decode CommandAck with success=True."""
-        encoded = enc.encode_command_ack("cmd1", "node1", True, "OK")
-        decoded = enc.decode_command_ack(encoded)
-        assert decoded["cmd_id"] == "cmd1"
+        """Encode/decode DeliveryAck with success=True."""
+        encoded = enc.encode_delivery_ack(5, 100, True, "OK", "node1")
+        decoded = enc.decode_delivery_ack(encoded)
+        assert decoded["seq"] == 5
+        assert decoded["server_ms"] == 100
         assert decoded["node_id"] == "node1"
         assert decoded["success"] is True
         assert decoded["message"] == "OK"
 
     def test_round_trip_failure(self):
-        """Encode/decode CommandAck with success=False."""
-        encoded = enc.encode_command_ack("cmd2", "node2", False, "FAIL")
-        decoded = enc.decode_command_ack(encoded)
+        """Encode/decode DeliveryAck with success=False."""
+        encoded = enc.encode_delivery_ack(6, 0, False, "FAIL")
+        decoded = enc.decode_delivery_ack(encoded)
         assert decoded["success"] is False
         assert decoded["message"] == "FAIL"
 
     def test_envelope_dispatch(self):
-        """decode_envelope dispatches field 12 to CommandAck decoder."""
-        inner = enc.encode_command_ack("c", "n", True, "m")
-        envelope = enc.encode_field(12, 2, enc.encode_length_delimited(inner))
+        """decode_envelope dispatches field 12 to the DeliveryAck decoder."""
+        envelope = enc.encode_delivery_ack_envelope(5, "node1", True, "OK", 100)
         result = enc.decode_envelope(envelope)
         assert result is not None
-        assert result["cmd_id"] == "c"
+        assert result["payload"] == "ack"
+        assert result["seq"] == 5
+        assert result["success"] is True
 
 
 class TestAudioMessage:
@@ -453,16 +454,17 @@ class TestEnvelopeDispatch:
         assert result is not None and "node_id" in result
 
     def test_dispatch_command_request(self):
-        inner = enc.encode_command_request("c", "t", "a", {}, 0, 0)
-        env = enc.encode_field(11, 2, enc.encode_length_delimited(inner))
+        inner = enc.encode_command_request("t", "a", {})
+        env = enc.encode_request_envelope(1, "command", inner)
         result = enc.decode_envelope(env)
-        assert result is not None and "cmd_id" in result
+        assert result is not None and result["request"]["kind"] == "command"
+        assert result["request"]["command"]["target"] == "t"
 
     def test_dispatch_command_ack(self):
-        inner = enc.encode_command_ack("c", "n", True, "m")
-        env = enc.encode_field(12, 2, enc.encode_length_delimited(inner))
+        env = enc.encode_delivery_ack_envelope(5, "n", True, "m")
         result = enc.decode_envelope(env)
-        assert result is not None and "success" in result
+        assert result is not None and result["payload"] == "ack"
+        assert "success" in result
 
     def test_dispatch_text_message(self):
         inner = enc.encode_text_message("n", "txt", 1)
@@ -598,38 +600,39 @@ class TestEncodeSensorEnvelopeEdgeCases:
 
 
 class TestCommandEnvelope:
-    """Tests for encode_command_envelope() (issue #78)."""
+    """Tests for the command request envelope (field 3)."""
 
     def test_round_trip(self):
-        """encode_command_envelope → decode_envelope round-trip."""
-        envelope = enc.encode_command_envelope(
-            "cmd1", "target1", "reboot", {}, 100, 200
+        """encode_request_envelope('command', …) → decode_envelope round-trip."""
+        envelope = enc.encode_request_envelope(
+            7, "command", enc.encode_command_request("target1", "reboot", {}, 100)
         )
         result = enc.decode_envelope(envelope)
         assert result is not None
-        assert result["cmd_id"] == "cmd1"
-        assert result["action"] == "reboot"
-        assert result["target"] == "target1"
-        assert result["params"] == {}
-        assert result["issued_ms"] == 100
-        assert result["expires_ms"] == 200
+        assert result["request"]["kind"] == "command"
+        command = result["request"]["command"]
+        assert command["target"] == "target1"
+        assert command["action"] == "reboot"
+        assert command["params"] == {}
+        assert command["issued_ms"] == 100
 
     def test_decode_envelope_dispatches_to_command(self):
-        """decode_envelope dispatches field 11 to CommandRequest decoder."""
-        inner = enc.encode_command_request("c", "t", "a", {}, 0, 0)
-        envelope = enc.encode_field(11, 2, enc.encode_length_delimited(inner))
+        """decode_envelope carries a command request via the request field."""
+        inner = enc.encode_command_request("t", "a", {})
+        envelope = enc.encode_request_envelope(1, "command", inner)
         result = enc.decode_envelope(envelope)
         assert result is not None
-        assert result["cmd_id"] == "c"
+        assert result["request"]["kind"] == "command"
+        assert result["request"]["command"]["action"] == "a"
 
     def test_with_params(self):
-        """encode_command_envelope with map params."""
+        """Request envelope with map params."""
         params = {"duration": "60", "valve": "open"}
-        envelope = enc.encode_command_envelope(
-            "c2", "t2", "spray", params, 0, 0
+        envelope = enc.encode_request_envelope(
+            2, "command", enc.encode_command_request("t2", "spray", params)
         )
         result = enc.decode_envelope(envelope)
-        assert result["params"] == params
+        assert result["request"]["command"]["params"] == params
 
 
 # ── ChartBundle (field 23) ────────────────────────────────────────

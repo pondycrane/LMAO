@@ -99,10 +99,11 @@ CREATE TABLE IF NOT EXISTS text_messages (
 
 _CREATE_COMMAND_ACKS_TABLE = """
 CREATE TABLE IF NOT EXISTS command_acks (
-    cmd_id TEXT NOT NULL,
-    node_id TEXT NOT NULL,
+    seq INTEGER,
+    node_id TEXT,
     success BOOLEAN,
     msg TEXT,
+    server_ms INTEGER,
     ingested_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 """
@@ -118,7 +119,8 @@ _INSERT_TEXT_MESSAGES = (
 )
 
 _INSERT_COMMAND_ACKS = (
-    "INSERT INTO command_acks (cmd_id, node_id, success, msg) VALUES (?, ?, ?, ?)"
+    "INSERT INTO command_acks (seq, node_id, success, msg, server_ms) "
+    "VALUES (?, ?, ?, ?, ?)"
 )
 
 # Registry keyed by protobuf field number (matches envelope.WhichOneof results via
@@ -441,7 +443,7 @@ class DuckDbStore:
 
     @staticmethod
     def _extract_ack_rows(envelope: Any) -> list[tuple]:
-        """Extract a command-ack row from a ``CommandAck`` envelope.
+        """Extract a delivery-ack row from a ``DeliveryAck`` envelope.
 
         The proto field is ``message``; we store it as ``msg``
         in the DB column.
@@ -449,10 +451,11 @@ class DuckDbStore:
         ack = envelope.ack
         return [
             (
-                ack.cmd_id,
+                ack.seq,
                 ack.node_id,
                 ack.success,
                 ack.message,  # proto field → DB column msg
+                ack.server_ms,
             )
         ]
 

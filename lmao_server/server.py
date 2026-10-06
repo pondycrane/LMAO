@@ -318,20 +318,23 @@ class Server:
         for q in dead:
             self.unregister_grpc_subscriber(q)
 
-    def send_command(self, target_identity_hex, action, params=None, cmd_id=None,
+    def send_command(self, target_identity_hex, action, params=None, seq=None,
                      timeout_ms=60000):
         """Send a CommandRequest to a target node over LXMF (issue #78).
 
-        Builds a protobuf CommandRequest, wraps it in an LMAOEnvelope,
-        resolves the target RNS.Identity, and dispatches via the LXMF router.
+        Builds ``LMAOEnvelope{ request.command, seq, request_ack }``, resolves the
+        target RNS.Identity, and dispatches via the LXMF router. The target
+        replies a DeliveryAck echoing ``seq`` (command results land on the same
+        unified ack payload).
 
         Args:
             target_identity_hex: Target node's identity hash as hex string.
                 Empty string or ``None`` = broadcast to all nodes.
             action: Command action string (e.g. ``"reboot"``).
             params: Optional dict of string→string parameters.
-            cmd_id: Optional command ID (auto-generated if ``None``).
-            timeout_ms: Command expiry in milliseconds from now.
+            seq: Optional uint32 correlation (auto-derived if ``None``).
+            timeout_ms: Retained for signature compatibility; command expiry is
+                no longer encoded (the old ``expires_ms`` field is removed).
 
         Returns:
             ``True`` if the message was queued for delivery, ``False`` on failure.
@@ -340,31 +343,27 @@ class Server:
             logger.error("send_command: router not initialised")
             return False
 
-        if cmd_id is None:
-            cmd_id = f"cmd-{int(time.time() * 1000)}"
-
         now_ms = int(time.time() * 1000)
-        issued_ms = now_ms
-        expires_ms = now_ms + timeout_ms
+        if seq is None:
+            seq = now_ms & 0xFFFFFFFF
 
         if params is None:
             params = {}
 
-        # Build protobuf CommandRequest
+        # Build Request{command} + envelope control
         from lma_core import CommandRequest, LMAOEnvelope  # noqa: F811
 
         cmd = CommandRequest()
-        cmd.cmd_id = cmd_id
         cmd.target = target_identity_hex or ""
         cmd.action = action
-        cmd.issued_ms = issued_ms
-        cmd.expires_ms = expires_ms
+        cmd.issued_ms = now_ms
         for k, v in params.items():
             cmd.params[k] = v
 
-        # Wrap in LMAOEnvelope
         envelope = LMAOEnvelope()
-        envelope.command.CopyFrom(cmd)
+        envelope.seq = seq
+        envelope.request_ack = True
+        envelope.request.command.CopyFrom(cmd)
 
         # Resolve target identity.  Reticulum can only encrypt to a peer
         # whose public keys were previously learned (via an announce), so
@@ -401,13 +400,62 @@ class Server:
             )
             self.router.handle_outbound(lxmf_msg)
             logger.info(
-                "CommandRequest %s dispatched: action=%s target=%s",
-                cmd_id, action, target_identity_hex or "<broadcast>",
+                "CommandRequest seq=%s dispatched: action=%s target=%s",
+                seq, action, target_identity_hex or "<broadcast>",
             )
             return True
         except (OSError, ValueError, KeyError, AttributeError) as e:
             logger.error("send_command: dispatch failed: %s", e, exc_info=True)
             return False
+
+    def _send_lxmf_reply(self, source_dest, envelope):
+        """Address only what the requester explicitly asked for (decoupled):
+        - ``envelope.request_ack``        -> DeliveryAck echoing ``envelope.seq``
+        - ``envelope.request.history``    -> ChartBundle (count/since/series honored)
+        A plain sensor/text payload draws no reply — reporting is one-way.
+        """
+        if self.router is None:
+            return
+        replied = False
+
+        def send(env):
+            msg = LXMF.LXMessage(
+                destination=source_dest,
+                source=_identity_to_destination(self.server_identity),
+                content=env.SerializeToString(),
+                title="p:Envelope",
+                desired_method=LXMF.LXMessage.OPPORTUNISTIC,
+            )
+            self.router.handle_outbound(msg)
+
+        has_request = envelope.HasField("request")
+        if has_request and envelope.request.HasField("history"):
+            hist = envelope.request.history
+            chart = SPROUT_HISTORY.chart_bundle(
+                count=hist.count, since_ms=hist.since_ms, series=set(hist.series)
+            )
+            if chart is not None:
+                chart_env = LMAOEnvelope()
+                chart_env.chart.CopyFrom(chart)
+                send(chart_env)
+                logger.info("Reply sent (ChartBundle, %d samples).", len(chart.soil))
+                replied = True
+            else:
+                logger.info("No chart history matches the request — no chart reply.")
+
+        if envelope.request_ack:
+            ack = LMAOEnvelope()
+            ack.ack.seq = envelope.seq
+            ack.ack.server_ms = int(time.time() * 1000)
+            ack.ack.success = True
+            ack.ack.node_id = self.server_identity.hexhash if hasattr(
+                self.server_identity, "hexhash") else ""
+            send(ack)
+            logger.info("DeliveryAck sent (seq=%s).", envelope.seq)
+            replied = True
+
+        if not replied:
+            logger.debug("No reply requested for this message.")
 
     def handle_lxmf_delivery(self, message):
         """Decodes incoming content as a protobuf LMAOEnvelope. The protocol uses
@@ -471,24 +519,10 @@ class Server:
             decode_lmao_message(content_bytes)
 
             if source_dest is not None and self.router is not None:
-                # Single-frame reply: the ChartBundle (LMAOEnvelope.chart) IS
-                # the receipt — returning the chart data proves the request
-                # was acked, so no standalone text ACK is needed.
-                chart = SPROUT_HISTORY.chart_bundle()
-                if chart is not None:
-                    chart_env = LMAOEnvelope()
-                    chart_env.chart.CopyFrom(chart)
-                    reply_msg = LXMF.LXMessage(
-                        destination=source_dest,
-                        source=_identity_to_destination(self.server_identity),
-                        content=chart_env.SerializeToString(),
-                        title="p:Envelope",
-                        desired_method=LXMF.LXMessage.OPPORTUNISTIC,
-                    )
-                    self.router.handle_outbound(reply_msg)
-                    logger.info("Reply sent (ChartBundle, %d samples).", len(chart.soil))
-                else:
-                    logger.info("No chart history yet — no reply sent.")
+                # Decoupled reply: only address what was explicitly requested.
+                # request_ack -> DeliveryAck; request.history -> ChartBundle;
+                # a plain sensor payload draws no reply (reporting is one-way).
+                self._send_lxmf_reply(source_dest, envelope)
             else:
                 logger.warning("Could not send reply (no source destination or router).")
 
@@ -664,14 +698,17 @@ if GRPC_AVAILABLE:
 
             # Resolve destination identity from the envelope payload.
             # SendRequest carries only the serialized envelope, so the
-            # destination must come from the payload itself — currently
-            # only CommandRequest.target carries a destination identity.
-            # Reticulum can only encrypt to a peer whose public keys were
-            # previously learned (via an announce), so look the identity
-            # up in the local cache with Identity.recall().
+            # destination must come from the payload itself — currently only a
+            # command request's target (envelope.request.command.target) carries
+            # a destination identity. Reticulum can only encrypt to a peer whose
+            # public keys were previously learned (via an announce), so look the
+            # identity up in the local cache with Identity.recall().
             dest_hash = ""
-            if envelope.HasField("command"):
-                dest_hash = envelope.command.target
+            if envelope.HasField("request"):
+                cmd = envelope.request.command if envelope.request.HasField(
+                    "command") else None
+                if cmd is not None:
+                    dest_hash = cmd.target
             try:
                 dest = RNS.Identity.recall(bytes.fromhex(dest_hash)) if dest_hash else None
             except (ValueError, TypeError, KeyError):

@@ -199,15 +199,37 @@ syntax = "proto3";
 package lma;
 
 message LMAOEnvelope {
+  uint32 seq         = 1;   // requester correlation — echoed in any reply
+  bool   request_ack = 2;   // ask for a DeliveryAck
+  Request request    = 3;   // intent axis (history / command) — sibling of payload
+
   oneof payload {
-    SensorReport    sensor  = 10;
-    CommandRequest  command = 11;
-    CommandAck      ack     = 12;
-    TextMessage     text    = 20;
-    AudioMessage    audio   = 21;
-    ImageMessage    image   = 22;
-    CallSignal      call    = 30;
+    SensorReport    sensor     = 10;   // one-way telemetry (no reply implied)
+    DeliveryAck     ack        = 12;   // unified ack (delivery confirm + command result)
+    TextMessage     text       = 20;
+    AudioMessage    audio      = 21;
+    ImageMessage    image      = 22;
+    CallSignal      call       = 30;
   }
+}
+
+message Request {
+  oneof kind {
+    HistoryRequest  history = 1;   // "give me chart history"
+    CommandRequest  command = 2;   // "run a command on a node"
+  }
+}
+message HistoryRequest {
+  uint32 count    = 1;   // last N samples (0 = full window)
+  uint64 since_ms = 2;   // only samples at/after this epoch ms (delta fetch)
+  repeated Series series = 3;  // subset of soil/temp/hum/pump (empty = all)
+}
+message DeliveryAck {
+  uint32 seq      = 1;  // echoes the acked request's envelope.seq
+  uint64 server_ms = 2;
+  bool   success  = 3;
+  string message  = 4;
+  string node_id  = 5;
 }
 
 message SensorReport {
@@ -217,12 +239,10 @@ message SensorReport {
   repeated SensorReading readings = 4;  // 7 B each: tag(1B)+varint(1B)+tag(1B)+float(4B)
 }
 message CommandRequest {
-  string cmd_id     = 1;
-  string target     = 2;
-  string action     = 3;  // "spray", "open_valve", "reboot"
-  map<string,string> params = 4;
-  uint64 issued_ms  = 5;
-  uint64 expires_ms = 6;
+  string   target     = 1;  // node the command addresses ("spray", "open_valve", "reboot")
+  string   action     = 2;
+  map<string,string> params = 3;
+  uint64   issued_ms  = 4;
 }
 message CallSignal {
   enum Signal { OFFER=0; ANSWER=1; ICE=2; HANGUP=3; KEEPALIVE=4; }
