@@ -12,3 +12,8 @@ cardputer_client/
 proto/__init__.py
 *.md
 Dockerfile
+# Non-Python native-client trees — not needed by the Python server image;
+# kept out so the build context (and the published image) stays small.
+rust-client/
+smart_irrigation/
+rnode_firmware/
