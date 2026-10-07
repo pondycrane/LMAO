@@ -625,6 +625,16 @@ def encode_chart_envelope(node_id, dry, wet, start_ms, period_ms, soil, temp, hu
     return encode_field(FIELD_CHART, 2, encode_length_delimited(bundle))
 
 
+def encode_audio_envelope(node_id, audio_data, codec, duration_ms, timestamp):
+    """Wrap an AudioMessage in an LMAOEnvelope (field 21, wire type 2).
+
+    Returns the full LMAOEnvelope bytes (an LXMF Content payload).  ``codec``
+    is a string ("codec2"); ``audio_data`` is the raw encoded bytes.
+    """
+    msg = encode_audio_message(node_id, audio_data, codec, duration_ms, timestamp)
+    return encode_field(FIELD_AUDIO, 2, encode_length_delimited(msg))
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 #  CallSignal (field 30)
 # ═══════════════════════════════════════════════════════════════════════════════
