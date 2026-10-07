@@ -50,6 +50,16 @@ except ImportError:
     HAS_CHART = False
     chart = None  # type: ignore[assignment]
 
+# Voice module (codec2 encode/decode + ES8311 I2S). Its presence depends on
+# the codec2-enabled firmware build; otherwise voice messages are dropped.
+try:
+    import voice
+
+    HAS_VOICE = True
+except ImportError:
+    HAS_VOICE = False
+    voice = None  # type: ignore[assignment]
+
 # Proto encoder (optional — gracefully degrades if not on device)
 try:
     from proto.lma_encoder import (
@@ -522,6 +532,17 @@ def handle_reply(message):
                 if cb is not None:
                     pending_replies.append(cb)
                     print(f"\n>>> CHART bundle ({len(cb['samples'])} samples)")
+                return
+
+            # AudioMessage downlink (payload field 21): decode + play on-device.
+            # The audio fields are merged into `result` by decode_envelope, so
+            # result is passed straight to voice.handle_inbound.
+            if isinstance(result, dict) and result.get("payload") == "audio":
+                if HAS_VOICE and voice is not None:
+                    n = voice.handle_inbound(result)
+                    print(f"\n>>> VOICE message played={n} ({len(result.get('audio_data', b''))} B)")
+                else:
+                    print("\n>>> VOICE message dropped (codec2 firmware not present)")
                 return
 
             # A command arrives via envelope.request (Request.kind.command). Its
