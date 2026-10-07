@@ -66,6 +66,7 @@ try:
         UNIT_CELSIUS,
         UNIT_PERCENT,
         decode_envelope,
+        encode_audio_envelope,
         encode_delivery_ack_envelope,
         encode_history_request,
         encode_request_envelope,
@@ -78,6 +79,7 @@ except ImportError:
     HAS_PROTO = False
     parse_poc_message = None  # type: ignore[assignment]
     decode_envelope = None  # type: ignore[assignment]
+    encode_audio_envelope = None  # type: ignore[assignment]
     encode_delivery_ack_envelope = None  # type: ignore[assignment]
     encode_history_request = None  # type: ignore[assignment]
     encode_request_envelope = None  # type: ignore[assignment]
@@ -87,6 +89,11 @@ except ImportError:
 # temp/humidity is not useful server-side (the Sprout is the soil/air source),
 # so the display only fetches charts. Flip to True to resume reporting.
 SEND_SENSOR = False
+
+# Feature flag for outbound voice. Recording over the ES8311 requires the
+# codec2 firmware build AND live MCLK tuning; keep False until that is
+# verified on-device, then flip True to enable the record->encode->send path.
+SEND_VOICE = False
 
 # Default interval and sensor settings; updated from config.py at boot time.
 # Module-level defaults allow make_sensor_message() to function even when
@@ -1046,6 +1053,30 @@ async def _periodic_send(
                 # explicitly — the server replies a ChartBundle to
                 # request.history and nothing otherwise). request_ack stays off:
                 # the chart itself is the data we want.
+                # Outbound voice: record -> codec2-encode -> AudioMessage
+                # envelope, delivered opportunistically like the chart request.
+                # Gated by SEND_VOICE (kept off until the ES8311 is tuned).
+                if SEND_VOICE and HAS_VOICE and voice is not None and encode_audio_envelope is not None:
+                    try:
+                        pcm = voice.record_ms(2000)
+                        bits = voice.encode(pcm)
+                        audio_env = encode_audio_envelope(
+                            identity_hex, bits, "codec2", 2000, int(time.time())
+                        )
+                        msgv = router.send_message(
+                            destination_hash=dest_hash,
+                            content=audio_env,
+                            title="p:Envelope",
+                            desired_method=LXMessage.OPPORTUNISTIC,
+                        )
+                        if msgv:
+                            log(f"Voice sent: {len(bits)} B codec2", tft, status_lines)
+                        else:
+                            log("Voice send returned None", tft, status_lines)
+                    except Exception as voice_err:
+                        sys.print_exception(voice_err)
+                        log(f"Voice send failed: {voice_err}", tft, status_lines)
+
                 if encode_history_request is not None and encode_request_envelope is not None:
                     try:
                         history_bytes = encode_history_request(count=0, since_ms=0, series=())
