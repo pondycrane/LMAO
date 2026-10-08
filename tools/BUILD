@@ -33,3 +33,16 @@ py_binary(
     visibility = ["//visibility:public"],
     deps = [":install_all_lib"],
 )
+
+# The repeatable foundation target for the native voice Cardputer: replicate
+# `install_all --native-cardputer --device-name <name>` (build firmware with
+# identity + DEST_HASH, flash, register in contact book) as one `bazel run`.
+# The native firmware tree is read from the workspace via
+# BUILD_WORKSPACE_DIRECTORY (see install_all._flash_cardputer_native).
+py_binary(
+    name = "flash_voice_cardputer",
+    srcs = ["flash_voice_cardputer.py"],
+    main = "flash_voice_cardputer.py",
+    visibility = ["//visibility:public"],
+    deps = [":install_all_lib"],
+)
