@@ -339,8 +339,17 @@ void app_main() {
                           len == sizeof(st));
             nvs_close(nv);
         }
+        sprout::ControlLimits limits;
+#if SPROUT_LITE
+        // Manually-armed Sprout-Lite: the dry-run/arm gate in pump.cpp is the
+        // physical safety, so a settled reading at the 0 % air anchor (bone-dry
+        // soil is indistinguishable from an unseated probe) is a LEGITIMATE
+        // input here — the operator armed the pump to water exactly that.  The
+        // full-sprout "unseated probe" implausible fail-off is dropped.
+        limits.plausible_floor_q8 = 0;
+#endif
         control.begin(have_state ? &st : nullptr,
-                      (uint32_t)(esp_timer_get_time() / 1000));
+                      (uint32_t)(esp_timer_get_time() / 1000), limits);
 #if SPROUT_LITE
         // Sprout lite: the plant is fixed at flashing time (SPROUT_PLANT) —
         // no server/display to switch it, so NVS never overrides the flash.
