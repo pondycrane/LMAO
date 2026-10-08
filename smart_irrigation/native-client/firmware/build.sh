@@ -17,18 +17,21 @@ set -euo pipefail
 # Device build configuration.
 MODE="${SPROUT_MODE:-sprout}"
 PLANT="${SPROUT_PLANT:-kale}"
+TARGET="${SPROUT_TARGET:-esp32}"   # classic Atom Lite (esp32) | Atom Lite S3 (esp32s3)
 while [ $# -gt 0 ]; do
     case "$1" in
         --mode)
             MODE="${2:-}"; shift 2 || true;;
         --plant)
             PLANT="${2:-}"; shift 2 || true;;
+        --target)
+            TARGET="${2:-}"; shift 2 || true;;
         -h|--help)
-            echo "usage: $0 [--mode sprout|sprout-lite] [--plant NAME]" >&2
+            echo "usage: $0 [--mode sprout|sprout-lite] [--plant NAME] [--target esp32|esp32s3]" >&2
             exit 0;;
         *)
             echo "unknown argument: $1" >&2
-            echo "usage: $0 [--mode sprout|sprout-lite] [--plant NAME]" >&2
+            echo "usage: $0 [--mode sprout|sprout-lite] [--plant NAME] [--target esp32|esp32s3]" >&2
             exit 2;;
     esac
 done
@@ -36,6 +39,12 @@ if [ "$MODE" != sprout ] && [ "$MODE" != sprout-lite ]; then
     echo "invalid --mode '$MODE' (expected sprout or sprout-lite)" >&2
     exit 2
 fi
+case "$TARGET" in
+    esp32|esp32s3) ;;
+    *)
+        echo "invalid --target '$TARGET' (expected esp32 or esp32s3)" >&2
+        exit 2;;
+esac
 # The plant is resolved against the control engine's profile table at boot
 # (control.cpp). Fail fast here on a typo instead of after flashing the device.
 case "$PLANT" in
@@ -88,8 +97,8 @@ fi
 cp -r "$APP/../../../firmware_common/lma_common" "$DEST/components/lma_common"
 cp -r "$APP/../../../firmware_common/rtreticulum" "$DEST/components/rtreticulum"
 cp "$APP/CMakeLists.txt" "$APP/sdkconfig.defaults" "$APP/partitions.csv" "$DEST/"
-echo "app staged in $DEST (mode=$MODE plant=$PLANT)"
+echo "app staged in $DEST (mode=$MODE plant=$PLANT target=$TARGET)"
 
-docker run --rm -v "$RTR:/repo" -w /repo/firmware/sprout -e IDF_TARGET=esp32 \
-    "$IDF_IMG" bash -lc 'git config --global --add safe.directory /repo; idf.py set-target esp32 && idf.py build' || exit 1
-echo "Built: $DEST/build/sprout_native.bin (mode=$MODE plant=$PLANT)"
+docker run --rm -v "$RTR:/repo" -w /repo/firmware/sprout -e IDF_TARGET="$TARGET" \
+    "$IDF_IMG" bash -lc "git config --global --add safe.directory /repo; idf.py set-target $TARGET && idf.py build" || exit 1
+echo "Built: $DEST/build/sprout_native.bin (mode=$MODE plant=$PLANT target=$TARGET)"

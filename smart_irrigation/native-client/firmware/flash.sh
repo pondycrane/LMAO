@@ -39,19 +39,27 @@ while [ $# -gt 0 ]; do
         --baud)  BAUD="${2:-}";   shift 2 || true;;
         --mode)  MODE="${2:-}";   shift 2 || true;;
         --plant) PLANT="${2:-}";  shift 2 || true;;
+        --target) TARGET="${2:-}"; shift 2 || true;;
         --force) FORCE=1;         shift 1 || true;;
         -h|--help)
             echo "usage: $0 [--port X] [--baud Y] [--mode sprout|sprout-lite]" >&2
-            echo "             [--plant NAME] [--force]" >&2
+            echo "             [--plant NAME] [--target esp32|esp32s3] [--force]" >&2
             echo "  --port X is REQUIRED (no default). Find X via tools/identify_device.py." >&2
             echo "  --force skips the identification target check." >&2
             exit 0;;
         *)
             echo "unknown argument: $1" >&2
-            echo "usage: $0 [--port X] [--baud Y] [--mode sprout|sprout-lite] [--plant NAME] [--force]" >&2
+            echo "usage: $0 [--port X] [--baud Y] [--mode sprout|sprout-lite] [--plant NAME] [--target esp32|esp32s3] [--force]" >&2
             exit 2;;
     esac
 done
+TARGET="${TARGET:-${SPROUT_TARGET:-esp32}}"
+case "$TARGET" in
+    esp32|esp32s3) ;;
+    *)
+        echo "invalid --target '$TARGET' (expected esp32 or esp32s3)" >&2
+        exit 2;;
+esac
 # Repo root = firmware/../../.. (firmware -> native-client -> smart_irrigation -> repo).
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
@@ -114,7 +122,12 @@ CFG="$DEST/main/device_config.h"
 want_lite=0
 [ "$MODE" = sprout-lite ] && want_lite=1
 need_build=0
+# A target change (esp32 <-> esp32s3) also invalidates the staged image:
+# detect it from the staged sdkconfig left by the previous set-target/build.
+prev_target="$(grep -E '^CONFIG_IDF_TARGET="' "$DEST/sdkconfig" 2>/dev/null | tr -d 'CONFIG_IDF_TARGET="')"
 if [ ! -f "$DEST/build/sprout_native.bin" ]; then
+    need_build=1
+elif [ -n "$prev_target" ] && [ "$prev_target" != "$TARGET" ]; then
     need_build=1
 elif ! grep -q "^#define SPROUT_LITE $want_lite\$" "$CFG" 2>/dev/null; then
     need_build=1
@@ -122,11 +135,13 @@ elif ! grep -q "^#define SPROUT_PLANT \"$PLANT\"\$" "$CFG" 2>/dev/null; then
     need_build=1
 fi
 if [ "$need_build" = 1 ]; then
-    echo "Staged image is not mode=$MODE plant=$PLANT — rebuilding with those args"
-    "$APP/build.sh" --mode "$MODE" --plant "$PLANT"
+    echo "Staged image is not mode=$MODE plant=$PLANT target=$TARGET — rebuilding with those args"
+    "$APP/build.sh" --mode "$MODE" --plant "$PLANT" --target "$TARGET"
 fi
 
-echo "Flashing Sprout ($MODE, plant=$PLANT) native firmware to $PORT @ $BAUD baud ..."
-exec docker run --rm -v "$RTR:/repo" --device "$PORT:/dev/ttyUSB0" \
-    -w /repo/firmware/sprout -e IDF_TARGET=esp32 "$IDF_IMG" \
-    bash -lc "idf.py -p /dev/ttyUSB0 -b $BAUD flash"
+echo "Flashing Sprout ($MODE, plant=$PLANT, target=$TARGET) native firmware to $PORT @ $BAUD baud ..."
+# Map the host port 1:1 into the container (works for both the FTDI /dev/ttyUSB
+# classic Atom and the USB-Serial-JTAG /dev/ttyACM Atom Lite S3).
+exec docker run --rm -v "$RTR:/repo" --device "$PORT:$PORT" \
+    -w /repo/firmware/sprout -e IDF_TARGET="$TARGET" "$IDF_IMG" \
+    bash -lc "idf.py -p $PORT -b $BAUD flash"

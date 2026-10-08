@@ -339,8 +339,17 @@ void app_main() {
                           len == sizeof(st));
             nvs_close(nv);
         }
+        sprout::ControlLimits limits;
+#if SPROUT_LITE
+        // Manually-armed Sprout-Lite: the dry-run/arm gate in pump.cpp is the
+        // physical safety, so a settled reading at the 0 % air anchor (bone-dry
+        // soil is indistinguishable from an unseated probe) is a LEGITIMATE
+        // input here — the operator armed the pump to water exactly that.  The
+        // full-sprout "unseated probe" implausible fail-off is dropped.
+        limits.plausible_floor_q8 = 0;
+#endif
         control.begin(have_state ? &st : nullptr,
-                      (uint32_t)(esp_timer_get_time() / 1000));
+                      (uint32_t)(esp_timer_get_time() / 1000), limits);
 #if SPROUT_LITE
         // Sprout lite: the plant is fixed at flashing time (SPROUT_PLANT) —
         // no server/display to switch it, so NVS never overrides the flash.
@@ -435,8 +444,10 @@ void app_main() {
             last_moisture_log_ms = now_ms;
             const float dbg_m =
                 (float)(eng.moisture_usable ? eng.moisture_q8 : moisture_q8) / 256.0f;
-            ESP_LOGI(TAG, "moisture=%.1f%% probe=%s state=%s blend=%s pump_cmd=%s%s",
-                     (double)dbg_m, probe_ok ? "ok" : "FAIL",
+            int rawc = -1;
+            moisture_read_raw_count(&rawc);
+            ESP_LOGI(TAG, "moisture=%.1f%% raw=%d probe=%s state=%s blend=%s pump_cmd=%s%s",
+                     (double)dbg_m, rawc, probe_ok ? "ok" : "FAIL",
                      sprout::state_name(eng.state),
                      eng.moisture_usable ? "cond" : "raw",
                      eng.pump_on ? "ON" : "off",
