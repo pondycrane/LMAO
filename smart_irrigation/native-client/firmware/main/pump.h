@@ -2,10 +2,12 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include "board_pins.h"
 
-// Watering Unit U101 pump enable — GPIO26 (Grove "SDA"), active-HIGH.
-// Verified wiring: docs/hardware-verification.md §2.
-#define PUMP_GPIO 26
+// Watering Unit U101 pump enable — board-dependent GPIO (classic Atom G26,
+// Atom Lite S3 G2), active-HIGH.  Verified classic wiring:
+// docs/hardware-verification.md §2.
+#define PUMP_GPIO BOARD_PUMP_GPIO
 
 // Runtime actuation gate (was a compile-time #define).  Every boot starts in
 // DRY RUN: pump_set(true) is refused until the user arms actuation — on the
