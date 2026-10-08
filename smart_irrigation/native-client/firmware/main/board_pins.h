@@ -10,18 +10,19 @@
 //
 // Atom Lite S3 (ESP32-S3), the upgraded Sprout-Lite:
 //   Grove (4-pin: 5V GND GPIO1 GPIO2): the two Grove data pins are GPIO1 + GPIO2.
-//   Moisture probe -> GPIO1 (ADC1_CH0, an S3 ADC1-capable channel); pump -> GPIO2.
+//   Moisture probe -> GPIO2 (ADC1_CH1, an S3 ADC1-capable channel); pump -> GPIO1.
 //   Built-in button GPIO41, 4x WS2812 RGB LEDs GPIO35 (RMT).
-//   NOTE: which Grove data wire carries the probe vs the pump is a *physical*
-//   wiring fact — BOARD_MOISTURE_GPIO/BOARD_PUMP_GPIO default to Grove pin 1 /
-//   pin 2 and must be swapped if the harness uses the opposite order.
+//   NOTE: the probe/pump Grove assignment was field-verified (probe in soil
+//   read 0.0%/dry on GPIO1), hence probe=GPIO2, pump=GPIO1.
 #include <stdint.h>
 #include "driver/adc.h"
 
 #ifdef CONFIG_IDF_TARGET_ESP32S3
-#define BOARD_MOISTURE_ADC1_CH   ADC1_CHANNEL_0   // GPIO1
-#define BOARD_MOISTURE_GPIO      1
-#define BOARD_PUMP_GPIO          2
+// Field finding (probe in soil read 0.0% = dry-as-air on Grove pin 1): the
+// Watering Unit probe is on Grove pin 2 (ADC1_CH1 / GPIO2); pump on pin 1.
+#define BOARD_MOISTURE_ADC1_CH   ADC1_CHANNEL_1   // GPIO2
+#define BOARD_MOISTURE_GPIO      2
+#define BOARD_PUMP_GPIO          1
 #define BOARD_BTN_GPIO           41
 #define BOARD_LED_GPIO           35
 #else
