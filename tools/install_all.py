@@ -126,8 +126,14 @@ def _flash_cardputer_native(port: str, result: DeviceResult,
     """
     import subprocess
 
+    # `bazel run` sets BUILD_WORKSPACE_DIRECTORY to the real repo; the
+    # __file__-relative fallback is for direct `python3 tools/install_all.py`.
+    # (Resolving from __file__ alone lands in the runfiles tree under `bazel
+    # run`, where cardputer_client/firmware/ is not packaged → build.sh missing.)
+    _bwd = os.environ.get("BUILD_WORKSPACE_DIRECTORY")
     firmware_dir = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "cardputer_client", "firmware"
+        _bwd or os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "cardputer_client", "firmware",
     )
     build_sh = os.path.join(firmware_dir, "build.sh")
     flash_sh = os.path.join(firmware_dir, "flash.sh")
