@@ -31,15 +31,27 @@ for _lp in _LIB_PATHS:
 else:
     HAS_URNS = False
 
-# Display support (if available).  The Cardputer ADV ships M5Stack's
-# MicroPython, whose display is M5.Lcd (LovyanGFX) — there is no ``st7789``
-# module on this device, so the previous st7789 path here never engaged.
+# Display support (if available).  Two backends, picked in ``init_display``:
+#  * ``st7789`` — the lean BeanPieChen-style ESP-IDF firmware the voice build
+#    uses (no M5Stack layer); this is the preferred backend.
+#  * ``M5.Lcd`` (LovyanGFX) — the stock UIFlow2/M5Stack firmware fallback,
+#    kept so the client still runs on a factory device.
 try:
     import M5
 
     HAS_DISPLAY = hasattr(M5, "Lcd")
 except ImportError:
     HAS_DISPLAY = False
+
+# The lean BeanPieChen-style firmware has no M5 layer but does ship the
+# ``st7789`` driver — treat that as a display too so the st7789 backend engages.
+if not HAS_DISPLAY:
+    try:
+        import st7789  # noqa: F401
+
+        HAS_DISPLAY = True
+    except ImportError:
+        HAS_DISPLAY = False
 
 # Chart renderer (optional — the text status screen is the fallback)
 try:
@@ -297,10 +309,55 @@ class LcdDisplay:
         self._lcd.drawString(string, int(x), int(y))
 
 
+class St7789Display:
+    """st7789 backend for the lean BeanPieChen-style Cardputer-ADV firmware.
+
+    Exposes the same four primitives (``fill``/``pixel``/``line``/``text``,
+    RGB888 in) as ``LcdDisplay`` so the status screen and the chart render
+    unchanged.  Uses the ADV wiring from ``MicroPythonShell``'s ``dev.py``:
+    SPI2 (sck=36, mosi=35), reset=33, dc=34, cs=37, backlight PWM on GPIO38,
+    ST7789 240x135 rotated.
+    """
+
+    def __init__(self, dp):
+        self._dp = dp
+
+    def _panel_size(self):
+        # Driver reports its own dimensions after initialisation.
+        try:
+            return self._dp.width(), self._dp.height()
+        except Exception:
+            return 240, 135
+
+    def _color(self, rgb888):
+        r = (rgb888 >> 16) & 0xFF
+        g = (rgb888 >> 8) & 0xFF
+        b = rgb888 & 0xFF
+        return st7789.color565(r, g, b)
+
+    def fill(self, rgb888):
+        self._dp.fill(self._color(rgb888))
+
+    def pixel(self, x, y, rgb888):
+        self._dp.pixel(int(x), int(y), self._color(rgb888))
+
+    def line(self, x0, y0, x1, y1, rgb888):
+        self._dp.line(int(x0), int(y0), int(x1), int(y1), self._color(rgb888))
+
+    def text(self, string, x, y, rgb888):
+        self._dp.text(string, int(x), int(y), self._color(rgb888))
+
+
 def init_display():
     """Initialise the Cardputer display, or None when unavailable."""
     if not HAS_DISPLAY:
         return None
+    try:
+        display = _init_st7789()
+        if display is not None:
+            return display
+    except ImportError:
+        pass
     try:
         display = LcdDisplay(M5.Lcd)
         panel = "unknown"
@@ -314,6 +371,44 @@ def init_display():
     except Exception as e:
         print(f"Display init failed: {e}")
         return None
+
+
+def _init_st7789():
+    """st7789 backend (lean BeanPieChen firmware); None when unavailable."""
+    global st7789
+    import st7789  # noqa: F401  (referenced from St7789Display._color)
+    from machine import Pin, PWM, SPI
+
+    height = 135
+    width = 240
+    spi = SPI(
+        2,
+        baudrate=40000000,
+        sck=Pin(36, Pin.OUT),
+        mosi=Pin(35, Pin.OUT),
+        miso=None,
+    )
+    # Driver signature is ST7789(spi, height, width, ...) — see MicroPythonShell.
+    dp = st7789.ST7789(
+        spi,
+        height,
+        width,
+        reset=Pin(33, Pin.OUT),
+        dc=Pin(34, Pin.OUT),
+        cs=Pin(37, Pin.OUT),
+        rotation=1,
+    )
+    dp.init()
+    try:
+        pwm = PWM(Pin(38, Pin.OUT))
+        pwm.freq(1000)
+        pwm.duty(512)  # mid brightness until the client tunes it
+    except Exception:
+        pass
+    display = St7789Display(dp)
+    print(f"Display ready: st7789 {width}x{height} (rotation=1)")
+    display.fill(0x000000)
+    return display
 
 
 def display_status(tft, lines):
