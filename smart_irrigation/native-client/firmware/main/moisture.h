@@ -3,11 +3,12 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-// Soil-moisture (M5Stack Watering Unit U101 capacitive probe) on GPIO32,
-// which is ADC1 channel 4.  Values are the verified 12-bit / 11 dB readings
-// from hardware-verification.md (2026-09-16): air ~2068, submerged ~1580.
-// Lower counts == wetter, so we normalise to moisture % with 100 % ==
-// saturated (as submerged) and 0 % == dry-as-air.
+// Soil-moisture (M5Stack Watering Unit U101 capacitive probe).  The GPIO /
+// ADC1 channel is board-dependent via board_pins.h (classic Atom GPIO32 /
+// ADC1_CH4; Atom Lite S3 GPIO1 / ADC1_CH0).  Values are the verified 12-bit /
+// 11 dB readings from hardware-verification.md (2026-09-16): air ~2068,
+// submerged ~1580.  Lower counts == wetter, so we normalise to moisture % with
+// 100 % == saturated (as submerged) and 0 % == dry-as-air.
 #define MOISTURE_DRY_COUNT 2068.0f
 #define MOISTURE_WET_COUNT 1580.0f
 
@@ -45,3 +46,8 @@ bool moisture_init(void);
 
 // Read the probe as Q8.8 percent.  Returns false on ADC failure.
 bool moisture_read_q8(int32_t* out_q8);
+
+// Raw 12-bit ADC count from the probe (diagnostics / re-calibration: the
+// ESP32-S3 ADC scale differs from the classic Atom, so the S3 calibrates its
+// own DRY/WET anchors from raw counts).
+bool moisture_read_raw_count(int* out_raw);

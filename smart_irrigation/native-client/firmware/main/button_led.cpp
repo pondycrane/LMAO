@@ -5,16 +5,17 @@
 #include "driver/gpio.h"
 #include "driver/rmt.h"
 #include "esp_log.h"
+#include "board_pins.h"
 
-// Atom Lite (ESP32-PICO-D4) front controls:
-//   * button on GPIO39 — input-only; the board has an external pull-up, so it
-//     reads HIGH released / LOW pressed (no internal pull-up exists on 34-39).
-//   * single SK6812 RGB LED on GPIO27 — one addressable pixel, driven via RMT.
+// Atom Lite front controls — board-dependent GPIOs (see board_pins.h).
+//   classic (ESP32): button G39 (input-only, external pull-up, HIGH released /
+//     LOW pressed), single SK6812 LED G27.
+//   Atom Lite S3 (ESP32-S3): built-in button G41, 4x WS2812 LEDs G35.
 static const char* TAG = "btn-led";
 
-#define BTN_GPIO         39
+#define BTN_GPIO         BOARD_BTN_GPIO
 #define BTN_PRESSED      0
-#define LED_GPIO         27
+#define LED_GPIO         BOARD_LED_GPIO
 #define LED_RMT_CHANNEL  RMT_CHANNEL_0
 #define RMT_CLK_DIV      8          // APB 80 MHz / 8 = 0.1 us per tick
 
