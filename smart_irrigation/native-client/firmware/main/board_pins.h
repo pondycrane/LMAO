@@ -18,11 +18,14 @@
 #include "driver/adc.h"
 
 #ifdef CONFIG_IDF_TARGET_ESP32S3
-// Field finding (probe in soil read 0.0% = dry-as-air on Grove pin 1): the
-// Watering Unit probe is on Grove pin 2 (ADC1_CH1 / GPIO2); pump on pin 1.
-#define BOARD_MOISTURE_ADC1_CH   ADC1_CHANNEL_1   // GPIO2
-#define BOARD_MOISTURE_GPIO      2
-#define BOARD_PUMP_GPIO          1
+// Grove (4-pin: 5V GND GPIO1 GPIO2).  Probe is ON GPIO1 (ADC1_CH0); pump GPIO2.
+// Field-verified on the S3: probe in air ~2133-2157 raw, submerged ~1591 raw —
+// matching the classic ESP32 anchors (air 2068 / wet 1580), so the classic
+// DRY/WET calibration carries over unchanged (air 0%, submerged ~93%).
+// GPIO2 read 0 (no probe) in the same test, confirming the assignment.
+#define BOARD_MOISTURE_ADC1_CH   ADC1_CHANNEL_0   // GPIO1
+#define BOARD_MOISTURE_GPIO      1
+#define BOARD_PUMP_GPIO          2
 #define BOARD_BTN_GPIO           41
 #define BOARD_LED_GPIO           35
 #else
