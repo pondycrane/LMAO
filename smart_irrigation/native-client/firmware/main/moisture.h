@@ -46,3 +46,8 @@ bool moisture_init(void);
 
 // Read the probe as Q8.8 percent.  Returns false on ADC failure.
 bool moisture_read_q8(int32_t* out_q8);
+
+// Raw 12-bit ADC count from the probe (diagnostics / re-calibration: the
+// ESP32-S3 ADC scale differs from the classic Atom, so the S3 calibrates its
+// own DRY/WET anchors from raw counts).
+bool moisture_read_raw_count(int* out_raw);

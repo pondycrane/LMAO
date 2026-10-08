@@ -43,3 +43,7 @@ bool moisture_read_q8(int32_t* out_q8) {
     *out_q8 = moisture_q8_from_counts(raw);
     return true;
 }
+
+bool moisture_read_raw_count(int* out_raw) {
+    return moisture_read_raw(out_raw);
+}

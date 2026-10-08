@@ -435,8 +435,10 @@ void app_main() {
             last_moisture_log_ms = now_ms;
             const float dbg_m =
                 (float)(eng.moisture_usable ? eng.moisture_q8 : moisture_q8) / 256.0f;
-            ESP_LOGI(TAG, "moisture=%.1f%% probe=%s state=%s blend=%s pump_cmd=%s%s",
-                     (double)dbg_m, probe_ok ? "ok" : "FAIL",
+            int rawc = -1;
+            moisture_read_raw_count(&rawc);
+            ESP_LOGI(TAG, "moisture=%.1f%% raw=%d probe=%s state=%s blend=%s pump_cmd=%s%s",
+                     (double)dbg_m, rawc, probe_ok ? "ok" : "FAIL",
                      sprout::state_name(eng.state),
                      eng.moisture_usable ? "cond" : "raw",
                      eng.pump_on ? "ON" : "off",
