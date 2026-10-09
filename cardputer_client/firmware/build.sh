@@ -53,6 +53,16 @@ cp -r "$APP/main" "$DEST/main"
 # duplication.
 cp -r "$APP/../../firmware_common/lma_common" "$DEST/components/lma_common"
 cp -r "$APP/../../firmware_common/rtreticulum" "$DEST/components/rtreticulum"
+# On-device Codec-2 voice codec (kitchen voice path); cardputer-only staging so
+# the Sprout build stays lean.  Only OUR files are committed — the upstream
+# codec2 source is fetched at build time (see codec2_prepare.sh) and never
+# vendored into the repo.
+mkdir -p "$DEST/components/codec2"
+cp "$APP/../../firmware_common/codec2/CMakeLists.txt" \
+   "$APP/../../firmware_common/codec2/codec2_wrap.c" \
+   "$APP/../../firmware_common/codec2/codec2_wrap.h" "$DEST/components/codec2/"
+# ES8311 codec + I2S audio master (record/play) for the voice path.
+cp -r "$APP/../../firmware_common/audio" "$DEST/components/audio"
 cp "$APP/CMakeLists.txt" "$APP/sdkconfig.defaults" "$APP/partitions.csv" "$DEST/"
 echo "app staged in $DEST"
 
@@ -84,6 +94,35 @@ HDR="$DEST/main/lmao_config.h"
 } > "$HDR"
 echo "generated $HDR"
 
+# Fetch + prepare the codec2 component (upstream source is never vendored).
+# Under `bazel run //cardputer_client:build_firmware` the @codec2 http_archive
+# is materialized in the runfiles; direct ./build.sh falls back to the
+# sha256-verified disk cache, then to the pinned codeload URL (codec2_prepare.sh).
+if [ -n "${C2_SRC_DIR:-}" ]; then
+    :    # caller provided the upstream tree explicitly
+else
+    # Under `bazel run //cardputer_client:build_firmware`, the @codec2
+    # http_archive is materialized in the runfiles; plain sh_binary does not
+    # export RUNFILES_DIR, so probe the common layouts.
+    for c in \
+        "${RUNFILES_DIR:-}/codec2/src" \
+        "${RUNFILES:-}/codec2/src" \
+        "$PWD/codec2/src" \
+        "$(dirname "$0")/../../bazel-bin/cardputer_client/build_firmware.runfiles/codec2/src" \
+        "$(dirname "$0")/build_firmware.runfiles/codec2/src" \
+        "$(pwd -P 2>/dev/null)/codec2/src"; do
+        if [ -d "$c" ]; then
+            export C2_SRC_DIR="$(cd "$(dirname "$c")" && pwd)"
+            echo "codec2 source from bazel runfiles: $C2_SRC_DIR"
+            break
+        fi
+    done
+fi
+"$APP/codec2_prepare.sh" "$DEST/components/codec2"
+
 docker run --rm -v "$RTR:/repo" -w /repo/firmware/cardputer -e IDF_TARGET=esp32s3 \
-    "$IDF_IMG" bash -lc 'git config --global --add safe.directory /repo; idf.py set-target esp32s3 && idf.py build' || exit 1
+    "$IDF_IMG" bash -lc 'git config --global --add safe.directory /repo; \
+    if [ ! -f /repo/firmware/cardputer/build/CMakeCache.txt ]; then \
+        rm -rf /repo/firmware/cardputer/build; fi; \
+    idf.py set-target esp32s3 && idf.py build' || exit 1
 echo "Built: $DEST/build/cardputer_native.bin"

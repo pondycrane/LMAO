@@ -26,6 +26,17 @@ namespace lma_encoder {
     // LMAOEnvelope{ oneof payload { SensorReport sensor = 10 } }
     std::string encode_envelope(const std::string& sensor_report_bytes);
 
+    // LMAOEnvelope{ oneof payload { AudioMessage audio = 21 } }
+    std::string encode_envelope_audio(const std::string& audio_message_bytes);
+
+    // AudioMessage{ node_id=1, audio_data=2(bytes), codec=3, duration_ms=4,
+    //               timestamp=5 }
+    std::string encode_audio_message(const std::string& node_id,
+                                     const std::string& audio_data,
+                                     const std::string& codec,
+                                     uint32_t duration_ms,
+                                     uint64_t timestamp_ms);
+
     // SensorReport{ node_id=1, seq=2, battery=3(float), readings=4 (repeated) }
     std::string encode_sensor_report(const std::string& node_id,
                                      uint32_t seq, float battery,
