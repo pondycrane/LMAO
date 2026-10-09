@@ -155,7 +155,7 @@ filegroup(
 sh_binary(
     name = "build_firmware",
     srcs = ["firmware/build.sh"],
-    data = [":firmware_sources"],
+    data = [":firmware_sources", "@codec2//:src"],
     tags = ["manual"],
 )
 
