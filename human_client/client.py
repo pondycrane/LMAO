@@ -309,10 +309,16 @@ class Client:
         )
         identity_hex = RNS.hexrep(self.client_identity.hash, delimit=False)
 
-        # Announce presence on the network
+        # Announce presence on the network. LXMF's router.announce() requires
+        # the *delivery destination hash* (keyed in router.delivery_destinations),
+        # not the raw identity hash — same pattern as the server.
         try:
-            self.router.announce()
-            logger.info("Announcement sent.")
+            for dest_hash in list(self.router.delivery_destinations):
+                self.router.announce(dest_hash)
+            logger.info(
+                "Announcement sent (%d delivery destinations).",
+                len(self.router.delivery_destinations),
+            )
         except (OSError, ValueError, KeyError) as e:
             logger.warning("Failed to announce presence: %s", e, exc_info=True)
 
