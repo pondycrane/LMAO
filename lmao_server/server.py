@@ -260,20 +260,66 @@ def _identity_to_destination(identity):
     )
 
 
-def _announce_delivery_destinations(router):
+def _announce_delivery_destinations(router, attached_interface=None):
     """Announce every registered delivery destination for LoRa path discovery.
 
     Single source of truth for both the startup announce and the periodic
     re-announce (issue #134).  LXMF's ``router.announce()`` requires the
     *delivery destination hash* (keyed in ``router.delivery_destinations``),
     NOT the raw identity hash — passing the identity hash is a silent no-op.
+
+    ``attached_interface`` scopes the announce to a single RNS interface
+    (e.g. the WiFi AutoInterface) when given — used by the periodic wifi-only
+    re-announce so fresh AutoInterface clients can resolve the server
+    identity without paying LoRa airtime (see _start_wifi_announce_loop).
     """
     for dest_hash in list(router.delivery_destinations):
-        router.announce(dest_hash)
+        router.announce(dest_hash, attached_interface=attached_interface)
     logger.info(
         "Server announce sent (%d delivery destinations).",
         len(router.delivery_destinations),
     )
+
+
+def _start_wifi_announce_loop(router):
+    """Periodically re-announce delivery destinations over the home-network
+    interfaces (everything except the LoRa RNode), every LMAO_ANNOUNCE_INTERVAL
+    seconds.
+
+    The startup announce is the ONLY discoverability beacon the server sends
+    (issue #142, to save LoRa airtime), so a wifi client that connects to the
+    TCP home-network interface after the server has booted would never learn
+    the server's delivery identity to address it.  Repeating the announce per
+    interface keeps fresh wifi/human clients addressable as soon as they
+    connect — at negligible unicast/multicast cost on the local wifi, while
+    #142's LoRa airtime rationale is preserved (LoRa is never announced here).
+
+    Interval comes from ``LMAO_ANNOUNCE_INTERVAL`` (seconds); 0/unset keeps
+    the old #142 behaviour (startup announce only).
+    """
+    try:
+        interval = float(os.environ.get("LMAO_ANNOUNCE_INTERVAL", "0"))
+    except ValueError:
+        logger.warning("Invalid LMAO_ANNOUNCE_INTERVAL — disabling wifi re-announce.")
+        return
+    if interval <= 0:
+        logger.info("WiFi re-announce disabled (LMAO_ANNOUNCE_INTERVAL unset/0).")
+        return
+
+    def announce_home_loop():
+        while True:
+            time.sleep(interval)
+            for iface in RNS.Transport.interfaces:
+                if type(iface).__name__ == "RNodeInterface":
+                    continue  # #142: never spend LoRa airtime on re-announces
+                try:
+                    _announce_delivery_destinations(router, attached_interface=iface)
+                except Exception as e:
+                    logger.warning("Home-network re-announce failed on %s: %s", iface, e)
+
+    t = threading.Thread(target=announce_home_loop, name="wifi-announce", daemon=True)
+    t.start()
+    logger.info("Home-network re-announce every %ss (non-LoRa interfaces).", interval)
 
 
 class Server:
@@ -889,6 +935,13 @@ async def async_main():
         _announce_delivery_destinations(router)
     except Exception as e:
         logger.warning("Server announce failed (LoRa may be unavailable): %s", e)
+
+    # ── Periodic WiFi-only re-announce (AutoInterface) ───────────
+    # Fresh wifi AutoInterface clients cannot resolve the server's delivery
+    # identity from the single startup announce; repeat it over the
+    # AutoInterface only (LMAO_ANNOUNCE_INTERVAL) so this and future wifi
+    # clients stay addressable without burning LoRa airtime (#142).
+    _start_wifi_announce_loop(router)
 
     # ── NATS connect (optional) ─────────────────────────────────
     nats_queue = None

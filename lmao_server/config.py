@@ -26,6 +26,7 @@ _cfg = RnsConfig(
     transport_path=_state_dir or "/tmp/lmao_server_rns_state",
     tempdir_prefix="lmao_rns_",
     persist_state=bool(_state_dir),
+    role="server",
 )
 
 # Export the same names as before so callers are unaffected

@@ -27,10 +27,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy project files
-COPY . .
-
-# Install Python dependencies
+# Install Python dependencies (before COPY so the code layer does not
+# invalidate this expensive layer on every rebuild)
 # rns/lxmf are pinned to match lmao_server/requirements_lock.txt — unpinned
 # installs drifted the production image (rns 1.4.0/lxmf 1.1.0) away from the
 # Bazel-tested versions and broke the LXMF ACK path (issue #70).
@@ -43,6 +41,9 @@ RUN pip install --no-cache-dir \
     psycopg[binary] \
     rns==1.3.5 \
     lxmf==1.0.1
+
+# Copy project files
+COPY . .
 
 # Generate protobuf/gRPC stubs
 RUN python -m grpc_tools.protoc -I proto --python_out=proto --grpc_python_out=proto proto/lma_messages.proto proto/lma_grpc.proto
