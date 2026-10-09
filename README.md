@@ -603,6 +603,10 @@ when running in Docker):
 | `LMAO_SERVER_IDENTITY_PATH` | `~/.local/share/lmao_server/lxmf` | LXMF identity storage dir (PVC: `/data/lxmf`) |
 | `LMAO_RNS_TRANSPORT_PATH` | unset (temp dir) | Reticulum state dir; set = persistent configdir (PVC: `/data/transport`) |
 | `LMAO_AUTOIFACE_DEVICES` | unset (all interfaces) | Comma-separated interface allowlist for AutoInterface (e.g. `wlan0`) |
+| `LMAO_TCP_PORT` | `4246` | Server's RNS `TCPServerInterface` listen port (hostNetwork) — the deterministic home-network transport for wifi/human clients (multicast AutoInterface is unreliable through the home AP) |
+| `LMAO_TCP_BIND` | `0.0.0.0` | Server's RNS TCP bind IP |
+| `LMAO_ANNOUNCE_INTERVAL` | `0` (off) | Seconds between server re-announces over non-LoRa interfaces so fresh wifi clients can resolve the server's delivery identity |
+| `LMAO_SERVER_HOST` | `192.168.50.67` | Client-side: RNS `TCPClientInterface` target (the LMAO server's IP); overrides with `LMAO_SERVER_PORT` |
 | `LMAO_MQTT_HOST` | `localhost` | MQTT broker hostname (IoT ingest) |
 | `LMAO_MQTT_PORT` | `1883` | MQTT broker port |
 | `LMAO_INGEST_DUCKDB_PATH` | `/data/sensors.db` | DuckDB file path (IoT ingest) |
@@ -959,8 +963,15 @@ PYTHONPATH="$PWD" python3 human_client/client.py
 LMAO_RNODE_PORT=/dev/ttyACM0 bazel run //human_client:client
 ```
 
-The Human Client starts with WiFi AutoInterface (no RNode required).
+The Human Client starts with WiFi AutoInterface (no RNode required), plus a
+`TCPClientInterface` to the LMAO server (`LMAO_SERVER_HOST`, default
+`192.168.50.67:4246`) — the deterministic home-network transport that also
+carries the server's delivery-identity announces.
 If an RNode is connected, LoRa messaging is available.
+
+For the server to accept a wifi client's envelopes, the client's
+`lxmf/delivery` source hash (printed at client start / seen in server logs as
+`Message received — From: <hash>`) must be in `LMAO_ALLOWED_CLIENTS`.
 
 ### 13. Local Docker Registry
 
