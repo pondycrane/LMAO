@@ -90,7 +90,7 @@ class RnsConfig:
         CONFIG_CONTENT = _cfg.CONFIG_CONTENT
     """
 
-    def __init__(self, transport_path, tempdir_prefix="lmao_rns_", persist_state=False):
+    def __init__(self, transport_path, tempdir_prefix="lmao_rns_", persist_state=False, role="client"):
         self._transport_path = transport_path
         self._tempdir_prefix = tempdir_prefix
         self._persist_state = persist_state
@@ -128,6 +128,29 @@ class RnsConfig:
             },
             "WiFi": wifi_interface,
         }
+
+        # Deterministic home-network transport.  Scoped multicast (AutoInterface)
+        # is unreliable on this home wifi (AP multicast/MLD filtering silently
+        # drops the RNS group frames for the server — verified), while unicast
+        # TCP to the server works.  The server listens (TCPServerInterface,
+        # port 4246 default) and wifi/human clients connect (TCPClientInterface)
+        # to LMAO_SERVER_HOST.  Role "server" => listening side.
+        if role == "server":
+            self._interfaces["Home network TCP"] = {
+                "type": "TCPServerInterface",
+                "listen_ip": os.environ.get("LMAO_TCP_BIND", "0.0.0.0"),
+                "port": int(os.environ.get("LMAO_TCP_PORT", "4246")),
+                "enabled": True,
+            }
+        else:
+            tcp_host = os.environ.get("LMAO_SERVER_HOST", "192.168.50.67").strip()
+            if tcp_host:
+                self._interfaces["Home network TCP"] = {
+                    "type": "TCPClientInterface",
+                    "target_host": tcp_host,
+                    "target_port": int(os.environ.get("LMAO_SERVER_PORT", "4246")),
+                    "enabled": True,
+                }
         self.CONFIG_CONTENT = dict_to_ini(self._sections, self._interfaces)
 
     def get_configdir(self):
@@ -165,8 +188,7 @@ class RnsConfig:
         """Return the config as a dict for introspection."""
         return {
             "interfaces": {
-                "RNode LoRa": dict(self._interfaces["RNode LoRa"]),
-                "WiFi": dict(self._interfaces["WiFi"]),
+                name: dict(iface) for name, iface in self._interfaces.items()
             },
             "transport": dict(self._sections["transport"]),
             "logging": dict(self._sections["logging"]),
