@@ -40,6 +40,21 @@ http_archive(
     urls = ["https://github.com/0xSeren/RTReticulum/archive/dab4362cf3577e464e98e85b71abc5cb26185224.tar.gz"],
 )
 
+# ── Codec-2 speech codec — Cardputer kitchen voice (issue #234) ────────────
+# The upstream source is NOT vendored: pinned by commit + sha256 and fetched
+# at build time.  `build_firmware` carries @codec2//:src in its runfiles and
+# build.sh/codec2_prepare.sh copies the extracted tree into the ESP-IDF
+# component (regenerating the generated codebook tables).  The pinned commit's
+# src/ is byte-identical to the tree the on-device codec round-trip verified
+# (188 files; the 8 codebook*.c are regenerated deterministically).
+http_archive(
+    name = "codec2",
+    build_file = "//cardputer_client:codec2.BUILD",
+    sha256 = "aced7f60d8ffc2ce67f3ce8de345d1960362f83200c3fec1b83d38ef37aaad77",
+    strip_prefix = "codec2-b2311e5a967e09e5b293578bb596c83c50af536d",
+    urls = ["https://github.com/drowe67/codec2/archive/b2311e5a967e09e5b293578bb596c83c50af536d.tar.gz"],
+)
+
 # ── Rust client: pinned RNS/LXMF protocol crates (PR #168) ─────────────────
 # The five protocol crates are fetched from crates.io by SHA-256 (the source
 # of-record pin record is rust-client/UPSTREAM.md). This replaces a committed

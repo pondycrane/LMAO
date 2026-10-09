@@ -11,6 +11,8 @@ idf_component_register(
     INCLUDE_DIRS "."
     REQUIRES
         lma_common
+        codec2
+        audio
         rtreticulum
         driver
         esp_driver_i2c

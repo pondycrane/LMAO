@@ -59,4 +59,24 @@ namespace lma_encoder {
         return e;
     }
 
+    std::string encode_envelope_audio(const std::string& audio_message_bytes) {
+        std::string e;
+        field_len(e, 21, audio_message_bytes);   // LMAOEnvelope.audio = 21
+        return e;
+    }
+
+    std::string encode_audio_message(const std::string& node_id,
+                                     const std::string& audio_data,
+                                     const std::string& codec,
+                                     uint32_t duration_ms,
+                                     uint64_t timestamp_ms) {
+        std::string a;
+        field_len(a, 1, node_id);
+        field_len(a, 2, audio_data);
+        field_len(a, 3, codec);
+        field_varint(a, 4, duration_ms);
+        field_varint(a, 5, timestamp_ms);
+        return a;
+    }
+
 }

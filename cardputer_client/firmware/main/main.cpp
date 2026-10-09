@@ -26,7 +26,12 @@
 #include "rtreticulum/reticulum.h"
 #include "lora_interface.h"
 #include "lma_identity.h"
+#include "codec2_wrap.h"
+#include "audio.h"
+#include "es8311.h"
 #include "lma_encoder.h"
+#include "lma_decoder.h"
+#include "lxmf_audio.h"
 #include "lxmf_send.h"
 #include "die_temp.h"
 #include "dht20.h"
@@ -120,7 +125,7 @@ static void send_sensor_report(const Identity& my_identity, bool dht_ok) {
         ESP_LOGW(TAG, "die temp read failed (NAN) — skipping SensorReport");
         return;
     }
-    readings.push_back(lma_encoder::encode_reading(1, die, "C", now_ms));
+    readings.push_back(lma_encoder::encode_reading(1, die, lma_encoder::Unit::UNIT_CELSIUS, now_ms));
     ESP_LOGI(TAG, "die temp = %.1f C", (double)die);
 
     // sensor_id 2 — optional DHT20 humidity ("%"); on-sensor temperature is
@@ -129,7 +134,7 @@ static void send_sensor_report(const Identity& my_identity, bool dht_ok) {
         float t = 0.0f, h = 0.0f;
         const bool ok = dht_ok && dht20::read(&t, &h);
         if (ok && h >= 0.0f && h <= 100.0f) {
-            readings.push_back(lma_encoder::encode_reading(2, h, "%", now_ms));
+            readings.push_back(lma_encoder::encode_reading(2, h, lma_encoder::Unit::UNIT_PERCENT, now_ms));
             ESP_LOGI(TAG, "humidity = %.1f %%", (double)h);
         } else {
             ESP_LOGW(TAG, "DHT20 read failed — sensor_id 1 only");
@@ -164,6 +169,219 @@ static void send_sensor_report(const Identity& my_identity, bool dht_ok) {
     Transport::broadcast(frame, nullptr);
 }
 
+// Results are stashed + reprinted by the main loop (whose 30 s cadence is easy
+// to capture), so the codec self-test outcome is visible without catching the
+// boot window.
+static volatile int g_c2_done = 0;
+static volatile int g_c2_step = -1;   // -1 not started; 4 = complete
+static int g_c2_spf[2], g_c2_pk[2], g_c2_code[2];
+static UBaseType_t g_c2_hwm = 0;
+
+// Live-audio round-trip results (ES8311 mic -> codec2 700C -> speaker),
+// reprinted by the main announce loop the same way as the codec self-test.
+static volatile int g_audio_done = 0;
+static volatile int g_audio_step = -1;   // -1 not started; 6 = complete
+static int g_audio_chip_id = 0;
+static float g_audio_in_rms = 0.f;       // mic level
+static float g_audio_out_rms = 0.f;      // decoded level
+static int g_audio_rc_play = -99;        // I2S TX result
+
+// On-device Codec-2 self-test (issue #234): codec2 700C encode needs a large
+// stack (multi-KB DSP frames), so this runs on a dedicated high-stack task.
+static void codec2_selftest_task(void *arg) {
+    const int modes[] = {C2W_MODE_1300, C2W_MODE_700C};
+    g_c2_step = 0;
+    for (unsigned m = 0; m < sizeof(modes) / sizeof(modes[0]); m++) {
+        g_c2_step = 1 + (int)m * 1;
+        g_c2_spf[m] = c2w_samples_per_frame(modes[m]);
+        g_c2_pk[m] = c2w_bytes_per_frame(modes[m]);
+        g_c2_code[m] = c2w_self_test_mode(modes[m]);
+    }
+    g_c2_hwm = uxTaskGetStackHighWaterMark(NULL);
+    g_c2_step = 4;
+    g_c2_done = 1;
+
+    // --- live audio: ES8311 mic -> codec 700C -> decode -> speaker ----------
+    // Combines the codec + the ADV audio hardware in one on-device proof.
+    // g_audio_step: last completed stage (1=i2s 2=es8311 3=record 4=codec).
+    // I2S (BCLK/WS master) first so the ES8311 slave PLL has a clock to lock.
+    g_audio_step = 0;
+    if (audio_init() != ESP_OK) {
+        ESP_LOGE(TAG, "i2s audio init failed");
+        goto audio_done;
+    }
+    g_audio_step = 1;
+    if (es8311_init() != ESP_OK) {
+        ESP_LOGE(TAG, "es8311 init failed");
+        goto audio_done;
+    }
+    g_audio_chip_id = es8311_chip_id();
+    ESP_LOGI(TAG, "es8311 chip id = 0x%02x", g_audio_chip_id);
+    g_audio_step = 2;
+    {
+        const int spf = c2w_samples_per_frame(C2W_MODE_700C);
+        const int pk = c2w_bytes_per_frame(C2W_MODE_700C);
+        enum { FRAMES = 2 };
+        int16_t pcm[FRAMES * 320];        // 640 samples = 80 ms
+        if (audio_record(pcm, FRAMES * spf) != ESP_OK) {
+            ESP_LOGE(TAG, "i2s record failed (ADC silent or clock mismatch)");
+            goto audio_done;
+        }
+        g_audio_in_rms = audio_rms(pcm, FRAMES * spf);
+        g_audio_step = 3;
+        void *c = c2w_create(C2W_MODE_700C);
+        if (!c) {
+            ESP_LOGE(TAG, "c2w_create failed");
+            goto audio_done;
+        }
+        uint8_t enc[FRAMES * 8];
+        c2w_encode(c, enc, pcm, FRAMES, spf, pk);
+        int16_t dec[FRAMES * 320];
+        c2w_decode(c, dec, enc, FRAMES, spf, pk);
+        g_audio_out_rms = audio_rms(dec, FRAMES * spf);
+        g_audio_rc_play = (int)audio_play(dec, FRAMES * spf);
+        c2w_destroy(c);
+        ESP_LOGI(TAG, "codec2 700C live: mic rms=%.1f dec rms=%.1f play_rc=%d",
+                 g_audio_in_rms, g_audio_out_rms, g_audio_rc_play);
+        g_audio_step = 4;
+    }
+audio_done:
+    g_audio_done = 1;
+    vTaskDelete(NULL);
+}
+
+// ---- voice over LXMF (issue #234) -----------------------------------------
+// codec2 700C encode/decode needs the big stack, so all audio work lives on a
+// dedicated high-stack task; the main loop drives clip cadence + the LXMF TX,
+// and the RNS packet callback only queues received audio for playback.
+static SemaphoreHandle_t s_voice_lock = NULL;
+static volatile int g_voice_started = 0;  // task up (capture-robust proof)
+static volatile int g_voice_capture = 0;  // task: record+encode the next clip
+static volatile int g_voice_ready = 0;    // task->main: g_voice_data valid
+static std::string g_voice_data;          // encoded 700C frames (own clip)
+static volatile int g_play_request = 0;   // RX cb->task: play g_play_data
+static std::string g_play_data;           // received 700C frames
+static volatile UBaseType_t g_voice_hwm = 0;
+
+// Incoming LXMF -> play queue.  Runs in the RNS receive context; only queues.
+static void on_delivery_packet(const RNS::Bytes& data, const RNS::Packet&) {
+    std::string audio, codec;
+    if (!lxmf_audio::extract(data.data(), data.size(), &audio, &codec)) {
+        return;   // not an audio envelope
+    }
+    if (s_voice_lock) xSemaphoreTake(s_voice_lock, portMAX_DELAY);
+    g_play_data = std::move(audio);
+    g_play_request = 1;
+    if (s_voice_lock) xSemaphoreGive(s_voice_lock);
+    ESP_LOGI(TAG, "RX voice %u B (codec '%s') queued for playback",
+             (unsigned)g_play_data.size(), codec.c_str());
+}
+
+static void voice_task(void *arg) {
+    const int spf = c2w_samples_per_frame(C2W_MODE_700C);   // 320 samples
+    const int pk = c2w_bytes_per_frame(C2W_MODE_700C);      // 4 bytes
+    void *codec = c2w_create(C2W_MODE_700C);
+    g_voice_started = 1;
+    ESP_LOGI(TAG, "voice task up (spf=%d pk=%d codec=%s)",
+             spf, pk, codec ? "ok" : "FAIL");
+    for (;;) {
+        vTaskDelay(pdMS_TO_TICKS(200));
+
+        if (g_voice_capture) {
+            xSemaphoreTake(s_voice_lock, portMAX_DELAY);
+            const bool armed = g_voice_capture && !g_voice_ready;
+            g_voice_capture = 0;
+            xSemaphoreGive(s_voice_lock);
+            if (!armed || !codec) {
+                continue;
+            }
+            enum { FRAMES = 16 };                       // 640 ms, 64 B codec2
+            int16_t pcm[FRAMES * 320];
+            if (audio_record(pcm, FRAMES * spf) != ESP_OK) {
+                ESP_LOGW(TAG, "voice capture record failed");
+                continue;
+            }
+            const float rms = audio_rms(pcm, FRAMES * spf);
+            std::string enc;
+            enc.reserve((size_t)FRAMES * pk);
+            uint8_t frame[8];
+            for (int f = 0; f < FRAMES; f++) {
+                c2w_encode(codec, frame, pcm + f * spf, 1, spf, pk);
+                enc.append((const char *)frame, (size_t)pk);
+            }
+            xSemaphoreTake(s_voice_lock, portMAX_DELAY);
+            g_voice_data = std::move(enc);
+            g_voice_ready = 1;
+            xSemaphoreGive(s_voice_lock);
+            ESP_LOGI(TAG, "voice clip: %u ms, %zu codec2 bytes, mic rms=%.1f",
+                     (unsigned)(FRAMES * 40), g_voice_data.size(), (double)rms);
+        }
+
+        if (g_play_request) {
+            xSemaphoreTake(s_voice_lock, portMAX_DELAY);
+            std::string play = std::move(g_play_data);
+            g_play_request = 0;
+            xSemaphoreGive(s_voice_lock);
+            if (!play.empty() && codec) {
+                const int nframes = (int)(play.size() / (size_t)pk);
+                const int n = nframes > 32 ? 32 : nframes;
+                int16_t pcm[32 * 320];
+                for (int f = 0; f < n; f++) {
+                    c2w_decode(codec, pcm + f * spf,
+                               (const unsigned char *)play.data() + f * pk,
+                               1, spf, pk);
+                }
+                const float rms = audio_rms(pcm, (size_t)n * spf);
+                (void)audio_play(pcm, (size_t)n * spf);
+                ESP_LOGI(TAG, "voice played: %d frames (%.0f ms) rms=%.1f",
+                         n, (double)n * 40, (double)rms);
+            }
+            g_voice_hwm = uxTaskGetStackHighWaterMark(NULL);
+        }
+    }
+}
+
+// Send the codec2 700C clip to the server as LMAOEnvelope.audio (field 21).
+static void send_voice_message(const Identity& my_identity,
+                               std::string audio_data) {
+    if (DEST_HASH_HEX[0] == '\0' || audio_data.empty()) {
+        return;
+    }
+    if (s_ident_lock) xSemaphoreTake(s_ident_lock, portMAX_DELAY);
+    const bool have = s_have_server;
+    Identity srv = s_server_identity;
+    if (s_ident_lock) xSemaphoreGive(s_ident_lock);
+    if (!have) {
+        ESP_LOGW(TAG, "server identity not learned yet — voice send deferred");
+        return;
+    }
+    const uint64_t now_ms = (uint64_t)(esp_timer_get_time() / 1000);
+    const uint64_t unix_s = 946684800ULL +
+        (uint64_t)(esp_timer_get_time() / 1000000ULL);
+    const uint32_t duration_ms =
+        (uint32_t)(audio_data.size() / (size_t)4) * 40;   // 4 B/frame = 40 ms
+
+    std::string am = lma_encoder::encode_audio_message(
+        hexstr(my_identity.get_salt()), audio_data, "codec2", duration_ms, now_ms);
+    std::string envelope = lma_encoder::encode_envelope_audio(am);
+    ESP_LOGI(TAG, "voice AudioMessage %uB (%u ms) ready",
+             (unsigned)envelope.size(), (unsigned)duration_ms);
+
+    Destination my_delivery(my_identity, Type::Destination::OUT, Type::Destination::SINGLE,
+                            "lxmf", "delivery");
+    Destination server_delivery(srv, Type::Destination::OUT, Type::Destination::SINGLE,
+                                "lxmf", "delivery");
+    Bytes body = lxmf_send::build_body(my_delivery, server_delivery, my_identity,
+                                       Bytes(envelope), Bytes("p:Envelope"), unix_s);
+    Bytes frame = lxmf_send::opportunistic_frame(server_delivery, body);
+    if (frame.empty()) {
+        ESP_LOGW(TAG, "no opportunistic frame");
+        return;
+    }
+    ESP_LOGI(TAG, "TX voice LXMF frame %uB -> server", (unsigned)frame.size());
+    Transport::broadcast(frame, nullptr);
+}
+
 extern "C" void app_main(void);
 
 void app_main() {
@@ -193,6 +411,14 @@ void app_main() {
                  lma_identity::delivery_hash(identity).c_str());
     }
 
+    // On-device Codec-2 self-test (issue #234): spawned on a dedicated
+    // high-stack task (codec2 700C encode needs far more than the 16 KB main
+    // task); results + high-water mark are logged from that task.
+    {
+        ESP_LOGI(TAG, "free heap before codec test: %u", (unsigned)esp_get_free_heap_size());
+        xTaskCreate(codec2_selftest_task, "c2test", 64 * 1024, NULL, 4, NULL);
+    }
+
     auto lora = Cardputer::LoraInterface::create();
     if (!lora->start()) {
         ESP_LOGE(TAG, "LoRa interface failed to start, halting");
@@ -220,6 +446,7 @@ void app_main() {
 
     Destination delivery(identity, Type::Destination::IN, Type::Destination::SINGLE,
                          "lxmf", "delivery");
+    delivery.set_packet_callback(on_delivery_packet);   // voice RX (issue #234)
     Transport::register_destination(delivery);
     ESP_LOGI(TAG, "delivery dest hash: %s", hexstr(delivery.hash()).c_str());
 
@@ -229,6 +456,10 @@ void app_main() {
         ESP_LOGE(TAG, "Reticulum::start failed");
         return;
     }
+
+    s_voice_lock = xSemaphoreCreateMutex();
+    xTaskCreate(voice_task, "voice", 80 * 1024, NULL, 5, NULL);
+    ESP_LOGI(TAG, "voice task spawned (80KB stack)");
 
     ESP_LOGI(TAG, "send interval: %us, DEST_HASH: %s",
              (unsigned)INTERVAL_SECONDS, DEST_HASH_HEX[0] ? "configured" : "none (no sends)");
@@ -244,6 +475,15 @@ void app_main() {
             dest.announce(Bytes(), true);
             delivery.announce(Bytes(), true);
             ESP_LOGI(TAG, "announced");
+            ESP_LOGI(TAG, "codec2 step=%d done=%d hwm=%u 1300(spf=%d pk=%d code=%d) 700C(spf=%d pk=%d code=%d)",
+                     (int)g_c2_step, (int)g_c2_done, (unsigned)g_c2_hwm,
+                     g_c2_spf[0], g_c2_pk[0], g_c2_code[0],
+                     g_c2_spf[1], g_c2_pk[1], g_c2_code[1]);
+            if (g_audio_done) {
+                ESP_LOGI(TAG, "audio step=%d id=0x%x mic_rms=%.1f dec_rms=%.1f play_rc=%d",
+                         (int)g_audio_step, g_audio_chip_id, g_audio_in_rms,
+                         g_audio_out_rms, g_audio_rc_play);
+            }
 
             // On-demand path discovery (issue #135): if the server identity is
             // not learned yet, ask the mesh for a path to the server's
@@ -253,6 +493,36 @@ void app_main() {
             const bool have_srv = s_have_server;
             if (s_ident_lock) xSemaphoreGive(s_ident_lock);
             if (!have_srv) path_find::request(DEST_HASH_HEX);
+
+            // Voice over LXMF (issue #234): once per 20th announce (both
+            // capture the next clip and ship a ready one, one announce apart).
+            static int voice_announces = 0;
+            if (have_srv) {
+                voice_announces++;
+                if (voice_announces == 1 || voice_announces % 20 == 0) {
+                    if (s_voice_lock) xSemaphoreTake(s_voice_lock, portMAX_DELAY);
+                    const bool idle = !g_voice_capture && !g_voice_ready;
+                    if (idle) g_voice_capture = 1;
+                    if (s_voice_lock) xSemaphoreGive(s_voice_lock);
+                }
+                std::string voice;
+                if (s_voice_lock) xSemaphoreTake(s_voice_lock, portMAX_DELAY);
+                const bool ready = g_voice_ready;
+                if (ready) {
+                    voice = std::move(g_voice_data);
+                    g_voice_ready = 0;
+                }
+                if (s_voice_lock) xSemaphoreGive(s_voice_lock);
+                if (ready) {
+                    ESP_LOGI(TAG, "voice client: hwm=%u",
+                             (unsigned)g_voice_hwm);
+                    send_voice_message(identity, std::move(voice));
+                }
+            }
+            ESP_LOGI(TAG, "voice task=%d srv=%d heap=%u clipn=%d capture=%d ready=%d",
+                     (int)g_voice_started, (int)have_srv,
+                     (unsigned)esp_get_free_heap_size(), voice_announces,
+                     (int)g_voice_capture, (int)g_voice_ready);
 
         }
 

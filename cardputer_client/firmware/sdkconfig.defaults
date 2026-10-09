@@ -16,8 +16,10 @@ CONFIG_FREERTOS_USE_TIMERS=y
 CONFIG_FREERTOS_HZ=1000
 
 # Stack and task tuning. Reticulum loop is spawned with 8192 words of
-# stack from app_main.
-CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+# stack from app_main; 16384 keeps the main task for the control/report loop.
+# On-device Codec-2 runs on its own high-stack task (see codec2_selftest_task),
+# so the main task stays lean (issue #234).
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
 
 # Enable mbedTLS algorithms RTReticulum needs.
 CONFIG_MBEDTLS_HARDWARE_AES=y
