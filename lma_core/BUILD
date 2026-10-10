@@ -4,9 +4,12 @@ py_library(
     name = "lma_core",
     srcs = [
         "__init__.py",
+        "calendar_pg.py",
+        "calendar_pics.py",
         "client_identity.py",
         "config_utils.py",
         "contact_book.py",
+        "contact_book_pg.py",
         "contacts_api.py",
         "device_detect.py",
         "grpc_types.py",

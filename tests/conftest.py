@@ -41,6 +41,9 @@ def setup_common_mocks(with_grpc=True):
     _proto_messages_pb2.AudioMessage = MagicMock()
     _proto_messages_pb2.ImageMessage = MagicMock()
     _proto_messages_pb2.CallSignal = MagicMock()
+    _proto_messages_pb2.CalendarRequest = MagicMock()
+    _proto_messages_pb2.CalEvent = MagicMock()
+    _proto_messages_pb2.CalendarBundle = MagicMock()
     sys.modules["proto"] = MagicMock()
     sys.modules["proto.lma_messages_pb2"] = _proto_messages_pb2
 
@@ -58,6 +61,9 @@ def setup_common_mocks(with_grpc=True):
         "AudioMessage",
         "ImageMessage",
         "CallSignal",
+        "CalendarRequest",
+        "CalEvent",
+        "CalendarBundle",
     ):
         setattr(_real_lma_core, _attr, getattr(_proto_messages_pb2, _attr))
 
