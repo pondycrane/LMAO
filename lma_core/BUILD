@@ -6,6 +6,7 @@ py_library(
         "__init__.py",
         "calendar_pg.py",
         "calendar_pics.py",
+        "calendar_tcp_api.py",
         "client_identity.py",
         "config_utils.py",
         "contact_book.py",
