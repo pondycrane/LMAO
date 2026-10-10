@@ -46,3 +46,23 @@ py_binary(
     visibility = ["//visibility:public"],
     deps = [":install_all_lib"],
 )
+
+# The family-calendar line-drawing skill: an agent (Hermes) rasterizes an SVG
+# or PNG source to a 1-bit B&W tile (RLCD 300x400-friendly, default 144x144)
+# and upserts the PNG bytes into the in-cluster Postgres `cal_pics` table via
+# lma_core.calendar_pics.PicStore.
+#   bazel run //tools:calendar_pics -- --key swim
+#   bazel run //tools:calendar_pics -- --key shopping --source art.svg --out check.png
+py_binary(
+    name = "calendar_pics",
+    srcs = ["calendar_pics.py"],
+    main = "calendar_pics.py",
+    data = ["//assets/calendar-icons:files"],
+    deps = [
+        "//lma_core",
+        "@lmao_pip//cairosvg",
+        "@lmao_pip//pillow",
+        "@lmao_pip//psycopg",
+        "@lmao_pip//psycopg_binary",
+    ],
+)

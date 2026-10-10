@@ -29,3 +29,14 @@ attrs==26.1.0
 idna==3.18
 sqlparse==0.5.3
 esptool==5.3.1
+# ── tools/calendar_pics.py (agent line-drawing skill: Pillow raster + cairosvg
+#    SVG renderer + psycopg store) — transitive closure enumerated manually. ──
+Pillow==11.2.1
+cairosvg==2.7.1
+cairocffi==1.7.1
+cssselect2==0.8.0
+defusedxml==0.7.1
+tinycss2==1.4.0
+webencodings==0.5.1
+psycopg==3.2.3
+psycopg-binary==3.2.3

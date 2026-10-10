@@ -35,6 +35,9 @@ _PROTO_NAMES = frozenset(
         "AudioMessage",
         "ImageMessage",
         "CallSignal",
+        "CalendarRequest",
+        "CalEvent",
+        "CalendarBundle",
     }
 )
 
