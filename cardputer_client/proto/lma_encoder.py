@@ -373,11 +373,13 @@ def decode_history_request(data):
 
 
 def encode_request_message(kind, inner_bytes):
-    """Encode a Request message { oneof kind { history = 1; command = 2 } }."""
+    """Encode a Request message { history = 1; command = 2; calendar = 3 }."""
     if kind == "history":
         return encode_field(1, 2, encode_length_delimited(inner_bytes))
     if kind == "command":
         return encode_field(2, 2, encode_length_delimited(inner_bytes))
+    if kind == "calendar":
+        return encode_field(3, 2, encode_length_delimited(inner_bytes))
     raise ValueError(f"Unknown request kind: {kind!r}")
 
 
@@ -401,6 +403,8 @@ def decode_request_message(data):
                 return {"kind": "history", "history": decode_history_request(blob)}
             if field_number == 2:
                 return {"kind": "command", "command": decode_command_request(blob)}
+            if field_number == 3:
+                return {"kind": "calendar", "calendar": decode_calendar_request(blob)}
         elif wire_type == 0:
             _, vlen = decode_varint(data, pos)
             pos += vlen
@@ -626,6 +630,118 @@ def encode_chart_envelope(node_id, dry, wet, start_ms, period_ms, soil, temp, hu
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+#  Family calendar (CalEvent / CalendarRequest / CalendarBundle)
+# ═══════════════════════════════════════════════════════════════════════════════
+# Wire contract proto/lma_messages.proto:
+#   CalendarRequest { string calendar_id=1; uint64 since_ms=2; uint32 max_events=3 }
+#   CalEvent        { uid=1; title=2; notes=3; start_ms=4; end_ms=5;
+#                     deleted=6(bool); pic=7 }
+#   CalendarBundle  { format=1; calendar_id=2; events=3(repeated CalEvent);
+#                     watermark_ms=4 }
+# The client asks with Request.kind.calendar (field 3) and reads the reply as an
+# LMAOEnvelope.payload = "calendar" (field 24).
+
+
+def encode_calendar_request(calendar_id="family", since_ms=0, max_events=0):
+    """Encode a CalendarRequest (Request.kind.calendar body)."""
+    result = bytearray()
+    if calendar_id:
+        result.extend(encode_field(1, 2, encode_length_delimited(calendar_id.encode("utf-8"))))
+    if since_ms:
+        result.extend(encode_field(2, 0, encode_varint(since_ms)))
+    if max_events:
+        result.extend(encode_field(3, 0, encode_varint(max_events)))
+    return bytes(result)
+
+
+def decode_calendar_request(data):
+    """Decode a CalendarRequest from protobuf bytes."""
+    return _decode_proto_message(
+        data,
+        {
+            1: (2, "calendar_id", lambda b: b.decode("utf-8", "replace"), ""),
+            2: (0, "since_ms", int, 0),
+            3: (0, "max_events", int, 0),
+        },
+    )
+
+
+def encode_cal_event(uid="", title="", notes="", start_ms=0, end_ms=0, deleted=False, pic=""):
+    """Encode a CalEvent protobuf message."""
+    result = bytearray()
+    if uid:
+        result.extend(encode_field(1, 2, encode_length_delimited(uid.encode("utf-8"))))
+    if title:
+        result.extend(encode_field(2, 2, encode_length_delimited(title.encode("utf-8"))))
+    if notes:
+        result.extend(encode_field(3, 2, encode_length_delimited(notes.encode("utf-8"))))
+    if start_ms:
+        result.extend(encode_field(4, 0, encode_varint(start_ms)))
+    if end_ms:
+        result.extend(encode_field(5, 0, encode_varint(end_ms)))
+    if deleted:
+        result.extend(encode_field(6, 0, encode_varint(1)))
+    if pic:
+        result.extend(encode_field(7, 2, encode_length_delimited(pic.encode("utf-8"))))
+    return bytes(result)
+
+
+def decode_cal_event(data):
+    """Decode a CalEvent from protobuf bytes.
+
+    Returns dict with keys: uid, title, notes, start_ms, end_ms, deleted, pic.
+    """
+    return _decode_proto_message(
+        data,
+        {
+            1: (2, "uid", lambda b: b.decode("utf-8", "replace"), ""),
+            2: (2, "title", lambda b: b.decode("utf-8", "replace"), ""),
+            3: (2, "notes", lambda b: b.decode("utf-8", "replace"), ""),
+            4: (0, "start_ms", int, 0),
+            5: (0, "end_ms", int, 0),
+            6: (0, "deleted", bool, False),
+            7: (2, "pic", lambda b: b.decode("utf-8", "replace"), ""),
+        },
+    )
+
+
+def encode_calendar_bundle(calendar_id="family", events=(), watermark_ms=0, fmt=1):
+    """Encode a CalendarBundle (server -> client payload).
+
+    ``events`` is an iterable of either pre-encoded CalEvent bytes or dicts of
+    CalEvent fields (encoded here).
+    """
+    result = bytearray()
+    if fmt:
+        result.extend(encode_field(1, 0, encode_varint(fmt)))
+    if calendar_id:
+        result.extend(encode_field(2, 2, encode_length_delimited(calendar_id.encode("utf-8"))))
+    for ev in events:
+        blob = ev if isinstance(ev, (bytes, bytearray)) else encode_cal_event(**ev)
+        result.extend(encode_field(3, 2, encode_length_delimited(bytes(blob))))
+    if watermark_ms:
+        result.extend(encode_field(4, 0, encode_varint(watermark_ms)))
+    return bytes(result)
+
+
+def decode_calendar_bundle(data):
+    """Decode a CalendarBundle from protobuf bytes.
+
+    Returns dict with keys: format, calendar_id, events (list of CalEvent
+    dicts), watermark_ms.
+    """
+    return _decode_proto_message(
+        data,
+        {
+            1: (0, "format", int, 0),
+            2: (2, "calendar_id", lambda b: b.decode("utf-8", "replace"), ""),
+            3: (2, "events", decode_cal_event, [], _REPEATED),
+            4: (0, "watermark_ms", int, 0),
+        },
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 #  CallSignal (field 30)
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -678,6 +794,7 @@ FIELD_TEXT = 20
 FIELD_AUDIO = 21
 FIELD_IMAGE = 22
 FIELD_CHART = 23
+FIELD_CALENDAR = 24
 FIELD_CALL = 30
 
 # Decoder dispatch table: oneof payload field_number → decoder function
@@ -688,6 +805,7 @@ _DECODERS = {
     FIELD_AUDIO: decode_audio_message,
     FIELD_IMAGE: decode_image_message,
     FIELD_CHART: decode_chart_bundle,
+    FIELD_CALENDAR: decode_calendar_bundle,
     FIELD_CALL: decode_call_signal,
 }
 
@@ -745,6 +863,7 @@ _FIELD_NAMES = {
     FIELD_AUDIO: "audio",
     FIELD_IMAGE: "image",
     FIELD_CHART: "chart",
+    FIELD_CALENDAR: "calendar",
     FIELD_CALL: "call",
 }
 
