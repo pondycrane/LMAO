@@ -20,6 +20,7 @@ message LMAOEnvelope {
     AudioMessage    audio        = 21;
     ImageMessage    image        = 22;
     ChartBundle     chart        = 23;   // server -> client history data
+    CalendarBundle  calendar     = 24;   // server -> client family calendar data
     CallSignal      call         = 30;
     LmafManifest    manifest     = 40;
     LmafChunk       chunk        = 41;
@@ -102,6 +103,7 @@ message Request {
   oneof kind {
     HistoryRequest  history = 1;   // "give me chart history data"
     CommandRequest  command = 2;   // "run a command on target"
+    CalendarRequest calendar = 3;  // "give me calendar events newer than since_ms"
   }
 }
 
@@ -138,6 +140,39 @@ message CommandRequest {
   string   action     = 2;   // what to do
   map<string,string> params = 3;   // command arguments
   uint64   issued_ms  = 4;   // when the command was issued (sender clock)
+}
+
+// --- Family calendar (read-only fetch) ---
+//
+// The calendar lives in the in-cluster Postgres (`lmao` db, `cal_events`
+// table, see lma_core/calendar_pg.py) and is edited OUT-OF-BAND — the
+// operator inserts/updates/deletes events directly with psql; DB triggers
+// stamp updated_ms/rev and convert hard DELETEs into tombstones so removals
+// propagate to every client on the next sync.  The LMAO wire protocol only
+// READS it: a client syncs by delta watermark and renders locally.
+//   Client -> server: LMAOEnvelope{ request.calendar }        (Request.kind)
+//   Server -> client: CalendarBundle (+ DeliveryAck iff request_ack)
+message CalendarRequest {
+  string calendar_id = 1;   // logical calendar, default "family"
+  uint64 since_ms    = 2;   // events with updated_ms > since_ms; 0 = full fetch
+  uint32 max_events  = 3;   // page-size cap; 0 = server default (see calendar_pg)
+}
+
+message CalEvent {
+  string uid      = 1;   // stable event id (the cal_events PK)
+  string title    = 2;
+  string notes    = 3;
+  uint64 start_ms = 4;   // epoch ms UTC
+  uint64 end_ms   = 5;   // epoch ms UTC
+  bool   deleted  = 6;   // tombstone — client must remove it locally
+  string pic      = 7;   // calendar-icon pack key, "" = none (assets/calendar-icons)
+}
+
+message CalendarBundle {   // server -> client, sibling of ChartBundle
+  uint32 format           = 1;   // payload format version (1)
+  string calendar_id      = 2;
+  repeated CalEvent events = 3;
+  uint64 watermark_ms     = 4;   // pre-read server watermark; next since_ms
 }
 
 // --- Human Communication ---

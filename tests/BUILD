@@ -283,6 +283,24 @@ py_test(
 )
 
 py_test(
+    name = "test_calendar_pg",
+    srcs = ["test_calendar_pg.py"],
+    deps = [
+        "//lma_core",
+        "@lmao_pip//pytest",
+    ],
+)
+
+py_test(
+    name = "test_calendar_pics",
+    srcs = ["test_calendar_pics.py"],
+    deps = [
+        "//lma_core",
+        "@lmao_pip//pytest",
+    ],
+)
+
+py_test(
     name = "test_urns_packet",
     srcs = ["test_urns_packet.py"],
     data = ["//cardputer_client:lib_files"],

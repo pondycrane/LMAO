@@ -519,6 +519,44 @@ The response for each contact carries `delivery_hash` (the destination to
 address downlinks to), `device_type`, `device_name`, `pubkey_hex`, and
 `last_seen`.
 
+### 7c. Family calendar — read-only sync (Postgres)
+
+The family calendar is a **read-only** LMAO feature: events live in the same
+in-cluster Postgres that backs the contact book (`lmao` db, `cal_events`
+table + `cal_events_cal_updated` index) and are edited **out-of-band** with
+plain SQL:
+
+```bash
+kubectl exec -it postgres-0 -- psql -U lmao -d lmao
+# INSERT INTO cal_events (uid, calendar_id, title, start_ms, end_ms, created_ms, pic)
+#   VALUES ('...', 'family', 'Sophia swim class', 1700000000001, 1700000000061, now_ms(), 'swim');
+```
+
+You never manage schema or bookkeeping — `lmao_server` ensures the table,
+index and two triggers at startup (same pattern as the Postgres contact book):
+
+- `lmao_cal_touch_trg` (BEFORE INSERT/UPDATE) stamps `updated_ms`/`rev`, so
+  direct SQL edits are always syncable without setting those columns;
+- `lmao_cal_tombstone_trg` (BEFORE DELETE) converts a `DELETE` into a
+  tombstone row, so removals propagate to every client on the next sync
+  (tombstones are tiny and retained — no purge job needed).
+
+Clients read via the LMAO wire protocol: `LMAOEnvelope{ request.calendar }`
+(lookup `CalendarRequest{ calendar_id, since_ms, max_events }` →
+`CalendarBundle{ events[], watermark_ms }`). A sync returns every event with
+`updated_ms > since_ms` (0 = full fetch) and a watermark to use as the next
+`since_ms` — delta-only, so replies stay small regardless of history length.
+Bound by the server-side page cap (100 events); calendar clients are
+WiFi/TCP-only (the calendar bundle is multi-frame and not suited to LoRa).
+The optional `pic` field on each event is a line-drawing pack key (e.g.
+`swim`, `birthday`, `dentist`; `""` = none). The drawings themselves are
+**1-bit black & white tiles** — formatted for the 4.2" RLCD calendar display
+(300×400 portrait) at a default 144×144 so the screen still has room for the
+title rows — generated and stored in Postgres (`cal_pics` table) by the
+**line-drawing skill** for agent use (see
+`.archon/skills/line-drawing/SKILL.md`) via `bazel run //tools:calendar_pics --
+--key <key>`. The client resolves the key to the stored tile for display.
+
 ### 8. Docker Image
 
 The server Docker image is the release artifact for the in-cluster
@@ -1112,6 +1150,8 @@ The registry is configured via environment variables:
 ├── lma_core/                          # Shared Python wrapper library
 │   ├── BUILD                          # Bazel: py_library target
 │   ├── __init__.py                    # Re-exports generated protobuf stubs
+│   ├── calendar_pg.py                 # Postgres family-calendar store (read-only sync)
+│   ├── calendar_pics.py               # Postgres pic store + RLCD tile helpers (agent skill)
 │   ├── config_utils.py                # RNode port resolution + INI generation helpers
 │   ├── message_utils.py               # Shared LXMF message decoding (decode_lmao_message)
 │   ├── query_api.py                   # Embedded HTTP query API (aiohttp) + SQL guard
@@ -1176,8 +1216,11 @@ The registry is configured via environment variables:
 │
 ├── tools/                             # Build/install tools
 │   ├── BUILD                          # Bazel: py_binary + py_library targets
+│   ├── calendar_pics.py               # Line-drawing skill: SVG/PNG → 1-bit B&W tile → Postgres (bazel run //tools:calendar_pics)
 │   ├── install_all.py                 # Unified hardware flash orchestrator
 │   └── install_services.py            # Pi server Docker build + K8s manifest apply
+│
+├── assets/calendar-icons/             # Family-calendar line-drawing pack (SVG, 20 keys)
 │
 └── rnode_firmware/                    # Documentation only
     └── README.md                      # Step-by-step ESP32 RNode flashing guide
@@ -1202,11 +1245,12 @@ See [`proto/lma_messages.proto`](proto/lma_messages.proto) and [`proto/lma_grpc.
 |-------------|----------|---------|---------------------|
 | `TextMessage` | 20 | Human-to-human text (node_id, content, timestamp) | ~45 B |
 | `SensorReport` | 10 | IoT sensor readings (node_id, seq, battery, readings[]) — one-way | ~30-150 B |
-| `Request` | 3 | Intent: `history` (chart fetch: count/since_ms/series) or `command` | ~10-60 B |
+| `Request` | 3 | Intent: `history` (chart fetch), `command`, or `calendar` (family calendar read) | ~10-60 B |
 | `DeliveryAck` | 12 | Unified ack (delivery confirm + command result: seq/server_ms/success/message/node_id) | ~15-45 B |
 | `AudioMessage` | 21 | Voice clips (node_id, audio_data, codec, duration_ms) | varies (WiFi) |
 | `ImageMessage` | 22 | Image transfers (node_id, image_data, format, width, height) | varies (WiFi) |
 | `CallSignal` | 30 | WebRTC call signaling (OFFER/ANSWER/ICE/HANGUP/KEEPALIVE) | ~100-500 B |
+| `CalendarBundle` | 24 | Family calendar delta (calendar_id, events[], watermark_ms) — read-only | ~50-90 B/event |
 
 > **Note:** Audio, image, and call signal payloads typically exceed LoRa's ~200 B
 > per-packet limit and are better suited for WiFi or other high-bandwidth

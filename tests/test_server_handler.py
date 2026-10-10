@@ -360,6 +360,96 @@ class TestHandleLXMFDelivery:
         server.router.handle_outbound.assert_not_called()
 
 
+class TestCalendarReply:
+    """A request.calendar envelope is answered with a CalendarBundle built
+    from the Postgres CalendarStore (read-only sync, lma_core/calendar_pg)."""
+
+    def test_calendar_request_replies_with_bundle(self, server_with_mocks):
+        server = server_with_mocks
+
+        # Point the module-global store at an in-memory fake so the reply is
+        # built from real row data without a Postgres connection.
+        import lmao_server.server as server_mod
+
+        fake_store = MagicMock()
+        fake_store.sync.return_value = (
+            [
+                {
+                    "uid": "u1", "calendar_id": "family", "title": "Swim class",
+                    "notes": "bring towel", "start_ms": 1700000000001,
+                    "end_ms": 1700000000061, "deleted": False, "pic": "swim",
+                },
+            ],
+            999,
+        )
+        server_mod.CALENDAR = fake_store
+
+        # Reconfigure mock: envelope carries request.calendar
+        mock_envelope = MagicMock()
+        mock_envelope.SerializeToString.return_value = b"calendar-bundle-bytes"
+        mock_envelope.HasField.return_value = True
+        mock_envelope.request.HasField.return_value = True
+        mock_envelope.request.calendar.calendar_id = "family"
+        mock_envelope.request.calendar.since_ms = 0
+        mock_envelope.request.calendar.max_events = 0
+        mock_envelope.request_ack = False
+        sys.modules["lma_core"].LMAOEnvelope.return_value = mock_envelope
+
+        msg = MagicMock()
+        msg.get_source.return_value = MagicMock()
+        msg.get_source.return_value.hash = b"\x0b" * 16
+        msg.content = b"calendar-request-bytes"
+        msg.title_as_string.return_value = "p:Envelope"
+
+        server.handle_lxmf_delivery(msg)
+
+        # The store saw the sync request with resolved defaults; one CalendarBundle
+        # outbound whose envelope carries the store's row + watermark.
+        fake_store.sync.assert_called_once_with(
+            calendar_id="family", since_ms=0, max_events=0
+        )
+        server.router.handle_outbound.assert_called_once()
+        call_kwargs = sys.modules["LXMF"].LXMessage.call_args.kwargs
+        assert call_kwargs["title"] == "p:Envelope"
+        assert call_kwargs["destination"] is msg.get_source.return_value
+        assert call_kwargs["content"] == b"calendar-bundle-bytes"
+        assert mock_envelope.calendar.format == 1
+        assert mock_envelope.calendar.calendar_id == "family"
+        assert mock_envelope.calendar.watermark_ms == 999
+        assert mock_envelope.calendar.events.add.call_count == 1
+        entry = mock_envelope.calendar.events.add.return_value
+        assert entry.uid == "u1"
+        assert entry.pic == "swim"
+
+    def test_calendar_request_no_reply_without_store(self, server_with_mocks, caplog):
+        server = server_with_mocks
+
+        import lmao_server.server as server_mod
+
+        server_mod.CALENDAR = None
+
+        mock_envelope = MagicMock()
+        mock_envelope.HasField.return_value = True
+        mock_envelope.request.HasField.return_value = True
+        mock_envelope.request.calendar.calendar_id = "family"
+        mock_envelope.request.calendar.since_ms = 0
+        mock_envelope.request.calendar.max_events = 0
+        mock_envelope.request_ack = False
+        sys.modules["lma_core"].LMAOEnvelope.return_value = mock_envelope
+
+        msg = MagicMock()
+        msg.get_source.return_value = MagicMock()
+        msg.get_source.return_value.hash = b"\x0c" * 16
+        msg.content = b"calendar-request-without-store"
+        msg.title_as_string.return_value = "p:Envelope"
+
+        with caplog.at_level(logging.WARNING):
+            server.handle_lxmf_delivery(msg)
+
+        assert "Calendar store not available" in caplog.text
+        server.router.handle_outbound.assert_not_called()
+
+
 class TestSubscriberManagement:
     """Tests for gRPC subscriber queue management."""
 

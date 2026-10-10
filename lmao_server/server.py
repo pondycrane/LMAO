@@ -27,6 +27,7 @@ import time
 from google.protobuf.message import DecodeError
 
 from lma_core import LMAOEnvelope
+from lma_core.calendar_pg import CalendarStore, open_calendar_store
 from lma_core.contact_book import ContactBook
 from lma_core.contact_book_pg import (
     backfill_sqlite_to_pg,
@@ -125,6 +126,11 @@ SPROUT_HISTORY = SproutHistory()
 # (issue #151) — a registered device is definitionally on the LMAO network.
 CONTACTS: "ContactBook | None" = None  # noqa: F841 — assigned in serve()
 _CONTACTS_LOCK = threading.Lock()
+
+# Postgres-backed family calendar (read-only on the wire; events are edited
+# out-of-band with direct SQL).  Initialized in async_main() next to the
+# contact book; ``None`` means calendar syncs get no data reply.
+CALENDAR: "CalendarStore | None" = None  # noqa: F841 — assigned in async_main()
 
 
 def _learn_contact(source_hash: str) -> None:
@@ -493,6 +499,42 @@ class Server:
                 replied = True
             else:
                 logger.info("No chart history matches the request — no chart reply.")
+
+        if has_request and envelope.request.HasField("calendar"):
+            treq = envelope.request.calendar
+            store = CALENDAR
+            if store is None:
+                logger.warning(
+                    "Calendar store not available — no calendar reply."
+                )
+            else:
+                try:
+                    events, watermark = store.sync(
+                        calendar_id=treq.calendar_id or "family",
+                        since_ms=treq.since_ms,
+                        max_events=treq.max_events,
+                    )
+                    cal_env = LMAOEnvelope()
+                    cal_env.calendar.format = 1
+                    cal_env.calendar.calendar_id = treq.calendar_id or "family"
+                    for ev in events:
+                        entry = cal_env.calendar.events.add()
+                        entry.uid = ev["uid"]
+                        entry.title = ev["title"]
+                        entry.notes = ev["notes"]
+                        entry.start_ms = ev["start_ms"]
+                        entry.end_ms = ev["end_ms"]
+                        entry.deleted = ev["deleted"]
+                        entry.pic = ev["pic"]
+                    cal_env.calendar.watermark_ms = watermark
+                    send(cal_env)
+                    logger.info(
+                        "Calendar reply sent (%d events, watermark %d).",
+                        len(events), watermark,
+                    )
+                except Exception as e:
+                    logger.error("Calendar sync failed: %s", e, exc_info=True)
+            replied = True
 
         if envelope.request_ack:
             ack = LMAOEnvelope()
@@ -906,6 +948,14 @@ async def async_main():
         except Exception as e:
             CONTACTS = None
             logger.warning("Contact book unavailable (%s) — downlink requires caps", e)
+
+    # ── Family calendar (read-only on the wire) ──────────────────
+    # Events live in the same Postgres as the contact book and are edited
+    # out-of-band with direct SQL; CalendarStore only reads/watersheds them.
+    global CALENDAR
+    CALENDAR = open_calendar_store()
+    if CALENDAR is not None:
+        logger.info("Calendar store ready (Postgres).")
 
     # Create Server instance (wraps router + identity)
     lmao_server = Server(config_dict=cfg_dict)
