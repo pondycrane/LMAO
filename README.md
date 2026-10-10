@@ -557,6 +557,47 @@ title rows — generated and stored in Postgres (`cal_pics` table) by the
 `.archon/skills/line-drawing/SKILL.md`) via `bazel run //tools:calendar_pics --
 --key <key>`. The client resolves the key to the stored tile for display.
 
+### 7d. RoboDog — RLCD family-calendar display client
+
+**RoboDog** is the LMAO family-calendar display client: a
+[Waveshare ESP32-S3 RLCD-4.2](https://docs.waveshare.com/wiki/ESP32-S3-RLCD-4.2)
+(4.2" 300×400 reflective **ST7305** LCD, ESP32-S3 N16R8, microSD, SHTC3,
+PCF85063 RTC). It is a **MicroPython** client (the same maintained urns stack
+as the Cardputer) that connects to the server over **RNS-TCP** (port 4246) —
+no LoRa — fetches the family calendar (`Request.kind.calendar` →
+`CalendarBundle`) and renders it 1-bit B&W on the RLCD.
+
+Hardware mapping (from the Waveshare ESP-IDF example):
+
+| Function | Pins |
+|---|---|
+| ST7305 SPI | DC=5, CS=40, SCK=11, MOSI=12, RST=41, TE=6 |
+| I2C (SHTC3 + PCF85063 RTC) | SDA=13, SCL=14 |
+| microSD | SDMMC (optional; pins in `robodog_client/config.py`) |
+
+Flash (adds the client to `install_all` as the **RoboDog** device):
+
+```bash
+bazel run //tools:install_all -- --robodog-port /dev/ttyACM1 \
+    --wifi-ssid <ssid> --wifi-pass <pass> --server-host 192.168.50.67
+```
+
+`--robodog-port` is required (no auto-detect for this board); `--wifi-ssid/--wifi-pass`
+bake WiFi in; `--server-host` overrides the RNS-TCP target; `DEST_HASH` is
+injected automatically like the Cardputer. The client prints
+`RoboDog lxmf/delivery <hex>` at boot — add that hash to the server's
+`LMAO_ALLOWED_CLIENTS` so its calendar reads are accepted.
+
+Notes:
+- Driving the board needs MicroPython flashed on it first (a one-off `esptool`
+  step outside `install_all`, like the Cardputer's UIFlow2 install — this board
+  ships ESP-IDF/Arduino, not MicroPython).
+- `robodog_client/st7305.py` is a best-effort port of Waveshare's ST7305 driver,
+  **not yet validated on a live panel** — no RoboDog hardware was attached when
+  it was written. Confirm orientation/polarity on-device before relying on it.
+- Typical deploy: the server (calendar + pics) is already live in-cluster; the
+  device flash above is the remaining step once a RoboDog is on USB.
+
 ### 8. Docker Image
 
 The server Docker image is the release artifact for the in-cluster
@@ -1221,6 +1262,12 @@ The registry is configured via environment variables:
 │   └── install_services.py            # Pi server Docker build + K8s manifest apply
 │
 ├── assets/calendar-icons/             # Family-calendar line-drawing pack (SVG, 20 keys)
+│
+├── robodog_client/                    # Waveshare ESP32-S3 RLCD-4.2 display client (MicroPython)
+│   ├── config.py                      # WiFi / RNS-TCP server / DEST_HASH (install_all patches)
+│   ├── main.py                        # WiFi->urns RNS-TCP -> LXMF calendar fetch -> render loop
+│   ├── ui.py                          # 300x400 1-bit render (host-testable)
+│   └── st7305.py                      # ST7305 reflective-LCD driver (best-effort port)
 │
 └── rnode_firmware/                    # Documentation only
     └── README.md                      # Step-by-step ESP32 RNode flashing guide

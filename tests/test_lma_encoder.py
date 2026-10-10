@@ -691,6 +691,81 @@ class TestChartBundle:
         assert env2.chart.watered == 3
 
 
+class TestCalendarEncoder:
+    def test_calendar_request_round_trip(self):
+        req = enc.encode_calendar_request("family", 1700000000000, 30)
+        assert enc.decode_calendar_request(req) == {
+            "calendar_id": "family", "since_ms": 1700000000000, "max_events": 30,
+        }
+
+    def test_calendar_request_defaults(self):
+        assert enc.decode_calendar_request(enc.encode_calendar_request()) == {
+            "calendar_id": "family", "since_ms": 0, "max_events": 0,
+        }
+
+    def test_cal_event_round_trip(self):
+        blob = enc.encode_cal_event("u1", title="Swim", notes="towel",
+                                    start_ms=1, end_ms=2, pic="swim")
+        assert enc.decode_cal_event(blob) == {
+            "uid": "u1", "title": "Swim", "notes": "towel",
+            "start_ms": 1, "end_ms": 2, "deleted": False, "pic": "swim",
+        }
+
+    def test_cal_event_deleted_flag(self):
+        assert enc.decode_cal_event(enc.encode_cal_event("x", deleted=True))["deleted"] is True
+
+    def test_calendar_bundle_round_trip(self):
+        events = [
+            {"uid": "u1", "title": "Swim", "start_ms": 1, "end_ms": 2, "pic": "swim"},
+            {"uid": "u2", "title": "Dentist", "deleted": True},
+        ]
+        blob = enc.encode_calendar_bundle("family", events, watermark_ms=999)
+        b = enc.decode_calendar_bundle(blob)
+        assert b["calendar_id"] == "family"
+        assert b["watermark_ms"] == 999
+        assert b["events"][0]["title"] == "Swim"
+        assert b["events"][1]["deleted"] is True
+
+    def test_envelope_calendar_request_kind(self):
+        req = enc.encode_calendar_request("family", since_ms=5)
+        env = enc.encode_request_envelope(42, "calendar", req, request_ack=True)
+        d = enc.decode_envelope(env)
+        assert d["seq"] == 42 and d["request_ack"] is True
+        assert d["request"]["kind"] == "calendar"
+        assert d["request"]["calendar"]["since_ms"] == 5
+
+    @pytest.mark.skipif(not HAS_PROTOBUF, reason="protobuf not installed")
+    def test_calendar_request_byte_identical_to_protobuf(self):
+        from lma_core import CalendarRequest
+
+        pb = CalendarRequest()
+        pb.calendar_id = "family"
+        pb.since_ms = 1700000000000
+        pb.max_events = 30
+        assert enc.encode_calendar_request("family", 1700000000000, 30) == pb.SerializeToString()
+
+    @pytest.mark.skipif(not HAS_PROTOBUF, reason="protobuf not installed")
+    def test_calendar_bundle_byte_identical_to_protobuf(self):
+        from lma_core import CalEvent, CalendarBundle
+
+        pb = CalendarBundle()
+        pb.format = 1
+        pb.calendar_id = "family"
+        pb.watermark_ms = 999
+        e = pb.events.add()
+        e.uid = "u1"
+        e.title = "Swim"
+        e.start_ms = 1
+        e.end_ms = 2
+        # decode is tolerant of omitted pic/notes
+        encoded = enc.encode_calendar_bundle(
+            "family",
+            [{"uid": "u1", "title": "Swim", "start_ms": 1, "end_ms": 2, "pic": ""}],
+            999,
+        )
+        assert encoded == pb.SerializeToString()
+
+
 if __name__ == "__main__":
     import sys
 

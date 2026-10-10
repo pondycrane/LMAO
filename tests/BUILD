@@ -301,6 +301,17 @@ py_test(
 )
 
 py_test(
+    name = "test_robodog_calendar_fetch",
+    srcs = ["test_robodog_calendar_fetch.py"],
+    deps = [
+        "//cardputer_client/proto:lma_encoder",
+        "//lma_core",
+        "//robodog_client",
+        "@lmao_pip//pytest",
+    ],
+)
+
+py_test(
     name = "test_urns_packet",
     srcs = ["test_urns_packet.py"],
     data = ["//cardputer_client:lib_files"],

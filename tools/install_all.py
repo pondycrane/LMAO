@@ -33,6 +33,7 @@ import argparse
 import contextlib
 import os
 import re
+import shutil
 import sys
 import tempfile
 import time
@@ -673,6 +674,142 @@ def _flash_cardputer_client(port: str, client_root: str, result: DeviceResult,
 # ---- RNode operations ----
 
 
+_ROBODOG_FILES = [
+    "boot.py",
+    "config.py",
+    "main.py",
+    "ui.py",
+    "st7305.py",
+    "proto/lma_encoder.py",
+]
+
+
+def _stage_robodog(src_root: str) -> str:
+    """Copy the RoboDog client + symlink the shared urns lib/proto into a temp
+    root that the raw-REPL uploader can walk (mirrors the Cardputer layout:
+    client .py at the root, vendored lib/ + proto/ beside them)."""
+    stage = tempfile.mkdtemp(prefix="robodog_")
+    try:
+        for fname in ("boot.py", "config.py", "main.py", "ui.py", "st7305.py", "__init__.py"):
+            src = os.path.join(src_root, fname)
+            if os.path.isfile(src):
+                shutil.copyfile(src, os.path.join(stage, fname))
+        # Shared stack lives in cardputer_client/ (DRY) — symlink it in.
+        cpc = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                           "cardputer_client")
+        for sub in ("lib", "proto"):
+            dst = os.path.join(stage, sub)
+            src = os.path.join(cpc, sub)
+            if os.path.exists(src) and not os.path.islink(dst):
+                os.symlink(src, dst)
+    except Exception:
+        shutil.rmtree(stage, ignore_errors=True)
+        raise
+    return stage
+
+
+def _patch_robodog_config(stage_root: str, dest_hash: str | None, server_host: str | None,
+                          wifi_ssid: str | None, wifi_pass: str | None) -> None:
+    """Rewrite the staged RoboDog config.py with deploy-time values (source is
+    never modified).  DEST_HASH is mandatory for the map to function."""
+    cfg = os.path.join(stage_root, "config.py")
+    with open(cfg) as f:
+        text = f.read()
+    if dest_hash is not None:
+        text, n = re.subn(
+            r'DEST_HASH\s*=\s*(?:"[^"]*"|None)',
+            f'DEST_HASH = "{dest_hash}"', text)
+        if not n:
+            raise RuntimeError("Could not patch DEST_HASH in robodog config.py")
+    if server_host is not None:
+        text, n = re.subn(
+            r'LMAO_SERVER_HOST\s*=\s*(?:"[^"]*"|None)',
+            f'LMAO_SERVER_HOST = "{server_host}"', text)
+        if not n:
+            raise RuntimeError("Could not patch LMAO_SERVER_HOST in robodog config.py")
+    if wifi_ssid is not None:
+        text = re.subn(
+            r'WIFI_SSID\s*=\s*(?:"[^"]*"|None)',
+            f'WIFI_SSID = "{wifi_ssid}"', text)[0]
+    if wifi_pass is not None:
+        text = re.subn(
+            r'WIFI_PASS\s*=\s*(?:"[^"]*"|None)',
+            f'WIFI_PASS = "{wifi_pass}"', text)[0]
+    with open(cfg, "w") as f:
+        f.write(text)
+
+
+def _flash_robodog(port: str, result: DeviceResult, src_root: str,
+                   inject_dest_hash: bool = True,
+                   server_host: str | None = None,
+                   wifi_ssid: str | None = None,
+                   wifi_pass: str | None = None) -> None:
+    """Stage + flash the RoboDog MicroPython client (Waveshare RLCD-4.2) and
+    bake DEST_HASH / server host / WiFi into its on-device config."""
+    try:
+        print(f"\n--- RoboDog: opening {port} ---")
+        ser = serial.Serial(port, 115200, timeout=1, write_timeout=10)
+        time.sleep(0.6)
+    except serial.SerialException as exc:
+        result.fail(f"Cannot open serial port {port}: {exc}")
+        print(f"  FAIL: {exc}")
+        return
+
+    stage = None
+    try:
+        stage = _stage_robodog(src_root)
+        if inject_dest_hash:
+            dest_hash = ensure_delivery_destination_hash()
+            _patch_robodog_config(stage, dest_hash, server_host, wifi_ssid, wifi_pass)
+            print(f"    DEST_HASH = {dest_hash}")
+        else:
+            _patch_robodog_config(stage, None, server_host, wifi_ssid, wifi_pass)
+
+        if not enter_raw_repl(ser):
+            result.fail("Could not enter raw REPL (is MicroPython installed?)")
+            print("  FAIL: Could not enter raw REPL")
+            return
+        try:
+            verify_device(ser)
+            disarm_watchdog(ser)
+            files = list(_ROBODOG_FILES) + auto_discover_lib_files(stage)
+            verify_files_exist(stage, files)
+            print(f"  Uploading {len(files)} file(s) ...")
+            failed = 0
+            for rel in files:
+                local = os.path.join(stage, rel)
+                size = os.path.getsize(local)
+                print(f"    {rel:32s} … ", end="", flush=True)
+                try:
+                    upload_file(ser, local, rel, skip_if_unchanged=True)
+                    print("OK")
+                except DeviceStalledError:
+                    print("STALLED")
+                    failed += 1
+                except Exception:
+                    print("FAILED")
+                    failed += 1
+            exit_raw_repl(ser)
+            if failed:
+                result.fail(f"{len(files) - failed}/{len(files)} uploaded")
+                return
+            result.ok("RoboDog client flashed (calendar via RNS-TCP)")
+        finally:
+            ser.close()
+    except Exception as exc:
+        import traceback
+
+        traceback.print_exc()
+        result.fail(f"Unexpected error: {exc}")
+        print(f"  FAIL: {exc}")
+    finally:
+        if stage:
+            shutil.rmtree(stage, ignore_errors=True)
+
+
+# ---- RNode operations ----
+
+
 def _rnode_probe_hint() -> str:
     """Return a diagnostic hint when the lmao-server container is running.
 
@@ -865,6 +1002,39 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Skip injecting the server DEST_HASH into the Cardputer config "
         "(e.g. when the server runs on a different host).",
     )
+    # ── RoboDog (Waveshare ESP32-S3 RLCD-4.2 family-calendar display) ──
+    parser.add_argument(
+        "--robodog-port",
+        default=None,
+        help="Serial port for the RoboDog RLCD-4.2 board (e.g. /dev/ttyACM1). "
+        "Required to flash; there is no auto-detect for this board.",
+    )
+    parser.add_argument(
+        "--skip-robodog",
+        action="store_true",
+        help="Skip the RoboDog flash entirely.",
+    )
+    parser.add_argument(
+        "--robodog-root",
+        default=None,
+        help="Path to robodog_client/ directory (auto-detected when omitted).",
+    )
+    parser.add_argument(
+        "--wifi-ssid",
+        default=None,
+        help="Wi-Fi SSID for RoboDog (baked into its config at flash time).",
+    )
+    parser.add_argument(
+        "--wifi-pass",
+        default=None,
+        help="Wi-Fi password for RoboDog.",
+    )
+    parser.add_argument(
+        "--server-host",
+        default=None,
+        help="LMAO server LAN host/IP for RoboDog's RNS-TCP ClientInterface "
+        "(baked into config; default keeps the config's value).",
+    )
     cp_group = parser.add_mutually_exclusive_group()
     cp_group.add_argument(
         "--micropython-cardputer",
@@ -951,6 +1121,32 @@ def main(argv: list[str] | None = None) -> None:
                 _register_contact_book(args.device_name, dev_hash)
             except Exception as exc:
                 print(f"  WARNING: contact-book registration skipped: {exc}")
+
+    # ── RoboDog (Waveshare ESP32-S3 RLCD-4.2 family-calendar display) ──
+    rd_result = DeviceResult("RoboDog (RLCD-4.2)")
+    results.append(rd_result)
+
+    if args.skip_robodog:
+        rd_result.skip("--skip-robodog")
+        print("RoboDog: SKIP (--skip-robodog)")
+    elif not args.robodog_port:
+        rd_result.skip("No --robodog-port given (no auto-detect for this board)")
+        print("RoboDog: SKIP — pass --robodog-port to flash (e.g. --robodog-port /dev/ttyACM1)")
+    else:
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        src_root = args.robodog_root or os.path.join(repo_root, "robodog_client")
+        if not os.path.isfile(os.path.join(src_root, "main.py")):
+            rd_result.fail("Cannot locate robodog_client/ (pass --robodog-root)")
+            print("RoboDog: FAIL — cannot locate robodog_client/")
+        else:
+            print("RoboDog: flashing MicroPython client (calendar via RNS-TCP)")
+            _flash_robodog(
+                args.robodog_port, rd_result, src_root,
+                inject_dest_hash=not args.skip_dest_hash,
+                server_host=args.server_host,
+                wifi_ssid=args.wifi_ssid,
+                wifi_pass=args.wifi_pass,
+            )
 
     # ── RNode ──
     rn_result = DeviceResult("RNode (Heltec)")
