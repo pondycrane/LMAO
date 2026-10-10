@@ -18,6 +18,7 @@ degradation — the server starts and operates without them.
 """
 
 import asyncio
+import contextlib
 import logging
 import os
 import random
@@ -1053,6 +1054,23 @@ async def async_main():
         except Exception as e:
             logger.warning("Contacts API unavailable (%s)", e)
 
+    # ── Calendar TCP read service (RoboDog native client, no RNS) ────
+    # Framed-TCP CalendarRequest/CalendarBundle read on LMAO_CAL_TCP_PORT so
+    # the ESP-IDF display can pull the family calendar from the LAN with a
+    # plain socket (no RNS/LXMF/HTTP).  Started only when the Postgres store is
+    # up; mirrors the same CalendarStore the RNS path reads.
+    cal_tcp_server = None
+    if CALENDAR is not None:
+        try:
+            from lma_core.calendar_tcp_api import start_calendar_tcp_server
+
+            cal_tcp_server = await start_calendar_tcp_server(
+                CALENDAR,
+                port=int(os.environ.get("LMAO_CAL_TCP_PORT", "4247")),
+            )
+        except Exception as e:
+            logger.warning("Calendar TCP read service unavailable (%s)", e)
+
     # Keep running until interrupted.  Discovery is on-demand: the server
     # answers client path requests (rns_init leaf-node patch) rather than
     # re-announcing periodically (issue #142 — no announce task to track).
@@ -1073,6 +1091,10 @@ async def async_main():
                 await contacts_runner.cleanup()
             except Exception:
                 pass
+        if cal_tcp_server is not None:
+            cal_tcp_server.close()
+            with contextlib.suppress(Exception):
+                await cal_tcp_server.wait_closed()
         if lmao_server:
             lmao_server.clear_grpc_subscribers()
             lmao_server._nats_queue = None  # Prevent new NATS publish attempts during shutdown
