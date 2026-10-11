@@ -16,7 +16,11 @@ sh_binary(
         "sdkconfig",
         "partitions.csv",
         "CMakeLists.txt",
-    ]),
+    ]) + [
+        # u8g2 upstream source is fetched (never vendored); carried in runfiles
+        # so `bazel run //robodog_native:build_firmware` needs no network.
+        "@u8g2//:src",
+    ],
     tags = ["manual"],
 )
 
