@@ -2,6 +2,8 @@ syntax = "proto3";
 
 package lma;
 
+import "lma_messages.proto";
+
 // ============================================================
 // gRPC API — K8s Integration
 // ============================================================
@@ -75,4 +77,9 @@ service LMAO {
 
   // Get the server's Reticulum identity hash.
   rpc GetIdentity(GetIdentityRequest) returns (GetIdentityResponse);
+
+  // Synchronous read of the family calendar (Postgres-backed) — direct, no
+  // LXMF round-trip.  Used by the non-RNS RoboDog RLCD display, which polls
+  // this once per sync window.
+  rpc GetCalendar(CalendarRequest) returns (CalendarBundle);
 }

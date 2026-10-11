@@ -7,6 +7,30 @@ The README is the single source of truth for project architecture, setup,
 usage, testing, and conventions. It covers everything from protocol design
 to hardware setup to deployment. Do not proceed without reading it first.
 
+## No vendored third-party code — fetch opensource deps, never copy them in
+
+NEVER commit a verbatim copy of a third-party open-source library or its
+generated files into this repo (e.g. a vendored `u8g2` blew a PR past 500k
+lines / 44 MB of font tables). This includes `components/`
+sub-trees copied from an upstream, `.c`/`.h` dropped verbatim from a tarball,
+and bulk generated outputs that belong to the upstream build.
+
+- **fetch** open-source at build time instead of shipping it:
+  - Bazel-managed builds: use `http_archive` (e.g. the `@codec2` precedent in
+    `lmao-master/WORKSPACE` + a `*.BUILD`, carried in the target's runfiles and
+    staged into the ESP-IDF tree by `build.sh`).
+  - ESP-IDF `idf.py` projects: use the component manager
+    (`idf_component.yml` → the gitignored `managed_components/`).
+- Only LMAO-owned source lives in the repo. A third-party dep is allowed in
+  the tree only while it is provisionally staged by `build.sh` into a
+  gitignored target dir — never in a committed source dir.
+- Long generated/derived output files (font tables, codebooks, protobuf
+  wire blobs) count as third-party output: regenerate or fetch, don't commit.
+
+If you are about to `cp -r` an upstream `components/<lib>` into the repo, stop
+and wire the fetch instead.
+
+
 ## DRY — no copy-paste across the two native firmware trees
 
 The Sprout and Cardputer native clients share one firmware protocol stack;

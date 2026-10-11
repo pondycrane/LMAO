@@ -140,6 +140,9 @@ spec:
             - name: rns-tcp
               containerPort: 4246
               protocol: TCP
+            - name: cal-tcp
+              containerPort: 4247
+              protocol: TCP
           volumeMounts:
             - name: rnode
               mountPath: /dev/ttyUSB1

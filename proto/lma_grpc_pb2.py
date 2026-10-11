@@ -22,31 +22,32 @@ _runtime_version.ValidateProtobufRuntimeVersion(
 _sym_db = _symbol_database.Default()
 
 
+from proto import lma_messages_pb2 as lma__messages__pb2
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0elma_grpc.proto\x12\x03lma\"\x1f\n\x0bSendRequest\x12\x10\n\x08\x65nvelope\x18\x01 \x01(\x0c\"8\n\x0cSendResponse\x12\x18\n\x10\x64\x65stination_hash\x18\x01 \x01(\t\x12\x0e\n\x06status\x18\x02 \x01(\t\"(\n\x10SubscribeRequest\x12\x14\n\x0ctitle_filter\x18\x01 \x01(\t\":\n\x11SubscribeResponse\x12\x10\n\x08\x65nvelope\x18\x01 \x01(\x0c\x12\x13\n\x0bsource_hash\x18\x02 \x01(\t\"9\n\rTunnelRequest\x12\x0e\n\x06packet\x18\x01 \x01(\x0c\x12\x18\n\x10\x64\x65stination_hash\x18\x02 \x01(\t\"E\n\x0eTunnelResponse\x12\x0e\n\x06packet\x18\x01 \x01(\x0c\x12\x13\n\x0bsource_hash\x18\x02 \x01(\t\x12\x0e\n\x06status\x18\x03 \x01(\t\"\x14\n\x12GetIdentityRequest\">\n\x13GetIdentityResponse\x12\x14\n\x0cidentity_hex\x18\x01 \x01(\t\x12\x11\n\tnode_name\x18\x02 \x01(\t2\xb3\x01\n\x04LMAO\x12+\n\x04Send\x12\x10.lma.SendRequest\x1a\x11.lma.SendResponse\x12<\n\tSubscribe\x12\x15.lma.SubscribeRequest\x1a\x16.lma.SubscribeResponse0\x01\x12@\n\x0bGetIdentity\x12\x17.lma.GetIdentityRequest\x1a\x18.lma.GetIdentityResponseb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0elma_grpc.proto\x12\x03lma\x1a\x12lma_messages.proto\"\x1f\n\x0bSendRequest\x12\x10\n\x08\x65nvelope\x18\x01 \x01(\x0c\"8\n\x0cSendResponse\x12\x18\n\x10\x64\x65stination_hash\x18\x01 \x01(\t\x12\x0e\n\x06status\x18\x02 \x01(\t\"(\n\x10SubscribeRequest\x12\x14\n\x0ctitle_filter\x18\x01 \x01(\t\":\n\x11SubscribeResponse\x12\x10\n\x08\x65nvelope\x18\x01 \x01(\x0c\x12\x13\n\x0bsource_hash\x18\x02 \x01(\t\"9\n\rTunnelRequest\x12\x0e\n\x06packet\x18\x01 \x01(\x0c\x12\x18\n\x10\x64\x65stination_hash\x18\x02 \x01(\t\"E\n\x0eTunnelResponse\x12\x0e\n\x06packet\x18\x01 \x01(\x0c\x12\x13\n\x0bsource_hash\x18\x02 \x01(\t\x12\x0e\n\x06status\x18\x03 \x01(\t\"\x14\n\x12GetIdentityRequest\">\n\x13GetIdentityResponse\x12\x14\n\x0cidentity_hex\x18\x01 \x01(\t\x12\x11\n\tnode_name\x18\x02 \x01(\t2\xed\x01\n\x04LMAO\x12+\n\x04Send\x12\x10.lma.SendRequest\x1a\x11.lma.SendResponse\x12<\n\tSubscribe\x12\x15.lma.SubscribeRequest\x1a\x16.lma.SubscribeResponse0\x01\x12@\n\x0bGetIdentity\x12\x17.lma.GetIdentityRequest\x1a\x18.lma.GetIdentityResponse\x12\x38\n\x0bGetCalendar\x12\x14.lma.CalendarRequest\x1a\x13.lma.CalendarBundleb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
 _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'lma_grpc_pb2', _globals)
 if not _descriptor._USE_C_DESCRIPTORS:
   DESCRIPTOR._loaded_options = None
-  _globals['_SENDREQUEST']._serialized_start=23
-  _globals['_SENDREQUEST']._serialized_end=54
-  _globals['_SENDRESPONSE']._serialized_start=56
-  _globals['_SENDRESPONSE']._serialized_end=112
-  _globals['_SUBSCRIBEREQUEST']._serialized_start=114
-  _globals['_SUBSCRIBEREQUEST']._serialized_end=154
-  _globals['_SUBSCRIBERESPONSE']._serialized_start=156
-  _globals['_SUBSCRIBERESPONSE']._serialized_end=214
-  _globals['_TUNNELREQUEST']._serialized_start=216
-  _globals['_TUNNELREQUEST']._serialized_end=273
-  _globals['_TUNNELRESPONSE']._serialized_start=275
-  _globals['_TUNNELRESPONSE']._serialized_end=344
-  _globals['_GETIDENTITYREQUEST']._serialized_start=346
-  _globals['_GETIDENTITYREQUEST']._serialized_end=366
-  _globals['_GETIDENTITYRESPONSE']._serialized_start=368
-  _globals['_GETIDENTITYRESPONSE']._serialized_end=430
-  _globals['_LMAO']._serialized_start=433
-  _globals['_LMAO']._serialized_end=612
+  _globals['_SENDREQUEST']._serialized_start=43
+  _globals['_SENDREQUEST']._serialized_end=74
+  _globals['_SENDRESPONSE']._serialized_start=76
+  _globals['_SENDRESPONSE']._serialized_end=132
+  _globals['_SUBSCRIBEREQUEST']._serialized_start=134
+  _globals['_SUBSCRIBEREQUEST']._serialized_end=174
+  _globals['_SUBSCRIBERESPONSE']._serialized_start=176
+  _globals['_SUBSCRIBERESPONSE']._serialized_end=234
+  _globals['_TUNNELREQUEST']._serialized_start=236
+  _globals['_TUNNELREQUEST']._serialized_end=293
+  _globals['_TUNNELRESPONSE']._serialized_start=295
+  _globals['_TUNNELRESPONSE']._serialized_end=364
+  _globals['_GETIDENTITYREQUEST']._serialized_start=366
+  _globals['_GETIDENTITYREQUEST']._serialized_end=386
+  _globals['_GETIDENTITYRESPONSE']._serialized_start=388
+  _globals['_GETIDENTITYRESPONSE']._serialized_end=450
+  _globals['_LMAO']._serialized_start=453
+  _globals['_LMAO']._serialized_end=690
 # @@protoc_insertion_point(module_scope)
