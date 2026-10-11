@@ -4,4 +4,7 @@
 /sdkconfig
 /managed_components/
 /dependencies.lock
-/components/u8g2/
+# u8g2 is fetched at build time (u8g2_prepare.sh -> @u8g2 http_archive); only
+# our ESP-IDF component wrapper is committed, the upstream csrc never is.
+/components/u8g2/*
+!/components/u8g2/CMakeLists.txt
