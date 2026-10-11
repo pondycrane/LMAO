@@ -166,6 +166,8 @@ message CalEvent {
   uint64 end_ms   = 5;   // epoch ms UTC
   bool   deleted  = 6;   // tombstone — client must remove it locally
   string pic      = 7;   // calendar-icon pack key, "" = none (assets/calendar-icons)
+  bytes  pic_data = 8;   // 1-bit 32x32 row-major tile (128 B, MSB first, 1=ink);
+                         // server fills it from cal_pics.tile_1bpp when pic != ""
 }
 
 message CalendarBundle {   // server -> client, sibling of ChartBundle

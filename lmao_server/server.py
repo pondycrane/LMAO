@@ -27,8 +27,9 @@ import time
 
 from google.protobuf.message import DecodeError
 
-from lma_core import LMAOEnvelope
+from lma_core import CalendarBundle, LMAOEnvelope
 from lma_core.calendar_pg import CalendarStore, open_calendar_store
+from lma_core.calendar_pics import open_pic_store
 from lma_core.contact_book import ContactBook
 from lma_core.contact_book_pg import (
     backfill_sqlite_to_pg,
@@ -527,6 +528,7 @@ class Server:
                         entry.end_ms = ev["end_ms"]
                         entry.deleted = ev["deleted"]
                         entry.pic = ev["pic"]
+                        _fill_pic_data(PIC_STORE, ev["pic"], entry)
                     cal_env.calendar.watermark_ms = watermark
                     send(cal_env)
                     logger.info(
@@ -773,6 +775,19 @@ class Server:
 # gRPC Service Implementation
 # ──────────────────────────────────────────────────────────────
 
+def _fill_pic_data(pic_store, pic_key, cal_entry) -> None:
+    """Attach the 1-bit RLCD tile for an event's pic key (CalEvent.pic_data,
+    field 8) when the picture store has one.  No-op otherwise."""
+    if not pic_key or pic_store is None:
+        return
+    try:
+        rec = pic_store.get(pic_key)
+    except Exception:
+        return
+    tile = rec.get("tile_1bpp") if rec else None
+    if tile:
+        cal_entry.pic_data = tile
+
 if GRPC_AVAILABLE:
 
     class LMAOGrpcService(LMAOServicer):
@@ -878,6 +893,44 @@ if GRPC_AVAILABLE:
                 node_name="lmao-server",
             )
 
+        async def GetCalendar(self, request, context):
+            """Synchronous family-calendar read (Postgres-backed).
+
+            Direct RPC — no LXMF round-trip.  Used by the non-RNS RoboDog
+            RLCD display, which polls this once per sync window and renders a
+            CalendarBundle.  Mirrors the env.request.calendar LXMF path.
+            """
+            store = CALENDAR
+            if store is None:
+                await context.abort(grpc.StatusCode.UNAVAILABLE,
+                                    "Calendar store not available")
+            try:
+                events, watermark = store.sync(
+                    calendar_id=request.calendar_id or "family",
+                    since_ms=request.since_ms,
+                    max_events=request.max_events,
+                )
+            except Exception as e:
+                logger.error("GetCalendar sync failed: %s", e, exc_info=True)
+                await context.abort(grpc.StatusCode.INTERNAL,
+                                    f"Calendar sync failed: {e}")
+            bundle = CalendarBundle()
+            bundle.format = 1
+            bundle.calendar_id = request.calendar_id or "family"
+            for ev in events:
+                entry = bundle.events.add()
+                entry.uid = ev["uid"]
+                entry.title = ev["title"]
+                entry.notes = ev["notes"]
+                entry.start_ms = ev["start_ms"]
+                entry.end_ms = ev["end_ms"]
+                entry.deleted = ev["deleted"]
+                entry.pic = ev["pic"]
+                _fill_pic_data(PIC_STORE, ev["pic"], entry)
+            bundle.watermark_ms = watermark
+            return bundle
+
+
 else:
 
     class LMAOGrpcService:  # type: ignore[no-redef]
@@ -957,6 +1010,11 @@ async def async_main():
     CALENDAR = open_calendar_store()
     if CALENDAR is not None:
         logger.info("Calendar store ready (Postgres).")
+
+    # Calendar picture store: CalEvent.pic keys -> 1-bit RLCD tiles served as
+    # CalEvent.pic_data (field 8) so the RoboDog display can draw real icons.
+    global PIC_STORE
+    PIC_STORE = open_pic_store()
 
     # Create Server instance (wraps router + identity)
     lmao_server = Server(config_dict=cfg_dict)

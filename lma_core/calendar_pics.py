@@ -76,6 +76,8 @@ CREATE TABLE IF NOT EXISTS cal_pics (
     height     SMALLINT NOT NULL,
     mime       TEXT NOT NULL DEFAULT 'image/png',
     bytes      BYTEA NOT NULL,
+    tile_1bpp  BYTEA,                   -- 32x32 1-bit row-major tile (128 B),
+                                        -- MSB-first, 1 = ink; for the RLCD row icon
     created_ms BIGINT NOT NULL,
     updated_ms BIGINT NOT NULL
 )
@@ -83,13 +85,14 @@ CREATE TABLE IF NOT EXISTS cal_pics (
 
 
 def _row_to_pic(row: tuple) -> dict[str, Any]:
-    pic_key, width, height, mime, png_bytes, created_ms, updated_ms = row
+    pic_key, width, height, mime, png_bytes, tile_1bpp, created_ms, updated_ms = row
     return {
         "pic_key": pic_key,
         "width": width,
         "height": height,
         "mime": mime,
         "bytes": bytes(png_bytes),
+        "tile_1bpp": bytes(tile_1bpp) if tile_1bpp is not None else None,
         "created_ms": created_ms,
         "updated_ms": updated_ms,
     }
@@ -112,23 +115,30 @@ class PicStore:
             cur.execute(_SCHEMA)
 
     def put(self, pic_key: str, png_bytes: bytes, width: int, height: int) -> dict[str, Any]:
-        """Upsert a picture by key (idempotent; regenerating a key overwrites)."""
+        """Upsert a picture by key (idempotent; regenerating a key overwrites).
+
+        Also computes and stores the 32x32 1-bit RLCD tile when Pillow is
+        available (the host skill tooling has it; the server pod only reads).
+        """
+        tile = _png_bytes_to_tile_1bpp(png_bytes)  # None if Pillow absent
         now_ms = _now_ms()
         with self._lock, self._conn.cursor() as cur:
             cur.execute(
                 """
                     INSERT INTO cal_pics(
-                        pic_key, width, height, mime, bytes, created_ms, updated_ms
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        pic_key, width, height, mime, bytes, tile_1bpp,
+                        created_ms, updated_ms
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT(pic_key) DO UPDATE SET
                         width = excluded.width,
                         height = excluded.height,
                         mime = excluded.mime,
                         bytes = excluded.bytes,
+                        tile_1bpp = excluded.tile_1bpp,
                         updated_ms = excluded.updated_ms
                     """,
                 (pic_key, int(width), int(height), self.DEFAULT_MIME,
-                 png_bytes, now_ms, now_ms),
+                 png_bytes, tile, now_ms, now_ms),
             )
             cur.execute(_GET_SQL, (pic_key,))
             row = cur.fetchone()
@@ -151,9 +161,37 @@ class PicStore:
 
 
 _GET_SQL = """
-SELECT pic_key, width, height, mime, bytes, created_ms, updated_ms
+SELECT pic_key, width, height, mime, bytes, tile_1bpp, created_ms, updated_ms
 FROM cal_pics WHERE pic_key = %s
 """
+
+# RLCD row-icon tile contract shared with robodog_native (lma_proto.h) and the
+# server (CalEvent.pic_data = field 8).  32x32, row-major, MSB-first, 1 = ink.
+TILE_W = 32
+TILE_H = 32
+TILE_1BPP_SIZE = (TILE_W * TILE_H + 7) // 8  # 128
+
+
+def _png_bytes_to_tile_1bpp(
+    png_bytes: bytes, tw: int = TILE_W, th: int = TILE_H,
+) -> bytes | None:
+    """Downscale a 1-bit-PNG to the RLCD tile: 32x32 row-major 1bpp, MSB
+    first, bit 1 = ink (black line work).  Returns None if Pillow is absent
+    (the server pod never calls this; the host skill tooling has Pillow)."""
+    try:
+        from PIL import Image  # noqa: PLC0415
+        import io  # noqa: PLC0415
+    except ImportError:
+        return None
+    img = Image.open(io.BytesIO(png_bytes)).convert("L")
+    img = img.resize((tw, th), Image.Resampling.NEAREST)
+    px = img.load()
+    out = bytearray(TILE_1BPP_SIZE)
+    for yy in range(th):
+        for xx in range(tw):
+            if px[xx, yy] < 128:  # black -> ink (bit 1)
+                out[(yy * tw + xx) // 8] |= 0x80 >> (xx % 8)
+    return bytes(out)
 
 
 def _now_ms() -> int:
