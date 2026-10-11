@@ -3,15 +3,14 @@
 Native **ESP-IDF** firmware for the **RoboDog** family-calendar display:
 a Waveshare **ESP32-S3** dev board driving the Waveshare **RLCD-4.2**
 (**ST7305**, 400×300 reflective 1-bit B&W LCD).  No RNS/LXMF here: the device
-reads the family calendar straight from the LMAO server over a tiny framed-TCP
-service and renders it in 1-bit B&W on the ST7305.
+reads the family calendar from a synchronous gRPC call on the LMAO server
+and renders it in 1-bit B&W on the ST7305.
 
 ```
-┌─ LMAO server (lma_core/calendar_tcp_api.py, LAN :4247) ─┐
-│   [u32 BE len][ CalendarRequest protobuf ]  ◀── client  │
-│   [u32 BE len][ CalendarBundle protobuf ]  ──▶ client   │
+┌─ LMAO server (lma.LMAO/GetCalendar gRPC, :50051) ───────┐
+│   HTTP/2 unary: CalendarRequest -> CalendarBundle       │
 └──────────────────────────────────────────────────────────┘
-            ▲ framed TCP, single request/reply per sync
+            ▲ gRPC/HTTP2, single request/reply per sync
 ESP32-S3 ───┘   → decode → merge δ into NVS cache → render ST7305
                 → light-sleep ~30 min → repeat
 ```
@@ -62,17 +61,21 @@ and set them once at runtime in NVS:
 | `wifi_pass`  (string) | STA passphrase (fallback: `RD_WIFI_PASS_DEFAULT`) |
 | `server_host`(string) | LMAO server host/IP (fallback: `RD_SERVER_HOST_DEFAULT`, `192.168.50.67`) |
 
-Other knobs (`RD_CAL_TCP_PORT`, `RD_SYNC_INTERVAL_SECONDS`,
+Other knobs (`RD_CAL_GRPC_PORT`, `RD_SYNC_INTERVAL_SECONDS`,
 `RD_SNTP_SERVER`, timeouts) are build-time macros in `main/config.h`.
 
 ## Wire contract (implemented exactly)
 
-Plain TCP to `LMAO_SERVER_HOST:LMAO_CAL_TCP_PORT` (default **4247**, LAN,
-insecure by design).  Every frame:
+Synchronous gRPC unary `lma.LMAO/GetCalendar(CalendarRequest) returns
+(CalendarBundle)` over HTTP/2 to `LMAO_SERVER_HOST:RD_CAL_GRPC_PORT`
+(default `50051` — the LMAO server's gRPC port; `192.168.10.19` LAN).
 
-```
-4-byte big-endian length, then that many payload bytes
-```
+The ESP32 client implements a minimal HTTP/2 + gRPC transport for this single
+RPC: connection preface, SETTINGS/ACK, a constant HPACK header block (literal
+without indexing), and a DATA frame carrying the gRPC-framed `CalendarRequest`
+(1-byte compression flag + 4-byte BE length + protobuf).  The reply DATA is
+stripped of its gRPC header and the `CalendarBundle` decoded by `lma_proto`.
+The wire format is verified live against the LMAO server.
 
 - **Client → server** payload = serialized `CalendarRequest` protobuf
   (`calendar_id=1` string, `since_ms=2` varint u64, `max_events=3` varint u32).

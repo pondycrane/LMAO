@@ -9,7 +9,8 @@
  *   4. merge the delta into the NVS-persisted event cache (union by uid,
  *      tombstones remove), advance the watermark
  *   5. render 1-bit rows on the ST7305 via the vendored u8g2_st7305 driver
- *   6. stop WiFi and light-sleep for SYNC_INTERVAL_SECONDS, then repeat
+ *   6. stop WiFi and hold the RLCD frame visible (no light-sleep; the
+ *      reflective ST7305 loses its image in sleep) for SYNC_INTERVAL_SECONDS, then repeat
  *
  * Wire format (both directions), payloads are raw protobuf (see lma_proto.c):
  *   [u32 BE length][payload bytes]
@@ -29,6 +30,7 @@
 #include "esp_wifi.h"
 #include "esp_netif.h"
 #include "esp_sleep.h"
+#include "esp_timer.h"
 #include "nvs_flash.h"
 #include "nvs.h"
 #include "lwip/sockets.h"
@@ -57,7 +59,12 @@ static size_t s_cache_count = 0;
 /* Frame/bundle buffers are static: a bundle can be ~8 KiB, main-task stacks
  * are far smaller. */
 static uint8_t s_frame[LMA_PB_MAX_FRAME];
+static uint8_t s_rx[LMA_PB_MAX_FRAME];   /* one received HTTP/2 frame payload */
+static uint8_t s_h2[512];                 /* HPACK header block (fixed RPC) */
 static lma_cal_bundle_t s_bundle;
+
+/* Defined below; tcp_sync sets the display clock from the server watermark. */
+static void clock_set(uint64_t utc_ms);
 
 #define NVS_NS "robodog"
 #define NVS_KEY_WM "wm"
@@ -241,16 +248,35 @@ static void cache_apply(const lma_cal_bundle_t *bundle)
 
 /* ------------------------------------------------------------------- WiFi */
 
+/* WiFi disconnect reason codes we care about (esp_wifi_types.h). */
+static const char *wifi_reason_str(int r)
+{
+    switch (r) {
+    case 201: return "NO_AP_FOUND (SSID not visible: 2.4GHz? range? hidden?)";
+    case 202: return "AUTH_FAIL (wrong password / >63-char passphrase)";
+    case 203: return "ASSOC_FAIL";
+    case 15:  return "4WAY_HANDSHAKE_TIMEOUT (wrong password / length)";
+    case 204: return "AUTH_EXPIRE";
+    default:  return "other";
+    }
+}
+
 static void wifi_event_handler(void *arg, esp_event_base_t base, int32_t id,
                                void *data)
 {
     (void)arg;
-    (void)data;
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
+        ESP_LOGI(TAG, "wifi STA started, connecting to '%s' (pass len %u)",
+                 s_wifi_ssid, (unsigned)strlen(s_wifi_pass));
         esp_wifi_connect();
+    } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_CONNECTED) {
+        ESP_LOGI(TAG, "wifi associated with AP");
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
+        wifi_event_sta_disconnected_t *d = (wifi_event_sta_disconnected_t *)data;
+        ESP_LOGW(TAG, "wifi disconnected reason=%d (%s)",
+                 d ? d->reason : -1, wifi_reason_str(d ? d->reason : -1));
         if (s_wifi_started) {
-            ESP_LOGW(TAG, "wifi disconnected, retrying");
+            ESP_LOGW(TAG, "reconnecting");
             esp_wifi_connect();
         }
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
@@ -356,10 +382,78 @@ static bool recv_exact(int fd, uint8_t *p, size_t n)
     return true;
 }
 
+/* ------------------------------------------------- gRPC calendar sync */
+/* Minimal HTTP/2 + gRPC unary client for the single GetCalendar RPC.
+ * Wire format verified live against the LMAO server:
+ *   connection preface -> SETTINGS -> ACK -> HEADERS(/lma.LMAO/GetCalendar,
+ *   literal-without-indexing HPACK) -> DATA(1-byte flag + 4-byte BE msg len +
+ *   CalendarRequest) -> read frames; DATA carries the gRPC-framed reply.
+ * Response HEADERS/HPACK are intentionally NOT decoded: grpc-status != 0
+ * yields no valid CalendarBundle (decode fails), which we treat as a failed
+ * sync and retry next poll. */
+#define H2_PREFACE   "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
+#define H2_PREFACE_LEN 24u
+
+static bool h2_send_frame(int fd, uint8_t type, uint8_t flags, uint32_t stream,
+                          const uint8_t *payload, size_t plen)
+{
+    uint8_t h[9];
+    h[0] = (uint8_t)((plen >> 16) & 0xff);
+    h[1] = (uint8_t)((plen >> 8) & 0xff);
+    h[2] = (uint8_t)(plen & 0xff);
+    h[3] = type;
+    h[4] = flags;
+    h[5] = (uint8_t)(stream >> 24);
+    h[6] = (uint8_t)(stream >> 16);
+    h[7] = (uint8_t)(stream >> 8);
+    h[8] = (uint8_t)(stream & 0xff);
+    return send_all(fd, h, 9) && send_all(fd, payload, plen);
+}
+
+static bool h2_recv_frame(int fd, uint8_t *type_out, uint8_t *flags_out,
+                          uint32_t *stream_out, size_t cap, size_t *plen_out)
+{
+    uint8_t h[9];
+    if (!recv_exact(fd, h, 9)) {
+        return false;
+    }
+    size_t ln = ((size_t)h[0] << 16) | ((size_t)h[1] << 8) | (size_t)h[2];
+    *type_out = h[3];
+    *flags_out = h[4];
+    *stream_out = ((uint32_t)h[5] << 24) | ((uint32_t)h[6] << 16) |
+                  ((uint32_t)h[7] << 8) | (uint32_t)h[8];
+    if (ln > cap) {
+        ESP_LOGW(TAG, "h2 frame too large (%u > %u)", (unsigned)ln, (unsigned)cap);
+        return false;
+    }
+    if (!recv_exact(fd, s_rx, ln)) {
+        return false;
+    }
+    *plen_out = ln;
+    return true;
+}
+
+/* HPACK literal-without-indexing header: 0x00, len(name), name, len(value),
+ * value.  Valid HPACK, no Huffman, no dynamic table — trivially encodable. */
+static size_t hpack_lit_header(uint8_t *o, const char *name, const char *value)
+{
+    size_t nl = strlen(name);
+    size_t vl = strlen(value);
+    size_t p = 0;
+    o[p++] = 0x00;
+    o[p++] = (uint8_t)nl;
+    memcpy(o + p, name, nl);
+    p += nl;
+    o[p++] = (uint8_t)vl;
+    memcpy(o + p, value, vl);
+    p += vl;
+    return p;
+}
+
 static bool tcp_sync(void)
 {
     char port[8];
-    snprintf(port, sizeof(port), "%u", RD_CAL_TCP_PORT);
+    snprintf(port, sizeof(port), "%u", RD_CAL_GRPC_PORT);
 
     struct addrinfo hints;
     memset(&hints, 0, sizeof(hints));
@@ -388,51 +482,107 @@ static bool tcp_sync(void)
         goto out;
     }
 
+    /* HPACK header block for POST /lma.LMAO/GetCalendar */
+    char authority[96];
+    snprintf(authority, sizeof(authority), "%s:%s", s_server_host, port);
+    size_t hp = 0;
+    hp += hpack_lit_header(s_h2 + hp, ":method", "POST");
+    hp += hpack_lit_header(s_h2 + hp, ":scheme", "http");
+    hp += hpack_lit_header(s_h2 + hp, ":path", "/lma.LMAO/GetCalendar");
+    hp += hpack_lit_header(s_h2 + hp, ":authority", authority);
+    hp += hpack_lit_header(s_h2 + hp, "content-type", "application/grpc");
+    hp += hpack_lit_header(s_h2 + hp, "te", "trailers");
+
+    /* Serialize CalendarRequest */
     lma_cal_request_t req;
     lma_proto_req_init(&req);
     snprintf(req.calendar_id, sizeof(req.calendar_id), "%s", RD_CALENDAR_ID);
-    req.since_ms = s_watermark; /* 0 -> full fetch on first boot */
-    /* max_events left 0 -> server default page cap */
-
-    int plen = lma_proto_req_encode(&req, s_frame + 4, sizeof(s_frame) - 4);
+    req.since_ms = s_watermark;          /* 0 -> full fetch on first boot */
+    int plen = lma_proto_req_encode(&req, s_frame, sizeof(s_frame));
     if (plen < 0) {
         ESP_LOGE(TAG, "request does not fit frame buffer");
         goto out;
     }
 
-    uint32_t n = (uint32_t)plen;
-    s_frame[0] = (uint8_t)(n >> 24);
-    s_frame[1] = (uint8_t)(n >> 16);
-    s_frame[2] = (uint8_t)(n >> 8);
-    s_frame[3] = (uint8_t)n;
-
-    if (!send_all(fd, s_frame, (size_t)4 + (size_t)plen)) {
-        ESP_LOGW(TAG, "send request failed");
+    /* HTTP/2 connection preface + our empty SETTINGS */
+    if (!send_all(fd, (const uint8_t *)H2_PREFACE, H2_PREFACE_LEN) ||
+        !h2_send_frame(fd, 0x4, 0x0, 0, NULL, 0)) {
+        ESP_LOGW(TAG, "h2 handshake write failed");
         goto out;
     }
 
-    uint8_t hdr[4];
-    if (!recv_exact(fd, hdr, 4)) {
-        ESP_LOGW(TAG, "no reply frame header (timeout %u ms)",
-                 (unsigned)RD_TCP_FRAME_TIMEOUT_MS);
-        goto out;
+    bool opened = false;
+    bool done = false;
+    size_t resp = 0;   /* accumulated DATA payloads (gRPC-framed reply) */
+    uint8_t ftype, fflags;
+    uint32_t fstream;
+    size_t flen;
+
+    while (!done) {
+        if (!h2_recv_frame(fd, &ftype, &fflags, &fstream,
+                           sizeof(s_rx), &flen)) {
+            ESP_LOGW(TAG, "h2 frame read failed (timeout %u ms)",
+                     (unsigned)RD_TCP_FRAME_TIMEOUT_MS);
+            goto out;
+        }
+        if (ftype == 0x4 && !(fflags & 0x1)) {          /* server SETTINGS */
+            /* ACK (one-shot on the first server SETTINGS pass) */
+            if (!opened) {
+                if (!h2_send_frame(fd, 0x4, 0x1, 0, NULL, 0) ||
+                    !h2_send_frame(fd, 0x1, 0x4, 1, s_h2, hp)) {
+                    ESP_LOGW(TAG, "h2 request write failed");
+                    goto out;
+                }
+                /* gRPC message: 1B flag(0) + 4B BE length + CalendarRequest */
+                s_rx[0] = 0;
+                s_rx[1] = (uint8_t)((signed)plen >> 24);
+                s_rx[2] = (uint8_t)((signed)plen >> 16);
+                s_rx[3] = (uint8_t)((signed)plen >> 8);
+                s_rx[4] = (uint8_t)(signed)plen;
+                memcpy(s_rx + 5, s_frame, (size_t)plen);
+                if (!h2_send_frame(fd, 0x0, 0x1, 1, s_rx, (size_t)5 + (size_t)plen)) {
+                    ESP_LOGW(TAG, "h2 request DATA failed");
+                    goto out;
+                }
+                opened = true;
+            } else {
+                /* late SETTINGS from a server restart on the same conn */
+                if (!h2_send_frame(fd, 0x4, 0x1, 0, NULL, 0)) {
+                    goto out;
+                }
+            }
+        } else if (ftype == 0x0) {                       /* DATA */
+            if (resp + flen <= sizeof(s_frame)) {
+                memcpy(s_frame + resp, s_rx, flen);
+                resp += flen;
+            } else {
+                ESP_LOGW(TAG, "reply too large (%u bytes)", (unsigned)(resp + flen));
+                goto out;
+            }
+        }
+        /* END_STREAM only exists on HEADERS/DATA frames — bit 0 on a SETTINGS
+         * frame means ACK and must NOT terminate the response read. */
+        if ((ftype == 0x1 || ftype == 0x0) && (fflags & 0x1)) {
+            done = true;
+        }
     }
-    n = ((uint32_t)hdr[0] << 24) | ((uint32_t)hdr[1] << 16) |
-        ((uint32_t)hdr[2] << 8) | (uint32_t)hdr[3];
-    if (n > sizeof(s_frame)) {
-        ESP_LOGW(TAG, "reply frame too large (%u bytes)", (unsigned)n);
-        goto out;
+
+    /* Accumulated DATA = gRPC message framing: [0][u32 len][CalendarBundle] */
+    if (resp >= 5u) {
+        uint32_t mlen = ((uint32_t)s_frame[1] << 24) | ((uint32_t)s_frame[2] << 16) |
+                        ((uint32_t)s_frame[3] << 8) | (uint32_t)s_frame[4];
+        if (s_frame[0] == 0u && (size_t)5 + (size_t)mlen <= resp &&
+            lma_proto_bundle_decode(s_frame + 5, mlen, &s_bundle)) {
+            clock_set(s_bundle.watermark_ms);  /* server epoch-ms as clock base */
+            cache_apply(&s_bundle);
+            ok = true;
+        } else {
+            ESP_LOGE(TAG, "no valid CalendarBundle in gRPC reply (%u bytes)",
+                     (unsigned)resp);
+        }
+    } else {
+        ESP_LOGE(TAG, "empty gRPC reply (%u bytes)", (unsigned)resp);
     }
-    if (!recv_exact(fd, s_frame, n)) {
-        ESP_LOGW(TAG, "short reply payload");
-        goto out;
-    }
-    if (!lma_proto_bundle_decode(s_frame, n, &s_bundle)) {
-        ESP_LOGE(TAG, "corrupt CalendarBundle payload (%u bytes)", (unsigned)n);
-        goto out;
-    }
-    cache_apply(&s_bundle);
-    ok = true;
 
 out:
     close(fd);
@@ -473,8 +623,8 @@ static void draw_right(u8g2_t *u8g2, int right_x, int baseline_y, const char *s)
     u8g2_DrawStr(u8g2, right_x - u8g2_GetStrWidth(u8g2, s), baseline_y, s);
 }
 
-/* 5x8 monospace-ish estimate for the clip length. */
-#define RD_TITLE_CHAR_PX 5
+/* 10x20 monospace-ish estimate for the clip length. */
+#define RD_TITLE_CHAR_PX 10
 
 static void draw_clipped_title(u8g2_t *u8g2, int x, int base, const char *s,
                                int max_px)
@@ -502,38 +652,71 @@ static void draw_clipped_title(u8g2_t *u8g2, int x, int base, const char *s,
     u8g2_DrawStr(u8g2, x, base, tmp);
 }
 
-/* Epoch ms (UTC) -> HH:MM, pure arithmetic (no RTC dependency). */
-static void epoch_ms_to_hhmm(uint64_t epoch_ms, char out[6])
+/* ---- Display clock: derived from the server's epoch-ms watermark, and
+ * advanced by esp_timer so the screen shows a live date/time to the minute.
+ * No RTC/SNTP (esp_sntp is absent from the IDF build image); the server's
+ * CalendarBundle.watermark_ms is the DB clock at sync (~ now). */
+static uint64_t s_epoch_base_ms = 0;    /* 0 = no clock yet (pre-first-sync) */
+static uint64_t s_epoch_base_tick = 0;  /* esp_timer ms when base was set */
+
+static void clock_set(uint64_t utc_ms)
 {
-    uint64_t tod = (epoch_ms / 1000) % 86400;
-    unsigned hh = (unsigned)(tod / 3600);
-    unsigned mm = (unsigned)((tod % 3600) / 60);
-    snprintf(out, 6, "%02u:%02u", hh, mm);
+    s_epoch_base_ms = utc_ms;
+    s_epoch_base_tick = esp_timer_get_time() / 1000;
 }
 
-static void header_date_str(char *out, size_t cap)
+static uint64_t clock_now_ms(void)
 {
-    out[0] = '\0';
-#if RD_SNTP_ENABLED
-    if (esp_sntp_get_sync_status() != SNTP_SYNC_STATUS_COMPLETED) {
-        return;
+    if (s_epoch_base_ms == 0) {
+        return 0;
     }
-    time_t now = time(NULL);
-    struct tm tmv;
-    gmtime_r(&now, &tmv);
-    if (strftime(out, cap, "%Y-%m-%d", &tmv) == 0) {
-        out[0] = '\0';
-    }
-#endif
+    return s_epoch_base_ms +
+           (esp_timer_get_time() / 1000 - s_epoch_base_tick);
 }
 
-/* "pic" is just an icon-pack key; draw a 16x16 placeholder box + glyph. */
+/* Epoch ms (UTC) -> local Y/M/D hh:mm, applying tz_min minutes east of UTC.
+ * Civil-from-days conversion, pure arithmetic, no libc tm required. */
+static void utc_ms_to_dt(uint64_t ms, int tz_min, int *yr, int *mo, int *dy,
+                         int *hh, int *mm)
+{
+    int64_t s = (int64_t)(ms / 1000) + (int64_t)tz_min * 60;
+    int64_t days = s / 86400;
+    int64_t tod = s % 86400;
+    if (tod < 0) {
+        tod += 86400;
+        days--;
+    }
+    int64_t z = days + 719468;
+    int64_t era = (z >= 0 ? z : z - 146096) / 146097;
+    unsigned doe = (unsigned)(z - era * 146097);
+    unsigned yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    int yy = (int)yoe + (int)(era * 400);
+    unsigned doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    unsigned mp = (5 * doy + 2) / 153;
+    unsigned dd = doy - (153 * mp + 2) / 5 + 1;
+    unsigned moo = mp + (mp < 10 ? 3 : -9);
+    yy += (moo <= 2) ? 1 : 0;
+    *yr = yy;
+    *mo = (int)moo;
+    *dy = (int)dd;
+    *hh = (int)(tod / 3600);
+    *mm = (int)((tod % 3600) / 60);
+}
+
+/* "%04d-%02d-%02d  %02d:%02d" into out (cap >= 24). */
+static void utc_ms_to_datetime(uint64_t ms, int tz_min, char *out, size_t cap)
+{
+    int y, mo, d, hh, mm;
+    utc_ms_to_dt(ms, tz_min, &y, &mo, &d, &hh, &mm);
+    snprintf(out, cap, "%04d-%02d-%02d  %02d:%02d", y, mo, d, hh, mm);
+}
+
+/* "pic" is just an icon-pack key; until real icon bitmaps are rendered,
+ * draw a clean (un-credited) image slot box.  No fake glyph — an event with
+ * no pic data just gets a tidy empty box. */
 static void draw_pic_placeholder(u8g2_t *u8g2, int x, int y, int sz)
 {
     u8g2_DrawFrame(u8g2, x, y, sz, sz);
-    u8g2_DrawCircle(u8g2, x + sz / 2, y + sz / 2, sz / 4, U8G2_DRAW_ALL);
-    u8g2_DrawLine(u8g2, x, y, x + sz - 1, y + sz - 1);
-    u8g2_DrawLine(u8g2, x + sz - 1, y, x, y + sz - 1);
 }
 
 typedef enum {
@@ -548,18 +731,23 @@ static void render_screen(rd_state_t state)
     int W = u8g2_GetDisplayWidth(u8g2);
     int H = u8g2_GetDisplayHeight(u8g2);
 
+    /* Invert: clear fills black; paint the whole panel white, then draw all
+     * content in black -> white background, black text. */
     u8g2_ClearBuffer(u8g2);
     u8g2_SetDrawColor(u8g2, 1);
+    u8g2_DrawBox(u8g2, 0, 0, W, H);
+    u8g2_SetDrawColor(u8g2, 0);
 
-    /* header: "family calendar" + (optional) SNTP date on the right */
-    u8g2_SetFont(u8g2, u8g2_font_10x20_tf);
-    char date[16];
-    header_date_str(date, sizeof(date));
-    if (date[0] != '\0') {
-        draw_right(u8g2, W - 6, 24, date);
+    /* header: only the live date/time (title line removed) */
+    int y, mo, d, hh, mm;
+    char line[32];
+    uint64_t now = clock_now_ms();
+    if (now != 0) {
+        u8g2_SetFont(u8g2, u8g2_font_10x20_tf);
+        utc_ms_to_datetime(now, RD_TZ_OFFSET_MINUTES, line, sizeof(line));
+        draw_centered(u8g2, 24, line);
     }
-    draw_centered(u8g2, 24, "family calendar");
-    u8g2_DrawHLine(u8g2, 4, 34, W - 8);
+    u8g2_DrawHLine(u8g2, 4, 40, W - 8);
 
     if (s_cache_count == 0) {
         const char *msg = (state == RD_STATE_OFFLINE) ? "no wifi  :  offline"
@@ -570,42 +758,49 @@ static void render_screen(rd_state_t state)
         return;
     }
 
-    u8g2_SetFont(u8g2, u8g2_font_5x8_tf);
+    u8g2_SetFont(u8g2, u8g2_font_10x20_tf);
 
-    /* small status hint under the rule when data is not fresh */
+    /* small status hint above the first row when data is not fresh */
     if (state == RD_STATE_STALE) {
-        draw_right(u8g2, W - 6, 41, "stale");
+        draw_right(u8g2, W - 6, 50, "stale");
     } else if (state == RD_STATE_OFFLINE) {
-        draw_right(u8g2, W - 6, 41, "no wifi");
+        draw_right(u8g2, W - 6, 50, "no wifi");
     }
 
-    const int row_top = 50;
-    const int row_stride = 22;
+    const int row_top = 58;
+    const int row_stride = 46;
     const int box_x = 6;
-    const int box_sz = 16;
-    const int time_w = 5 * 5 + 4;    /* "HH:MM" at 5px/char + margin */
-    const int title_x = box_x + box_sz + 6;
+    const int box_sz = (int)LMA_PB_PIC_TILE; /* 32 — matches the served tile */
+    const int title_x = box_x + box_sz + 8;
+    const int time_w = 5 * 10 + 6;   /* "HH:MM" at 10px/char + margin */
 
-    int y = row_top;
+    int yy = row_top;
     size_t visible = 0;
     for (size_t i = 0; i < s_cache_count; i++) {
-        if (y + row_stride > H) {
+        if (yy + row_stride > H) {
             break; /* rest of the day is off-screen; split is fine for v1 */
         }
         const lma_cal_event_t *ev = &s_cache[i];
 
-        if (ev->pic[0] != '\0') {
-            draw_pic_placeholder(u8g2, box_x, y, box_sz);
+        /* icon slot: render the served 1-bit tile when present, else a clean
+         * empty box (no fake glyph). */
+        if (ev->pic_data_len == LMA_PB_PIC_TILE_BYTES) {
+            u8g2_DrawXBM(u8g2, box_x, yy, LMA_PB_PIC_TILE, LMA_PB_PIC_TILE,
+                         ev->pic_data);
+        } else {
+            draw_pic_placeholder(u8g2, box_x, yy, box_sz);
         }
 
-        char hhmm[6];
-        epoch_ms_to_hhmm(ev->start_ms, hhmm);
-        draw_right(u8g2, W - 6, y + 12, hhmm);
+        char hhmm[8];
+        utc_ms_to_dt(ev->start_ms, RD_TZ_OFFSET_MINUTES, &y, &mo, &d,
+                     &hh, &mm);
+        snprintf(hhmm, sizeof(hhmm), "%02d:%02d", hh, mm);
+        draw_right(u8g2, W - 6, yy + 20, hhmm);
 
         int avail = (W - 6) - title_x - time_w;
-        draw_clipped_title(u8g2, title_x, y + 12, ev->title, avail);
+        draw_clipped_title(u8g2, title_x, yy + 20, ev->title, avail);
 
-        y += row_stride;
+        yy += row_stride;
         visible++;
     }
 
@@ -614,18 +809,29 @@ static void render_screen(rd_state_t state)
              (unsigned)s_cache_count);
 }
 
-/* ------------------------------------------------------------------ sleep */
+/* ------------------------------------------------------------------ hold */
 
-static void sleep_until_next_sync(void)
+static void hold_until_next_sync(rd_state_t state)
 {
     if (s_wifi_started) {
         s_wifi_started = false; /* stop the disconnect-retry handler first */
         esp_wifi_disconnect();
         esp_wifi_stop();
     }
-    esp_sleep_enable_timer_wakeup((uint64_t)RD_SYNC_INTERVAL_SECONDS * 1000000ULL);
-    ESP_LOGI(TAG, "light sleep for %u s", (unsigned)RD_SYNC_INTERVAL_SECONDS);
-    esp_light_sleep_start();
+    /* Reflective ST7305 loses its image when the ESP32 light-sleeps the
+       display power ("screen went blank"), so stay in active mode and let the
+       RLCD keep the last rendered frame visible until the next sync.  Redraw
+       every 30 s so the header date/time stays live (clock advances via
+       esp_timer). */
+    ESP_LOGI(TAG, "holding screen %u s (no light-sleep)",
+             (unsigned)RD_SYNC_INTERVAL_SECONDS);
+    uint32_t left_ms = (uint32_t)RD_SYNC_INTERVAL_SECONDS * 1000u;
+    while (left_ms > 0) {
+        uint32_t chunk = left_ms > 30000u ? 30000u : left_ms;
+        vTaskDelay(pdMS_TO_TICKS(chunk));
+        left_ms -= chunk;
+        render_screen(state);
+    }
 }
 
 /* ------------------------------------------------------------------ entry */
@@ -664,6 +870,6 @@ void robodog_app_main(void)
             state = RD_STATE_OFFLINE;
         }
         render_screen(state);
-        sleep_until_next_sync();
+        hold_until_next_sync(state);
     }
 }
