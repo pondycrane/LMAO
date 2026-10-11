@@ -28,7 +28,6 @@
 #include "esp_event.h"
 #include "esp_wifi.h"
 #include "esp_netif.h"
-#include "esp_sntp.h"
 #include "esp_sleep.h"
 #include "nvs_flash.h"
 #include "nvs.h"
@@ -264,10 +263,16 @@ static void wifi_init(void)
 {
     s_wifi_evt = xEventGroupCreate();
 
-    ESP_ERROR_CHECK(esp_netif_create_default_wifi_sta());
-
     wifi_init_config_t wic = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&wic));
+    /* create_default_wifi_sta() AFTER esp_wifi_init(); it returns esp_netif_t*
+       (NULL on failure), not esp_err_t, so it must NOT go through
+       ESP_ERROR_CHECK — check for NULL instead. */
+    esp_netif_t *sta = esp_netif_create_default_wifi_sta();
+    if (sta == NULL) {
+        ESP_LOGE(TAG, "create_default_wifi_sta failed");
+        abort();
+    }
 
     ESP_ERROR_CHECK(esp_event_handler_instance_register(
         WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_event_handler, NULL, NULL));
@@ -304,7 +309,7 @@ static bool wifi_connect(void)
 
 static void sntp_sync(void)
 {
-#if RD_SNTP_SERVER[0] != '\0'
+#if RD_SNTP_ENABLED
     if (esp_sntp_get_sync_status() == SNTP_SYNC_STATUS_COMPLETED) {
         return;
     }
@@ -509,7 +514,7 @@ static void epoch_ms_to_hhmm(uint64_t epoch_ms, char out[6])
 static void header_date_str(char *out, size_t cap)
 {
     out[0] = '\0';
-#if RD_SNTP_SERVER[0] != '\0'
+#if RD_SNTP_ENABLED
     if (esp_sntp_get_sync_status() != SNTP_SYNC_STATUS_COMPLETED) {
         return;
     }
@@ -526,7 +531,7 @@ static void header_date_str(char *out, size_t cap)
 static void draw_pic_placeholder(u8g2_t *u8g2, int x, int y, int sz)
 {
     u8g2_DrawFrame(u8g2, x, y, sz, sz);
-    u8g2_DrawCircle(u8g2, x + sz / 2, y + sz / 2, sz / 4);
+    u8g2_DrawCircle(u8g2, x + sz / 2, y + sz / 2, sz / 4, U8G2_DRAW_ALL);
     u8g2_DrawLine(u8g2, x, y, x + sz - 1, y + sz - 1);
     u8g2_DrawLine(u8g2, x + sz - 1, y, x, y + sz - 1);
 }
