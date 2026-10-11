@@ -1,0 +1,6 @@
+# gitignore private build secrets + IDF build artifacts for the RoboDog firmware
+/local_secrets.h
+/build/
+/sdkconfig
+/managed_components/
+/dependencies.lock

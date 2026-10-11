@@ -11,8 +11,8 @@ idf_component_register(
         esp_wifi
         esp_netif
         esp_event
-        esp_sntp
-        esp_sleep
+        esp_hw_support
+        esp_pm
         lwip
         u8g2_st7305
 )
