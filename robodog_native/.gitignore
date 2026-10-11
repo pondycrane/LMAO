@@ -4,3 +4,4 @@
 /sdkconfig
 /managed_components/
 /dependencies.lock
+/components/u8g2/
