@@ -39,11 +39,13 @@
 #define RD_WIFI_PASS_DEFAULT ""
 #endif
 
-/* ---- LMAO calendar TCP service (lma_core/calendar_tcp_api.py) ---- */
+/* ---- LMAO calendar sync (synchronous gRPC GetCalendar on the lmao server) ---- */
 #ifndef RD_SERVER_HOST_DEFAULT
 #define RD_SERVER_HOST_DEFAULT "192.168.50.67"
 #endif
-#define RD_CAL_TCP_PORT        4247u
+#ifndef RD_CAL_GRPC_PORT
+#define RD_CAL_GRPC_PORT       50051u /* lma.LMAO.GetCalendar (gRPC) on 50051 */
+#endif
 /* Server-side live calendar id; empty request == server default "family". */
 #define RD_CALENDAR_ID         "family"
 
@@ -55,10 +57,19 @@
 #endif
 
 /* ---- Timing / robustness ---- */
-#define RD_SYNC_INTERVAL_SECONDS   1800u /* light-sleep between syncs */
+#define RD_SYNC_INTERVAL_SECONDS   1800u /* active hold between syncs */
 #define RD_WIFI_CONNECT_TIMEOUT_S  15u
 #define RD_TCP_CONNECT_TIMEOUT_MS  5000
 #define RD_TCP_FRAME_TIMEOUT_MS    5000
+/* Display clock/calendar timezone: minutes east of UTC.
+ * . -240 = US Eastern Daylight (EDT, spring/summer) — correct now
+ * . -300 = US Eastern Standard (EST, winter)
+ * The device has no RTC/SNTP (esp_sntp absent from the IDF image), so the
+ * clock is derived from the server's epoch-ms watermark and shown in this
+ * offset.  Adjust when DST changes. */
+#ifndef RD_TZ_OFFSET_MINUTES
+#define RD_TZ_OFFSET_MINUTES (-240)
+#endif
 #define RD_SNTP_WAIT_MAX_MS        3000u
 
 #endif /* ROBODOG_CONFIG_H */

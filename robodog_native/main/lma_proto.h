@@ -46,6 +46,12 @@ extern "C" {
 #define LMA_PB_EV_END     5u /* CalEvent.end_ms   varint uint64   */
 #define LMA_PB_EV_DELETED 6u /* CalEvent.deleted  varint bool     */
 #define LMA_PB_EV_PIC     7u /* CalEvent.pic      string          */
+#define LMA_PB_EV_PICDATA 8u /* CalEvent.pic_data bytes (1bpp tile) */
+
+/* RLCD row-icon tile contract (see lma_core/calendar_pics.py): 32x32 1-bit,
+ * row-major, MSB first, bit 1 = ink.  128 bytes. */
+#define LMA_PB_PIC_TILE       32u
+#define LMA_PB_PIC_TILE_BYTES (LMA_PB_PIC_TILE * LMA_PB_PIC_TILE / 8u)
 
 /* Fixed-buffer sizes (character byte caps, NUL not counted in these macros). */
 #define LMA_PB_CAL_ID_MAX    31u
@@ -78,6 +84,8 @@ typedef struct {
     uint64_t end_ms;      /* epoch ms UTC */
     bool deleted;         /* tombstone: client must drop this uid */
     char pic[LMA_PB_EVENT_PIC_MAX + 1]; /* icon-pack key, "" = none */
+    uint8_t pic_data[LMA_PB_PIC_TILE_BYTES]; /* 1bpp 32x32 tile from server */
+    size_t pic_data_len;  /* 0 = no tile served */
 } lma_cal_event_t;
 
 typedef struct {

@@ -13,6 +13,7 @@ idf_component_register(
         esp_event
         esp_hw_support
         esp_pm
+        esp_timer
         lwip
         u8g2_st7305
 )
