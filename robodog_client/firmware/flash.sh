@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# Flash the RoboDog native firmware to the Waveshare ESP32-S3 RLCD-4.2
-# (USB-Serial-JTAG /dev/ttyACM0) via the ESP-IDF Docker image — mirrors
-# build.sh's staging.
+# Flash the RoboDog LVGL firmware to the Waveshare ESP32-S3 RLCD-4.2.
+#
+# IMPORTANT: this runs esptool on the HOST, not in Docker — same reason as
+# robodog_native/flash.sh: Docker's ttyACM passthrough drops the RTS/DTR
+# modem-control ioctls (EPROTO on open), which breaks esptool's button-free
+# reset into download mode.  Requires host `python3 -m esptool`.
 #
 # Use from Bazel:
-#   bazel run //robodog_client:flash_firmware
-#   bazel run //robodog_client:flash_firmware -- --port /dev/ttyACM0
+#   bazel run //robodog_client:flash_firmware [-- --port /dev/ttyACM1]
 set -euo pipefail
 
 if [ -n "${BUILD_WORKSPACE_DIRECTORY:-}" ]; then
@@ -13,33 +15,27 @@ if [ -n "${BUILD_WORKSPACE_DIRECTORY:-}" ]; then
 else
     APP="$(cd "$(dirname "$0")" && pwd)"
 fi
-RTR="$(dirname "$APP")/.rtreticulum"
-SPROUT_RTR="$(cd "$APP/../../smart_irrigation/native-client" 2>/dev/null && pwd)/.rtreticulum"
-if [ -n "${RTRETICULUM_ROOT:-}" ]; then
-    RTR="$RTRETICULUM_ROOT"
-elif [ -d "$SPROUT_RTR" ]; then
-    RTR="$SPROUT_RTR"
-fi
-IDF_IMG="${IDF_IMG:-espressif/idf:v5.3.1}"
+PARENT="$(dirname "$APP")"
+RTR="${RTRETICULUM_ROOT:-$PARENT/.rtreticulum}"
+SPROUT_RTR="$(cd "$PARENT/smart_irrigation/native-client" 2>/dev/null && pwd)/.rtreticulum"
+[ -n "${RTRETICULUM_ROOT:-}" ] || { [ -d "$SPROUT_RTR" ] && RTR="$SPROUT_RTR"; }
+BUILD_DIR="$RTR/firmware/robodog/build"
 
-PORT="${FLASH_PORT:-/dev/ttyACM0}"
-# USB-Serial-JTAG is reliable at 921600.
-BAUD="${FLASH_BAUD:-921600}"
-# Accept `--port X [--baud Y]` style args too.
-if [ "${1:-}" = "--port" ] && [ -n "${2:-}" ]; then
-    PORT="$2"
-    shift 2 || true
-fi
-if [ "${1:-}" = "--baud" ] && [ -n "${2:-}" ]; then
-    BAUD="$2"
-fi
-
-if [ ! -f "$RTR/firmware/robodog/build/robodog_native.bin" ]; then
-    echo "No built image at $RTR/firmware/robodog/build/robodog_native.bin — run :build_firmware first" >&2
+if ! python3 -c "import esptool" >/dev/null 2>&1; then
+    echo "host esptool is required (button-free reset can't run in Docker):" >&2
+    echo "  python3 -m pip install --target=\$HOME/.local/lib python esptool" >&2
     exit 1
 fi
 
-echo "Flashing RoboDog native firmware to $PORT @ $BAUD baud ..."
-exec docker run --rm -v "$RTR:/repo" --device "$PORT:/dev/ttyACM0" \
-    -w /repo/firmware/robodog -e IDF_TARGET=esp32s3 "$IDF_IMG" \
-    bash -lc "idf.py -p /dev/ttyACM0 -b $BAUD flash"
+PORT="${FLASH_PORT:-/dev/ttyACM1}"
+BAUD="${FLASH_BAUD:-460800}"
+if [ "${1:-}" = "--port" ] && [ -n "${2:-}" ]; then PORT="$2"; shift 2 || true; fi
+if [ ! -f "$BUILD_DIR/robodog_native.bin" ]; then
+    echo "No built image at $BUILD_DIR/robodog_native.bin — run :build_firmware first" >&2
+    exit 1
+fi
+
+echo "Flashing RoboDog LVGL firmware to $PORT @ $BAUD baud (host esptool) ..."
+cd "$BUILD_DIR"
+exec python3 -m esptool --chip esp32s3 -p "$PORT" -b "$BAUD" \
+    --before default_reset --after hard_reset write_flash @flash_args
