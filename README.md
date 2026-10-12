@@ -566,12 +566,13 @@ mirroring the Cardputer's split (MicroPython default, native opt-in):
 
 | Runtime | Stack | Notes |
 |---|---|---|
-| **Default** | MicroPython (`robodog_client/*.py`, urns µReticulum) | RNS-TCP to the server on :4246 — no LoRa — with an LXMF calendar request (`LMAOEnvelope{ request.calendar }` → `CalendarBundle`); renders 1-bit B&W on the RLCD. Unchanged, field-proven path. |
-| **Opt-in** `--native-robodog` | Native ESP-IDF firmware (`robodog_client/firmware/`) | Same data path via the shared RTReticulum native stack (`firmware_common/`); **LVGL 9 declarative XML + subjects UI** (below). |
+| **Stable (current board build)** | Native ESP-IDF (`robodog_native/`, u8g2) | gRPC `GetCalendar` client over framed TCP (`:4247`) + RLCD UI with real icons. Flashed via its **dedicated** targets `//robodog_native:{build_firmware,flash_firmware}` (see below). |
+| MicroPython (new in #239) | `robodog_client/*.py`, urns µReticulum | RNS-TCP to the server on :4246 with an LXMF calendar request (`LMAOEnvelope{ request.calendar }` → `CalendarBundle`); own 1-bit renderer. Flashed via `install_all --robodog-port`. |
+| **LVGL opt-in** `--native-robodog` | Native ESP-IDF firmware (`robodog_client/firmware/`) | Same data path via the shared RTReticulum native stack (`firmware_common/`); **LVGL 9 declarative XML + subjects UI** (below). Flashed via `install_all --native-robodog` or the dedicated `//robodog_client:{build_firmware,flash_firmware}` targets. |
 
 ```
-RoboDog (WiFi STA) ──RNS/LXMF (TCP :4246)──▶ server TCPServerInterface
-LMAOEnvelope{ request.calendar } ──▶ CalendarBundle reply ──▶ ST7305 render
+Stable:  robodog_native ──framed-TCP gRPC GetCalendar (:4247)──▶ lmao-server   [removed server-side in #239]
+New:     any client ──RNS/LXMF (TCP :4246)──▶ CalendarBundle reply ──▶ ST7305 render
 ```
 
 #### Native LVGL firmware (opt-in)
@@ -602,16 +603,26 @@ Hardware mapping (from the Waveshare ESP-IDF example):
 | ST7305 SPI | DC=5, CS=40, SCK=11, MOSI=12, RST=41, TE=6 |
 | I2C (SHTC3 + PCF85063 RTC) | SDA=13, SCL=14 |
 
-Flash (adds the RoboDog as a device in `install_all`; `--native-robodog`
-switches the runtime — the native path builds with the ESP-IDF Docker
-toolchain and flashes with `idf.py`, so the board needs no MicroPython):
+Flash — **each runtime has its own flash command**, no single install entry
+owns the board:
 
 ```bash
-# Default (MicroPython client):
+# 1. Stable board build today (robodog_native, ESP-IDF):
+bazel run //robodog_native:build_firmware
+bazel run //robodog_native:flash_firmware [-- --port /dev/ttyACM1]
+# ⚠ Both flash scripts run esptool on the HOST, not in Docker: Docker's
+#   ttyACM passthrough drops RTS/DTR, breaking esptool's button-free reset
+#   (EPROTO on open).
+
+# 2. MicroPython client (new in #239):
 bazel run //tools:install_all -- --robodog-port /dev/ttyACM1 \
     --wifi-ssid <ssid> --wifi-pass <pass> --server-host 192.168.50.67 \
     --robodog-name kitchen-cal
-# Opt-in (native LVGL firmware): add --native-robodog to the same command.
+
+# 3. LVGL opt-in firmware (new in #239):
+bazel run //tools:install_all -- --robodog-port ... --native-robodog   # or
+bazel run //robodog_client:build_firmware
+bazel run //robodog_client:flash_firmware [-- --port /dev/ttyACM1]
 ```
 
 - `--robodog-port` is required (no auto-detect for this board);
@@ -646,6 +657,12 @@ bazel run //robodog_client/firmware/tests:calendar_fetch -- 192.168.50.67 4246
 ```
 
 Notes / status:
+- **Deploy warning:** this PR (in its staged server-side baseline) *removes*
+  the server's `:4247` framed-TCP calendar service and the gRPC
+  `GetCalendar` RPC. The stable `robodog_native` client reads its calendar
+  over exactly that endpoint — deploying this server as-is leaves the
+  stable board on its cached/offline render until it is re-flashed onto one
+  of the new runtimes (or the server-side read path is reinstated).
 - The native **request path is verified live** through the deployed server
   (SLIP-framed TCP, announce decode, LXMF request; server logged
   `Calendar reply sent (2 events, watermark ...)` + `DeliveryAck sent`).
