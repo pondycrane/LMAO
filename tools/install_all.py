@@ -866,13 +866,17 @@ def _flash_robodog_native(port: str, result: DeviceResult, src_root: str,
                    wifi_ssid: str | None = None,
                    wifi_pass: str | None = None,
                    device_name: str | None = None) -> None:
-    """Build + flash the native ESP-IDF/LVGL RoboDog firmware.
+    """Build + flash the native ESP-IDF/LVGL RoboDog firmware (button-free).
 
     The firmware lives in robodog_client/firmware/ (LVGL 9 declarative
     XML + subjects UI on the ST7305 RLCD; calendar fetch over RNS-TCP via the
     shared RTReticulum native stack).  build.sh stages the app into the shared
-    RTReticulum checkout and runs the ESP-IDF Docker build; flash.sh runs
-    ``idf.py flash`` on *port*.
+    RTReticulum checkout and runs the ESP-IDF toolchain in Docker; flash.sh
+    runs **esptool on the HOST** because Docker's ttyACM passthrough drops
+    RTS/DTR and breaks esptool's button-free reset into download mode
+    (EPROTO on open) — the same rule as robodog_native/flash.sh.  This check
+    fails fast here so the flash step can never silently fall back to a
+    Docker flash.
 
     DEST_HASH / RNS-TCP server host / WiFi are baked in at build time via
     LMAO_* env vars (the source tree is never modified), mirroring the native
@@ -880,10 +884,23 @@ def _flash_robodog_native(port: str, result: DeviceResult, src_root: str,
     (LMAO_NODE_IDENTITY_HEX — the named or canonical client identity), so the
     board keeps one lxmf/delivery hash across re-flashes.
 
-    Requires: Docker (espressif/idf:v5.3.1) on the host.  Unlike the old
-    MicroPython client the board needs no pre-installed runtime — idf.py
-    flashes the bare chip in download mode."""
+    Requires: Docker (espressif/idf:v5.3.1) for the build and HOST
+    `python3 -m esptool` for the button-free flash.  Unlike the old
+    MicroPython client the board needs no pre-installed runtime."""
     import subprocess
+
+    # Authoritative invariant: the RoboDog ESP-IDF board is flashed
+    # button-free, which only works with host esptool (RTS/DTR).  Bail out
+    # BEFORE the (long) Docker build if the flash tool is missing.
+    flash_check = subprocess.run(
+        ["python3", "-c", "import esptool"], text=True,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    if flash_check.returncode != 0:
+        result.fail("Host esptool missing — button-free RoboDog flash needs it")
+        print("  FAIL: host esptool is required (button-free reset can't run "
+              "in Docker — RTS/DTR breaks through Docker ttyACM passthrough)")
+        print("    fix: python3 -m pip install --target=$HOME/.local/lib python esptool")
+        return
 
     firmware_dir = os.path.join(src_root, "firmware")
     build_sh = os.path.join(firmware_dir, "build.sh")
