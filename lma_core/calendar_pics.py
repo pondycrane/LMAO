@@ -165,8 +165,8 @@ SELECT pic_key, width, height, mime, bytes, tile_1bpp, created_ms, updated_ms
 FROM cal_pics WHERE pic_key = %s
 """
 
-# RLCD row-icon tile contract shared with robodog_native (lma_proto.h) and the
-# server (CalEvent.pic_data = field 8).  32x32, row-major, MSB-first, 1 = ink.
+# RLCD row-icon tile contract shared with the RoboDog client (CalEvent.pic_data
+# = field 8) and the server.  32x32, row-major, MSB-first, 1 = ink.
 TILE_W = 32
 TILE_H = 32
 TILE_1BPP_SIZE = (TILE_W * TILE_H + 7) // 8  # 128

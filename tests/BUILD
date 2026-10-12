@@ -301,12 +301,12 @@ py_test(
 )
 
 py_test(
-    name = "test_calendar_tcp_api",
-    srcs = ["test_calendar_tcp_api.py"],
+    name = "test_robodog_calendar_fetch",
+    srcs = ["test_robodog_calendar_fetch.py"],
     deps = [
-        "//lma_core",
+        "//cardputer_client/proto:lma_encoder",
+        "//robodog_client",
         "@lmao_pip//pytest",
-        "@lmao_pip//pytest_asyncio",
     ],
 )
 

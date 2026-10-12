@@ -27,7 +27,7 @@ import time
 
 from google.protobuf.message import DecodeError
 
-from lma_core import CalendarBundle, LMAOEnvelope
+from lma_core import LMAOEnvelope
 from lma_core.calendar_pg import CalendarStore, open_calendar_store
 from lma_core.calendar_pics import open_pic_store
 from lma_core.contact_book import ContactBook
@@ -893,43 +893,6 @@ if GRPC_AVAILABLE:
                 node_name="lmao-server",
             )
 
-        async def GetCalendar(self, request, context):
-            """Synchronous family-calendar read (Postgres-backed).
-
-            Direct RPC — no LXMF round-trip.  Used by the non-RNS RoboDog
-            RLCD display, which polls this once per sync window and renders a
-            CalendarBundle.  Mirrors the env.request.calendar LXMF path.
-            """
-            store = CALENDAR
-            if store is None:
-                await context.abort(grpc.StatusCode.UNAVAILABLE,
-                                    "Calendar store not available")
-            try:
-                events, watermark = store.sync(
-                    calendar_id=request.calendar_id or "family",
-                    since_ms=request.since_ms,
-                    max_events=request.max_events,
-                )
-            except Exception as e:
-                logger.error("GetCalendar sync failed: %s", e, exc_info=True)
-                await context.abort(grpc.StatusCode.INTERNAL,
-                                    f"Calendar sync failed: {e}")
-            bundle = CalendarBundle()
-            bundle.format = 1
-            bundle.calendar_id = request.calendar_id or "family"
-            for ev in events:
-                entry = bundle.events.add()
-                entry.uid = ev["uid"]
-                entry.title = ev["title"]
-                entry.notes = ev["notes"]
-                entry.start_ms = ev["start_ms"]
-                entry.end_ms = ev["end_ms"]
-                entry.deleted = ev["deleted"]
-                entry.pic = ev["pic"]
-                _fill_pic_data(PIC_STORE, ev["pic"], entry)
-            bundle.watermark_ms = watermark
-            return bundle
-
 
 else:
 
@@ -1112,23 +1075,6 @@ async def async_main():
         except Exception as e:
             logger.warning("Contacts API unavailable (%s)", e)
 
-    # ── Calendar TCP read service (RoboDog native client, no RNS) ────
-    # Framed-TCP CalendarRequest/CalendarBundle read on LMAO_CAL_TCP_PORT so
-    # the ESP-IDF display can pull the family calendar from the LAN with a
-    # plain socket (no RNS/LXMF/HTTP).  Started only when the Postgres store is
-    # up; mirrors the same CalendarStore the RNS path reads.
-    cal_tcp_server = None
-    if CALENDAR is not None:
-        try:
-            from lma_core.calendar_tcp_api import start_calendar_tcp_server
-
-            cal_tcp_server = await start_calendar_tcp_server(
-                CALENDAR,
-                port=int(os.environ.get("LMAO_CAL_TCP_PORT", "4247")),
-            )
-        except Exception as e:
-            logger.warning("Calendar TCP read service unavailable (%s)", e)
-
     # Keep running until interrupted.  Discovery is on-demand: the server
     # answers client path requests (rns_init leaf-node patch) rather than
     # re-announcing periodically (issue #142 — no announce task to track).
@@ -1149,10 +1095,6 @@ async def async_main():
                 await contacts_runner.cleanup()
             except Exception:
                 pass
-        if cal_tcp_server is not None:
-            cal_tcp_server.close()
-            with contextlib.suppress(Exception):
-                await cal_tcp_server.wait_closed()
         if lmao_server:
             lmao_server.clear_grpc_subscribers()
             lmao_server._nats_queue = None  # Prevent new NATS publish attempts during shutdown
