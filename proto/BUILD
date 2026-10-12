@@ -21,6 +21,7 @@ proto_library(
     name = "lma_grpc_proto",
     srcs = ["lma_grpc.proto"],
     visibility = ["//visibility:public"],
+    deps = [":lma_messages_proto"],
 )
 
 py_proto_library(

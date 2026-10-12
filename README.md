@@ -557,29 +557,43 @@ title rows — generated and stored in Postgres (`cal_pics` table) by the
 `.archon/skills/line-drawing/SKILL.md`) via `bazel run //tools:calendar_pics --
 --key <key>`. The client resolves the key to the stored tile for display.
 
-### 7d. RoboDog — RLCD family-calendar display client (native, no RNS)
+### 7d. RoboDog — RLCD family-calendar display client
 
-**RoboDog** is the LMAO family-calendar *display* client — a
+**RoboDog** is the LMAO family-calendar *display* client: a
 [Waveshare ESP32-S3 RLCD-4.2](https://docs.waveshare.com/wiki/ESP32-S3-RLCD-4.2)
-(4.2" 300×400 reflective **ST7305** LCD, ESP32-S3 N16R8). It deliberately uses
-the board's **factory stack** (native ESP-IDF, vendor ST7305 drivers — no
-MicroPython) and **skips RNS/LXMF entirely**: it connects to the game server
-over WiFi and reads the calendar straight from a small **framed-TCP** service
-(`LMAO_CAL_TCP_PORT`, default **4247**, hostNetwork on the node IP) that the
-server side already runs:
+(4.2" 300×400 reflective **ST7305** LCD, ESP32-S3 N16R8). It has two runtimes,
+mirroring the Cardputer's split (MicroPython default, native opt-in):
+
+| Runtime | Stack | Notes |
+|---|---|---|
+| **Default** | MicroPython (`robodog_client/*.py`, urns µReticulum) | RNS-TCP to the server on :4246 — no LoRa — with an LXMF calendar request (`LMAOEnvelope{ request.calendar }` → `CalendarBundle`); renders 1-bit B&W on the RLCD. Unchanged, field-proven path. |
+| **Opt-in** `--native-robodog` | Native ESP-IDF firmware (`robodog_client/firmware/`) | Same data path via the shared RTReticulum native stack (`firmware_common/`); **LVGL 9 declarative XML + subjects UI** (below). |
 
 ```
-client ──[4-byte BE length]──▶[CalendarRequest protobuf]──▶ server
-server ──[4-byte BE length]──▶[CalendarBundle protobuf]──▶ client
+RoboDog (WiFi STA) ──RNS/LXMF (TCP :4246)──▶ server TCPServerInterface
+LMAOEnvelope{ request.calendar } ──▶ CalendarBundle reply ──▶ ST7305 render
 ```
 
-The wire reuses the same `CalendarRequest`/`CalendarBundle`/`CalEvent` messages
-as the RNS path (so the data shape is identical), but framing is plain
-length-prefixing over a lwIP socket — no HTTP/2, no gRPC, no RNS identity/path
-discovery.  `since_ms` = the last `watermark_ms` the device saw → the server
-replies with a small delta; the device merges into its cached list and stores
-the watermark (NVS/microSD).  Trust = the family LAN (no auth, same as the
-contacts/query APIs).
+#### Native LVGL firmware (opt-in)
+
+The native client's UI is **LVGL 9 declarative XML + subjects** — data-bound,
+React-style: `main/ui_xml/calendar_screen.xml` declares the whole screen
+(header band + 6 event rows) as an LVGL XML component whose labels and row
+visibility bind to **subjects** (`header_text`, `status_text`,
+`row{0..5}_{title,time,present,pic}`) over LVGL's observer system. The app
+never touches widgets directly — it pokes subjects
+(`calendar_ui::set_header/set_offline/set_events`) and LVGL re-renders.
+Event selection/formatting lives in the pure-C++ `calendar_model` (host-tested
+port of the MicroPython renderer's semantics). LVGL is fetched from the ESP
+component registry (`main/idf_component.yml`, `lvgl/lvgl >=9.3,<9.4` — never
+vendored) and drives the ST7305 through `st7305_disp` (`LV_COLOR_FORMAT_I1`,
+one static full-screen buffer, full-frame push per flush — the RLCD holds the
+image without a refresh).
+
+`since_ms` = the last `watermark_ms` the client saw → the server replies with
+the incremental delta; events merge by `uid` (tombstones remove), and the
+last raw reply + watermark cache in NVS, so the panel boots with yesterday's
+calendar (marked `OFFLINE`) while WiFi is down.
 
 Hardware mapping (from the Waveshare ESP-IDF example):
 
@@ -587,22 +601,63 @@ Hardware mapping (from the Waveshare ESP-IDF example):
 |---|---|
 | ST7305 SPI | DC=5, CS=40, SCK=11, MOSI=12, RST=41, TE=6 |
 | I2C (SHTC3 + PCF85063 RTC) | SDA=13, SCL=14 |
-| microSD | SDMMC (optional) |
 
-Flash (`robodog_native/` — an ESP-IDF project):
+Flash (adds the RoboDog as a device in `install_all`; `--native-robodog`
+switches the runtime — the native path builds with the ESP-IDF Docker
+toolchain and flashes with `idf.py`, so the board needs no MicroPython):
 
 ```bash
-cd robodog_native && idf.py set-target esp32s3 && idf.py build && idf.py flash
+# Default (MicroPython client):
+bazel run //tools:install_all -- --robodog-port /dev/ttyACM1 \
+    --wifi-ssid <ssid> --wifi-pass <pass> --server-host 192.168.50.67 \
+    --robodog-name kitchen-cal
+# Opt-in (native LVGL firmware): add --native-robodog to the same command.
+```
+
+- `--robodog-port` is required (no auto-detect for this board);
+  `--wifi-ssid/--wifi-pass` bake WiFi in (on-device config.py for the
+  MicroPython runtime, build-time `LMAO_WIFI_*` for the native one);
+  `--server-host` overrides the RNS-TCP target (default `192.168.50.67:4246`);
+  `DEST_HASH` is injected automatically like the Cardputer.
+- Identity is **pinned no-drift** like the Cardputer: with `--robodog-name`
+  the per-name identity at `~/.local/share/lmao_client/devs/<name>` is used
+  (and its public record POSTed to the server contact book); without it, the
+  shared canonical client identity — the SAME hash on both runtimes of the
+  board (`LMAO_NODE_IDENTITY_HEX` on native). The client prints its
+  `lxmf/delivery` hash at boot — add that hash to the server's
+  `LMAO_ALLOWED_CLIENTS` so its calendar reads are accepted.
+- Bare native build/flash without `install_all` (announce-only — no
+  `DEST_HASH`):
+
+```bash
+bazel run //robodog_client:build_firmware     # LMAO_* env vars bake config
+bazel run //robodog_client:flash_firmware -- --port /dev/ttyACM1
+```
+
+Tests / verification (no panel needed):
+
+```bash
+# Wire codec golden bytes vs the canonical Python encoder + event model
+bazel test //robodog_client/firmware/tests:lma_calendar_test \
+           //robodog_client/firmware/tests:calendar_model_test
+
+# Live interop smoke: request the calendar over RNS-TCP from a real server
+bazel run //robodog_client/firmware/tests:calendar_fetch -- 192.168.50.67 4246
 ```
 
 Notes / status:
-- The **server read service is live** (deployed + verified: a framed request
-  returns the `CalendarBundle`); the ESP-IDF client under `robodog_native/` is a
-  scaffold — it was written without a board in hand, so **first-run validation
-  on hardware is required** (ST7305 orientation/polarity, WiFi, endpoint
-  reachability to the node IP `:4247`).
-- No `ALLOWED_CLIENTS`/DEST_HASH involvement — this is a direct Postgres read,
-  not an LXMF mesh client.
+- The native **request path is verified live** through the deployed server
+  (SLIP-framed TCP, announce decode, LXMF request; server logged
+  `Calendar reply sent (2 events, watermark ...)` + `DeliveryAck sent`).
+  The native side does **not yet decrypt replies**: RTReticulum lacks
+  ratchet key-rotation (upstream TODO, `link.cpp` "Hook for future
+  ratchet/key-rotation support") and LXMF replies are ratchet-encrypted —
+  until that lands, the MicroPython client remains the runtime that reads
+  the calendar (which is why it stays the default).
+- `st7305_disp` is a faithful port of the Waveshare-derived MicroPython
+  ST7305 driver; **validate orientation/polarity on a live panel** when a
+  RoboDog is first attached — if ink is inverted, flip the pixel polarity in
+  the flush path.
 
 ### 8. Docker Image
 
@@ -689,7 +744,6 @@ when running in Docker):
 | `LMAO_RNS_TRANSPORT_PATH` | unset (temp dir) | Reticulum state dir; set = persistent configdir (PVC: `/data/transport`) |
 | `LMAO_AUTOIFACE_DEVICES` | unset (all interfaces) | Comma-separated interface allowlist for AutoInterface (e.g. `wlan0`) |
 | `LMAO_TCP_PORT` | `4246` | Server's RNS `TCPServerInterface` listen port (hostNetwork) — the deterministic home-network transport for wifi/human clients (multicast AutoInterface is unreliable through the home AP) |
-| `LMAO_CAL_TCP_PORT` | `4247` | Framed-TCP family-calendar read service (RoboDog native client, no RNS): 4-byte-length-prefixed `CalendarRequest`→`CalendarBundle` |
 | `LMAO_TCP_BIND` | `0.0.0.0` | Server's RNS TCP bind IP |
 | `LMAO_ANNOUNCE_INTERVAL` | `0` (off) | Seconds between server re-announces over non-LoRa interfaces so fresh wifi clients can resolve the server's delivery identity |
 | `LMAO_SERVER_HOST` | `192.168.50.67` | Client-side: RNS `TCPClientInterface` target (the LMAO server's IP); overrides with `LMAO_SERVER_PORT` |

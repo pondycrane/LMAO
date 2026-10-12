@@ -33,6 +33,7 @@ import argparse
 import contextlib
 import os
 import re
+import shutil
 import sys
 import tempfile
 import time
@@ -305,18 +306,20 @@ def _inject_dest_hash(ser, client_root: str) -> str:
 _DEVICE_IDENTITY_PATH = "/flash/rns/identity"
 
 
-def _read_device_identity_hex(ser):
-    """Read the µReticulum identity file from the device, or *None*.
+def _read_device_identity_hex(ser, identity_path: str = _DEVICE_IDENTITY_PATH):
+    """Read the µReticulum identity file from *identity_path* or *None*.
 
     Returns the hex-encoded raw identity file bytes when the device has
-    one, otherwise ``None`` (file absent / not parseable).
+    one, otherwise ``None`` (file absent / not parseable).  The default
+    path is the Cardputer's ``/flash/rns/identity``; other boards (e.g.
+    RoboDog, RNS root ``/rns``) pass their own.
     """
     from cardputer_client.flash import exec_raw
 
     script = (
         "import ubinascii\n"
         "try:\n"
-        "    _f = open('/flash/rns/identity', 'rb')\n"
+        f"    _f = open({identity_path!r}, 'rb')\n"
         "    print('IDENT ' + ubinascii.hexlify(_f.read()).decode())\n"
         "    _f.close()\n"
         "except Exception:\n"
@@ -331,25 +334,27 @@ def _read_device_identity_hex(ser):
     return out[idx + len("IDENT "):].splitlines()[0].strip() or None
 
 
-def _write_device_identity(ser, identity_bytes) -> None:
-    """Write the pinned identity file to ``/flash/rns/identity`` and verify.
+def _write_device_identity(ser, identity_bytes,
+                           identity_path: str = _DEVICE_IDENTITY_PATH) -> None:
+    """Write the pinned identity file to *identity_path* and verify.
 
-    Creates ``/flash/rns`` when missing.  Raises ``RuntimeError`` on any
-    failure (including a read-back mismatch) so a flash never silently
-    proceeds with a drifted identity.
+    Creates the parent directory (default ``/flash/rns``) when missing.
+    Raises ``RuntimeError`` on any failure (including a read-back
+    mismatch) so a flash never silently proceeds with a drifted identity.
     """
     from cardputer_client.flash import exec_raw
 
     hexbytes = identity_bytes.hex()
+    rns_dir = identity_path.rsplit("/", 1)[0]
     script = (
         "import os, binascii\n"
         "try:\n"
-        "    os.mkdir('/flash/rns')\n"
+        f"    os.mkdir({rns_dir!r})\n"
         "except Exception:\n"
         "    pass\n"
         "try:\n"
-        "    _f = open('/flash/rns/identity', 'wb')\n"
-        f"    _f.write(binascii.unhexlify('{hexbytes}'))\n"
+        f"    _f = open({identity_path!r}, 'wb')\n"
+        f"    _f.write(binascii.unhexlify({hexbytes!r}))\n"
         "    _f.close()\n"
         "    print('WRITE_OK')\n"
         "except Exception as _e:\n"
@@ -359,7 +364,7 @@ def _write_device_identity(ser, identity_bytes) -> None:
     if not ok or "WRITE_OK" not in out:
         raise RuntimeError(f"Could not write identity to device: {out[:200]}")
 
-    readback = _read_device_identity_hex(ser)
+    readback = _read_device_identity_hex(ser, identity_path=identity_path)
     if readback != hexbytes:
         raise RuntimeError(
             "Identity write verification failed — device reports a different "
@@ -367,8 +372,8 @@ def _write_device_identity(ser, identity_bytes) -> None:
         )
 
 
-def _inject_client_identity(ser, device_name=None):
-    """Pin the LMAO client identity onto the Cardputer (no-drift scheme).
+def _inject_client_identity(ser, device_name=None, identity_root="/flash/rns"):
+    """Pin the LMAO client identity onto the device (no-drift scheme).
 
     With *device_name*, the identity is resolved/minted per-name from the
     private device store (``~/.local/share/lmao_client/devs/<name>/identity``)
@@ -376,9 +381,13 @@ def _inject_client_identity(ser, device_name=None):
     the "identity by human-readable name" flow.  Without it, the single
     canonical client identity is used (backward compatible).
 
+    *identity_root* is the device directory the µReticulum Identity loads
+    from (default ``/flash/rns`` on the Cardputer; the RoboDog passes
+    ``/rns``).  The identity file is written to ``{identity_root}/identity``.
+
     Mode: on the *first* install of a store, an existing on-device identity is
     adopted so the currently allow-listed hash keeps working; thereafter the
-    identity file is written to ``/flash/rns/identity`` on every flash.
+    identity file is written on every flash.
 
     Returns the pinned delivery hash (hex) to compare against the server's
     allow-list.  Raises on any failure.
@@ -391,6 +400,8 @@ def _inject_client_identity(ser, device_name=None):
         identity_file_path,
     )
     from lma_core.server_identity import delivery_destination_hash_hex
+
+    identity_path = f"{identity_root.rstrip('/')}/identity"
 
     if device_name:
         from lma_core.client_identity import device_identity_dir
@@ -410,7 +421,7 @@ def _inject_client_identity(ser, device_name=None):
         store_label = "canonical"
 
     if not os.path.isfile(store_path):
-        device_hex = _read_device_identity_hex(ser)
+        device_hex = _read_device_identity_hex(ser, identity_path=identity_path)
         if device_hex:
             try:
                 device_bytes = bytes.fromhex(device_hex)
@@ -422,7 +433,7 @@ def _inject_client_identity(ser, device_name=None):
     identity, path = _ensure()
     with open(path, "rb") as f:
         store_bytes = f.read()
-    _write_device_identity(ser, store_bytes)
+    _write_device_identity(ser, store_bytes, identity_path=identity_path)
     return delivery_destination_hash_hex(identity)
 
 
@@ -670,6 +681,314 @@ def _flash_cardputer_client(port: str, client_root: str, result: DeviceResult,
         ser.close()
 
 
+# ---- RoboDog (Waveshare ESP32-S3 RLCD-4.2 family-calendar display) ----
+
+_ROBODOG_FILES = [
+    "boot.py",
+    "config.py",
+    "main.py",
+    "ui.py",
+    "st7305.py",
+    "proto/lma_encoder.py",
+]
+
+
+def _stage_robodog(src_root: str) -> str:
+    """Copy the RoboDog client + symlink the shared urns lib/proto into a temp
+    root that the raw-REPL uploader can walk (mirrors the Cardputer layout:
+    client .py at the root, vendored lib/ + proto/ beside them)."""
+    stage = tempfile.mkdtemp(prefix="robodog_")
+    try:
+        for fname in ("boot.py", "config.py", "main.py", "ui.py", "st7305.py", "__init__.py"):
+            src = os.path.join(src_root, fname)
+            if os.path.isfile(src):
+                shutil.copyfile(src, os.path.join(stage, fname))
+        # Shared stack lives in cardputer_client/ (DRY) — symlink it in.
+        cpc = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                           "cardputer_client")
+        for sub in ("lib", "proto"):
+            dst = os.path.join(stage, sub)
+            src = os.path.join(cpc, sub)
+            if os.path.exists(src) and not os.path.islink(dst):
+                os.symlink(src, dst)
+    except Exception:
+        shutil.rmtree(stage, ignore_errors=True)
+        raise
+    return stage
+
+
+def _patch_robodog_config(stage_root: str, dest_hash: str | None, server_host: str | None,
+                          wifi_ssid: str | None, wifi_pass: str | None) -> None:
+    """Rewrite the staged RoboDog config.py with deploy-time values (source is
+    never modified).  DEST_HASH is mandatory for the calendar fetch to work."""
+    cfg = os.path.join(stage_root, "config.py")
+    with open(cfg) as f:
+        text = f.read()
+    if dest_hash is not None:
+        text, n = re.subn(
+            r'DEST_HASH\s*=\s*(?:"[^"]*"|None)',
+            f'DEST_HASH = "{dest_hash}"', text)
+        if not n:
+            raise RuntimeError("Could not patch DEST_HASH in robodog config.py")
+    if server_host is not None:
+        text, n = re.subn(
+            r'LMAO_SERVER_HOST\s*=\s*(?:"[^"]*"|None)',
+            f'LMAO_SERVER_HOST = "{server_host}"', text)
+        if not n:
+            raise RuntimeError("Could not patch LMAO_SERVER_HOST in robodog config.py")
+    if wifi_ssid is not None:
+        text = re.subn(
+            r'WIFI_SSID\s*=\s*(?:"[^"]*"|None)',
+            f'WIFI_SSID = "{wifi_ssid}"', text)[0]
+    if wifi_pass is not None:
+        text = re.subn(
+            r'WIFI_PASS\s*=\s*(?:"[^"]*"|None)',
+            f'WIFI_PASS = "{wifi_pass}"', text)[0]
+    with open(cfg, "w") as f:
+        f.write(text)
+
+
+def _flash_robodog(port: str, result: DeviceResult, src_root: str,
+                   inject_dest_hash: bool = True,
+                   server_host: str | None = None,
+                   wifi_ssid: str | None = None,
+                   wifi_pass: str | None = None,
+                   device_name: str | None = None) -> None:
+    """Stage + flash the RoboDog MicroPython client (Waveshare RLCD-4.2) and
+    bake DEST_HASH / server host / WiFi into its on-device config.
+
+    The client runs the *shared* urns stack (RNS-TCP to the LMAO server on
+    :4246), so identity pinning uses the same no-drift scheme as the Cardputer
+    but targets the RoboDog's RNS root (/rns).  No hardware validation is done
+    for the unverified ST7305 driver — that is a first-run on-device check."""
+    try:
+        print(f"\n--- RoboDog: opening {port} ---")
+        ser = serial.Serial(port, 115200, timeout=1, write_timeout=10)
+        time.sleep(0.6)
+    except serial.SerialException as exc:
+        result.fail(f"Cannot open serial port {port}: {exc}")
+        print(f"  FAIL: {exc}")
+        return
+
+    stage = None
+    try:
+        stage = _stage_robodog(src_root)
+
+        dest_hash = None
+        if inject_dest_hash:
+            dest_hash = ensure_delivery_destination_hash()
+        _patch_robodog_config(stage, dest_hash, server_host, wifi_ssid, wifi_pass)
+        print(f"    DEST_HASH = {dest_hash or '(announce-only)'}")
+        if server_host:
+            print(f"    RNS-TCP server: {server_host}:4246")
+
+        if not enter_raw_repl(ser):
+            result.fail("Could not enter raw REPL (is MicroPython installed?)")
+            print("  FAIL: Could not enter raw REPL")
+            return
+        try:
+            verify_device(ser)
+            disarm_watchdog(ser)
+
+            # Pin the no-drift identity (named via --robodog-name, else the
+            # canonical client identity).  RNS root is /rns on RoboDog.
+            try:
+                client_hash = _inject_client_identity(
+                    ser, device_name=device_name, identity_root="/rns"
+                )
+                label = f"device {device_name!r}" if device_name else "canonical"
+                print(f"    robo-dog {label} lxmf/delivery hash = {client_hash} "
+                      "(keep in server ALLOWED_CLIENTS)")
+            except Exception as exc:
+                result.fail(f"RoboDog identity pinning failed: {exc}")
+                print(f"  FAIL: RoboDog identity pinning failed — {exc}")
+                return
+
+            files = list(_ROBODOG_FILES) + auto_discover_lib_files(stage)
+            verify_files_exist(stage, files)
+            print(f"  Uploading {len(files)} file(s) ...")
+            failed = 0
+            for rel in files:
+                local = os.path.join(stage, rel)
+                size = os.path.getsize(local)
+                print(f"    {rel:32s} … ", end="", flush=True)
+                try:
+                    upload_file(ser, local, rel, skip_if_unchanged=True)
+                    print("OK")
+                except DeviceStalledError:
+                    print("STALLED")
+                    failed += 1
+                except Exception:
+                    print("FAILED")
+                    failed += 1
+
+            # Verify the bake landed (only when a hash was injected).
+            if dest_hash is not None:
+                from cardputer_client.flash import exec_raw
+
+                ok, out = exec_raw(
+                    ser,
+                    "import sys\n"
+                    "if 'config' in sys.modules:\n"
+                    "    del sys.modules['config']\n"
+                    "import config\n"
+                    "print(config.DEST_HASH)\n",
+                )
+                if not ok or dest_hash not in out:
+                    result.fail(
+                        f"DEST_HASH verification failed — device config reports "
+                        f"{out[:120]}"
+                    )
+                    print("  FAIL: DEST_HASH verification failed")
+                    return
+
+            exit_raw_repl(ser)
+            if failed:
+                result.fail(f"{len(files) - failed}/{len(files)} uploaded")
+                return
+            result.ok("RoboDog client flashed (calendar via RNS-TCP)")
+        finally:
+            ser.close()
+    except Exception as exc:
+        import traceback
+
+        traceback.print_exc()
+        result.fail(f"Unexpected error: {exc}")
+        print(f"  FAIL: {exc}")
+    finally:
+        if stage:
+            shutil.rmtree(stage, ignore_errors=True)
+
+
+def _flash_robodog_native(port: str, result: DeviceResult, src_root: str,
+                   inject_dest_hash: bool = True,
+                   server_host: str | None = None,
+                   wifi_ssid: str | None = None,
+                   wifi_pass: str | None = None,
+                   device_name: str | None = None) -> None:
+    """Build + flash the native ESP-IDF/LVGL RoboDog firmware.
+
+    The firmware lives in robodog_client/firmware/ (LVGL 9 declarative
+    XML + subjects UI on the ST7305 RLCD; calendar fetch over RNS-TCP via the
+    shared RTReticulum native stack).  build.sh stages the app into the shared
+    RTReticulum checkout and runs the ESP-IDF Docker build; flash.sh runs
+    ``idf.py flash`` on *port*.
+
+    DEST_HASH / RNS-TCP server host / WiFi are baked in at build time via
+    LMAO_* env vars (the source tree is never modified), mirroring the native
+    Cardputer path.  Client identity pinning uses the same no-drift scheme
+    (LMAO_NODE_IDENTITY_HEX — the named or canonical client identity), so the
+    board keeps one lxmf/delivery hash across re-flashes.
+
+    Requires: Docker (espressif/idf:v5.3.1) on the host.  Unlike the old
+    MicroPython client the board needs no pre-installed runtime — idf.py
+    flashes the bare chip in download mode."""
+    import subprocess
+
+    firmware_dir = os.path.join(src_root, "firmware")
+    build_sh = os.path.join(firmware_dir, "build.sh")
+    flash_sh = os.path.join(firmware_dir, "flash.sh")
+    for path, what in ((build_sh, "build script"), (flash_sh, "flash script")):
+        if not os.path.isfile(path):
+            result.fail(f"Missing {what}: {path}")
+            print(f"  FAIL: missing {what} {path}")
+            return
+
+    env = dict(os.environ)
+    env["PORT"] = port
+    if inject_dest_hash:
+        print("  Computing server DEST_HASH ...")
+        try:
+            dest_hash = ensure_delivery_destination_hash()
+            env["LMAO_DEST_HASH_HEX"] = dest_hash
+            print(f"    DEST_HASH = {dest_hash}")
+        except Exception as exc:
+            result.fail(f"DEST_HASH resolution failed: {exc}")
+            print(f"  FAIL: DEST_HASH resolution failed — {exc}")
+            return
+
+    # Pin the client identity (no-drift, lma_core/client_identity.py): the
+    # named (--robodog-name) or canonical client private key is baked into the
+    # native build via LMAO_NODE_IDENTITY_HEX, so the delivery hash never
+    # drifts across re-flashes / NVS erases.
+    print("  Pinning client identity (native) ...")
+    try:
+        env["LMAO_NODE_IDENTITY_HEX"] = _device_client_private_key_hex(device_name)
+        label = f"device {device_name!r}" if device_name else "canonical"
+        print(f"    native node identity pinned to the {label} client identity")
+    except Exception as exc:
+        result.fail(f"Client identity resolution failed: {exc}")
+        print(f"  FAIL: client identity resolution failed — {exc}")
+        return
+
+    if server_host:
+        env["LMAO_SERVER_HOST"] = server_host
+        print(f"    RNS-TCP server: {server_host}:4246")
+    if wifi_ssid:
+        env["LMAO_WIFI_SSID"] = wifi_ssid
+    if wifi_pass:
+        env["LMAO_WIFI_PASS"] = wifi_pass
+    if not wifi_ssid:
+        print("  WARNING: no --wifi-ssid given — the panel will not reach the server")
+
+    print(f"\n--- RoboDog (native): building firmware for {port} ---")
+    try:
+        proc = subprocess.run(
+            ["bash", build_sh],
+            env=env,
+            cwd=firmware_dir,
+            text=True,
+            stdout=subprocess.DEVNULL if not os.environ.get("LMAO_VERBOSE") else None,
+            stderr=subprocess.STDOUT,
+        )
+        if proc.returncode != 0:
+            result.fail(f"Native firmware build failed (exit {proc.returncode})")
+            print("  FAIL: native firmware build failed — run "
+                  "bazel run //robodog_client:build_firmware for the full log")
+            return
+    except FileNotFoundError as exc:
+        result.fail(f"build.sh failed to run (bash? subprocess): {exc}")
+        print(f"  FAIL: {exc}")
+        return
+    except Exception as exc:
+        result.fail(f"Native firmware build error: {exc}")
+        print(f"  FAIL: {exc}")
+        return
+
+    print(f"--- RoboDog (native): flashing to {port} ---")
+    try:
+        env["FLASH_PORT"] = port
+        env["FLASH_BAUD"] = env.get("FLASH_BAUD", "921600")
+        proc = subprocess.run(
+            ["bash", flash_sh, "--port", port],
+            env=env,
+            cwd=firmware_dir,
+            text=True,
+            stdout=subprocess.DEVNULL if not os.environ.get("LMAO_VERBOSE") else None,
+            stderr=subprocess.STDOUT,
+        )
+        if proc.returncode != 0:
+            result.fail(f"Native firmware flash failed (exit {proc.returncode})")
+            print(f"  FAIL: native firmware flash failed — run "
+                  f"bazel run //robodog_client:flash_firmware -- --port {port} for the full log")
+            return
+    except FileNotFoundError as exc:
+        result.fail(f"flash.sh failed to run (bash? subprocess/docker): {exc}")
+        print(f"  FAIL: {exc}")
+        return
+    except Exception as exc:
+        result.fail(f"Native firmware flash error: {exc}")
+        print(f"  FAIL: {exc}")
+        return
+
+    if inject_dest_hash:
+        result.ok(f"Built + flashed native firmware on {port} (DEST_HASH baked)")
+        print(f"  OK: native firmware flashed on {port}, DEST_HASH baked in")
+    else:
+        result.ok(f"Built + flashed native firmware on {port} (no DEST_HASH — announce-only)")
+        print(f"  OK: native firmware flashed on {port} (no DEST_HASH — device will not fetch)")
+
+
 # ---- RNode operations ----
 
 
@@ -865,6 +1184,56 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Skip injecting the server DEST_HASH into the Cardputer config "
         "(e.g. when the server runs on a different host).",
     )
+    # ── RoboDog (Waveshare ESP32-S3 RLCD-4.2 family-calendar display) ──
+    parser.add_argument(
+        "--robodog-port",
+        default=None,
+        help="Serial port for the RoboDog RLCD-4.2 board (e.g. /dev/ttyACM1). "
+        "Required to flash; there is no auto-detect for this board.",
+    )
+    parser.add_argument(
+        "--skip-robodog",
+        action="store_true",
+        help="Skip the RoboDog flash entirely.",
+    )
+    parser.add_argument(
+        "--native-robodog",
+        action="store_true",
+        help="Flash the native ESP-IDF/LVGL RoboDog firmware "
+        "(robodog_client/firmware/, ST7305 UI) instead of the MicroPython "
+        "client. Requires Docker (espressif/idf:v5.3.1); the reply path is not "
+        "yet verified on hardware, so MicroPython stays the default.",
+    )
+    parser.add_argument(
+        "--robodog-root",
+        default=None,
+        help="Path to robodog_client/ directory (auto-detected when omitted).",
+    )
+    parser.add_argument(
+        "--robodog-name",
+        default=None,
+        help="Human-readable name for the RoboDog (e.g. 'kitchen-cal'). Resolves/"
+        "mints the device's private identity by name "
+        "(~/.local/share/lmao_client/devs/<name>) so its lxmf/delivery hash "
+        "never drifts across flashes.  Omitting it falls back to the single "
+        "shared canonical client identity.",
+    )
+    parser.add_argument(
+        "--wifi-ssid",
+        default=None,
+        help="Wi-Fi SSID for RoboDog (baked into the native firmware at build time).",
+    )
+    parser.add_argument(
+        "--wifi-pass",
+        default=None,
+        help="Wi-Fi password for RoboDog.",
+    )
+    parser.add_argument(
+        "--server-host",
+        default=None,
+        help="LMAO server LAN host/IP for RoboDog's RNS-TCP ClientInterface "
+        "(baked into config; default keeps the config's value).",
+    )
     cp_group = parser.add_mutually_exclusive_group()
     cp_group.add_argument(
         "--micropython-cardputer",
@@ -951,6 +1320,64 @@ def main(argv: list[str] | None = None) -> None:
                 _register_contact_book(args.device_name, dev_hash)
             except Exception as exc:
                 print(f"  WARNING: contact-book registration skipped: {exc}")
+
+    # ── RoboDog (Waveshare ESP32-S3 RLCD-4.2 family-calendar display) ──
+    rd_result = DeviceResult("RoboDog (RLCD-4.2)")
+    results.append(rd_result)
+
+    if args.skip_robodog:
+        rd_result.skip("--skip-robodog")
+        print("RoboDog: SKIP (--skip-robodog)")
+    elif not args.robodog_port:
+        rd_result.skip("No --robodog-port given (no auto-detect for this board)")
+        print("RoboDog: SKIP — pass --robodog-port to flash (e.g. --robodog-port /dev/ttyACM1)")
+    else:
+        # `bazel run` sets BUILD_WORKSPACE_DIRECTORY to the real repo; the
+        # __file__-relative fallback is for direct `python3 tools/install_all.py`.
+        repo_root = os.environ.get("BUILD_WORKSPACE_DIRECTORY") or os.path.dirname(
+            os.path.dirname(os.path.abspath(__file__)))
+        src_root = args.robodog_root or os.path.join(repo_root, "robodog_client")
+        if args.native_robodog:
+            if not os.path.isfile(os.path.join(src_root, "firmware", "build.sh")):
+                rd_result.fail("Cannot locate robodog_client/firmware/ (pass --robodog-root)")
+                print("RoboDog: FAIL — cannot locate robodog_client/firmware/")
+            else:
+                print("RoboDog: building + flashing native ESP-IDF/LVGL firmware")
+                _flash_robodog_native(
+                    args.robodog_port, rd_result, src_root,
+                    inject_dest_hash=not args.skip_dest_hash,
+                    server_host=args.server_host,
+                    wifi_ssid=args.wifi_ssid,
+                    wifi_pass=args.wifi_pass,
+                    device_name=args.robodog_name,
+                )
+        else:
+            # MicroPython is the RoboDog's default runtime (same story as the
+            # Cardputer): the urns RNS-TCP stack is field-proven here; the
+            # native LVGL firmware is opt-in via --native-robodog.
+            if not os.path.isfile(os.path.join(src_root, "main.py")):
+                rd_result.fail("Cannot locate robodog_client/ (pass --robodog-root)")
+                print("RoboDog: FAIL — cannot locate robodog_client/")
+            else:
+                print("RoboDog: flashing MicroPython client (calendar via RNS-TCP)")
+                _flash_robodog(
+                    args.robodog_port, rd_result, src_root,
+                    inject_dest_hash=not args.skip_dest_hash,
+                    server_host=args.server_host,
+                    wifi_ssid=args.wifi_ssid,
+                    wifi_pass=args.wifi_pass,
+                    device_name=args.robodog_name,
+                )
+
+        # Register the named RoboDog's public record in the server contact book.
+        if args.robodog_name is not None and rd_result.status == "OK":
+            try:
+                from lma_core.client_identity import device_delivery_destination_hash
+
+                dev_hash = device_delivery_destination_hash(args.robodog_name)
+                _register_contact_book(args.robodog_name, dev_hash, device_type="robodog")
+            except Exception as exc:
+                print(f"  WARNING: RoboDog contact-book registration skipped: {exc}")
 
     # ── RNode ──
     rn_result = DeviceResult("RNode (Heltec)")

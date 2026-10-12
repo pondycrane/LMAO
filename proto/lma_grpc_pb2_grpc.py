@@ -4,7 +4,6 @@ import grpc
 import warnings
 
 from proto import lma_grpc_pb2 as lma__grpc__pb2
-from proto import lma_messages_pb2 as lma__messages__pb2
 
 GRPC_GENERATED_VERSION = '1.81.1'
 GRPC_VERSION = grpc.__version__
@@ -52,11 +51,6 @@ class LMAOStub:
                 request_serializer=lma__grpc__pb2.GetIdentityRequest.SerializeToString,
                 response_deserializer=lma__grpc__pb2.GetIdentityResponse.FromString,
                 _registered_method=True)
-        self.GetCalendar = channel.unary_unary(
-                '/lma.LMAO/GetCalendar',
-                request_serializer=lma__messages__pb2.CalendarRequest.SerializeToString,
-                response_deserializer=lma__messages__pb2.CalendarBundle.FromString,
-                _registered_method=True)
 
 
 class LMAOServicer:
@@ -89,15 +83,6 @@ class LMAOServicer:
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
-    def GetCalendar(self, request, context):
-        """Synchronous read of the family calendar (Postgres-backed) — direct, no
-        LXMF round-trip.  Used by the non-RNS RoboDog RLCD display, which polls
-        this once per sync window.
-        """
-        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-        context.set_details('Method not implemented!')
-        raise NotImplementedError('Method not implemented!')
-
 
 def add_LMAOServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -115,11 +100,6 @@ def add_LMAOServicer_to_server(servicer, server):
                     servicer.GetIdentity,
                     request_deserializer=lma__grpc__pb2.GetIdentityRequest.FromString,
                     response_serializer=lma__grpc__pb2.GetIdentityResponse.SerializeToString,
-            ),
-            'GetCalendar': grpc.unary_unary_rpc_method_handler(
-                    servicer.GetCalendar,
-                    request_deserializer=lma__messages__pb2.CalendarRequest.FromString,
-                    response_serializer=lma__messages__pb2.CalendarBundle.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -205,33 +185,6 @@ class LMAO:
             '/lma.LMAO/GetIdentity',
             lma__grpc__pb2.GetIdentityRequest.SerializeToString,
             lma__grpc__pb2.GetIdentityResponse.FromString,
-            options,
-            channel_credentials,
-            insecure,
-            call_credentials,
-            compression,
-            wait_for_ready,
-            timeout,
-            metadata,
-            _registered_method=True)
-
-    @staticmethod
-    def GetCalendar(request,
-            target,
-            options=(),
-            channel_credentials=None,
-            call_credentials=None,
-            insecure=False,
-            compression=None,
-            wait_for_ready=None,
-            timeout=None,
-            metadata=None):
-        return grpc.experimental.unary_unary(
-            request,
-            target,
-            '/lma.LMAO/GetCalendar',
-            lma__messages__pb2.CalendarRequest.SerializeToString,
-            lma__messages__pb2.CalendarBundle.FromString,
             options,
             channel_credentials,
             insecure,

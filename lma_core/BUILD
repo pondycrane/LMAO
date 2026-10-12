@@ -6,7 +6,6 @@ py_library(
         "__init__.py",
         "calendar_pg.py",
         "calendar_pics.py",
-        "calendar_tcp_api.py",
         "client_identity.py",
         "config_utils.py",
         "contact_book.py",
@@ -27,6 +26,8 @@ py_library(
     deps = [
         "//proto:lma_messages_py_proto",
         "@lmao_pip//aiohttp",
+        "@lmao_pip//psycopg",
+        "@lmao_pip//psycopg_binary",
         "@lmao_pip//sqlparse",
     ],
 )

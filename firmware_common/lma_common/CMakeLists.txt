@@ -11,6 +11,7 @@
 idf_component_register(
     SRCS
         "lma_encoder.cpp"
+        "lma_calendar.cpp"
         "lxmf_send.cpp"
         "path_find.cpp"
         "lma_identity.cpp"

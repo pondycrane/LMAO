@@ -20,6 +20,15 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+# ── Host-testable: Family-calendar wire codec (pure C++) ──
+cc_library(
+    name = "lma_calendar",
+    srcs = ["lma_common/lma_calendar.cpp"],
+    hdrs = ["lma_common/lma_calendar.h"],
+    strip_include_prefix = "lma_common",
+    visibility = ["//visibility:public"],
+)
+
 # ── Host-testable: send-only LXMF (RTReticulum-dependent) ──
 cc_library(
     name = "lxmf_send",
