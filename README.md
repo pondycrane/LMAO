@@ -561,40 +561,25 @@ title rows — generated and stored in Postgres (`cal_pics` table) by the
 
 **RoboDog** is the LMAO family-calendar *display* client: a
 [Waveshare ESP32-S3 RLCD-4.2](https://docs.waveshare.com/wiki/ESP32-S3-RLCD-4.2)
-(4.2" 300×400 reflective **ST7305** LCD, ESP32-S3 N16R8). It has two runtimes,
-mirroring the Cardputer's split (MicroPython default, native opt-in):
+(4.2" 300×400 reflective **ST7305** LCD, ESP32-S3 N16R8). Two runtimes live
+in the repo:
 
 | Runtime | Stack | Notes |
 |---|---|---|
-| **Stable (current board build)** | Native ESP-IDF (`robodog_native/`, u8g2) | gRPC `GetCalendar` client over framed TCP (`:4247`) + RLCD UI with real icons. Flashed via its **dedicated** targets `//robodog_native:{build_firmware,flash_firmware}` (see below). |
-| MicroPython (new in #239) | `robodog_client/*.py`, urns µReticulum | RNS-TCP to the server on :4246 with an LXMF calendar request (`LMAOEnvelope{ request.calendar }` → `CalendarBundle`); own 1-bit renderer. Flashed via `install_all --robodog-port`. |
-| **LVGL opt-in** `--native-robodog` | Native ESP-IDF firmware (`robodog_client/firmware/`) | Same data path via the shared RTReticulum native stack (`firmware_common/`); **LVGL 9 declarative XML + subjects UI** (below). Flashed via `install_all --native-robodog` or the dedicated `//robodog_client:{build_firmware,flash_firmware}` targets. |
+| **Stable (current board build)** | Native ESP-IDF (`robodog_native/`, u8g2) | gRPC `GetCalendar` client over framed TCP (`:4247`) + RLCD UI with real icons; flashed with its DEDICATED targets (below). |
+| **LVGL MicroPython runtime (new in #239)** | lvgl-micropython image + `robodog_client/*.py` | ONE interpreter, two layers: **urns µReticulum owns ALL comms** — RNS-TCP to the server on `:4246` with the full LXMF calendar round-trip (`LMAOEnvelope{ request.calendar }` → ratchet-decrypted `CalendarBundle`) — and **LVGL 9 renders the panel** (React-style: the app only pokes LVGL state; LVGL redraws).  No C-side protocol code, no RTReticulum on this board. |
 
 ```
-Stable:  robodog_native ──framed-TCP gRPC GetCalendar (:4247)──▶ lmao-server   [removed server-side in #239]
-New:     any client ──RNS/LXMF (TCP :4246)──▶ CalendarBundle reply ──▶ ST7305 render
+┌─────────────── lvgl-micropython on the RoboDog ───────────────┐
+│  urns (µPy) ──RNS-TCP :4246──▶ CalendarBundle (µPy dicts)     │
+│        │ data passed as plain Python                          │
+│  LVGL 9 (C, µPy-bound) ──I1 flush──▶ ST7305 panel             │
+└───────────────────────────────────────────────────────────────┘
 ```
-
-#### Native LVGL firmware (opt-in)
-
-The native client's UI is **LVGL 9 declarative XML + subjects** — data-bound,
-React-style: `main/ui_xml/calendar_screen.xml` declares the whole screen
-(header band + 6 event rows) as an LVGL XML component whose labels and row
-visibility bind to **subjects** (`header_text`, `status_text`,
-`row{0..5}_{title,time,present,pic}`) over LVGL's observer system. The app
-never touches widgets directly — it pokes subjects
-(`calendar_ui::set_header/set_offline/set_events`) and LVGL re-renders.
-Event selection/formatting lives in the pure-C++ `calendar_model` (host-tested
-port of the MicroPython renderer's semantics). LVGL is fetched from the ESP
-component registry (`main/idf_component.yml`, `lvgl/lvgl >=9.3,<9.4` — never
-vendored) and drives the ST7305 through `st7305_disp` (`LV_COLOR_FORMAT_I1`,
-one static full-screen buffer, full-frame push per flush — the RLCD holds the
-image without a refresh).
 
 `since_ms` = the last `watermark_ms` the client saw → the server replies with
-the incremental delta; events merge by `uid` (tombstones remove), and the
-last raw reply + watermark cache in NVS, so the panel boots with yesterday's
-calendar (marked `OFFLINE`) while WiFi is down.
+the incremental delta; events merge by `uid` (tombstones remove); the SD
+cache keeps yesterday's calendar (marked `OFFLINE`) when WiFi is down.
 
 Hardware mapping (from the Waveshare ESP-IDF example):
 
@@ -603,78 +588,68 @@ Hardware mapping (from the Waveshare ESP-IDF example):
 | ST7305 SPI | DC=5, CS=40, SCK=11, MOSI=12, RST=41, TE=6 |
 | I2C (SHTC3 + PCF85063 RTC) | SDA=13, SCL=14 |
 
-Flash — **each runtime has its own flash command**, no single install entry
-owns the board:
+#### Flash commands (each runtime has its own)
 
-```bash
-# 1. Stable board build today (robodog_native, ESP-IDF):
-bazel run //robodog_native:build_firmware
-bazel run //robodog_native:flash_firmware [-- --port /dev/ttyACM1]
-# ⚠ Both flash scripts run esptool on the HOST, not in Docker: Docker's
-#   ttyACM passthrough drops RTS/DTR, breaking esptool's button-free reset
-#   (EPROTO on open).
+```
+1. STABLE board build today (robodog_native, ESP-IDF):
+     bazel run //robodog_native:build_firmware
+     bazel run //robodog_native:flash_firmware [-- --port /dev/ttyACM1]
 
-# 2. MicroPython client (new in #239):
-bazel run //tools:install_all -- --robodog-port /dev/ttyACM1 \
-    --wifi-ssid <ssid> --wifi-pass <pass> --server-host 192.168.50.67 \
-    --robodog-name kitchen-cal
-
-# 3. LVGL opt-in firmware (new in #239):
-bazel run //tools:install_all -- --robodog-port ... --native-robodog   # or
-bazel run //robodog_client:build_firmware
-bazel run //robodog_client:flash_firmware [-- --port /dev/ttyACM1]
+2. LVGL MicroPython runtime (new in #239):
+     LVGL_MPY_BIN=/path/to/LVGL_MPY.bin      bazel run //tools:install_all -- --native-robodog          --robodog-port /dev/ttyACM1 --wifi-ssid <ssid> --wifi-pass <pass>          --server-host 192.168.50.67 --robodog-name kitchen-cal
 ```
 
+⚠ **Button-free flash invariant**: both ESP-IDF and the LVGL image are
+flashed with **esptool on the HOST**, never inside Docker — Docker's ttyACM
+passthrough drops RTS/DTR, breaking esptool's button-free reset into
+download mode (`EPROTO` on open).  `install_all` enforces this: it checks
+for host esptool *before* doing anything and fails fast with the
+`pip install esptool` hint otherwise.
+
 - `--robodog-port` is required (no auto-detect for this board);
-  `--wifi-ssid/--wifi-pass` bake WiFi in (on-device config.py for the
-  MicroPython runtime, build-time `LMAO_WIFI_*` for the native one);
-  `--server-host` overrides the RNS-TCP target (default `192.168.50.67:4246`);
-  `DEST_HASH` is injected automatically like the Cardputer.
+  `--wifi-ssid/--wifi-pass` bake WiFi into config.py; `--server-host`
+  overrides the RNS-TCP target (default `192.168.50.67:4246`); `DEST_HASH` is
+  injected automatically like the Cardputer.
 - Identity is **pinned no-drift** like the Cardputer: with `--robodog-name`
   the per-name identity at `~/.local/share/lmao_client/devs/<name>` is used
   (and its public record POSTed to the server contact book); without it, the
-  shared canonical client identity — the SAME hash on both runtimes of the
-  board (`LMAO_NODE_IDENTITY_HEX` on native). The client prints its
+  shared canonical client identity. The client prints its
   `lxmf/delivery` hash at boot — add that hash to the server's
   `LMAO_ALLOWED_CLIENTS` so its calendar reads are accepted.
-- Bare native build/flash without `install_all` (announce-only — no
-  `DEST_HASH`):
+
+#### LVGL UI internals (robodog_client/)
+
+- `lv_display.py` — bridges LVGL's I1 flush onto `st7305.py`: `lv.display_
+  create(300, 400)` → `set_color_format(I1)` → `set_flush_cb` → full-screen
+  framebuffer → `ST7305.show()` on every `flush_is_last`.  No C-side driver;
+  the panel keeps all of its µPy-tested init/tile/polarity code.
+- `lvui.py` — the calendar screen (header band, status label, separator,
+  six event rows) built with `lv` objects; `set_header/set_offline/set_events`
+  mirror `ui.py`, so `main.py` prefers LVGL and falls back to the bitfont
+  renderer when the image lacks LVGL.
+- `ui.py` — the previous pure-µPy 5×7-bitfont renderer; kept as the fallback
+  for plain MicroPython images.
+
+Tests / verification (host):
 
 ```bash
-bazel run //robodog_client:build_firmware     # LMAO_* env vars bake config
-bazel run //robodog_client:flash_firmware -- --port /dev/ttyACM1
-```
-
-Tests / verification (no panel needed):
-
-```bash
-# Wire codec golden bytes vs the canonical Python encoder + event model
-bazel test //robodog_client/firmware/tests:lma_calendar_test \
-           //robodog_client/firmware/tests:calendar_model_test
-
-# Live interop smoke: request the calendar over RNS-TCP from a real server
-bazel run //robodog_client/firmware/tests:calendar_fetch -- 192.168.50.67 4246
+bazel test //tests:test_robodog_calendar_fetch        # renderer semantics
+bazel test //tests:test_install_all                  # flash flow wiring
 ```
 
 Notes / status:
+- **Verify on hardware before merge**: flash the LVGL image + client on the
+  RoboDog and confirm (a) the panel renders, (b) urns/µReticulum announces,
+  (c) the server's reply decodes and the event list updates on screen.
 - **Deploy warning:** this PR (in its staged server-side baseline) *removes*
   the server's `:4247` framed-TCP calendar service and the gRPC
   `GetCalendar` RPC. The stable `robodog_native` client reads its calendar
   over exactly that endpoint — deploying this server as-is leaves the
-  stable board on its cached/offline render until it is re-flashed onto one
-  of the new runtimes (or the server-side read path is reinstated).
-- The native **request path is verified live** through the deployed server
-  (SLIP-framed TCP, announce decode, LXMF request; server logged
-  `Calendar reply sent (2 events, watermark ...)` + `DeliveryAck sent`).
-  The native side does **not yet decrypt replies**: RTReticulum lacks
-  ratchet key-rotation (upstream TODO, `link.cpp` "Hook for future
-  ratchet/key-rotation support") and LXMF replies are ratchet-encrypted —
-  until that lands, the MicroPython client remains the runtime that reads
-  the calendar (which is why it stays the default).
-- `st7305_disp` is a faithful port of the Waveshare-derived MicroPython
-  ST7305 driver; **validate orientation/polarity on a live panel** when a
-  RoboDog is first attached — if ink is inverted, flip the pixel polarity in
-  the flush path.
+  stable board on its cached/offline render until it is re-flashed onto the
+  LVGL runtime (or the server-side read path is reinstated).
+- **Panel polarity**: ST7305 ink mapping (which palette bit is ink) is
+  verified on-device at boot; if text renders inverted, flip the palette
+  order in `lv_display.py`'s flush (one constant).
 
 ### 8. Docker Image
 

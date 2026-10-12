@@ -53,7 +53,10 @@ except ImportError:
     encode_calendar_request = None  # type: ignore[assignment]
     encode_request_envelope = None  # type: ignore[assignment]
 
-# Calendar renderer (robodog_client/ui.py — pure, no hardware imports).
+# Calendar renderers.  Preferred: LVGL 9 (data-bound screen, robodog_client/
+# lvui.py + lv_display.py) when an lvgl-micropython image is running; the base
+# resonant-path renderer (robodog_client/ui.py — own 5x7 bitfont, pure Python,
+# no hardware imports) stays the fallback for plain MicroPython images.
 try:
     import ui
 
@@ -61,6 +64,33 @@ try:
 except ImportError:
     HAS_UI = False
     ui = None  # type: ignore[assignment]
+
+_lv_screen = None
+
+
+def _ensure_lvgl(display=None):
+    """Lazy-init the LVGL path once; returns a CalendarScreen or None.
+    *display* is the ST7305 panel instance from ``_init_display`` (reused,
+    never re-inited)."""
+    global _lv_screen
+    if _lv_screen is not None:
+        return _lv_screen
+    try:
+        import lvgl as lv  # NOQA
+        import lv_display as lvdisp_mod  # NOQA
+        import lvui as lvuimod  # NOQA
+
+        d = lvdisplay_mod.LVGLST7305(panel=display)
+        _lv_screen = lvuimod.CalendarScreen(d)
+        print("LVGL screen ready")
+    except ImportError as e:
+        print("LVGL unavailable (%s) — falling back to ui.py" % e)
+        _lv_screen = None
+    except Exception as e:
+        print("LVGL init failed: %s" % e)
+        _lv_screen = None
+    return _lv_screen
+
 
 # ---- Module-level defaults (overridden from config.py at boot) ------------
 # Mirrors cardputer_client/main.py: helpers read these globals, so the module
@@ -213,8 +243,28 @@ def _header_now():
 
 
 def _render(display, events, now_ms=None, offline=False):
-    """Render *events* to the ST7305 via ui; returns True on success."""
+    """Render *events* to the ST7305.  LVGL screen preferred; falls back to
+    ui.py's own 5x7 bitfont renderer on plain MicroPython images."""
     global _LAST_BUF
+    scr = _ensure_lvgl(display)
+    if scr is not None:
+        try:
+            scr.set_header(_header_now() if now_ms else "FAMILY CALENDAR")
+            scr.set_offline(offline)
+            scr.set_events(events or [])
+            try:
+                lv = __import__("lvgl")
+                lv.task_handler()
+            except ImportError:
+                pass
+            print(
+                "rendered %d events%s (LVGL)"
+                % (len(events or []), " (offline cached)" if offline else "")
+            )
+            return True
+        except Exception as e:
+            sys.print_exception(e)
+            print("LVGL render failed — falling back to ui.py")
     if display is None or ui is None:
         return False
     try:
@@ -235,6 +285,15 @@ def _render(display, events, now_ms=None, offline=False):
 def _render_offline_cached(display):
     """Show the cached calendar marked OFFLINE; else keep the last frame."""
     global _EVENTS, _LAST_BUF
+    if (_EVENTS or _LAST_BUF is not None or display is not None) and _ensure_lvgl(display) is not None:
+        try:
+            if _EVENTS:
+                _render(display, _EVENTS, offline=True)
+            else:
+                _render(display, [], offline=True)
+            return
+        except Exception as e:
+            print("LVGL offline render failed: %s" % e)
     if display is None or ui is None:
         return
     try:

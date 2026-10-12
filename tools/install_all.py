@@ -688,6 +688,8 @@ _ROBODOG_FILES = [
     "config.py",
     "main.py",
     "ui.py",
+    "lv_display.py",
+    "lvui.py",
     "st7305.py",
     "proto/lma_encoder.py",
 ]
@@ -699,7 +701,8 @@ def _stage_robodog(src_root: str) -> str:
     client .py at the root, vendored lib/ + proto/ beside them)."""
     stage = tempfile.mkdtemp(prefix="robodog_")
     try:
-        for fname in ("boot.py", "config.py", "main.py", "ui.py", "st7305.py", "__init__.py"):
+        for fname in ("boot.py", "config.py", "main.py", "ui.py", "lv_display.py",
+                      "lvui.py", "st7305.py", "__init__.py"):
             src = os.path.join(src_root, fname)
             if os.path.isfile(src):
                 shutil.copyfile(src, os.path.join(stage, fname))
@@ -865,33 +868,27 @@ def _flash_robodog_native(port: str, result: DeviceResult, src_root: str,
                    server_host: str | None = None,
                    wifi_ssid: str | None = None,
                    wifi_pass: str | None = None,
-                   device_name: str | None = None) -> None:
-    """Build + flash the native ESP-IDF/LVGL RoboDog firmware (button-free).
+                   device_name: str | None = None,
+                   image_bin: str | None = None) -> None:
+    """Flash the lvgl-micropython IMAGE and stage the LMAO LVGL µPy client.
 
-    The firmware lives in robodog_client/firmware/ (LVGL 9 declarative
-    XML + subjects UI on the ST7305 RLCD; calendar fetch over RNS-TCP via the
-    shared RTReticulum native stack).  build.sh stages the app into the shared
-    RTReticulum checkout and runs the ESP-IDF toolchain in Docker; flash.sh
-    runs **esptool on the HOST** because Docker's ttyACM passthrough drops
-    RTS/DTR and breaks esptool's button-free reset into download mode
-    (EPROTO on open) — the same rule as robodog_native/flash.sh.  This check
-    fails fast here so the flash step can never silently fall back to a
-    Docker flash.
+    Authoritative flow (button-free, host-only):
+      1. Flash *image_bin* (an lvgl-micropython build for ESP32-S3/SPIRAM_OCT)
+         via HOST esptool --before default_reset --after hard_reset.  Docker is
+         NOT used at flash time: its ttyACM passthrough drops RTS/DTR, which
+         breaks esptool's button-free reset into download mode (EPROTO).  The
+         wrapper checks for host esptool up-front and fails fast.
+      2. Stage the µPy client (main.py, config.py, lv_display.py, lvui.py,
+         ui.py fallback, st7305.py, urns lib, proto) over raw REPL — the same
+         uploader the MicroPython path uses — then bake DEST_HASH / server
+         host / WiFi into config.py and pin the client identity (no-drift).
 
-    DEST_HASH / RNS-TCP server host / WiFi are baked in at build time via
-    LMAO_* env vars (the source tree is never modified), mirroring the native
-    Cardputer path.  Client identity pinning uses the same no-drift scheme
-    (LMAO_NODE_IDENTITY_HEX — the named or canonical client identity), so the
-    board keeps one lxmf/delivery hash across re-flashes.
-
-    Requires: Docker (espressif/idf:v5.3.1) for the build and HOST
-    `python3 -m esptool` for the button-free flash.  Unlike the old
-    MicroPython client the board needs no pre-installed runtime."""
+    The board ends up with ONE runtime: MicroPython + LVGL UI + urns comms.
+    """
     import subprocess
 
-    # Authoritative invariant: the RoboDog ESP-IDF board is flashed
-    # button-free, which only works with host esptool (RTS/DTR).  Bail out
-    # BEFORE the (long) Docker build if the flash tool is missing.
+    # Authoritative invariant: host esptool only (button-free reset cannot
+    # run through Docker's ttyACM passthrough).  Bail BEFORE any state change.
     flash_check = subprocess.run(
         ["python3", "-c", "import esptool"], text=True,
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
@@ -902,108 +899,126 @@ def _flash_robodog_native(port: str, result: DeviceResult, src_root: str,
         print("    fix: python3 -m pip install --target=$HOME/.local/lib python esptool")
         return
 
-    firmware_dir = os.path.join(src_root, "firmware")
-    build_sh = os.path.join(firmware_dir, "build.sh")
-    flash_sh = os.path.join(firmware_dir, "flash.sh")
-    for path, what in ((build_sh, "build script"), (flash_sh, "flash script")):
-        if not os.path.isfile(path):
-            result.fail(f"Missing {what}: {path}")
-            print(f"  FAIL: missing {what} {path}")
-            return
-
-    env = dict(os.environ)
-    env["PORT"] = port
+    # ---- 1. flash the image -------------------------------------------------
+    dest_hash = None
     if inject_dest_hash:
         print("  Computing server DEST_HASH ...")
         try:
             dest_hash = ensure_delivery_destination_hash()
-            env["LMAO_DEST_HASH_HEX"] = dest_hash
             print(f"    DEST_HASH = {dest_hash}")
         except Exception as exc:
             result.fail(f"DEST_HASH resolution failed: {exc}")
             print(f"  FAIL: DEST_HASH resolution failed — {exc}")
             return
 
-    # Pin the client identity (no-drift, lma_core/client_identity.py): the
-    # named (--robodog-name) or canonical client private key is baked into the
-    # native build via LMAO_NODE_IDENTITY_HEX, so the delivery hash never
-    # drifts across re-flashes / NVS erases.
-    print("  Pinning client identity (native) ...")
+    print(f"  Pinning client identity ({'device ' + repr(device_name) if device_name else 'canonical'}) ...")
     try:
-        env["LMAO_NODE_IDENTITY_HEX"] = _device_client_private_key_hex(device_name)
+        _device_client_private_key_hex(device_name)
         label = f"device {device_name!r}" if device_name else "canonical"
-        print(f"    native node identity pinned to the {label} client identity")
+        print(f"    identity pinned to the {label} client identity")
     except Exception as exc:
         result.fail(f"Client identity resolution failed: {exc}")
         print(f"  FAIL: client identity resolution failed — {exc}")
         return
 
-    if server_host:
-        env["LMAO_SERVER_HOST"] = server_host
-        print(f"    RNS-TCP server: {server_host}:4246")
-    if wifi_ssid:
-        env["LMAO_WIFI_SSID"] = wifi_ssid
-    if wifi_pass:
-        env["LMAO_WIFI_PASS"] = wifi_pass
-    if not wifi_ssid:
-        print("  WARNING: no --wifi-ssid given — the panel will not reach the server")
-
-    print(f"\n--- RoboDog (native): building firmware for {port} ---")
+    print(f"\n--- RoboDog (LVGL MicroPython): flashing image to {port} ---")
+    cmd = [
+        "python3", "-m", "esptool", "--chip", "esp32s3",
+        "-p", port, "-b", "460800",
+        "--before", "default_reset", "--after", "hard_reset",
+        "write_flash", "-z", "0x0", image_bin,
+    ]
+    print("    esptool:", " ".join(cmd))
     try:
-        proc = subprocess.run(
-            ["bash", build_sh],
-            env=env,
-            cwd=firmware_dir,
-            text=True,
-            stdout=subprocess.DEVNULL if not os.environ.get("LMAO_VERBOSE") else None,
-            stderr=subprocess.STDOUT,
-        )
+        proc = subprocess.run(cmd, text=True,
+                              stdout=None if os.environ.get("LMAO_VERBOSE") else subprocess.DEVNULL,
+                              stderr=subprocess.STDOUT)
         if proc.returncode != 0:
-            result.fail(f"Native firmware build failed (exit {proc.returncode})")
-            print("  FAIL: native firmware build failed — run "
-                  "bazel run //robodog_client:build_firmware for the full log")
+            result.fail("LVGL MicroPython image flash failed")
+            print("  FAIL: esptool exit", proc.returncode, "(run with LMAO_VERBOSE=1 for output)")
             return
     except FileNotFoundError as exc:
-        result.fail(f"build.sh failed to run (bash? subprocess): {exc}")
+        result.fail(f"esptool failed to run: {exc}")
         print(f"  FAIL: {exc}")
         return
     except Exception as exc:
-        result.fail(f"Native firmware build error: {exc}")
+        result.fail(f"LVGL image flash error: {exc}")
         print(f"  FAIL: {exc}")
         return
+    print(f"  OK: image flashed on {port} — waiting 3s for reboot ...")
+    time.sleep(3)
 
-    print(f"--- RoboDog (native): flashing to {port} ---")
+    # ---- 2. stage the MicroPython client via raw REPL -----------------------
+    # Reuses the same uploader machinery as the plain MicroPython path.
     try:
-        env["FLASH_PORT"] = port
-        env["FLASH_BAUD"] = env.get("FLASH_BAUD", "921600")
-        proc = subprocess.run(
-            ["bash", flash_sh, "--port", port],
-            env=env,
-            cwd=firmware_dir,
-            text=True,
-            stdout=subprocess.DEVNULL if not os.environ.get("LMAO_VERBOSE") else None,
-            stderr=subprocess.STDOUT,
-        )
-        if proc.returncode != 0:
-            result.fail(f"Native firmware flash failed (exit {proc.returncode})")
-            print(f"  FAIL: native firmware flash failed — run "
-                  f"bazel run //robodog_client:flash_firmware -- --port {port} for the full log")
+        ser = serial.Serial(port, 115200, timeout=1, write_timeout=10)
+        time.sleep(0.6)
+    except serial.SerialException as exc:
+        result.fail(f"Cannot open serial port {port}: {exc}")
+        print(f"  FAIL: {exc}")
+        return
+    stage = None
+    try:
+        stage = _stage_robodog(src_root)
+        wifi = wifi_pass is not None
+        _patch_robodog_config(stage, dest_hash, server_host, wifi_ssid, wifi_pass)
+        print(f"    DEST_HASH = {dest_hash or '(announce-only)'}")
+        if server_host:
+            print(f"    RNS-TCP server: {server_host}:4246")
+        if not enter_raw_repl(ser):
+            result.fail("Could not enter raw REPL (LVGL image stuck?)")
+            print("  FAIL: Could not enter raw REPL")
             return
-    except FileNotFoundError as exc:
-        result.fail(f"flash.sh failed to run (bash? subprocess/docker): {exc}")
-        print(f"  FAIL: {exc}")
-        return
+        try:
+            verify_device(ser)
+            disarm_watchdog(ser)
+            try:
+                client_hash = _inject_client_identity(
+                    ser, device_name=device_name, identity_root="/rns"
+                )
+                label = f"device {device_name!r}" if device_name else "canonical"
+                print(f"    robo-dog {label} lxmf/delivery hash = {client_hash} "
+                      "(keep in server ALLOWED_CLIENTS)")
+            except Exception as exc:
+                result.fail(f"RoboDog identity pinning failed: {exc}")
+                print(f"  FAIL: RoboDog identity pinning failed — {exc}")
+                return
+            files = list(_ROBODOG_FILES) + auto_discover_lib_files(stage)
+            verify_files_exist(stage, files)
+            print(f"  Uploading {len(files)} file(s) ...")
+            failed = 0
+            for rel in files:
+                local = os.path.join(stage, rel)
+                size = os.path.getsize(local)
+                print(f"    {rel:32s} … ", end="", flush=True)
+                try:
+                    upload_file(ser, local, rel, skip_if_unchanged=True)
+                    print("OK")
+                except DeviceStalledError:
+                    print("STALLED")
+                    failed += 1
+                except Exception:
+                    print("FAILED")
+                    failed += 1
+            exit_raw_repl(ser)
+            if failed:
+                result.fail(f"{len(files) - failed}/{len(files)} uploaded")
+                return
+            result.ok(
+                f"LVGL MicroPython image flashed + client staged on {port}"
+                " (calendar via RNS-TCP)"
+            )
+        finally:
+            ser.close()
     except Exception as exc:
-        result.fail(f"Native firmware flash error: {exc}")
+        import traceback
+        traceback.print_exc()
+        result.fail(f"Unexpected error: {exc}")
         print(f"  FAIL: {exc}")
-        return
-
-    if inject_dest_hash:
-        result.ok(f"Built + flashed native firmware on {port} (DEST_HASH baked)")
-        print(f"  OK: native firmware flashed on {port}, DEST_HASH baked in")
-    else:
-        result.ok(f"Built + flashed native firmware on {port} (no DEST_HASH — announce-only)")
-        print(f"  OK: native firmware flashed on {port} (no DEST_HASH — device will not fetch)")
+    finally:
+        if stage:
+            shutil.rmtree(stage, ignore_errors=True)
+    print(f"  OK: LVGL MicroPython runtime ready on {port}")
 
 
 # ---- RNode operations ----
@@ -1355,11 +1370,28 @@ def main(argv: list[str] | None = None) -> None:
             os.path.dirname(os.path.abspath(__file__)))
         src_root = args.robodog_root or os.path.join(repo_root, "robodog_client")
         if args.native_robodog:
-            if not os.path.isfile(os.path.join(src_root, "firmware", "build.sh")):
-                rd_result.fail("Cannot locate robodog_client/firmware/ (pass --robodog-root)")
-                print("RoboDog: FAIL — cannot locate robodog_client/firmware/")
+            # The LVGL path now flashes the lvgl-micropython IMAGE (button-free
+            # host esptool) and then stages the MicroPython LMAO client + LVGL
+            # UI over raw REPL.  The LVGL-on-ESP-IDF (RTReticulum) firmware was
+            # dropped from this PR — one working transport stack (urns), one
+            # UI source of truth.
+            bin_path = os.environ.get("LVGL_MPY_BIN")
+            if not bin_path or not os.path.isfile(bin_path):
+                candidates = (
+                    "/tmp/lvglmp/LVGL_MPY.bin",
+                    os.path.expanduser("~/.cache/lmao-lvgl-micropython/LVGL_MPY.bin"),
+                )
+                for c in candidates:
+                    if os.path.isfile(c):
+                        bin_path = c
+                        break
+            if not bin_path or not os.path.isfile(bin_path):
+                rd_result.fail("No lvgl-micropython image found")
+                print("  FAIL: set LVGL_MPY_BIN=/path/to/LVGL_MPY.bin (or place"
+                      " the built image at " + candidates[0] + ")")
             else:
-                print("RoboDog: building + flashing native ESP-IDF/LVGL firmware")
+                print("RoboDog: flashing LVGL MicroPython image (button-free) "
+                      "+ staging client from", bin_path)
                 _flash_robodog_native(
                     args.robodog_port, rd_result, src_root,
                     inject_dest_hash=not args.skip_dest_hash,
@@ -1367,6 +1399,7 @@ def main(argv: list[str] | None = None) -> None:
                     wifi_ssid=args.wifi_ssid,
                     wifi_pass=args.wifi_pass,
                     device_name=args.robodog_name,
+                    image_bin=bin_path,
                 )
         else:
             # MicroPython is the RoboDog's default runtime (same story as the
