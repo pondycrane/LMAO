@@ -863,7 +863,7 @@ def _flash_robodog(port: str, result: DeviceResult, src_root: str,
             shutil.rmtree(stage, ignore_errors=True)
 
 
-def _flash_robodog_native(port: str, result: DeviceResult, src_root: str,
+def _flash_robodog_lvgl(port: str, result: DeviceResult, src_root: str,
                    inject_dest_hash: bool = True,
                    server_host: str | None = None,
                    wifi_ssid: str | None = None,
@@ -945,8 +945,17 @@ def _flash_robodog_native(port: str, result: DeviceResult, src_root: str,
         result.fail(f"LVGL image flash error: {exc}")
         print(f"  FAIL: {exc}")
         return
-    print(f"  OK: image flashed on {port} — waiting 3s for reboot ...")
-    time.sleep(3)
+    print(f"  OK: image flashed on {port} — waiting for USB to re-enumerate ...")
+    waited = 0
+    while waited < 90 and not os.path.exists(port):
+        time.sleep(1)
+        waited += 1
+    if not os.path.exists(port):
+        result.fail(f"{port} did not return after flash — replug the board")
+        print(f"  FAIL: {port} never re-enumerated after flashing (the board"
+              " may need a manual replug)")
+        return
+    print(f"    {port} back after {waited}s — opening ...")
 
     # ---- 2. stage the MicroPython client via raw REPL -----------------------
     # Reuses the same uploader machinery as the plain MicroPython path.
@@ -1229,7 +1238,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Skip the RoboDog flash entirely.",
     )
     parser.add_argument(
-        "--native-robodog",
+        "--lvgl-robodog",
         action="store_true",
         help="Flash the native ESP-IDF/LVGL RoboDog firmware "
         "(robodog_client/firmware/, ST7305 UI) instead of the MicroPython "
@@ -1369,7 +1378,7 @@ def main(argv: list[str] | None = None) -> None:
         repo_root = os.environ.get("BUILD_WORKSPACE_DIRECTORY") or os.path.dirname(
             os.path.dirname(os.path.abspath(__file__)))
         src_root = args.robodog_root or os.path.join(repo_root, "robodog_client")
-        if args.native_robodog:
+        if args.lvgl_robodog:
             # The LVGL path now flashes the lvgl-micropython IMAGE (button-free
             # host esptool) and then stages the MicroPython LMAO client + LVGL
             # UI over raw REPL.  The LVGL-on-ESP-IDF (RTReticulum) firmware was
@@ -1393,7 +1402,7 @@ def main(argv: list[str] | None = None) -> None:
             else:
                 print("RoboDog: flashing LVGL MicroPython image (button-free) "
                       "+ staging client from", bin_path)
-                _flash_robodog_native(
+                _flash_robodog_lvgl(
                     args.robodog_port, rd_result, src_root,
                     inject_dest_hash=not args.skip_dest_hash,
                     server_host=args.server_host,
@@ -1405,7 +1414,7 @@ def main(argv: list[str] | None = None) -> None:
         else:
             # MicroPython is the RoboDog's default runtime (same story as the
             # Cardputer): the urns RNS-TCP stack is field-proven here; the
-            # native LVGL firmware is opt-in via --native-robodog.
+            # native LVGL firmware is opt-in via --lvgl-robodog.
             if not os.path.isfile(os.path.join(src_root, "main.py")):
                 rd_result.fail("Cannot locate robodog_client/ (pass --robodog-root)")
                 print("RoboDog: FAIL — cannot locate robodog_client/")
