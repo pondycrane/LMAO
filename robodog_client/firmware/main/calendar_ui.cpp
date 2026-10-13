@@ -14,6 +14,8 @@
 #include <stdint.h>
 #include <stdio.h>
 
+#include "esp_log.h"
+
 #include "calendar_model.h"
 #include <string.h>
 #include <vector>
@@ -244,7 +246,9 @@ void set_events_data(const lma_cal_event_t* events, size_t count,
     // matching them by loro uid order (select_events preserves order of ui).
     for (size_t i = 0; i < out.size() && i < kRows; i++) {
         for (size_t j = 0; j < count && j < LMA_PB_EVENT_MAX; j++) {
-            if (events[j].uid == out[i].uid) {
+            if (strcmp(events[j].uid, out[i].uid.c_str()) == 0) {
+                ESP_LOGI("calui", "row %u uid=%s pic_len=%u", (unsigned)i,
+                         events[j].uid, (unsigned)events[j].pic_data_len);
                 apply_tile(i, events[j].pic_data, events[j].pic_data_len);
                 break;
             }
