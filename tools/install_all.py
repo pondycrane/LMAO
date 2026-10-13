@@ -922,6 +922,16 @@ def _flash_robodog_lvgl(port: str, result: DeviceResult, src_root: str,
         return
 
     print(f"\n--- RoboDog (LVGL MicroPython): flashing image to {port} ---")
+    waited = 0
+    while waited < 60 and not os.path.exists(port):
+        time.sleep(1)
+        waited += 1
+    if not os.path.exists(port):
+        result.fail(f"{port} never appeared — plug the board in (normal mode)")
+        print(f"  FAIL: no device on {port} after {waited}s wait")
+        return
+    if waited:
+        print(f"    {port} appeared after {waited}s")
     cmd = [
         "python3", "-m", "esptool", "--chip", "esp32s3",
         "-p", port, "-b", "460800",
