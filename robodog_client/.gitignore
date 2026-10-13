@@ -1,0 +1,4 @@
+build/
+build_lvgl/
+myboard/
+managed_components/
