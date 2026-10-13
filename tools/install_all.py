@@ -1379,6 +1379,7 @@ def main(argv: list[str] | None = None) -> None:
             if not bin_path or not os.path.isfile(bin_path):
                 candidates = (
                     "/tmp/lvglmp/LVGL_MPY.bin",
+                    os.path.expanduser("~/.cache/LVGL_MPY.bin"),
                     os.path.expanduser("~/.cache/lmao-lvgl-micropython/LVGL_MPY.bin"),
                 )
                 for c in candidates:
