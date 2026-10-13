@@ -604,6 +604,29 @@ Notes / status:
 - No `ALLOWED_CLIENTS`/DEST_HASH involvement — this is a direct Postgres read,
   not an LXMF mesh client.
 
+#### 7d.2 RoboDog LVGL client (`robodog_client/firmware/`)
+
+`robodog_client/firmware/` is a second build of the same family-calendar
+panel data — this time rendered with **LVGL 9 declarative XML + Subjects**
+(file `ui_xml/calendar_screen.xml` + `calendar_ui.cpp`, one `lv_subject_t`
+per bound field) instead of hand-painted u8g2. Data still comes over the
+same **gRPC `GetCalendar` RPC on :50051** (see §7); the `robodog_native/`
+framed-TCP client (§7c above) remains a stable, independent build.
+
+```bash
+# build in Docker (esp32s3 image), output: robodog_client/build_lvgl/build/robodog_lvgl.bin
+bash robodog_client/firmware/build.sh
+
+# flash via host esptool (RTS/DTR-safe; Docker breaks download-mode entry)
+FLASH_PORT=/dev/ttyACM0 bash robodog_client/firmware/flash.sh
+```
+
+WiFi/server credentials and `RD_SYNC_INTERVAL_SECONDS` are NVS-backed
+(robodog_native's `config.h` keys, namespace `robodog`); build-time defaults
+come from `main/local_secrets.h` (gitignored, never commit).
+`install_all --lvgl-robodog` performs the authoritative
+build-flash-verify cycle.
+
 ### 8. Docker Image
 
 The server Docker image is the release artifact for the in-cluster
@@ -1270,11 +1293,11 @@ The registry is configured via environment variables:
 │
 ├── assets/calendar-icons/             # Family-calendar line-drawing pack (SVG, 20 keys)
 │
-├── robodog_client/                    # Waveshare ESP32-S3 RLCD-4.2 display client (MicroPython)
-│   ├── config.py                      # WiFi / RNS-TCP server / DEST_HASH (install_all patches)
-│   ├── main.py                        # WiFi->urns RNS-TCP -> LXMF calendar fetch -> render loop
-│   ├── ui.py                          # 300x400 1-bit render (host-testable)
-│   └── st7305.py                      # ST7305 reflective-LCD driver (best-effort port)
+├── robodog_client/                    # Waveshare ESP32-S3 RLCD-4.2 display client
+│   ├── firmware/                      # ESP-IDF + LVGL 9 declarative UI (native)
+│   │   ├── build.sh                   # Docker-based build (idf.py in esp32s3 image)
+│   │   ├── flash.sh                   # host esptool flash (RTS/DTR-safe)
+│   │   └── main/                      # LVGL subjects + gRPC GetCalendar core + ST7305 driver
 │
 └── rnode_firmware/                    # Documentation only
     └── README.md                      # Step-by-step ESP32 RNode flashing guide

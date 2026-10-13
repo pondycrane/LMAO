@@ -1,0 +1,123 @@
+/*
+ * lma_proto.h -- Tiny hand-rolled protobuf codec for the LMAO family-calendar
+ * wire messages exchanged over the framed-TCP service (lma_core/calendar_tcp_api.py).
+ * It implements ONLY the CalendarRequest / CalEvent / CalendarBundle fields
+ * pinned in proto/lma_messages.proto:
+ *
+ *   CalendarRequest { string calendar_id = 1;  uint64 since_ms    = 2;
+ *                     uint32 max_events = 3; }
+ *   CalEvent        { string uid = 1;  string title = 2;  string notes = 3;
+ *                     uint64 start_ms = 4;  uint64 end_ms = 5;
+ *                     bool deleted = 6;  string pic = 7; }
+ *   CalendarBundle  { uint32 format = 1;  string calendar_id = 2;
+ *                     repeated CalEvent events = 3;  uint64 watermark_ms = 4; }
+ *
+ * Deliberately dependency-free (no malloc, no strings heap, no lwip): strings
+ * land in fixed-size buffers, so this file builds and self-tests on a bare
+ * host `cc -std=c11 -Wall -Wextra` as well as inside the ESP-IDF main
+ * component.  UTF-8 bytes are copied verbatim and NUL-terminated; oversized
+ * fields are truncated (never overflow).
+ */
+#ifndef LMA_PROTO_H
+#define LMA_PROTO_H
+
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* Field-number tags -- keep in sync with proto/lma_messages.proto. */
+#define LMA_PB_CALREQ_ID    1u /* CalendarRequest.calendar_id  string          */
+#define LMA_PB_CALREQ_SINCE 2u /* CalendarRequest.since_ms    varint uint64   */
+#define LMA_PB_CALREQ_MAX   3u /* CalendarRequest.max_events  varint uint32   */
+
+#define LMA_PB_BUNDLE_FORMAT 1u /* CalendarBundle.format      varint uint32   */
+#define LMA_PB_BUNDLE_CALID  2u /* CalendarBundle.calendar_id string          */
+#define LMA_PB_BUNDLE_EVENT  3u /* CalendarBundle.events      repeated CalEvent */
+#define LMA_PB_BUNDLE_WM     4u /* CalendarBundle.watermark_ms varint uint64  */
+
+#define LMA_PB_EV_UID     1u /* CalEvent.uid      string          */
+#define LMA_PB_EV_TITLE   2u /* CalEvent.title    string          */
+#define LMA_PB_EV_NOTES   3u /* CalEvent.notes    string          */
+#define LMA_PB_EV_START   4u /* CalEvent.start_ms varint uint64   */
+#define LMA_PB_EV_END     5u /* CalEvent.end_ms   varint uint64   */
+#define LMA_PB_EV_DELETED 6u /* CalEvent.deleted  varint bool     */
+#define LMA_PB_EV_PIC     7u /* CalEvent.pic      string          */
+#define LMA_PB_EV_PICDATA 8u /* CalEvent.pic_data bytes (1bpp tile) */
+
+/* RLCD row-icon tile contract (see lma_core/calendar_pics.py): 32x32 1-bit,
+ * row-major, MSB first, bit 1 = ink.  128 bytes. */
+#define LMA_PB_PIC_TILE       32u
+#define LMA_PB_PIC_TILE_BYTES (LMA_PB_PIC_TILE * LMA_PB_PIC_TILE / 8u)
+
+/* Fixed-buffer sizes (character byte caps, NUL not counted in these macros). */
+#define LMA_PB_CAL_ID_MAX    31u
+#define LMA_PB_EVENT_UID_MAX  63u
+#define LMA_PB_EVENT_TITLE_MAX 127u
+#define LMA_PB_EVENT_NOTES_MAX 255u
+#define LMA_PB_EVENT_PIC_MAX   31u
+
+/* Maximum number of events one bundle may carry (cache/NVS arrays sized by it). */
+#define LMA_PB_EVENT_MAX 16u
+
+/*
+ * Largest payload frame this build accepts from the server.  The server caps
+ * frames at 1 MiB; a family delta is well under 1 KiB, so 4 KiB is generous
+ * on-device and keeps the receive buffer static.
+ */
+#define LMA_PB_MAX_FRAME 4096u
+
+typedef struct {
+    char calendar_id[LMA_PB_CAL_ID_MAX + 1];
+    uint64_t since_ms;    /* 0 = full fetch from server */
+    uint32_t max_events;  /* 0 = server default page cap */
+} lma_cal_request_t;
+
+typedef struct {
+    char uid[LMA_PB_EVENT_UID_MAX + 1];
+    char title[LMA_PB_EVENT_TITLE_MAX + 1];
+    char notes[LMA_PB_EVENT_NOTES_MAX + 1];
+    uint64_t start_ms;    /* epoch ms UTC */
+    uint64_t end_ms;      /* epoch ms UTC */
+    bool deleted;         /* tombstone: client must drop this uid */
+    char pic[LMA_PB_EVENT_PIC_MAX + 1]; /* icon-pack key, "" = none */
+    uint8_t pic_data[LMA_PB_PIC_TILE_BYTES]; /* 1bpp 32x32 tile from server */
+    size_t pic_data_len;  /* 0 = no tile served */
+} lma_cal_event_t;
+
+typedef struct {
+    uint32_t format;
+    char calendar_id[LMA_PB_CAL_ID_MAX + 1];
+    lma_cal_event_t events[LMA_PB_EVENT_MAX];
+    size_t event_count;
+    uint64_t watermark_ms; /* server pre-read watermark; use as next since_ms */
+} lma_cal_bundle_t;
+
+/* Build an all-default request: "" calendar_id, since 0, max 0, i.e. the
+ * documented "defaults" frame the server maps to {calendar_id:"family"}.
+ * An all-default request encodes to a 0-length payload (empty frame). */
+void lma_proto_req_init(lma_cal_request_t *req);
+
+/* Serialize a request; returns bytes written (0 + empty frame == defaults),
+ * or -1 if it does not fit in cap bytes. */
+int lma_proto_req_encode(const lma_cal_request_t *req, uint8_t *buf, size_t cap);
+
+/* Round-trip / host-test decoder for the request; returns 1 on success. */
+int lma_proto_req_decode(const uint8_t *data, size_t len, lma_cal_request_t *out);
+
+/* Zero a bundle (all strings "", no events, format/watermark 0). */
+void lma_proto_bundle_init(lma_cal_bundle_t *out);
+
+/* Decode a CalendarBundle payload; returns 1 on success, 0 on malformed or
+ * truncated input.  Unknown fields (including wire types fixed32/fixed64) are
+ * skipped; groups (deprecated) are rejected. */
+int lma_proto_bundle_decode(const uint8_t *data, size_t len, lma_cal_bundle_t *out);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* LMA_PROTO_H */

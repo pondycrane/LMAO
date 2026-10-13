@@ -2,3 +2,4 @@ build/
 build_lvgl/
 myboard/
 managed_components/
+firmware/main/local_secrets.h
