@@ -58,12 +58,11 @@
                           style_text_font="lv_font_montserrat_14"
                           style_text_color="0x000000"/>
             </lv_obj>
-            <lv_obj width="24" height="24" scrollable="false"
-                    style_pad_all="0" style_radius="0"
-                    style_border_width="1" style_border_color="0x000000"
-                    style_bg_opa="0%">
-                <lv_obj-bind_flag_if_eq subject="row0_pic" flag="hidden" ref_value="0"/>
-            </lv_obj>
+            <lv_image width="32" height="32" scrollable="false"
+                      style_pad_all="0" style_radius="0"
+                      style_border_width="0" style_bg_opa="0%">
+                <lv_image-bind_flag_if_eq subject="row0_pic" flag="hidden" ref_value="0"/>
+            </lv_image>
         </lv_obj>
 
         <!-- Event row 1 -->
@@ -85,12 +84,11 @@
                           style_text_font="lv_font_montserrat_14"
                           style_text_color="0x000000"/>
             </lv_obj>
-            <lv_obj width="24" height="24" scrollable="false"
-                    style_pad_all="0" style_radius="0"
-                    style_border_width="1" style_border_color="0x000000"
-                    style_bg_opa="0%">
-                <lv_obj-bind_flag_if_eq subject="row1_pic" flag="hidden" ref_value="0"/>
-            </lv_obj>
+            <lv_image width="32" height="32" scrollable="false"
+                      style_pad_all="0" style_radius="0"
+                      style_border_width="0" style_bg_opa="0%">
+                <lv_image-bind_flag_if_eq subject="row1_pic" flag="hidden" ref_value="0"/>
+            </lv_image>
         </lv_obj>
 
         <!-- Event row 2 -->
@@ -112,12 +110,11 @@
                           style_text_font="lv_font_montserrat_14"
                           style_text_color="0x000000"/>
             </lv_obj>
-            <lv_obj width="24" height="24" scrollable="false"
-                    style_pad_all="0" style_radius="0"
-                    style_border_width="1" style_border_color="0x000000"
-                    style_bg_opa="0%">
-                <lv_obj-bind_flag_if_eq subject="row2_pic" flag="hidden" ref_value="0"/>
-            </lv_obj>
+            <lv_image width="32" height="32" scrollable="false"
+                      style_pad_all="0" style_radius="0"
+                      style_border_width="0" style_bg_opa="0%">
+                <lv_image-bind_flag_if_eq subject="row2_pic" flag="hidden" ref_value="0"/>
+            </lv_image>
         </lv_obj>
 
         <!-- Event row 3 -->
@@ -139,12 +136,11 @@
                           style_text_font="lv_font_montserrat_14"
                           style_text_color="0x000000"/>
             </lv_obj>
-            <lv_obj width="24" height="24" scrollable="false"
-                    style_pad_all="0" style_radius="0"
-                    style_border_width="1" style_border_color="0x000000"
-                    style_bg_opa="0%">
-                <lv_obj-bind_flag_if_eq subject="row3_pic" flag="hidden" ref_value="0"/>
-            </lv_obj>
+            <lv_image width="32" height="32" scrollable="false"
+                      style_pad_all="0" style_radius="0"
+                      style_border_width="0" style_bg_opa="0%">
+                <lv_image-bind_flag_if_eq subject="row3_pic" flag="hidden" ref_value="0"/>
+            </lv_image>
         </lv_obj>
 
         <!-- Event row 4 -->
@@ -166,12 +162,11 @@
                           style_text_font="lv_font_montserrat_14"
                           style_text_color="0x000000"/>
             </lv_obj>
-            <lv_obj width="24" height="24" scrollable="false"
-                    style_pad_all="0" style_radius="0"
-                    style_border_width="1" style_border_color="0x000000"
-                    style_bg_opa="0%">
-                <lv_obj-bind_flag_if_eq subject="row4_pic" flag="hidden" ref_value="0"/>
-            </lv_obj>
+            <lv_image width="32" height="32" scrollable="false"
+                      style_pad_all="0" style_radius="0"
+                      style_border_width="0" style_bg_opa="0%">
+                <lv_image-bind_flag_if_eq subject="row4_pic" flag="hidden" ref_value="0"/>
+            </lv_image>
         </lv_obj>
 
         <!-- Event row 5 -->
@@ -193,12 +188,11 @@
                           style_text_font="lv_font_montserrat_14"
                           style_text_color="0x000000"/>
             </lv_obj>
-            <lv_obj width="24" height="24" scrollable="false"
-                    style_pad_all="0" style_radius="0"
-                    style_border_width="1" style_border_color="0x000000"
-                    style_bg_opa="0%">
-                <lv_obj-bind_flag_if_eq subject="row5_pic" flag="hidden" ref_value="0"/>
-            </lv_obj>
+            <lv_image width="32" height="32" scrollable="false"
+                      style_pad_all="0" style_radius="0"
+                      style_border_width="0" style_bg_opa="0%">
+                <lv_image-bind_flag_if_eq subject="row5_pic" flag="hidden" ref_value="0"/>
+            </lv_image>
         </lv_obj>
     </view>
 </component>

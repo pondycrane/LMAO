@@ -1,9 +1,18 @@
 // LVGL 9 declarative UI layer for the RoboDog family-calendar client.
 // Owns the LVGL subjects bound by ui_xml/calendar_screen.xml and exposes the
 // small imperative API used by the application/net layer.
+//
+// robodog_core.c (C) only sees the extern "C" shim at the bottom; everything
+// else is C++.
 #pragma once
 
 #include <stddef.h>
+
+#include "lma_proto.h"
+
+#ifdef __cplusplus
+
+#include <cstdint>
 
 #include "calendar_model.h"
 
@@ -25,3 +34,12 @@ void set_offline(bool offline);
 void set_events(const calendar_model::UiEvent* events, size_t count);
 
 }  // namespace calendar_ui
+
+// C shim: robodog_core.c's sync loop calls this after each (successful or
+// cached) fetch. state: 0 = fresh, 1 = stale, 2 = offline — the header-band
+// OFFLINE status shows when != 0 and events were not re-confirmed.
+extern "C"
+void set_events_data(const lma_cal_event_t *events, size_t count,
+                     uint64_t now_ms, bool stale_badge);
+
+#endif /* __cplusplus */

@@ -7,6 +7,8 @@
 # runtime land in the follow-up PR.
 set(SRCS
     "main.cpp"
+    "lma_proto.c"
+    "robodog_core.c"
     "st7305_disp.cpp"
     "calendar_ui.cpp"
     "calendar_model.cpp"
@@ -20,6 +22,10 @@ idf_component_register(
         lvgl
         nvs_flash
         esp_timer
+        esp_wifi
+        esp_event
+        esp_netif
+        lwip
         esp_driver_spi
         esp_driver_gpio
         log
