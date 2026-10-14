@@ -1,6 +1,10 @@
 // ST7305 300x400 1-bit reflective LCD driver + LVGL 9 display glue for the
 // Waveshare ESP32-S3 RLCD-4.2 board.
 //
+// LVGL renders a landscape 400x300 surface (st7305_disp_get returns that
+// display); the flush callback transposes it into the portrait 300x400 frame
+// the banded panel push drives. Landscape mirrors the reference RLCD-4.2 demo.
+//
 // Port of robodog_client/st7305.py (itself a faithful port of Waveshare's
 // u8g2_st7305.c — same init command table and 4x4-LUT 8x8-tile column remap).
 //

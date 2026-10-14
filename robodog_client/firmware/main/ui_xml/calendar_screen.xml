@@ -1,4 +1,9 @@
-<!-- RoboDog family-calendar screen: 300x400 portrait, 1-bit black-on-white.
+<!-- RoboDog family-calendar screen: 400x300 landscape, 1-bit black-on-white.
+     Horizontal display (like the reference RLCD-4.2 demo). The ST7305 driver
+     renders a 400x300 landscape LVGL surface and rotates it into the panel.
+
+     Layout: header band + separator on top, then a 2-column x 3-row grid of
+     events (6 slots preserve calendar_model::MAX_ROWS).
 
      Subjects (created and registered from C in calendar_ui.cpp):
        header_text   (string)  - header band line
@@ -12,7 +17,7 @@
      C (calendar_ui.cpp); the scaffold enables them via Kconfig. -->
 <component>
     <view extends="lv_obj"
-          width="300" height="400" x="0" y="0" scrollable="false"
+          width="400" height="300" x="0" y="0" scrollable="false"
           style_layout="flex" style_flex_flow="column"
           style_pad_all="4" style_pad_row="0"
           style_radius="0" style_border_width="0"
@@ -20,7 +25,7 @@
           style_text_color="0x000000">
 
         <!-- Header band: title/date left, status right -->
-        <lv_obj width="100%" height="30" scrollable="false"
+        <lv_obj width="100%" height="26" scrollable="false"
                 style_layout="flex" style_flex_flow="row"
                 style_flex_main_place="space_between"
                 style_flex_cross_place="center"
@@ -39,160 +44,181 @@
                 style_pad_all="0" style_radius="0" style_border_width="0"
                 style_bg_color="0x000000" style_bg_opa="100%"/>
 
-        <!-- Event row 0 -->
-        <lv_obj width="100%" height="58" scrollable="false"
+        <!-- 2-column event grid (rows 0-2 left, 3-5 right) -->
+        <lv_obj width="100%" style_flex_grow="1" scrollable="false"
                 style_layout="flex" style_flex_flow="row"
-                style_flex_main_place="space_between"
-                style_flex_cross_place="center"
-                style_pad_all="0" style_pad_column="8"
+                style_pad_all="0" style_pad_column="8" style_pad_row="0"
                 style_radius="0" style_border_width="0" style_bg_opa="0%">
-            <lv_obj-bind_flag_if_eq subject="row0_present" flag="hidden" ref_value="0"/>
-            <lv_obj style_flex_grow="1" height="content" scrollable="false"
-                    style_layout="flex" style_flex_flow="column" style_pad_row="6"
-                    style_pad_all="0" style_radius="0" style_border_width="0"
-                    style_bg_opa="0%">
-                <lv_label bind_text="row0_title" width="100%" long_mode="dots"
-                          style_text_font="lv_font_montserrat_20"
-                          style_text_color="0x000000"/>
-                <lv_label bind_text="row0_time" width="100%" long_mode="clip"
-                          style_text_font="lv_font_montserrat_14"
-                          style_text_color="0x000000"/>
-            </lv_obj>
-            <lv_image width="32" height="32" scrollable="false"
-                      style_pad_all="0" style_radius="0"
-                      style_border_width="0" style_bg_opa="0%">
-                <lv_image-bind_flag_if_eq subject="row0_pic" flag="hidden" ref_value="0"/>
-            </lv_image>
-        </lv_obj>
 
-        <!-- Event row 1 -->
-        <lv_obj width="100%" height="58" scrollable="false"
-                style_layout="flex" style_flex_flow="row"
-                style_flex_main_place="space_between"
-                style_flex_cross_place="center"
-                style_pad_all="0" style_pad_column="8"
-                style_radius="0" style_border_width="0" style_bg_opa="0%">
-            <lv_obj-bind_flag_if_eq subject="row1_present" flag="hidden" ref_value="0"/>
-            <lv_obj style_flex_grow="1" height="content" scrollable="false"
+            <!-- Left column: rows 0-2 -->
+            <lv_obj style_flex_grow="1" height="100%" scrollable="false"
                     style_layout="flex" style_flex_flow="column" style_pad_row="6"
                     style_pad_all="0" style_radius="0" style_border_width="0"
                     style_bg_opa="0%">
-                <lv_label bind_text="row1_title" width="100%" long_mode="dots"
-                          style_text_font="lv_font_montserrat_20"
-                          style_text_color="0x000000"/>
-                <lv_label bind_text="row1_time" width="100%" long_mode="clip"
-                          style_text_font="lv_font_montserrat_14"
-                          style_text_color="0x000000"/>
-            </lv_obj>
-            <lv_image width="32" height="32" scrollable="false"
-                      style_pad_all="0" style_radius="0"
-                      style_border_width="0" style_bg_opa="0%">
-                <lv_image-bind_flag_if_eq subject="row1_pic" flag="hidden" ref_value="0"/>
-            </lv_image>
-        </lv_obj>
 
-        <!-- Event row 2 -->
-        <lv_obj width="100%" height="58" scrollable="false"
-                style_layout="flex" style_flex_flow="row"
-                style_flex_main_place="space_between"
-                style_flex_cross_place="center"
-                style_pad_all="0" style_pad_column="8"
-                style_radius="0" style_border_width="0" style_bg_opa="0%">
-            <lv_obj-bind_flag_if_eq subject="row2_present" flag="hidden" ref_value="0"/>
-            <lv_obj style_flex_grow="1" height="content" scrollable="false"
-                    style_layout="flex" style_flex_flow="column" style_pad_row="6"
-                    style_pad_all="0" style_radius="0" style_border_width="0"
-                    style_bg_opa="0%">
-                <lv_label bind_text="row2_title" width="100%" long_mode="dots"
-                          style_text_font="lv_font_montserrat_20"
-                          style_text_color="0x000000"/>
-                <lv_label bind_text="row2_time" width="100%" long_mode="clip"
-                          style_text_font="lv_font_montserrat_14"
-                          style_text_color="0x000000"/>
-            </lv_obj>
-            <lv_image width="32" height="32" scrollable="false"
-                      style_pad_all="0" style_radius="0"
-                      style_border_width="0" style_bg_opa="0%">
-                <lv_image-bind_flag_if_eq subject="row2_pic" flag="hidden" ref_value="0"/>
-            </lv_image>
-        </lv_obj>
+                <!-- Event row 0 -->
+                <lv_obj width="100%" style_flex_grow="1" scrollable="false"
+                        style_layout="flex" style_flex_flow="row"
+                        style_flex_main_place="space_between"
+                        style_flex_cross_place="center"
+                        style_pad_all="0" style_pad_column="8"
+                        style_radius="0" style_border_width="0" style_bg_opa="0%">
+                    <lv_obj-bind_flag_if_eq subject="row0_present" flag="hidden" ref_value="0"/>
+                    <lv_obj style_flex_grow="1" height="content" scrollable="false"
+                            style_layout="flex" style_flex_flow="column" style_pad_row="4"
+                            style_pad_all="0" style_radius="0" style_border_width="0"
+                            style_bg_opa="0%">
+                        <lv_label bind_text="row0_title" width="100%" long_mode="dots"
+                                  style_text_font="lv_font_montserrat_20"
+                                  style_text_color="0x000000"/>
+                        <lv_label bind_text="row0_time" width="100%" long_mode="clip"
+                                  style_text_font="lv_font_montserrat_14"
+                                  style_text_color="0x000000"/>
+                    </lv_obj>
+                    <lv_image width="32" height="32" scrollable="false"
+                              style_pad_all="0" style_radius="0"
+                              style_border_width="0" style_bg_opa="0%">
+                        <lv_image-bind_flag_if_eq subject="row0_pic" flag="hidden" ref_value="0"/>
+                    </lv_image>
+                </lv_obj>
 
-        <!-- Event row 3 -->
-        <lv_obj width="100%" height="58" scrollable="false"
-                style_layout="flex" style_flex_flow="row"
-                style_flex_main_place="space_between"
-                style_flex_cross_place="center"
-                style_pad_all="0" style_pad_column="8"
-                style_radius="0" style_border_width="0" style_bg_opa="0%">
-            <lv_obj-bind_flag_if_eq subject="row3_present" flag="hidden" ref_value="0"/>
-            <lv_obj style_flex_grow="1" height="content" scrollable="false"
-                    style_layout="flex" style_flex_flow="column" style_pad_row="6"
-                    style_pad_all="0" style_radius="0" style_border_width="0"
-                    style_bg_opa="0%">
-                <lv_label bind_text="row3_title" width="100%" long_mode="dots"
-                          style_text_font="lv_font_montserrat_20"
-                          style_text_color="0x000000"/>
-                <lv_label bind_text="row3_time" width="100%" long_mode="clip"
-                          style_text_font="lv_font_montserrat_14"
-                          style_text_color="0x000000"/>
-            </lv_obj>
-            <lv_image width="32" height="32" scrollable="false"
-                      style_pad_all="0" style_radius="0"
-                      style_border_width="0" style_bg_opa="0%">
-                <lv_image-bind_flag_if_eq subject="row3_pic" flag="hidden" ref_value="0"/>
-            </lv_image>
-        </lv_obj>
+                <!-- Event row 1 -->
+                <lv_obj width="100%" style_flex_grow="1" scrollable="false"
+                        style_layout="flex" style_flex_flow="row"
+                        style_flex_main_place="space_between"
+                        style_flex_cross_place="center"
+                        style_pad_all="0" style_pad_column="8"
+                        style_radius="0" style_border_width="0" style_bg_opa="0%">
+                    <lv_obj-bind_flag_if_eq subject="row1_present" flag="hidden" ref_value="0"/>
+                    <lv_obj style_flex_grow="1" height="content" scrollable="false"
+                            style_layout="flex" style_flex_flow="column" style_pad_row="4"
+                            style_pad_all="0" style_radius="0" style_border_width="0"
+                            style_bg_opa="0%">
+                        <lv_label bind_text="row1_title" width="100%" long_mode="dots"
+                                  style_text_font="lv_font_montserrat_20"
+                                  style_text_color="0x000000"/>
+                        <lv_label bind_text="row1_time" width="100%" long_mode="clip"
+                                  style_text_font="lv_font_montserrat_14"
+                                  style_text_color="0x000000"/>
+                    </lv_obj>
+                    <lv_image width="32" height="32" scrollable="false"
+                              style_pad_all="0" style_radius="0"
+                              style_border_width="0" style_bg_opa="0%">
+                        <lv_image-bind_flag_if_eq subject="row1_pic" flag="hidden" ref_value="0"/>
+                    </lv_image>
+                </lv_obj>
 
-        <!-- Event row 4 -->
-        <lv_obj width="100%" height="58" scrollable="false"
-                style_layout="flex" style_flex_flow="row"
-                style_flex_main_place="space_between"
-                style_flex_cross_place="center"
-                style_pad_all="0" style_pad_column="8"
-                style_radius="0" style_border_width="0" style_bg_opa="0%">
-            <lv_obj-bind_flag_if_eq subject="row4_present" flag="hidden" ref_value="0"/>
-            <lv_obj style_flex_grow="1" height="content" scrollable="false"
-                    style_layout="flex" style_flex_flow="column" style_pad_row="6"
-                    style_pad_all="0" style_radius="0" style_border_width="0"
-                    style_bg_opa="0%">
-                <lv_label bind_text="row4_title" width="100%" long_mode="dots"
-                          style_text_font="lv_font_montserrat_20"
-                          style_text_color="0x000000"/>
-                <lv_label bind_text="row4_time" width="100%" long_mode="clip"
-                          style_text_font="lv_font_montserrat_14"
-                          style_text_color="0x000000"/>
+                <!-- Event row 2 -->
+                <lv_obj width="100%" style_flex_grow="1" scrollable="false"
+                        style_layout="flex" style_flex_flow="row"
+                        style_flex_main_place="space_between"
+                        style_flex_cross_place="center"
+                        style_pad_all="0" style_pad_column="8"
+                        style_radius="0" style_border_width="0" style_bg_opa="0%">
+                    <lv_obj-bind_flag_if_eq subject="row2_present" flag="hidden" ref_value="0"/>
+                    <lv_obj style_flex_grow="1" height="content" scrollable="false"
+                            style_layout="flex" style_flex_flow="column" style_pad_row="4"
+                            style_pad_all="0" style_radius="0" style_border_width="0"
+                            style_bg_opa="0%">
+                        <lv_label bind_text="row2_title" width="100%" long_mode="dots"
+                                  style_text_font="lv_font_montserrat_20"
+                                  style_text_color="0x000000"/>
+                        <lv_label bind_text="row2_time" width="100%" long_mode="clip"
+                                  style_text_font="lv_font_montserrat_14"
+                                  style_text_color="0x000000"/>
+                    </lv_obj>
+                    <lv_image width="32" height="32" scrollable="false"
+                              style_pad_all="0" style_radius="0"
+                              style_border_width="0" style_bg_opa="0%">
+                        <lv_image-bind_flag_if_eq subject="row2_pic" flag="hidden" ref_value="0"/>
+                    </lv_image>
+                </lv_obj>
             </lv_obj>
-            <lv_image width="32" height="32" scrollable="false"
-                      style_pad_all="0" style_radius="0"
-                      style_border_width="0" style_bg_opa="0%">
-                <lv_image-bind_flag_if_eq subject="row4_pic" flag="hidden" ref_value="0"/>
-            </lv_image>
-        </lv_obj>
 
-        <!-- Event row 5 -->
-        <lv_obj width="100%" height="58" scrollable="false"
-                style_layout="flex" style_flex_flow="row"
-                style_flex_main_place="space_between"
-                style_flex_cross_place="center"
-                style_pad_all="0" style_pad_column="8"
-                style_radius="0" style_border_width="0" style_bg_opa="0%">
-            <lv_obj-bind_flag_if_eq subject="row5_present" flag="hidden" ref_value="0"/>
-            <lv_obj style_flex_grow="1" height="content" scrollable="false"
+            <!-- Right column: rows 3-5 -->
+            <lv_obj style_flex_grow="1" height="100%" scrollable="false"
                     style_layout="flex" style_flex_flow="column" style_pad_row="6"
                     style_pad_all="0" style_radius="0" style_border_width="0"
                     style_bg_opa="0%">
-                <lv_label bind_text="row5_title" width="100%" long_mode="dots"
-                          style_text_font="lv_font_montserrat_20"
-                          style_text_color="0x000000"/>
-                <lv_label bind_text="row5_time" width="100%" long_mode="clip"
-                          style_text_font="lv_font_montserrat_14"
-                          style_text_color="0x000000"/>
+
+                <!-- Event row 3 -->
+                <lv_obj width="100%" style_flex_grow="1" scrollable="false"
+                        style_layout="flex" style_flex_flow="row"
+                        style_flex_main_place="space_between"
+                        style_flex_cross_place="center"
+                        style_pad_all="0" style_pad_column="8"
+                        style_radius="0" style_border_width="0" style_bg_opa="0%">
+                    <lv_obj-bind_flag_if_eq subject="row3_present" flag="hidden" ref_value="0"/>
+                    <lv_obj style_flex_grow="1" height="content" scrollable="false"
+                            style_layout="flex" style_flex_flow="column" style_pad_row="4"
+                            style_pad_all="0" style_radius="0" style_border_width="0"
+                            style_bg_opa="0%">
+                        <lv_label bind_text="row3_title" width="100%" long_mode="dots"
+                                  style_text_font="lv_font_montserrat_20"
+                                  style_text_color="0x000000"/>
+                        <lv_label bind_text="row3_time" width="100%" long_mode="clip"
+                                  style_text_font="lv_font_montserrat_14"
+                                  style_text_color="0x000000"/>
+                    </lv_obj>
+                    <lv_image width="32" height="32" scrollable="false"
+                              style_pad_all="0" style_radius="0"
+                              style_border_width="0" style_bg_opa="0%">
+                        <lv_image-bind_flag_if_eq subject="row3_pic" flag="hidden" ref_value="0"/>
+                    </lv_image>
+                </lv_obj>
+
+                <!-- Event row 4 -->
+                <lv_obj width="100%" style_flex_grow="1" scrollable="false"
+                        style_layout="flex" style_flex_flow="row"
+                        style_flex_main_place="space_between"
+                        style_flex_cross_place="center"
+                        style_pad_all="0" style_pad_column="8"
+                        style_radius="0" style_border_width="0" style_bg_opa="0%">
+                    <lv_obj-bind_flag_if_eq subject="row4_present" flag="hidden" ref_value="0"/>
+                    <lv_obj style_flex_grow="1" height="content" scrollable="false"
+                            style_layout="flex" style_flex_flow="column" style_pad_row="4"
+                            style_pad_all="0" style_radius="0" style_border_width="0"
+                            style_bg_opa="0%">
+                        <lv_label bind_text="row4_title" width="100%" long_mode="dots"
+                                  style_text_font="lv_font_montserrat_20"
+                                  style_text_color="0x000000"/>
+                        <lv_label bind_text="row4_time" width="100%" long_mode="clip"
+                                  style_text_font="lv_font_montserrat_14"
+                                  style_text_color="0x000000"/>
+                    </lv_obj>
+                    <lv_image width="32" height="32" scrollable="false"
+                              style_pad_all="0" style_radius="0"
+                              style_border_width="0" style_bg_opa="0%">
+                        <lv_image-bind_flag_if_eq subject="row4_pic" flag="hidden" ref_value="0"/>
+                    </lv_image>
+                </lv_obj>
+
+                <!-- Event row 5 -->
+                <lv_obj width="100%" style_flex_grow="1" scrollable="false"
+                        style_layout="flex" style_flex_flow="row"
+                        style_flex_main_place="space_between"
+                        style_flex_cross_place="center"
+                        style_pad_all="0" style_pad_column="8"
+                        style_radius="0" style_border_width="0" style_bg_opa="0%">
+                    <lv_obj-bind_flag_if_eq subject="row5_present" flag="hidden" ref_value="0"/>
+                    <lv_obj style_flex_grow="1" height="content" scrollable="false"
+                            style_layout="flex" style_flex_flow="column" style_pad_row="4"
+                            style_pad_all="0" style_radius="0" style_border_width="0"
+                            style_bg_opa="0%">
+                        <lv_label bind_text="row5_title" width="100%" long_mode="dots"
+                                  style_text_font="lv_font_montserrat_20"
+                                  style_text_color="0x000000"/>
+                        <lv_label bind_text="row5_time" width="100%" long_mode="clip"
+                                  style_text_font="lv_font_montserrat_14"
+                                  style_text_color="0x000000"/>
+                    </lv_obj>
+                    <lv_image width="32" height="32" scrollable="false"
+                              style_pad_all="0" style_radius="0"
+                              style_border_width="0" style_bg_opa="0%">
+                        <lv_image-bind_flag_if_eq subject="row5_pic" flag="hidden" ref_value="0"/>
+                    </lv_image>
+                </lv_obj>
             </lv_obj>
-            <lv_image width="32" height="32" scrollable="false"
-                      style_pad_all="0" style_radius="0"
-                      style_border_width="0" style_bg_opa="0%">
-                <lv_image-bind_flag_if_eq subject="row5_pic" flag="hidden" ref_value="0"/>
-            </lv_image>
         </lv_obj>
     </view>
 </component>
