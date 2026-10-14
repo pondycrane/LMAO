@@ -17,11 +17,13 @@
 #include "esp_log.h"
 
 #include "calendar_model.h"
+#include "config.h"  // RD_TZ_OFFSET_MINUTES
 #include <string.h>
 #include <vector>
 
 #include "lvgl.h"
-#include "lma_proto.h"   // LMA_PB_PIC_TILE(_BYTES) — same tile contract
+#include "lma_proto.h"
+#include "draw/lv_image_decoder.h"   // LMA_PB_PIC_TILE(_BYTES) — same tile contract
 #include "st7305_disp.h"
 
 // ESP-IDF EMBED_TXTFILES symbols for ui_xml/calendar_screen.xml.
@@ -171,7 +173,8 @@ void set_events(const calendar_model::UiEvent* events, size_t count) {
     for (size_t i = 0; i < kRows; i++) {
         if (i < count) {
             const calendar_model::UiEvent& ev = events[i];
-            const std::string hhmm = calendar_model::fmt_hhmm(ev.start_ms);
+            const std::string hhmm =
+                calendar_model::fmt_hhmm(ev.start_ms, RD_TZ_OFFSET_MINUTES);
             lv_subject_copy_string(&s_row_title[i], ev.title.c_str());
             lv_subject_copy_string(&s_row_time[i], hhmm.c_str());
             lv_subject_set_int(&s_row_present[i], 1);
@@ -237,7 +240,8 @@ void set_events_data(const lma_cal_event_t* events, size_t count,
         ui.push_back(e);
     }
     auto out = calendar_model::select_events(ui, now_ms);
-    const std::string hdr = calendar_model::header_text(now_ms);
+    const std::string hdr =
+        calendar_model::header_text(now_ms, RD_TZ_OFFSET_MINUTES);
     set_header(hdr.c_str());
     set_offline(stale_badge);
     set_events(out.data(), out.size());

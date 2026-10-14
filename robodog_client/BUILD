@@ -10,7 +10,10 @@
 cc_library(
     name = "calendar_model",
     srcs = ["firmware/main/calendar_model.cpp"],
-    hdrs = ["firmware/main/calendar_model.h"],
+    hdrs = [
+        "firmware/main/calendar_model.h",
+        "firmware/main/config.h",
+    ],
     strip_include_prefix = "firmware/main",
     visibility = ["//visibility:public"],
 )
