@@ -56,6 +56,7 @@ CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 CONFIG_LV_COLOR_DEPTH_1=y
 CONFIG_LV_COLOR_DEPTH=1
 CONFIG_LV_USE_XML=y
+CONFIG_LV_USE_OBJ_NAME=y
 # LVGL 9.3.0's XML engine (lv_xml_component.c) references lv_grad_dsc_t.params
 # unguarded — only compiled in with complex gradients enabled. Harmless on a
 # 1-bit panel (we never draw gradients); required for LV_USE_XML to compile.

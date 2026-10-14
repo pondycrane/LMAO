@@ -56,7 +56,8 @@ lv_image_dsc_t s_row_tile_dsc[kRows];
 // Tile buffers are the socle the C core owns (s_cache[i].pic_data) — but the
 // swap-in place in robodog_core invalidates bytes, so calendar_ui keeps its
 // own copies.
-static uint8_t s_pic_tile_copy[kRows][LMA_PB_PIC_TILE_BYTES];
+// Palette-prefixed tile buffers: [2 x lv_color32_t palette][128 px bytes].
+static uint8_t s_pic_tile_buf[kRows][8 + LMA_PB_PIC_TILE_BYTES];
 
 
 // lv_subject_init_string() copies into caller-owned buffers (persistent).
@@ -120,14 +121,7 @@ namespace calendar_ui {
 /* The six XML pic boxes resolved after instantiation: LVML has no src
  * binding, so apply_tile() points the widgets at the descriptors in C. */
 lv_obj_t* s_row_img[kRows];
-static size_t s_img_idx = 0;
 
-static lv_obj_tree_walk_res_t img_collector(lv_obj_t* obj, void*) {
-    if (s_img_idx < kRows && lv_obj_check_type(obj, &lv_image_class)) {
-        s_row_img[s_img_idx++] = obj;
-    }
-    return LV_OBJ_TREE_WALK_NEXT;
-}
 
 bool init() {
     if (s_initialized) return true;
@@ -148,9 +142,13 @@ bool init() {
     }
 #endif  // LV_USE_XML
     if (screen != nullptr) {
-        // Rows are emitted row0..row5 in the XML, so walk order == row order.
-        s_img_idx = 0;
-        lv_obj_tree_walk(screen, img_collector, nullptr);
+        // The XML pic boxes carry name="row{i}_img"; LVGL resolves them by
+        // name, so the mapping cannot depend on tree shape or walk order.
+        for (size_t i = 0; i < kRows; i++) {
+            char name[16];
+            snprintf(name, sizeof(name), "row%zu_img", i);
+            s_row_img[i] = lv_obj_find_by_name(screen, name);
+        }
     }
     lv_unlock();
 
@@ -209,14 +207,18 @@ void set_events(const calendar_model::UiEvent* events, size_t count) {
 static void apply_tile(size_t i, const uint8_t* tile, size_t len) {
     memset(&s_row_tile_dsc[i], 0, sizeof(lv_image_dsc_t));
     if (tile != nullptr && len == LMA_PB_PIC_TILE_BYTES) {
-        memcpy(s_pic_tile_copy[i], tile, len);
+        uint8_t* buf = s_pic_tile_buf[i];
+        const uint32_t palette[2] = {0xFFFFFFFFu /* bg   (white) */,
+                                     0xFF000000u /* ink  (black) */};
+        memcpy(buf, palette, 8);
+        memcpy(buf + 8, tile, len);
         s_row_tile_dsc[i].header.cf = LV_COLOR_FORMAT_I1;
         s_row_tile_dsc[i].header.w  = LMA_PB_PIC_TILE;
         s_row_tile_dsc[i].header.h  = LMA_PB_PIC_TILE;
         s_row_tile_dsc[i].header.stride = LMA_PB_PIC_TILE / 8;
         s_row_tile_dsc[i].header.magic  = LV_IMAGE_HEADER_MAGIC;
-        s_row_tile_dsc[i].data = s_pic_tile_copy[i];
-        s_row_tile_dsc[i].data_size = len;
+        s_row_tile_dsc[i].data = buf;
+        s_row_tile_dsc[i].data_size = 8 + len;
         if (s_row_img[i] != nullptr) {
             /* LVML has no runtime src binding — set the widget source in C */
             lv_image_set_src(s_row_img[i], &s_row_tile_dsc[i]);

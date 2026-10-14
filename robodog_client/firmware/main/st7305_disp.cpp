@@ -3,6 +3,7 @@
 // re-mapped into the ST7305's 8x8-tile column format via the 4x4 LUT.
 #include "st7305_disp.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 #include "driver/gpio.h"
@@ -241,6 +242,30 @@ void flush_cb(lv_display_t* disp, const lv_area_t* area, uint8_t* px_map) {
 uint32_t tick_cb() { return (uint32_t)(esp_timer_get_time() / 1000); }
 
 }  // namespace
+
+
+/* Diagnostic: bypass LVGL and push a synthetic full-screen frame
+ * (300x400 row-major I1, bit set = ink) straight to the panel — the exact
+ * transport the normal render uses. If this image is not visible, the
+ * problem is below the display-driver boundary (transport/init), not LVGL.
+ * Black background with a white cross. */
+bool st7305_debug_fullscreen_test(void) {
+    static uint8_t frame[kFrameBytes];
+    memset(frame, 0, sizeof(frame));
+    memset(frame, 0xFF, sizeof(frame));  // full invert -> black panel
+    for (int y = 0; y < kHeight; y++) {
+        for (int x = 0; x < kWidth; x++) {
+            const int dy = y - kHeight / 2;
+            const int dx = x - kWidth / 2;
+            if (abs(dx) < 60 || abs(dy) < 60) {
+                frame[y * kRowBytes + x / 8] &= ~(0x80u >> (x % 8));
+            }
+        }
+    }
+    ESP_LOGI(kTag, "pushing synthetic full-screen test frame");
+    panel_show(frame);
+    return true;
+}
 
 bool st7305_disp_init(void) {
     if (s_disp != nullptr) return true;
