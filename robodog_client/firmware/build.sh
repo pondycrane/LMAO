@@ -21,6 +21,13 @@ mkdir -p "$WORK"
 STAGE="$WORK"
 rm -rf "$STAGE/build" "$STAGE/main"   # stale CMakeCache + stale staged copy
 cp -rT "$APP/main" "$STAGE/main"
+# Untracked WiFi/server secrets (never committed); NVS keys win over these.
+# Primary: firmware/main/local_secrets.h in this tree (gitignored).
+# Fallback: the old robodog_native copy (migration convenience).
+if [ ! -f "$STAGE/main/local_secrets.h" ] && \
+   [ -f "$APP/../../robodog_native/main/local_secrets.h" ]; then
+    cp "$APP/../../robodog_native/main/local_secrets.h" "$STAGE/main/"
+fi
 cp "$APP/CMakeLists.txt" "$APP/sdkconfig.defaults" "$APP/partitions.csv" "$STAGE/" 2>/dev/null || true
 echo "app staged in $STAGE"
 
