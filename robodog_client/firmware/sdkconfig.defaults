@@ -12,6 +12,9 @@ CONFIG_COMPILER_CXX_EXCEPTIONS_EMG_POOL_SIZE=0
 # /dev/ttyACM0 work.
 CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
 
+# WiFi station + lwip (gRPC GetCalendar over :50051).
+CONFIG_ESP_WIFI_ENABLED=y
+
 # FreeRTOS config — recursive mutexes are used by Transport.
 CONFIG_FREERTOS_HZ=1000
 

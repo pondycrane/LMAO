@@ -29,11 +29,12 @@ std::vector<UiEvent> select_events(
     const std::vector<UiEvent>& events, uint64_t now_ms,
     size_t max_rows = MAX_ROWS);
 
-// "HH:MM" (UTC) for an epoch-ms timestamp, or "" when ms == 0 / invalid.
-std::string fmt_hhmm(uint64_t ms);
+// "HH:MM" for an epoch-ms timestamp in the given zone offset (minutes east
+// of UTC, e.g. -240 = US Eastern), or "" when ms == 0 / invalid.
+std::string fmt_hhmm(uint64_t ms, int tz_min = 0);
 
-// "YYYY-MM-DD  HH:MM" (UTC) for an epoch-ms timestamp, or "FAMILY CALENDAR"
-// when now_ms == 0 / invalid.
-std::string header_text(uint64_t now_ms);
+// "YYYY-MM-DD  HH:MM" for an epoch-ms timestamp in the given zone offset, or
+// "FAMILY CALENDAR" when now_ms == 0 / invalid.
+std::string header_text(uint64_t now_ms, int tz_min = 0);
 
 }  // namespace calendar_model

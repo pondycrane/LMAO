@@ -34,11 +34,14 @@ static calendar_model::UiEvent ev(const char* title, uint64_t start_ms, uint64_t
 }
 
 int main() {
-    // ---- fmt_hhmm / header_text (UTC; 1700000000000 ms = 2023-11-14 22:13:20Z)
+    // ---- fmt_hhmm / header_text (zone-shifted; 1700000000000 ms =
+    // 2023-11-14T22:13:20Z, RD_TZ_OFFSET_MINUTES=-240 -> 18:13 New York)
+    CHECK_TRUE(calendar_model::fmt_hhmm(1700000000000ULL, -240) == "18:13",
+               "fmt_hhmm formats New York HH:MM");
     CHECK_TRUE(calendar_model::fmt_hhmm(1700000000000ULL) == "22:13",
-               "fmt_hhmm formats UTC HH:MM");
+               "fmt_hhmm(0-zone) = UTC HH:MM");
     CHECK_TRUE(calendar_model::fmt_hhmm(0) == "", "fmt_hhmm(0) is empty");
-    CHECK_TRUE(calendar_model::header_text(1700000000000ULL) == "2023-11-14  22:13",
+    CHECK_TRUE(calendar_model::header_text(1700000000000ULL, -240) == "2023-11-14  18:13",
                "header_text formats date + time");
     CHECK_TRUE(calendar_model::header_text(0) == "FAMILY CALENDAR",
                "header_text(0) falls back to the banner");
