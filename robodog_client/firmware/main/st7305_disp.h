@@ -26,6 +26,12 @@ bool st7305_disp_init(void);
 // The LVGL display created by st7305_disp_init(), or NULL before init.
 lv_display_t* st7305_disp_get(void);
 
+// Dev helper: push a synthetic full-screen (300x400) test frame — black
+// background with a white cross inside — bypassing LVGL entirely. Panel
+// transport sanity check; returns true after pushing.
+bool st7305_debug_fullscreen_test(void);
+
+
 #ifdef __cplusplus
 }
 #endif

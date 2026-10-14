@@ -27,6 +27,8 @@ void app_main() {
         ESP_LOGE(TAG, "ST7305 display init failed — halting");
         while (true) vTaskDelay(pdMS_TO_TICKS(1000));
     }
+
+
     if (!calendar_ui::init()) {
         ESP_LOGE(TAG, "calendar_ui init failed — halting");
         while (true) vTaskDelay(pdMS_TO_TICKS(1000));
