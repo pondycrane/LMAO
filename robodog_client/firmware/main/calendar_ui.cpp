@@ -22,8 +22,7 @@
 #include <vector>
 
 #include "lvgl.h"
-#include "lma_proto.h"
-#include "draw/lv_image_decoder.h"   // LMA_PB_PIC_TILE(_BYTES) — same tile contract
+#include "lma_proto.h"   // LMA_PB_PIC_TILE(_BYTES) — same tile contract
 #include "st7305_disp.h"
 
 // ESP-IDF EMBED_TXTFILES symbols for ui_xml/calendar_screen.xml.
@@ -48,13 +47,11 @@ lv_subject_t s_row_title[kRows];
 lv_subject_t s_row_time[kRows];
 lv_subject_t s_row_present[kRows];
 lv_subject_t s_row_pic[kRows];       /* int 0/1: tile present */
-lv_subject_t s_row_tile[kRows];      /* pointer subject -> per-row image dsc */
 
 // Static descriptors over the cached tile bytes filled by set_events().
 // I1 1bpp tiles come over the wire from lma_proto (32x32, MSB first,
 // bit 1 = ink — the same contract the u8g2 build rendered with).
 lv_image_dsc_t s_row_tile_dsc[kRows];
-uint8_t s_tile_ptrs[kRows];          /* 0/1: dsc[i] points to tile buffer i */
 
 // Tile buffers are the socle the C core owns (s_cache[i].pic_data) — but the
 // swap-in place in robodog_core invalidates bytes, so calendar_ui keeps its
@@ -82,9 +79,7 @@ void create_and_register_subjects() {
                                sizeof(s_row_time_buf[i]), "");
         lv_subject_init_int(&s_row_present[i], 0);
         lv_subject_init_int(&s_row_pic[i], 0);
-        s_tile_ptrs[i] = 0;
         memset(&s_row_tile_dsc[i], 0, sizeof(lv_image_dsc_t));
-        lv_subject_init_pointer(&s_row_tile[i], &s_row_tile_dsc[i]);
     }
 
 #if LV_USE_XML
@@ -100,8 +95,6 @@ void create_and_register_subjects() {
         lv_xml_register_subject(nullptr, name, &s_row_present[i]);
         snprintf(name, sizeof(name), "row%u_pic", (unsigned)i);
         lv_xml_register_subject(nullptr, name, &s_row_pic[i]);
-        snprintf(name, sizeof(name), "row%u_img", (unsigned)i);
-        lv_xml_register_subject(nullptr, name, &s_row_tile[i]);
     }
 #endif  // LV_USE_XML
 }
@@ -124,6 +117,18 @@ void register_fonts() {
 
 namespace calendar_ui {
 
+/* The six XML pic boxes resolved after instantiation: LVML has no src
+ * binding, so apply_tile() points the widgets at the descriptors in C. */
+lv_obj_t* s_row_img[kRows];
+static size_t s_img_idx = 0;
+
+static lv_obj_tree_walk_res_t img_collector(lv_obj_t* obj, void*) {
+    if (s_img_idx < kRows && lv_obj_check_type(obj, &lv_image_class)) {
+        s_row_img[s_img_idx++] = obj;
+    }
+    return LV_OBJ_TREE_WALK_NEXT;
+}
+
 bool init() {
     if (s_initialized) return true;
     if (!st7305_disp_init()) return false;
@@ -142,6 +147,11 @@ bool init() {
                                      nullptr);
     }
 #endif  // LV_USE_XML
+    if (screen != nullptr) {
+        // Rows are emitted row0..row5 in the XML, so walk order == row order.
+        s_img_idx = 0;
+        lv_obj_tree_walk(screen, img_collector, nullptr);
+    }
     lv_unlock();
 
     if (screen == nullptr) return false;
@@ -178,10 +188,13 @@ void set_events(const calendar_model::UiEvent* events, size_t count) {
             lv_subject_copy_string(&s_row_title[i], ev.title.c_str());
             lv_subject_copy_string(&s_row_time[i], hhmm.c_str());
             lv_subject_set_int(&s_row_present[i], 1);
-            lv_subject_set_int(&s_row_pic[i], ev.pic.empty() ? 0 : 1);
         } else {
             lv_subject_copy_string(&s_row_title[i], "");
             lv_subject_copy_string(&s_row_time[i], "");
+            lv_subject_set_int(&s_row_pic[i], 0);
+            if (s_row_img[i] != nullptr) {
+                lv_obj_add_flag(s_row_img[i], LV_OBJ_FLAG_HIDDEN);
+            }
             lv_subject_set_int(&s_row_pic[i], 0);
             lv_subject_set_int(&s_row_present[i], 0);
         }
@@ -204,11 +217,16 @@ static void apply_tile(size_t i, const uint8_t* tile, size_t len) {
         s_row_tile_dsc[i].header.magic  = LV_IMAGE_HEADER_MAGIC;
         s_row_tile_dsc[i].data = s_pic_tile_copy[i];
         s_row_tile_dsc[i].data_size = len;
-        s_tile_ptrs[i] = 1;
-    } else {
-        s_tile_ptrs[i] = 0;
+        if (s_row_img[i] != nullptr) {
+            /* LVML has no runtime src binding — set the widget source in C */
+            lv_image_set_src(s_row_img[i], &s_row_tile_dsc[i]);
+            lv_obj_invalidate(s_row_img[i]);
+        }
+        lv_subject_set_int(&s_row_pic[i], 1);  /* XML shows the box */
+    } else if (s_row_img[i] != nullptr) {
+        lv_obj_add_flag(s_row_img[i], LV_OBJ_FLAG_HIDDEN);
+        lv_subject_set_int(&s_row_pic[i], 0);
     }
-    lv_subject_set_pointer(&s_row_tile[i], &s_row_tile_dsc[i]);
 }
 
 }  // namespace calendar_ui
