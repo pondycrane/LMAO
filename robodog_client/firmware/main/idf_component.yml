@@ -1,5 +1,0 @@
-dependencies:
-  # LVGL v9 from the ESP component registry (lands in gitignored
-  # managed_components/ — NEVER vendored into the source tree).
-  lvgl/lvgl: ">=9.3,<9.4"
-  idf: ">=5.0"

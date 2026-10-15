@@ -725,6 +725,34 @@ typedef enum {
     RD_STATE_OFFLINE, /* no wifi, showing cache (or an offline note) */
 } rd_state_t;
 
+/* ----------------------------------------------------------------- shot --
+ * RD_SHOT_CAPTURE (build flag): stream the exact u8g2 full-frame buffer
+ * (== the bytes pushed to the ST7305) over the USB-JTAG console so a host
+ * tool can reconstruct what is really displayed, pixel for pixel. Off in
+ * normal builds; enabled via `RD_SHOT_CAPTURE=1 build.sh`.
+ * Protocol: RD_SHOT_BEGIN/<bufsize,w,h>/lowercase-hex/RD_SHOT_END.
+ */
+#if defined(RD_SHOT_CAPTURE)
+static void rd_shot_dump(u8g2_t *u8g2)
+{
+    const uint8_t *buf = u8g2_GetBufferPtr(u8g2);
+    size_t n = u8g2_GetBufferSize(u8g2);
+    u8g2_t *u = u8g2;
+    printf("\nRD_SHOT_BEGIN bufsize=%u w=%d h=%d\n", (unsigned)n,
+           u8g2_GetDisplayWidth(u), u8g2_GetDisplayHeight(u));
+    for (size_t i = 0; i < n; i++) {
+        printf("%02x", buf[i]);
+        if ((i & 0x1f) == 0x1f) {
+            printf("\n");
+        }
+    }
+    printf("\nRD_SHOT_END\n");
+    fflush(stdout);
+}
+#else
+#define rd_shot_dump(u8g2) ((void)0)
+#endif
+
 static void render_screen(rd_state_t state)
 {
     u8g2_t *u8g2 = u8g2_st7305_get_u8g2(&s_display);
@@ -755,6 +783,7 @@ static void render_screen(rd_state_t state)
         u8g2_SetFont(u8g2, u8g2_font_10x20_tf);
         draw_centered(u8g2, (H / 2) + 7, msg);
         u8g2_SendBuffer(u8g2);
+        rd_shot_dump(u8g2);
         return;
     }
 
@@ -805,6 +834,7 @@ static void render_screen(rd_state_t state)
     }
 
     u8g2_SendBuffer(u8g2);
+    rd_shot_dump(u8g2);
     ESP_LOGI(TAG, "rendered %u rows (cache=%u)", (unsigned)visible,
              (unsigned)s_cache_count);
 }
