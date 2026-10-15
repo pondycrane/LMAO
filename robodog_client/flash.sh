@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Flash robodog_native to the Waveshare ESP32-S3 RLCD, button-free.
+# Flash robodog_client to the Waveshare ESP32-S3 RLCD, button-free.
 #
 # IMPORTANT: this runs esptool on the HOST, not in Docker.  Docker's ttyACM
 # passthrough drops the RTS/DTR modem-control ioctls (EPROTO on open), which
@@ -7,10 +7,10 @@
 # `--before default_reset` auto-reset only works when esptool runs directly on
 # the host.  Requires host `python3 -m esptool`.
 #
-#   bazel run //robodog_native:flash_firmware [-- --port /dev/ttyACM0]
+#   bazel run //robodog_client:flash_firmware [-- --port /dev/ttyACM0]
 set -euo pipefail
 if [ -n "${BUILD_WORKSPACE_DIRECTORY:-}" ]; then
-    APP="$BUILD_WORKSPACE_DIRECTORY/robodog_native"
+    APP="$BUILD_WORKSPACE_DIRECTORY/robodog_client"
 else
     APP="$(cd "$(dirname "$0")" && pwd)"
 fi

@@ -2,7 +2,7 @@
  * lma_proto_selftest.c -- host-only self-test + tiny demo main for the wire
  * layer.  NOT part of the ESP-IDF build (it defines its own main()).
  *
- * Build & run (from robodog_native/):
+ * Build & run (from robodog_client/):
  *   cc -std=c11 -Wall -Wextra main/lma_proto_selftest.c main/lma_proto.c \
  *      -o /tmp/lma_selftest && /tmp/lma_selftest
  */

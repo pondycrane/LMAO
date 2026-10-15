@@ -1,4 +1,4 @@
-# robodog_native
+# robodog_client
 
 Native **ESP-IDF** firmware for the **RoboDog** family-calendar display:
 a Waveshare **ESP32-S3** dev board driving the Waveshare **RLCD-4.2**
@@ -108,7 +108,7 @@ of the IDF build.
 ## Layout
 
 ```
-robodog_native/
+robodog_client/
 ├── CMakeLists.txt            project() entry
 ├── sdkconfig.defaults        ESP32-S3: 16M flash, octal 8M PSRAM, wifi, PM
 ├── partitions.csv            roomy 8M factory app
@@ -124,27 +124,63 @@ robodog_native/
     └── CMakeLists.txt        component registration
 ```
 
-## Status & unverified items
+## Status
 
-This project was written **without hardware bring-up** and was **not compiled
-or flashed** here (no ESP-IDF toolchain/board in this environment).  The wire
-layer (`lma_proto.c`) is the only code that was compiled and exercised —
-successfully, on the host, including under ASan/UBSan.  Items that must be
-validated on first real hardware:
+Hardware-validated on the Waveshare RLCD-4.2 (built in the ESP-IDF Docker
+image, flashed to `/dev/ttyACM0`, gRPC-synced live data, and the render
+confirmed **pixel-exact** against the physical panel via `capture.py` — the
+captured frame matched what the user sees on the RLCD exactly, orientation and
+polarity included).  The header shows the live date once synced; rows are real
+`GetCalendar` events.
 
-- **ST7305 orientation / rotation**: the renderer uses `U8G2_R1` (as the
-  vendor example does) and sizes the layout from `u8g2_GetDisplayWidth/Height`
-  so a rotation change is a one-line config tweak.  If the screen appears
-  upside-down or portrait-vs-landscape is wrong, adjust
-  `cfg.rotation` in `robodog.c` `display_init()`.
-- **Reflective LCD contrast / color polarity**: `u8g2_SetDrawColor(…, 1)` is
-  assumed to mean "dark = ink".  If the display is inverted (white text on
-  black), toggle the draw color in `render_screen()`.
-- **WiFi first-run**: SSID/pass provisioning, roaming behavior, and the
-  disconnect-retry loop are untested on real air.
-- **SNTP**: `pool.ntp.org` assumes internet egress; on a LAN-only network set
-  `RD_SNTP_SERVER` to a reachable NTP server or `""` to disable (header then
-  shows no date; event HH:MM is computed from the event's own UTC epoch, so it
-  always renders).
-- **Frame/width tuning**: row count, title clipping and the 16×16 picture
-  placeholder are approximations that benefit from a look at the real panel.
+Still environment-dependent / worth a look on real air:
+- **WiFi**: credentials are NVS/built-in (`wifi_ssid`/`wifi_pass`); the board
+  is 2.4 GHz-only, so the AP must be 2.4 GHz and reachable from the node.
+- **Frame/width tuning**: row count, title clipping and the icon boxes are
+  tuned for the current data — adjust with the screenshot loop below.
+
+## Screenshot-driven validation (feature + state)
+
+Every UI/data change is validated from the **real panel pixels**, not a
+re-render.  The (opt-in) capture firmware streams its exact full-frame buffer
+after each render — for each frame it reconstructs `panel_raw_portrait.png`
+(300×400 panel memory) and `panel_landscape.png` (as seen in landscape) so a
+change is verifiable pixel-for-pixel.
+
+```bash
+# one-time: capture-enabled firmware (normal builds are unaffected)
+RD_SHOT_CAPTURE=1 ./build.sh
+bash flash.sh --port /dev/ttyACM0
+
+# capture: reset the board, then read frames; make --n/--timeout wide enough
+# that WiFi connect + first gRPC sync happen (sync landed ~40s post-boot here)
+python3 capture.py --port /dev/ttyACM0 --reset --n 4 --timeout 100 --describe
+#   shots/frameN.i1                raw 15200-byte u8g2 buffer (panel memory)
+#   shots/panel_raw_portrait.png   panel-native 300×400
+#   shots/panel_landscape.png      400×300 as seen in landscape
+#   shots/frameN_analysis.txt      vision-model transcription (--describe)
+```
+
+**Reading the device state from the screenshot:**
+- Header `YYYY-MM-DD HH:MM` present → WiFi up + gRPC sync healthy.
+- Header **BLANK** + `no wifi` hint beside the first row → not connected yet:
+  pre-sync boot frame, or WiFi/AP unreachable.
+- `stale` hint → connected but last sync failed (showing NVS cache).
+- Row set == Postgres/`GetCalendar` output → data path live; a stale/different
+  set means the cache is being shown (compare timestamps against the header).
+
+**Validation loop after a change** (layout, status hints, row logic,
+data path): flash the change with `RD_SHOT_CAPTURE=1`, run the capture command
+above, and read the state from `frameN_analysis.txt` + the PNGs.
+
+**Vision readback (so the agent can reason):** `--describe` sends the
+landscape frame to the same self-hosted vision model hermes uses —
+Qwen2.5-VL at `spark-eebf` (`~/.hermes/config.yaml` `vision`; override with
+`RD_VISION_BASE_URL` / `RD_VISION_MODEL`) — which transcribes the header clock
+and every row.  The agent reads that transcription (e.g.
+"2026-10-14 23:19 / Smoke test: Dinner 00:27 / …") instead of guessing from
+the XML/model, so iteration is driven by what the panel really shows.
+
+The raw buffer is the literal ST7305 payload (304×50 tiles = 300×400), so
+there is no interpretation between "what the firmware drew" and "what you see".
+
