@@ -1,5 +1,5 @@
 /*
- * config.h -- build-time board / network configuration for robodog_native.
+ * config.h -- build-time board / network configuration for robodog_client.
  *
  * All values in here are defaults; the three network strings below can be
  * overridden at runtime from NVS keys:
@@ -12,7 +12,7 @@
 #include "driver/gpio.h"
 
 /* ---- Optional per-build secrets (WiFi SSID/pass, server host) — never commit.
-   Create robodog_native/main/local_secrets.h with:
+   Create robodog_client/main/local_secrets.h with:
        #define RD_WIFI_SSID_DEFAULT     "MySSID"
        #define RD_WIFI_PASS_DEFAULT     "secret"
        #define RD_SERVER_HOST_DEFAULT   "192.168.10.19"
