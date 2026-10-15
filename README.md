@@ -557,29 +557,25 @@ title rows — generated and stored in Postgres (`cal_pics` table) by the
 `.archon/skills/line-drawing/SKILL.md`) via `bazel run //tools:calendar_pics --
 --key <key>`. The client resolves the key to the stored tile for display.
 
-### 7d. RoboDog — RLCD family-calendar display client (native, no RNS)
+### 7d. RoboDog — RLCD family-calendar display client (native, ESP-IDF)
 
 **RoboDog** is the LMAO family-calendar *display* client — a
 [Waveshare ESP32-S3 RLCD-4.2](https://docs.waveshare.com/wiki/ESP32-S3-RLCD-4.2)
-(4.2" 300×400 reflective **ST7305** LCD, ESP32-S3 N16R8). It deliberately uses
-the board's **factory stack** (native ESP-IDF, vendor ST7305 drivers — no
-MicroPython) and **skips RNS/LXMF entirely**: it connects to the game server
-over WiFi and reads the calendar straight from a small **framed-TCP** service
-(`LMAO_CAL_TCP_PORT`, default **4247**, hostNetwork on the node IP) that the
-server side already runs:
+(4.2" 300×400 reflective **ST7305** LCD, ESP32-S3 N16R8). It uses the board's
+**factory stack** (native ESP-IDF, u8g2 ST7305 driver — no MicroPython) and
+**skips RNS/LXMF entirely**: it joins the family LAN over WiFi and reads the
+calendar over the **gRPC `GetCalendar` RPC on :50051** (same
+`CalendarRequest`/`CalendarBundle` messages as every other data path):
 
 ```
-client ──[4-byte BE length]──▶[CalendarRequest protobuf]──▶ server
-server ──[4-byte BE length]──▶[CalendarBundle protobuf]──▶ client
+client ──(HTTP/2: GET /lma.LMAO/GetCalendar + DATA CalendarRequest)──▶ 192.168.50.67:50051
+server ──(DATA: gRPC-framed CalendarBundle)──────────────────────────▶ client
 ```
 
-The wire reuses the same `CalendarRequest`/`CalendarBundle`/`CalEvent` messages
-as the RNS path (so the data shape is identical), but framing is plain
-length-prefixing over a lwIP socket — no HTTP/2, no gRPC, no RNS identity/path
-discovery.  `since_ms` = the last `watermark_ms` the device saw → the server
-replies with a small delta; the device merges into its cached list and stores
-the watermark (NVS/microSD).  Trust = the family LAN (no auth, same as the
-contacts/query APIs).
+The device sends `since_ms` = the last `watermark_ms` it saw and merges the
+delta into its NVS cache (and its header clock is derived from the bundle's
+watermark), so a reconnect is cheap. Trust = the family LAN (no auth, same as
+the contacts/query APIs) — no `ALLOWED_CLIENTS`/DEST_HASH involvement.
 
 Hardware mapping (from the Waveshare ESP-IDF example):
 
@@ -589,43 +585,74 @@ Hardware mapping (from the Waveshare ESP-IDF example):
 | I2C (SHTC3 + PCF85063 RTC) | SDA=13, SCL=14 |
 | microSD | SDMMC (optional) |
 
-Flash (`robodog_native/` — an ESP-IDF project):
+Flash (`robodog_client/` — an ESP-IDF project; the canonical board client):
 
 ```bash
-cd robodog_native && idf.py set-target esp32s3 && idf.py build && idf.py flash
-```
+# build in Docker (esp32s3 image), flash via host esptool (button-free reset
+# can't run through Docker; host esptool only):
+bash robodog_client/build.sh
+FLASH_PORT=/dev/ttyACM0 bash robodog_client/flash.sh
+# or: bazel run //robodog_client:build_firmware  /  //robodog_client:flash_firmware
 
-Notes / status:
-- The **server read service is live** (deployed + verified: a framed request
-  returns the `CalendarBundle`); the ESP-IDF client under `robodog_native/` is a
-  scaffold — it was written without a board in hand, so **first-run validation
-  on hardware is required** (ST7305 orientation/polarity, WiFi, endpoint
-  reachability to the node IP `:4247`).
-- No `ALLOWED_CLIENTS`/DEST_HASH involvement — this is a direct Postgres read,
-  not an LXMF mesh client.
-
-#### 7d.2 RoboDog LVGL client (`robodog_client/firmware/`)
-
-`robodog_client/firmware/` is a second build of the same family-calendar
-panel data — this time rendered with **LVGL 9 declarative XML + Subjects**
-(file `ui_xml/calendar_screen.xml` + `calendar_ui.cpp`, one `lv_subject_t`
-per bound field) instead of hand-painted u8g2. Data still comes over the
-same **gRPC `GetCalendar` RPC on :50051** (see §7); the `robodog_native/`
-framed-TCP client (§7c above) remains a stable, independent build.
-
-```bash
-# build in Docker (esp32s3 image), output: robodog_client/build_lvgl/build/robodog_lvgl.bin
-bash robodog_client/firmware/build.sh
-
-# flash via host esptool (RTS/DTR-safe; Docker breaks download-mode entry)
-FLASH_PORT=/dev/ttyACM0 bash robodog_client/firmware/flash.sh
+# optional: pixel-capture firmware (see §7d.1)
+RD_SHOT_CAPTURE=1 ./build.sh && bash flash.sh --port /dev/ttyACM0
 ```
 
 WiFi/server credentials and `RD_SYNC_INTERVAL_SECONDS` are NVS-backed
-(robodog_native's `config.h` keys, namespace `robodog`); build-time defaults
-come from `main/local_secrets.h` (gitignored, never commit).
-`install_all --lvgl-robodog` performs the authoritative
-build-flash-verify cycle.
+(namespace `robodog`, keys `wifi_ssid`/`wifi_pass`/`server_host`); build-time
+defaults come from `main/local_secrets.h` + `config.h` (both gitignored,
+never commit). On a reachable 2.4 GHz LAN the device joins and gRPC-syncs the
+live family calendar — header date and rows verified on hardware.
+
+Status:
+- The server gRPC `GetCalendar` (:50051) is live in-cluster (verified from the
+  board); the device syncs real events (header clock + live rows).
+- Render is validated pixel-for-pixel against the physical panel (§7d.1).
+- An earlier LVGL 9 XML rendering attempt was retired — this u8g2 native
+  build is the single board client.
+
+#### 7d.1 Screenshot-driven validation (`robodog_client/capture.py`)
+
+Every feature/state change is validated from the **real panel pixels**, never a
+re-render: the (opt-in) capture firmware streams its exact full-frame buffer
+after each render, `capture.py` reconstructs it, and a vision model reads it
+back so the agent can reason about the render:
+
+```bash
+bash robodog_client/build.sh            # once, with RD_SHOT_CAPTURE=1 (above)
+bash robodog_client/flash.sh --port /dev/ttyACM0
+# capture after a reset — keep --n/--timeout wide enough for WiFi+gRPC sync:
+python3 robodog_client/capture.py --port /dev/ttyACM0 --reset --n 4 \
+    --timeout 100 --describe
+```
+
+Outputs in `robodog_client/shots/` (gitignored):
+
+| File | Meaning |
+|---|---|
+| `frameN.i1` | raw 15200-byte panel memory (300×400 portrait) |
+| `panel_raw_portrait.png` | panel-native 300×400 view |
+| `panel_landscape.png` | 400×300 view as seen holding the panel in landscape |
+| `frameN_analysis.txt` | vision-model transcription (`--describe`) |
+
+**Reading the state** (validate feature + device state):
+- Header date/time present → gRPC sync healthy; **BLANK** → not connected yet
+  or offline (the "no wifi" hint appears beside the first row).
+- `stale` hint → connected but last sync failed (showing cache); no hint →
+  fresh data.
+- Rows show live served events (or the exact cached set) — compare against
+  Postgres/`GetCalendar` to confirm a data-path change.
+
+**Vision readback**: `--describe` sends `panel_landscape.png` to the same
+self-hosted vision model hermes uses (Qwen2.5-VL at `spark-eebf`, config in
+`~/.hermes/config.yaml` `vision`; override via `RD_VISION_BASE_URL` /
+`RD_VISION_MODEL`). It transcribes the header clock and every row, so layout,
+status hints and content changes are verifiable without eyeballing the panel;
+the agent uses the transcription to reason and re-iterate.
+
+Verified end-to-end on hardware: the captured frame shows the live header
+(`2026-10-14 23:20`) and five live rows after the board joined WiFi and gRPC-
+synced (frames 1-3 in the shot; frame 0 is the pre-sync offline render).
 
 ### 8. Docker Image
 
@@ -1293,11 +1320,12 @@ The registry is configured via environment variables:
 │
 ├── assets/calendar-icons/             # Family-calendar line-drawing pack (SVG, 20 keys)
 │
-├── robodog_client/                    # Waveshare ESP32-S3 RLCD-4.2 display client
-│   ├── firmware/                      # ESP-IDF + LVGL 9 declarative UI (native)
-│   │   ├── build.sh                   # Docker-based build (idf.py in esp32s3 image)
-│   │   ├── flash.sh                   # host esptool flash (RTS/DTR-safe)
-│   │   └── main/                      # LVGL subjects + gRPC GetCalendar core + ST7305 driver
+├── robodog_client/                    # Waveshare ESP32-S3 RLCD-4.2 display client (canonical)
+│   ├── main/                          # u8g2 ST7305 render + gRPC GetCalendar core (ESP-IDF)
+│   ├── components/                    # u8g2 wrapper (fetched csrc, never vendored) + u8g2_st7305 driver
+│   ├── build.sh / flash.sh            # Docker ESP-IDF build; host esptool flash
+│   ├── capture.py                     # real-pixel screenshot + vision readback (§7d.1)
+│   └── shots/                         # captured frames/PNGs (gitignored)
 │
 └── rnode_firmware/                    # Documentation only
     └── README.md                      # Step-by-step ESP32 RNode flashing guide

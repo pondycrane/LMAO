@@ -4,7 +4,7 @@
 # ESP-IDF component wrapper (components/u8g2/CMakeLists.txt) lives in git;
 # the csrc/ trees are fetched here into the gitignored components/u8g2/csrc.
 #
-#   usage: u8g2_prepare.sh <robodog_native-dir>
+#   usage: u8g2_prepare.sh <robodog_client-dir>
 #
 # Source selection (first match wins):
 #   U8G2_SRC_DIR  an already-extracted upstream tree (bazel http_archive works)
@@ -17,7 +17,7 @@ U8G2_COMMIT="d6c8499c5f2707cac8eccd09fd8f677d12b17977"
 U8G2_SHA256="7cc16bda1d51e0663ddc25c50d4b832405b4bcc0a2e0f77d1fc9c78eda6ca7bf"
 U8G2_URL="https://github.com/olikraus/u8g2/archive/${U8G2_COMMIT}.tar.gz"
 
-APP="${1:?usage: u8g2_prepare.sh <robodog_native-dir>}"
+APP="${1:?usage: u8g2_prepare.sh <robodog_client-dir>}"
 C="$APP/components/u8g2/csrc"
 
 # Already at the pinned rev (marker lives inside the gitignored csrc)?
@@ -41,7 +41,7 @@ else
         "${RUNFILES_DIR:-}/u8g2" \
         "${RUNFILES:-}/u8g2" \
         "$PWD/u8g2" \
-        "$(dirname "$0")/../../bazel-bin/robodog_native/build_firmware.runfiles/u8g2" \
+        "$(dirname "$0")/../../bazel-bin/robodog_client/build_firmware.runfiles/u8g2" \
         "$(dirname "$0")/build_firmware.runfiles/u8g2" \
         "$(pwd -P 2>/dev/null)/u8g2"; do
         if [ -d "$c/csrc" ]; then
