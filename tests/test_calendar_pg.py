@@ -7,6 +7,7 @@ scripted cursor results, so we can assert both the ensure-at-init DDL
 (table + triggers) and the sync query shape without a database.
 """
 
+import json
 import sys
 import types
 from unittest.mock import MagicMock
@@ -99,6 +100,9 @@ class TestInit:
         # bookkeeping + tombstone triggers
         assert "lmao_cal_touch" in sql and "lmao_cal_touch_trg" in sql
         assert "lmao_cal_tombstone" in sql and "lmao_cal_tombstone_trg" in sql
+        # participants column is part of the schema and the in-place migration
+        assert "participants JSONB NOT NULL DEFAULT '[]'" in sql
+        assert "ADD COLUMN IF NOT EXISTS participants JSONB NOT NULL DEFAULT '[]'" in sql
         # DSN is the shared contact-book Postgres
         assert captures["dsn"] == "postgresql://lmao:pw@postgres.default:5432/lmao"
 
@@ -123,8 +127,8 @@ class TestSync:
         # cursor above is used for the sync (CalendarStore reuses the conn).
         old_executes = list(captures["executes"])
         cursor.fetchall_rows = [
-            ("u1", "family", "Swim class", "bring towel", 1700000000001, 1700000000061, False, "swim"),
-            ("u2", "family", "Dentist", "", 1700000001000, 1700000001001, True, "dentist"),
+            ("u1", "family", "Swim class", "bring towel", 1700000000001, 1700000000061, False, "swim", ["juliet"]),
+            ("u2", "family", "Dentist", "", 1700000001000, 1700000001001, True, "dentist", []),
         ]
         # point the store's connection at this scripted cursor for the sync
         store._conn.cursor = staticmethod(lambda: cursor)
@@ -137,8 +141,10 @@ class TestSync:
             "uid": "u1", "calendar_id": "family", "title": "Swim class",
             "notes": "bring towel", "start_ms": 1700000000001,
             "end_ms": 1700000000061, "deleted": False, "pic": "swim",
+            "participants": ["juliet"],
         }
         assert events[1]["deleted"] is True and events[1]["pic"] == "dentist"
+        assert events[1]["participants"] == []
         # the sync issues the watermark SELECT then the delta SELECT
         select_params = [p for s, p in captures["executes"] if "FROM cal_events" in s]
         assert [list(p) for p in select_params] == [["family", 500, 11]]
@@ -154,7 +160,7 @@ class TestSync:
         cursor = make_cursor()
         store._conn.cursor = staticmethod(lambda: cursor)
         cursor.fetchall_rows = [
-            (f"u{i}", "family", f"ev{i}", "", i, i, False, "") for i in range(12)
+            (f"u{i}", "family", f"ev{i}", "", i, i, False, "", []) for i in range(12)
         ]
 
         with caplog.at_level(logging.WARNING):
@@ -176,6 +182,47 @@ class TestSync:
         select_params = [p for s, p in captures["executes"] if "ORDER BY updated_ms" in s]
         assert len(select_params) == 1
         assert select_params[0] == ("others", 7, cal.DEFAULT_MAX_EVENTS + 1)
+
+
+# ---------------------------------------------------------------------------
+# upsert / tombstone
+# ---------------------------------------------------------------------------
+
+
+class TestUpsert:
+    def test_upsert_issues_insert_with_jsonb_participants(self, mock_pg):
+        cal, captures, _ = mock_pg
+        store = _make_store(cal)
+        store.upsert(
+            calendar_id="family",
+            uid="gcal_abc123",
+            title="Swim class",
+            notes="bring towel",
+            start_ms=1700000000001,
+            end_ms=1700000000061,
+            pic="ev_abc123",
+            participants=["juliet", "wesley"],
+        )
+        # find the INSERT...ON CONFLICT and check params (uid .. participants)
+        inserts = [
+            (s, p) for s, p in captures["executes"]
+            if "INSERT INTO cal_events" in s and "ON CONFLICT (uid)" in s
+        ]
+        assert len(inserts) == 1
+        sql, params = inserts[0]
+        assert "participants" in sql and "%s::jsonb" in sql
+        assert list(params)[:7] == [
+            "gcal_abc123", "family", "Swim class", "bring towel",
+            1700000000001, 1700000000061, "ev_abc123",
+        ]
+        assert json.loads(list(params)[7]) == ["juliet", "wesley"]
+
+    def test_tombstone_flips_deleted_flag(self, mock_pg):
+        cal, captures, _ = mock_pg
+        store = _make_store(cal)
+        store.tombstone("family", "gcal_abc123")
+        updates = [p for s, p in captures["executes"] if "deleted = TRUE WHERE uid = %s" in s]
+        assert updates == [("gcal_abc123", "family")]
 
 
 # ---------------------------------------------------------------------------

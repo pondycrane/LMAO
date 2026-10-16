@@ -23,6 +23,7 @@ the LXMF delivery callback, no ORM/migrations.
 
 from __future__ import annotations
 
+import json
 import logging
 import threading
 from typing import Any
@@ -49,10 +50,18 @@ CREATE TABLE IF NOT EXISTS cal_events (
     rev         INTEGER NOT NULL DEFAULT 1,
     deleted     BOOLEAN NOT NULL DEFAULT FALSE,
     pic         TEXT NOT NULL DEFAULT '',
+    participants JSONB NOT NULL DEFAULT '[]',
     CHECK (end_ms >= start_ms)
 );
 CREATE INDEX IF NOT EXISTS cal_events_cal_updated
     ON cal_events (calendar_id, updated_ms);
+"""
+
+# For databases created before the participants column existed: idempotent
+# in-place migration so the sync schema stays feeless to re-apply.
+_MIGRATE_PARTICIPANTS = """
+ALTER TABLE cal_events
+    ADD COLUMN IF NOT EXISTS participants JSONB NOT NULL DEFAULT '[]';
 """
 
 # Direct SQL edits keep the sync delta correct: updated_ms is stamped from the
@@ -94,12 +103,12 @@ DEFAULT_MAX_EVENTS = 100
 
 
 def _row_to_event(row: tuple) -> dict[str, Any]:
-    """Map a cal_events row to the CalEvent wire fields (schema order).
+    """Map a cal_events row to the CalEvent proposal fields (schema order).
 
     Columns selected: uid, calendar_id, title, notes, start_ms, end_ms,
-    deleted, pic.
+    deleted, pic, participants.
     """
-    uid, calendar_id, title, notes, start_ms, end_ms, deleted, pic = row
+    uid, calendar_id, title, notes, start_ms, end_ms, deleted, pic, participants = row
     return {
         "uid": uid,
         "calendar_id": calendar_id,
@@ -109,6 +118,7 @@ def _row_to_event(row: tuple) -> dict[str, Any]:
         "end_ms": end_ms,
         "deleted": bool(deleted),
         "pic": pic or "",
+        "participants": participants or [],
     }
 
 
@@ -126,6 +136,7 @@ class CalendarStore:
         with self._lock:
             with self._conn.cursor() as cur:
                 cur.execute(_SCHEMA)
+                cur.execute(_MIGRATE_PARTICIPANTS)
                 cur.execute(_TOUCH_FN)
                 cur.execute(_TOMBSTONE_FN)
                 cur.execute(_TRIGGERS)
@@ -157,7 +168,7 @@ class CalendarStore:
                 watermark = int(cur.fetchone()[0])
                 cur.execute(
                     """
-                    SELECT uid, calendar_id, title, notes, start_ms, end_ms, deleted, pic
+                    SELECT uid, calendar_id, title, notes, start_ms, end_ms, deleted, pic, participants
                     FROM cal_events
                     WHERE calendar_id = %s AND updated_ms > %s
                     ORDER BY updated_ms
@@ -178,6 +189,59 @@ class CalendarStore:
     def close(self) -> None:
         with self._lock:
             self._conn.close()
+
+
+    def upsert(
+        self,
+        calendar_id: str,
+        uid: str,
+        title: str,
+        notes: str,
+        start_ms: int,
+        end_ms: int,
+        pic: str,
+        participants: list[str],
+    ) -> None:
+        """Insert or refresh an event idempotently (keyed by ``uid``).
+
+        Used by the out-of-band Google Calendar sync tool.  ``created_ms`` is
+        set on insert only; the ``lmao_cal_touch_trg`` stamp ``updated_ms`` /
+        ``rev`` on every insert/update so the delta sync re-delivers changed
+        rows.  ``participants`` is stored as JSONB (``["juliet","wesley"]``).
+        """
+        with self._lock, self._conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO cal_events(
+                    uid, calendar_id, title, notes, start_ms, end_ms, pic,
+                    participants, created_ms
+                ) VALUES (
+                    %s, %s, %s, %s, %s, %s, %s,
+                    %s::jsonb,
+                    (EXTRACT(epoch FROM clock_timestamp()) * 1000)::bigint
+                )
+                ON CONFLICT (uid) DO UPDATE SET
+                    calendar_id = EXCLUDED.calendar_id,
+                    title       = EXCLUDED.title,
+                    notes       = EXCLUDED.notes,
+                    start_ms    = EXCLUDED.start_ms,
+                    end_ms      = EXCLUDED.end_ms,
+                    pic         = EXCLUDED.pic,
+                    participants = EXCLUDED.participants
+                """,
+                (uid, calendar_id, title, notes, int(start_ms), int(end_ms),
+                 pic, json.dumps(participants)),
+            )
+
+
+    def tombstone(self, calendar_id: str, uid: str) -> None:
+        """Mark an event deleted (propagates to clients as a tombstone)."""
+        with self._lock, self._conn.cursor() as cur:
+            cur.execute(
+                "UPDATE cal_events SET deleted = TRUE"
+                " WHERE uid = %s AND calendar_id = %s",
+                (uid, calendar_id),
+            )
 
 
 def open_calendar_store() -> CalendarStore | None:
