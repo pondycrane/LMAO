@@ -649,7 +649,9 @@ Outputs in `robodog_client/shots/` (gitignored):
 - `stale` hint → connected but last sync failed (showing cache); no hint →
   fresh data.
 - Rows show live served events (or the exact cached set) — compare against
-  Postgres/`GetCalendar` to confirm a data-path change.
+  Postgres/`GetCalendar` to confirm a data-path change. Note the panel caps at
+  3 event rows by design (headline picture + 2 compact text rows; 4th+
+  dropped), so a shorter set is not a data-path error unless a hint says so.
 
 **Vision readback**: `--describe` sends `panel_landscape.png` to the same
 self-hosted vision model hermes uses (Qwen2.5-VL at `spark-eebf`, config in
@@ -661,6 +663,8 @@ the agent uses the transcription to reason and re-iterate.
 Verified end-to-end on hardware: the captured frame shows the live header
 (`2026-10-14 23:20`) and five live rows after the board joined WiFi and gRPC-
 synced (frames 1-3 in the shot; frame 0 is the pre-sync offline render).
+(That capture predates the `v < 3` row cap from the LEFT-align layout PR —
+current builds draw the headline picture + 2 compact rows.)
 
 ### 8. Docker Image
 

@@ -41,6 +41,14 @@ class TestMain:
         type(mock_identity).hash = PropertyMock(return_value=b"\x01" * 16)
         sys.modules["RNS"].Identity.return_value = mock_identity
 
+        # The client announces each registered delivery destination hash
+        # (mirrors the server's _announce_delivery_destinations), so the mock
+        # router must expose a non-empty delivery_destinations dict for the
+        # announce assertion below to hold.
+        sys.modules["LXMF"].LXMRouter.return_value.delivery_destinations = {
+            b"\x02" * 16: MagicMock()
+        }
+
         # Trigger KeyboardInterrupt to exit the infinite loop (now uses break, not sys.exit)
         with patch.object(client, "input", side_effect=KeyboardInterrupt):
             client.main()

@@ -186,7 +186,8 @@ task list:
 
 Known board facts to weave in: WiFi is 2.4 GHz-only with NVS/builtin creds
 (`wifi_ssid`/`wifi_pass`, fallbacks in `config.h`); sync lands ~40 s post-boot;
-row count, title clipping and icon boxes are tuned for current data.
+title clipping and icon boxes are tuned for current data; row count is a fixed
+3-event cap (headline + 2 compact rows, 4th+ dropped by design).
 
 ---
 
