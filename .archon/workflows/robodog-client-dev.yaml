@@ -1,0 +1,255 @@
+name: robodog-client-dev
+description: |
+  Use when: You have a feature idea or description and want end-to-end development
+  in the LMAO repo for the RoboDog device — the Waveshare ESP32-S3 RLCD-4.2
+  (ST7305) family-calendar display that fetches CalendarBundle over gRPC from the
+  LMAO server (robodog_client/ — vended u8g2 native firmware, no RNS/LXMF).
+  Input: Feature description in natural language, or path to a PRD file
+  Output: PR ready for merge with comprehensive review + pixel-exact display
+  evidence (screen capture + vision model readback)
+
+  RoboDog-adapted workflow (display-driven verification):
+  1. Create implementation plan (robodog rules baked in — every render/UI change
+     must be validated from the panel pixels, never a re-render)
+  2. Setup branch and extract scope limits
+  3. Verify plan research is still valid
+  4. Implement all tasks with Bazel build-checking + firmware build via the
+     ESP-IDF Docker image (robodog_client/build.sh — u8g2 fetched, never vendored)
+  5. robodog-validate gate (BUILD completeness + bazel build + ruff/mypy +
+     unit tests + lma_proto host selftest)
+  6. MANDATORY robodog-hardware-e2e gate: build + flash the real board (host
+     esptool via robodog_client/flash.sh — the ONLY esptool path sanctioned for
+     the robodog board), then SCREEN-CAPTURE the exact ST7305 pixels
+     (capture.py streams the live u8g2 frame buffer over USB-JTAG) and read the
+     render back with the vision model (Qwen2.5-VL via capture.py --describe),
+     asserting the header clock + row set from that transcription — loud skip
+     when the board (VID 0x303A PID 0x1001) is not attached
+  7. robodog-production-health gate (.gate-head owner)
+  8. Create PR with template + the captured-pixel evidence (frame PNGs + vision
+     transcription snippet), mark ready
+  9. Comprehensive code review (5 parallel agents with scope limit awareness)
+  10. Synthesize and fix review findings
+  11. RE-RUNS the full gate chain after any fix commits (fast-pass only when
+      HEAD is unchanged — the #87 regression guard). Re-running the hardware gate
+      re-flashes the board and re-captures, so a display regression cannot hide
+ 12. Final summary with decision matrix -> GitHub comment
+
+  NOT for: Cardputer/LoRa work (use lmao-feature-dev), GitHub-issue fixes
+  (use lmao-fix-issue), Smart Irrigation (use smart-irrigation-dev), standalone reviews.
+
+  Models: gx10 DeepSeek V4 Flash (gx10/deepseek-ai/DeepSeek-V4-Flash-0731) for the
+  agent. The screen-capture vision READBACK inside robodog-hardware-e2e is a fixed
+  pipeline (Qwen2.5-VL via capture.py --describe), not the agent model. No Claude anywhere.
+
+nodes:
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 0: CREATE PLAN (robodog rules baked in)
+  # ═══════════════════════════════════════════════════════════════════
+
+  - id: create-plan
+    command: robodog-create-plan
+    context: fresh
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    effort: high
+
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 1: SETUP
+  # ═══════════════════════════════════════════════════════════════════
+
+  - id: plan-setup
+    command: lmao-plan-setup
+    depends_on: [create-plan]
+    context: fresh
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 2: CONFIRM PLAN
+  # ═══════════════════════════════════════════════════════════════════
+
+  - id: confirm-plan
+    command: lmao-confirm-plan
+    depends_on: [plan-setup]
+    context: fresh
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 3: IMPLEMENT (robodog safety rules + Bazel + firmware build)
+  # ═══════════════════════════════════════════════════════════════════
+
+  - id: implement-tasks
+    command: robodog-implement-tasks
+    depends_on: [confirm-plan]
+    context: fresh
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    effort: max
+
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 4: ROBODOG GATE CHAIN — validate → hardware E2E (screen
+  # capture + vision) → production health. Mandatory before PR creation.
+  # ═══════════════════════════════════════════════════════════════════
+
+  - id: validate
+    command: robodog-validate
+    depends_on: [implement-tasks]
+    context: fresh
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+
+  - id: hardware-e2e
+    command: robodog-hardware-e2e
+    depends_on: [validate]
+    context: fresh
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+
+  - id: production-health
+    command: robodog-production-health
+    depends_on: [hardware-e2e]
+    context: fresh
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 5: FINALIZE PR (robodog-hardware-e2e writes the canonical
+  # $ARTIFACTS_DIR/hardware-e2e.md, so lmao-finalize-pr's existing gate
+  # holds: the PR body embeds the captured-frame evidence verbatim)
+  # ═══════════════════════════════════════════════════════════════════
+
+  - id: finalize-pr
+    command: lmao-finalize-pr
+    depends_on: [production-health]
+    context: fresh
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 6: CODE REVIEW
+  # ═══════════════════════════════════════════════════════════════════
+
+  - id: verify-pr-base
+    bash: |
+      set -euo pipefail
+      EXPECTED="$BASE_BRANCH"
+      ACTUAL=$(gh pr view --json baseRefName -q '.baseRefName')
+      if [ "$ACTUAL" != "$EXPECTED" ]; then
+        PR_NUMBER=$(gh pr view --json number -q '.number')
+        echo "Base mismatch on PR #$PR_NUMBER: expected=$EXPECTED actual=$ACTUAL — re-targeting" >&2
+        gh pr edit "$PR_NUMBER" --base "$EXPECTED"
+      else
+        echo "PR base verified: $EXPECTED"
+      fi
+    depends_on: [finalize-pr]
+
+  - id: review-scope
+    command: archon-pr-review-scope
+    depends_on: [verify-pr-base]
+    context: fresh
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+
+  - id: sync
+    command: lmao-sync-pr-with-main
+    depends_on: [review-scope]
+    context: fresh
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+
+  - id: code-review
+    command: archon-code-review-agent
+    depends_on: [sync]
+    context: fresh
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+
+  - id: error-handling
+    command: archon-error-handling-agent
+    depends_on: [sync]
+    context: fresh
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+
+  - id: test-coverage
+    command: archon-test-coverage-agent
+    depends_on: [sync]
+    context: fresh
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+
+  - id: comment-quality
+    command: archon-comment-quality-agent
+    depends_on: [sync]
+    context: fresh
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+
+  - id: docs-impact
+    command: archon-docs-impact-agent
+    depends_on: [sync]
+    context: fresh
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+
+  - id: synthesize
+    command: archon-synthesize-review
+    depends_on: [code-review, error-handling, test-coverage, comment-quality, docs-impact]
+    trigger_rule: one_success
+    context: fresh
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 7: FIX REVIEW ISSUES (robodog-adapted)
+  # ═══════════════════════════════════════════════════════════════════
+
+  - id: implement-fixes
+    command: robodog-implement-review-fixes
+    depends_on: [synthesize]
+    context: fresh
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    effort: max
+
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 8: FINAL GATE CHAIN — re-run after review-fix commits.
+  # Fast-pass ONLY when HEAD is unchanged since the first gate chain
+  # (.gate-head marker); any new commit forces the FULL chain including
+  # a re-flash + re-capture of the board. The #87 regression guard.
+  # ═══════════════════════════════════════════════════════════════════
+
+  - id: final-validate
+    command: robodog-validate
+    depends_on: [implement-fixes]
+    context: fresh
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+
+  - id: final-hardware-e2e
+    command: robodog-hardware-e2e
+    depends_on: [final-validate]
+    context: fresh
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+
+  - id: final-production-health
+    command: robodog-production-health
+    depends_on: [final-hardware-e2e]
+    context: fresh
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 9: FINAL SUMMARY & FOLLOW-UP
+  # ═══════════════════════════════════════════════════════════════════
+
+  - id: workflow-summary
+    command: archon-workflow-summary
+    depends_on: [final-production-health]
+    context: fresh
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+
+  # ─── Push notification via ntfy (bash + curl) ─────────────────
+  # To enable, create .archon/mcp/ntfy.json with {"NTFY_TOPIC": "..."}
+  # in the project root. No-op when the file is absent.
+
+  - id: ntfy-result
+    bash: |
+      if [ ! -f .archon/mcp/ntfy.json ]; then exit 0; fi
+      NTFY_TOPIC="${NTFY_TOPIC:-$(grep -oP '"NTFY_TOPIC":\s*"\K[^"]+' .archon/mcp/ntfy.json 2>/dev/null)}"
+      [ -z "$NTFY_TOPIC" ] && exit 0
+      if [ -f "$ARTIFACTS_DIR/workflow-summary.md" ]; then
+        TITLE="✅ RoboDog-Dev Complete"
+        TAGS="white_check_mark"
+        BODY="Workflow completed successfully for: $ARGUMENTS"
+      else
+        TITLE="❌ RoboDog-Dev Failed"
+        TAGS="x"
+        BODY="Workflow failed for: $ARGUMENTS"
+      fi
+      curl -sf -H "Title: $TITLE" -H "Priority: 4" -H "Tags: $TAGS" \
+        -d "$BODY" "https://ntfy.sh/$NTFY_TOPIC" > /dev/null 2>&1
+    depends_on: [workflow-summary]
+    trigger_rule: all_done
