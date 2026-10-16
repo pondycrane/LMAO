@@ -207,6 +207,15 @@ archon workflow run lmao-fix-issue "Fix issue #N"
 # Feature idea to reviewed PR with the same gates
 archon workflow run lmao-feature-dev "description of feature"
 
+# RoboDog — Waveshare ESP32-S3 RLCD-4.2 (ST7305) family-calendar display (u8g2
+# native firmware, gRPC GetCalendar from the LMAO server). Verification is
+# PIXEL-DRIVEN: the mandatory robodog-hardware-e2e gate builds + flashes the
+# board (host esptool via robodog_client/flash.sh — the one sanctioned esptool
+# path for the 0x303A:0x1001 board), screen-captures the exact ST7305 pixels
+# (capture.py streams the live u8g2 buffer), and reads the render back with the
+# vision model (Qwen2.5-VL via capture.py --describe). Loud skip when no board.
+archon workflow run robodog-client-dev "description of feature"
+
 # Sprout — smart irrigation node (Atom Lite + DTU base + Watering Unit + ENV III). Blueprint phases.
 # Firmware work is hard-blocked until smart_irrigation/docs/algorithm-evaluation.md
 # exists (blueprint Appendix 13). ⚠️ The smart-irrigation-dev workflow is NOT ready
@@ -218,6 +227,12 @@ archon workflow run lmao-feature-dev "description of feature"
 These workflows encode the rules on this page (esptool bans, Bazel BUILD
 completeness, hardware E2E evidence in the PR body, production Cardputer
 left running). See `docs/archon-workflows.md` for the full reference.
+
+**esptool allowance**: the ONLY sanctioned esptool-on-the-robodog-board path is
+`robodog_client/flash.sh` (`bazel run //robodog_client:flash_firmware` — host
+esptool; Docker ttyACM RTS passthrough breaks the button-free reset). The
+Cardputer (`0x303A:0x8120`) and RNode (`/dev/ttyUSB*`) remain esptool-banned
+under every workflow.
 
 **Gate-chain contract**: `$ARTIFACTS_DIR/.gate-head` is written **only** by
 `lmao-production-health` when the full chain completes. No other gate node
