@@ -831,11 +831,15 @@ static void render_screen(rd_state_t state)
     }
 
     const int img_sz = (int)LMA_PB_PIC_TILE;   /* 144 — the whole drawing */
-    const int img_x = (W - img_sz) / 2;        /* centered */
+    const int img_x = 20;                      /* LEFT-aligned (was centered) */
     const int img_y = 54;
+    const int txt_x = img_x + img_sz + 12;     /* info column right of image */
     char hhmm[8];
 
     /* Headline event: the big picture (or a tidy slot, none served yet).
+     * LEFT-aligned image; its start time + clipped title are drawn to the
+     * RIGHT, inside the image's row band (the text block is vertically
+     * centred roughly on the picture).
      *
      * Draw with u8g2_DrawBitmap (MSB-first, bit 7 = leftmost pixel), NOT
      * u8g2_DrawXBM (LSB-first): the served tile_1bpp is MSB-first row-major
@@ -850,16 +854,16 @@ static void render_screen(rd_state_t state)
     }
     utc_ms_to_dt(hl->start_ms, RD_TZ_OFFSET_MINUTES, &y, &mo, &d, &hh, &mm);
     snprintf(hhmm, sizeof(hhmm), "%02d:%02d", hh, mm);
-    draw_right(u8g2, W - 6, img_y + img_sz + 8, hhmm);
-    {
-        int avail = (W - 6) - 20 - time_w;
-        draw_clipped_title(u8g2, 20, img_y + img_sz + 8, hl->title, avail);
-    }
+    draw_clipped_title(u8g2, txt_x, img_y + img_sz / 2 - 14, hl->title,
+                       (W - 6) - txt_x);
+    u8g2_DrawStr(u8g2, txt_x, img_y + img_sz / 2 + 22, hhmm);
 
-    /* Following events: text-only rows (no picture per event). */
+    /* Following events: text-only compact rows — the 2nd..3rd visible only;
+     * anything beyond the third is dropped (time right-aligned, title
+     * left-clipped). */
     int yy = img_y + img_sz + 32;
     const int row_stride = 24;
-    for (size_t v = 1; v < nvis; v++) {
+    for (size_t v = 1; v < nvis && v < 3; v++) {
         const lma_cal_event_t *ev = vis[v];
         utc_ms_to_dt(ev->start_ms, RD_TZ_OFFSET_MINUTES, &y, &mo, &d,
                      &hh, &mm);

@@ -296,6 +296,7 @@ py_test(
     srcs = ["test_calendar_pics.py"],
     deps = [
         "//lma_core",
+        "@lmao_pip//pillow",
         "@lmao_pip//pytest",
     ],
 )
