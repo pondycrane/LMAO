@@ -136,8 +136,9 @@ polarity included).  The header shows the live date once synced; rows are real
 Still environment-dependent / worth a look on real air:
 - **WiFi**: credentials are NVS/built-in (`wifi_ssid`/`wifi_pass`); the board
   is 2.4 GHz-only, so the AP must be 2.4 GHz and reachable from the node.
-- **Frame/width tuning**: row count, title clipping and the icon boxes are
-  tuned for the current data — adjust with the screenshot loop below.
+- **Frame/width tuning**: title clipping and the icon boxes are tuned for the
+  current data — adjust with the screenshot loop below. (Row count is a fixed
+  cap: the headline picture + 2 compact text rows.)
 
 ## Screenshot-driven validation (feature + state)
 
@@ -169,6 +170,11 @@ python3 capture.py --port /dev/ttyACM0 --reset --n 4 --timeout 100 --describe
 - `stale` hint → connected but last sync failed (showing NVS cache).
 - Row set == Postgres/`GetCalendar` output → data path live; a stale/different
   set means the cache is being shown (compare timestamps against the header).
+- At most 3 event rows are drawn: the headline (big picture, LEFT, with start
+  time + clipped title to its right) plus 2 compact text rows; a 4th+ visible
+  event is dropped by design (`RD_MAX_EVENT_ROWS` in `render_screen`) — a
+  shorter row set is not a data-path error unless the header hints
+  (`stale`/`no wifi`) say otherwise.
 
 **Validation loop after a change** (layout, status hints, row logic,
 data path): build + flash normally (capture is compiled in), run the capture
