@@ -2,14 +2,20 @@
 """Line-drawing picture generator + Postgres store for the family calendar.
 
 The skill tooling a Hermes-class agent uses to produce a calendar picture:
-takes an SVG or PNG source (an existing ``assets/calendar-icons/<key>.svg`` is
-used automatically), renders it **1-bit black & white** at the RLCD tile size,
+takes an SVG or PNG source — a local file, or the URL of a small line drawing
+found online (an existing ``assets/calendar-icons/<key>.svg`` is used
+automatically) — renders it **1-bit black & white** at the RLCD tile size,
 and upserts the resulting PNG bytes into the in-cluster Postgres ``cal_pics``
 table keyed by ``CalEvent.pic``.  Rerunning with the same key overwrites
 (idempotent) — regenerating artwork for kids' calendars is the primary use.
+Prefer a real line drawing found online over an agent-invented SVG: a found
+drawing reads much better on the reflective panel (see
+``.archon/skills/line-drawing/SKILL.md``).
 
 Usage (agent-facing; see .archon/skills/line-drawing/SKILL.md):
     PYTHONPATH=<repo-root> python3 tools/calendar_pics.py --key swim
+    PYTHONPATH=<repo-root> python3 tools/calendar_pics.py --key robodog \\
+        --source https://commons.wikimedia.org/wiki/Special:FilePath/Dog.svg
     PYTHONPATH=<repo-root> python3 tools/calendar_pics.py --key shopping \\
         --source my-art.svg --size 144x144 --out check.png
 
@@ -23,9 +29,14 @@ falls back to writing the PNG to --out and exits non-zero with a message.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import io
+import mimetypes
 import os
 import sys
+import tempfile
+import urllib.request
+from collections.abc import Iterator
 from typing import Any
 
 # Repo root on path so `from lma_core...` resolves when run as a plain script.
@@ -44,7 +55,11 @@ def _load_png_bytes(
     height: int,
     threshold: int,
 ) -> bytes:
-    """Render source (SVG or PNG) to a 1-bit B&W PNG of (width, height)."""
+    """Render a local SVG/PNG file to a 1-bit B&W PNG of (width, height).
+
+    ``source_path`` must be a local file (URLs are materialized by
+    :func:`_materialize_source` before this is called).
+    """
     lower = source_path.lower()
     if lower.endswith(".svg"):
         try:
@@ -98,6 +113,49 @@ def _default_source(pic_key: str) -> str | None:
     return candidate if os.path.isfile(candidate) else None
 
 
+def _is_url(source: str) -> bool:
+    return source.startswith(("http://", "https://"))
+
+
+def _suffix_for(data: bytes, content_type: str | None) -> str:
+    """Pick the loader-driving file suffix from the HTTP content type (with a
+    byte sniff fallback) so the right renderer is used regardless of the URL
+    shape: ``.svg`` goes to cairosvg, everything else to Pillow."""
+    low = (content_type or "").lower()
+    if "svg" in low or data[:64].lstrip().startswith((b"<svg", b"<?xml")):
+        return ".svg"
+    ext = mimetypes.guess_extension(low.split(";")[0].strip())
+    return ext if ext else ".png"
+
+
+@contextlib.contextmanager
+def _materialize_source(source: str) -> Iterator[str]:
+    """Yield a local path loadable by cairosvg/Pillow.
+
+    http(s) URLs are downloaded to a tempfile first (suffix chosen so the
+    renderer matches the payload); local paths pass straight through.  The
+    fetched line drawing should be small; a bounded timeout keeps the skill
+    from hanging on a bad URL.
+    """
+    if not _is_url(source):
+        yield source
+        return
+
+    req = urllib.request.Request(
+        source,
+        headers={"User-Agent": "LMAO-calendar-pics/1.0"},
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        data = resp.read()
+        ctype = resp.headers.get_content_type()
+    with tempfile.NamedTemporaryFile(
+        prefix="calendar-pic-", suffix=_suffix_for(data, ctype),
+    ) as tf:
+        tf.write(data)
+        tf.flush()
+        yield tf.name
+
+
 def _store(pic_key: str, png: bytes, width: int, height: int, out_path: str | None) -> int:
     if out_path:
         with open(out_path, "wb") as f:
@@ -131,7 +189,7 @@ def _store(pic_key: str, png: bytes, width: int, height: int, out_path: str | No
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--key", help="CalEvent.pic key to store under (upsert)")
-    parser.add_argument("--source", help="SVG or PNG source; defaults to assets/calendar-icons/<key>.svg")
+    parser.add_argument("--source", help="SVG or PNG source — local path or http(s) URL; defaults to assets/calendar-icons/<key>.svg")
     parser.add_argument("--size", default="144x144", help="tile WxH (RLCD 300x400 panel); default 144x144")
     parser.add_argument("--threshold", type=int, default=128, help="B&W threshold 0-255 (default 128)")
     parser.add_argument("--out", help="also write the PNG locally (always on missing-DB fallback)")
@@ -174,10 +232,13 @@ def main(argv: list[str] | None = None) -> int:
         # Full-size sanity: never exceed the panel tile contract.
         tile = pick_tile_size()
         width, height = min(width, tile[0]), min(height, tile[1])
-        png = _load_png_bytes(source, width, height, args.threshold)
+        with _materialize_source(source) as local:
+            png = _load_png_bytes(local, width, height, args.threshold)
     except Exception as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
+    if _is_url(source):
+        print(f"Fetched {source} ({len(png)}-byte tile)")
     return _store(args.key, png, width, height, args.out)
 
 

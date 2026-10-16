@@ -48,9 +48,11 @@ extern "C" {
 #define LMA_PB_EV_PIC     7u /* CalEvent.pic      string          */
 #define LMA_PB_EV_PICDATA 8u /* CalEvent.pic_data bytes (1bpp tile) */
 
-/* RLCD row-icon tile contract (see lma_core/calendar_pics.py): 32x32 1-bit,
- * row-major, MSB first, bit 1 = ink.  128 bytes. */
-#define LMA_PB_PIC_TILE       32u
+/* RLCD image contract (see lma_core/calendar_pics.py): 144x144 1-bit (the
+ * whole line drawing), row-major, MSB first, bit 1 = ink.  2592 bytes.  The
+ * server attaches pic_data only to the single headline event per reply, so
+ * one image at a time is on the wire despite the per-event buffer. */
+#define LMA_PB_PIC_TILE       144u
 #define LMA_PB_PIC_TILE_BYTES (LMA_PB_PIC_TILE * LMA_PB_PIC_TILE / 8u)
 
 /* Fixed-buffer sizes (character byte caps, NUL not counted in these macros). */
@@ -65,10 +67,12 @@ extern "C" {
 
 /*
  * Largest payload frame this build accepts from the server.  The server caps
- * frames at 1 MiB; a family delta is well under 1 KiB, so 4 KiB is generous
- * on-device and keeps the receive buffer static.
+ * frames at 1 MiB; a family delta is small, but each event may carry a 512 B
+ * 64x64 pic tile, so the receive buffer must hold LMA_PB_EVENT_MAX tiles
+ * (16 x 512 = 8 KiB) plus text.  16 KiB is generous on the PSRAM S3 and keeps
+ * the buffer static.
  */
-#define LMA_PB_MAX_FRAME 4096u
+#define LMA_PB_MAX_FRAME 16384u
 
 typedef struct {
     char calendar_id[LMA_PB_CAL_ID_MAX + 1];
@@ -84,8 +88,8 @@ typedef struct {
     uint64_t end_ms;      /* epoch ms UTC */
     bool deleted;         /* tombstone: client must drop this uid */
     char pic[LMA_PB_EVENT_PIC_MAX + 1]; /* icon-pack key, "" = none */
-    uint8_t pic_data[LMA_PB_PIC_TILE_BYTES]; /* 1bpp 32x32 tile from server */
-    size_t pic_data_len;  /* 0 = no tile served */
+    uint8_t pic_data[LMA_PB_PIC_TILE_BYTES]; /* 1bpp 144x144 image (XBM) */
+    size_t pic_data_len;  /* 0 = no image served */
 } lma_cal_event_t;
 
 typedef struct {

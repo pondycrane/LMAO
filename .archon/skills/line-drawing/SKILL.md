@@ -22,7 +22,12 @@ python3 -m pip install --break-system-packages Pillow cairosvg 'psycopg[binary]'
 # Rasterize an existing pack key (assets/calendar-icons/<key>.svg) and store
 bazel run //tools:calendar_pics -- --key swim
 
-# A custom SVG/PNG source at a different tile size, also saved locally
+# Find a line drawing online and store it under a key (the tool downloads
+# the URL — SVG preferred, PNG/JPEG works too — and renders it 1-bit B&W)
+bazel run //tools:calendar_pics -- --key robodog \
+    --source https://commons.wikimedia.org/wiki/Special:FilePath/Dog.svg
+
+# A custom local SVG/PNG source at a different tile size, also saved locally
 bazel run //tools:calendar_pics -- --key shopping --source my-basket.svg \
     --size 128x128 --out /tmp/check.png
 
@@ -61,8 +66,12 @@ The `cal_pics` table is created on first use; rerunning a key overwrites
 ## Procedure for the agent
 
 1. Decide the key (must match the `pic` value your calendar events use).
-2. Prefer a source from `assets/calendar-icons/`; otherwise draw/produce an
-   SVG at the tile aspect and pass `--source`.
+2. Prefer a real line drawing over an agent-drawn one: for a key not in
+   `assets/calendar-icons/`, find a **small, simple, black-on-white line
+   drawing online** (Wikimedia Commons is a good source; prefer public-domain
+   works) and pass its URL via `--source`. Note the URL, and only fall back
+   to hand-drawing an SVG when no good line drawing exists — invented SVG
+   artwork reads badly on the reflective panel.
 3. Run the tool (above). Verify the `Stored '<key>': WxH…` line.
 4. Optionally also write `--out <png>` if the display client vendors local
    assets instead of reading Postgres directly.

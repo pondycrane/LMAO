@@ -14,11 +14,8 @@ IDF_IMG="${IDF_IMG:-espressif/idf:v5.3.1}"
 # gitignored components/u8g2/csrc (via bazel @u8g2 runfiles or a sha256-verified
 # cache) so a fresh checkout builds with no committed upstream source.
 "$APP/u8g2_prepare.sh" "$APP"
-# Opt-in: RD_SHOT_CAPTURE=1 enables the u8g2 frame-dump hook (host pixel
-# capture via robodog_client/capture.py).
-IDF_ARGS=()
-if [ -n "${RD_SHOT_CAPTURE:-}" ]; then
-    IDF_ARGS+=("-DRD_SHOT_CAPTURE=ON")
-fi
+# The u8g2 frame-dump capture hook is always compiled in (see
+# main/CMakeLists.txt) — capture.py confirms the current production firmware's
+# display, so there is no separate capture build.
 exec docker run --rm -v "$APP:/workspace" -w /workspace "$IDF_IMG" \
-    idf.py build "${IDF_ARGS[@]+"${IDF_ARGS[@]}"}"
+    idf.py build

@@ -516,10 +516,16 @@ class Server:
                         since_ms=treq.since_ms,
                         max_events=treq.max_events,
                     )
+                    if treq.since_ms == 0:
+                        # Full fetch = snapshot of live events; tombstones only
+                        # matter to delta clients that already hold the events.
+                        events = [e for e in events if not e["deleted"]]
                     cal_env = LMAOEnvelope()
                     cal_env.calendar.format = 1
                     cal_env.calendar.calendar_id = treq.calendar_id or "family"
-                    for ev in events:
+                    headline = _pick_headline_idx(
+                        events, int(time.time() * 1000))
+                    for i, ev in enumerate(events):
                         entry = cal_env.calendar.events.add()
                         entry.uid = ev["uid"]
                         entry.title = ev["title"]
@@ -528,7 +534,8 @@ class Server:
                         entry.end_ms = ev["end_ms"]
                         entry.deleted = ev["deleted"]
                         entry.pic = ev["pic"]
-                        _fill_pic_data(PIC_STORE, ev["pic"], entry)
+                        if i == headline:
+                            _fill_pic_data(PIC_STORE, ev["pic"], entry)
                     cal_env.calendar.watermark_ms = watermark
                     send(cal_env)
                     logger.info(
@@ -775,6 +782,23 @@ class Server:
 # gRPC Service Implementation
 # ──────────────────────────────────────────────────────────────
 
+def _pick_headline_idx(events: list[dict], now_ms: int) -> int | None:
+    """Index of the single event whose picture the panel shows.
+
+    The RoboDog panel draws an image only for its first visible (non-  tombstoned,
+    ongoing-or-future) row, so the server attaches pic_data for just that one —
+    one 144x144 image per calendar reply, never one per event.  Returns the
+    index of the earliest-starting such event in ``events``, or None.
+    """
+    best: int | None = None
+    for i, ev in enumerate(events):
+        if ev["deleted"] or (ev.get("end_ms") or 0) < now_ms:
+            continue
+        if best is None or ev["start_ms"] < events[best]["start_ms"]:
+            best = i
+    return best
+
+
 def _fill_pic_data(pic_store, pic_key, cal_entry) -> None:
     """Attach the 1-bit RLCD tile for an event's pic key (CalEvent.pic_data,
     field 8) when the picture store has one.  No-op otherwise."""
@@ -914,10 +938,15 @@ if GRPC_AVAILABLE:
                 logger.error("GetCalendar sync failed: %s", e, exc_info=True)
                 await context.abort(grpc.StatusCode.INTERNAL,
                                     f"Calendar sync failed: {e}")
+            if request.since_ms == 0:
+                # Full fetch = snapshot of live events; tombstones only matter
+                # to delta clients that already hold the events.
+                events = [e for e in events if not e["deleted"]]
             bundle = CalendarBundle()
             bundle.format = 1
             bundle.calendar_id = request.calendar_id or "family"
-            for ev in events:
+            headline = _pick_headline_idx(events, int(time.time() * 1000))
+            for i, ev in enumerate(events):
                 entry = bundle.events.add()
                 entry.uid = ev["uid"]
                 entry.title = ev["title"]
@@ -926,7 +955,8 @@ if GRPC_AVAILABLE:
                 entry.end_ms = ev["end_ms"]
                 entry.deleted = ev["deleted"]
                 entry.pic = ev["pic"]
-                _fill_pic_data(PIC_STORE, ev["pic"], entry)
+                if i == headline:
+                    _fill_pic_data(PIC_STORE, ev["pic"], entry)
             bundle.watermark_ms = watermark
             return bundle
 
