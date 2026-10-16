@@ -13,16 +13,21 @@ rescue (see issue #89 for the full post-mortem of the #87 run).
 | `lmao-fix-issue` | Fix / implement a GitHub issue end-to-end: classify → investigate/plan → implement → **gates** → draft PR → review → self-fix → simplify → **gates re-run** → report. |
 | `lmao-feature-dev` | Feature idea → plan → implement → **gates** → PR → 5-agent review → fixes → **gates re-run** → summary. |
 | `smart-irrigation-dev` | **⚠️ NOT READY TO RUN** (pending refinement in [#122](https://github.com/pondycrane/LMAO/issues/122)) — do not run until refined. When ready: Smart Irrigation node (Sprout) work from the blueprint in `smart_irrigation/docs/development-plan.md`: phase features, or the mandatory Phase 0 algorithm evaluation. Firmware work is hard-blocked until `smart_irrigation/docs/algorithm-evaluation.md` exists (blueprint Appendix 13). |
+| `robodog-client-dev` | Feature idea → plan → implement → **gates** → PR → 5-agent review → fixes → **gates re-run** → summary, for the **RoboDog** device (Waveshare ESP32-S3 RLCD-4.2 / ST7305 family-calendar display). Verification is **pixel-driven**: the mandatory hardware gate builds + flashes the real board and **screen-captures the exact ST7305 pixels** (`capture.py` streams the live u8g2 buffer over USB-JTAG), then reads the render back with the **vision model** (Qwen2.5-VL via `capture.py --describe`) — the PR carries the captured frames + verbatim transcription, not a re-render. Loud skip when the board (VID `0x303A` PID `0x1001`) is not attached. |
 
 Both run entirely on pi routing to the in-house GX10 box — every node uses
 the local DeepSeek V4 Flash model (`gx10/deepseek-ai/DeepSeek-V4-Flash-0731`,
 such as `gx10-f156.local:8000/v1`, defined in `~/.pi/agent/models.json`). The
-cloud DeepSeek endpoint is no longer used by default. No Claude anywhere.
+cloud DeepSeek endpoint is no longer used by default. No Claude anywhere (in
+`robodog-client-dev` the agent model is GX10 too; the separate Qwen2.5-VL
+vision readback inside the capture gate is a fixed pipeline, not the agent
+model).
 
 ```bash
 cd /home/pondycrane/LMAO
 archon workflow run lmao-fix-issue "Fix issue #87"
 archon workflow run lmao-feature-dev "Add humidity graphing to the ingest pod"
+archon workflow run robodog-client-dev "Add a shopping-list icon + re-tune the row layout"
 
 # Smart Irrigation — ⚠️ workflow NOT ready yet (#122): do not run it.
 # Phase 0 (algorithm evaluation) is currently a MANUAL gate — write
@@ -65,6 +70,47 @@ irrigation-validate  →  irrigation-hardware-e2e  →  irrigation-production-he
   the production Cardputer (journal or K8s) and, when the irrigation node is
   deployed, SensorReport/DB/JetStream health. Honest UNVERIFIABLE is recorded
   loudly.
+
+### The robodog pixel-driven gate chain
+
+`robodog-client-dev` uses a display-oriented variant of the chain:
+
+```
+robodog-validate  →  robodog-hardware-e2e  →  robodog-production-health
+```
+
+- **`robodog-validate`** — the LMAO host gate (BUILD completeness, `bazel
+  build //...`, ruff/mypy, `bazel test //tests:all
+  --test_tag_filters=-requires_hardware`) plus robodog host units: the
+  dependency-free wire codec selftest (`cc` build + run of
+  `main/lma_proto_selftest.c`), a `capture.py --help` sanity check, and — when
+  C sources changed — a real firmware compile via `bazel run
+  //robodog_client:build_firmware` (ESP-IDF Docker; `bazel build //...` skips
+  the manual-tagged firmware targets, so C errors surface before the board is
+  touched). `robodog_client/capture.py` joins the BUILD-completeness exemption
+  list as a standalone host tool. No hardware is touched here.
+- **`robodog-hardware-e2e`** — the verification gate. It builds + flashes the
+  real RoboDog board (Waveshare ESP32-S3 RLCD-4.2; verified fingerprint
+  `0x303A:0x1001` from `lma_core/device_detect.py`, or the `ROBODOG_PORT`
+  override — **never** the Cardputer `0x8120` or RNode), then **screen-captures
+  the exact ST7305 pixels**: `capture.py --reset --n 4 --timeout 120 --describe`
+  streams the live u8g2 frame buffer (300×400 panel memory) over USB-JTAG and
+  reconstructs `panel_raw_portrait.png` / `panel_landscape.png`, and `--describe`
+  sends the frame to the same self-hosted vision model hermes uses (Qwen2.5-VL
+  at `spark-eebf`, `~/.hermes/config.yaml "vision"`) which **transcribes** the
+  header clock + every row. The agent asserts `HEADER_PRESENT` (sync date/time
+  in the readback), `ROWS_RENDERED` (≥1 calendar row), `NO_UNEXPECTED_STATUS`
+  (no `no wifi`/`stale` on the synced frame unless that *is* the feature) and,
+  best-effort, `ROW_MATCH` against the server's `CalendarBundle`. The evidence
+  (verbatim transcriptions + frame PNG paths) is written to the canonical
+  `$ARTIFACTS_DIR/hardware-e2e.md` that the PR gate consumes — no re-render, no
+  model guess. No board → **loud skip** (plus offline `--i1` decode evidence
+  when a prior dump exists).
+- **`robodog-production-health`** — owns `$ARTIFACTS_DIR/.gate-head`. After the
+  E2E flash it confirms the panel is at rest healthy: one non-destructive
+  `capture.py --n 1 --timeout 60 --describe` frame (no reset, no flash) showing
+  a live sync, plus a best-effort probe that the LMAO server (the panel's
+  `GetCalendar` data source) is serving. Honest UNVERIFIABLE is recorded loudly.
 
 ### The irrigation evaluation-first gate
 
@@ -113,9 +159,13 @@ including reflashing the hardware. This is the direct fix for "the simplify
 phase regressed the e2e test and nothing re-ran it".
 
 PR creation (`lmao-fix-issue.yaml` create-pr node and the `lmao-finalize-pr`
-command it delegates to; also used by `lmao-feature-dev`) requires
+command it delegates to; also used by `lmao-feature-dev` and
+`robodog-client-dev`) requires
 `$ARTIFACTS_DIR/hardware-e2e.md` to exist and aborts before any `git add`
 if it is missing — a hard block against creating a PR with no hardware evidence.
+`robodog-hardware-e2e` writes that same canonical filename with robodog capture
+evidence (frame transcriptions + PNG paths), so the existing PR gate holds
+unchanged.
 
 **Run-tree discipline**: every gate command starts with a mandatory
 "locate the run tree" phase — agents must `cd` into the run worktree
@@ -162,6 +212,11 @@ mechanism, so the safety preamble is repeated deliberately):
 | `lmao-implement-review-fixes` | `archon-implement-review-fixes` | Bazel validation |
 | `lmao-finalize-pr` | `archon-finalize-pr` | PR body must include the hardware E2E table; blocks PR creation unless `$ARTIFACTS_DIR/hardware-e2e.md` exists |
 | `lmao-sync-pr-with-main` | `archon-sync-pr-with-main` | Bazel validation after rebase |
+| `robodog-create-plan` | `lmao-create-plan` | RoboDog domain: capture-first task decomposition (pixel-driven, never re-render), wire/pictures/server slices |
+| `robodog-implement-tasks` / `robodog-implement-review-fixes` | `lmao-implement-tasks` / `lmao-implement-review-fixes` | Explicit that host esptool via `flash.sh` is the SANCTIONED robodog-board flash (Cardputer/RNode stay banned); display changes verified from captured frames |
+| `robodog-validate` | `lmao-validate` | + `lma_proto_selftest` host build/run; `capture.py` exempt; firmware compile via `bazel run //robodog_client:build_firmware` when C changed |
+| `robodog-hardware-e2e` | *(new)* | Build + flash the board, **screen-capture the exact ST7305 pixels** (`capture.py --describe`) and **verify via the Qwen2.5-VL readback**; loud skip on `0x303A:0x1001` absence; writes canonical `hardware-e2e.md` |
+| `robodog-production-health` | `lmao-production-health` | One non-destructive panel frame post-E2E + calendar-server probe; `.gate-head` owner |
 
 Also in `.archon/workflows/`: the pi-adapted overrides
 (`archon-idea-to-pr`, `archon-fix-github-issue`, `archon-feature-development`,
