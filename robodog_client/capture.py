@@ -2,9 +2,12 @@
 """Capture the EXACT RLCD pixels from the RoboDog u8g2 native firmware.
 
 Reads the u8g2 full-frame buffer that the firmware streams over the USB-JTAG
-console (built with RD_SHOT_CAPTURE=1) and reconstructs what is really on the
-panel — no re-rendering, no XML interpretation. The dumped bytes are literally
-the ST7305's memory content (304x50 tiles = 300x400 portrait panel).
+console (the dump hook is compiled into every build — capture confirms the
+current production firmware's render, not a separate opt-in build) and
+reconstructs what the firmware drew — no re-rendering, no XML interpretation.
+The dumped bytes are literally the u8g2 buffer (304x50 tiles = 300x400
+portrait panel) that the reference-locked u8g2_st7305 driver pushes to the
+ST7305.
 
   robodog_client/capture.py [--port /dev/ttyACM0] [--reset] [--n 3]
 
@@ -189,7 +192,7 @@ def main():
             time.sleep(1)
         frames = read_frames(args.port, n=args.n, timeout=args.timeout)
         if not frames:
-            sys.exit("no RD_SHOT frames captured — is the capture build flashed?")
+            sys.exit("no RD_SHOT frames captured — is robodog firmware flashed?")
 
     for i, (data, expect) in enumerate(frames):
         if len(data) != expect:
