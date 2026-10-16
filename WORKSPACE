@@ -42,13 +42,13 @@ http_archive(
 
 # ── RoboDog native: u8g2 graphics library (fetched, never vendored) ───────
 # The RoboDog RLCD (ST7305) display uses the u8g2 monochrome graphics library.
-# Only our ESP-IDF component wrapper (robodog_native/components/u8g2/
+# Only our ESP-IDF component wrapper (robodog_client/components/u8g2/
 # CMakeLists.txt) is committed; the upstream csrc is pinned here by commit and
-# staged into the gitignored components/u8g2/csrc by robodog_native/
+# staged into the gitignored components/u8g2/csrc by robodog_client/
 # u8g2_prepare.sh at build time. Mirrors the codec2/cardputer fetch pattern.
 http_archive(
     name = "u8g2",
-    build_file = "//robodog_native:u8g2.BUILD",
+    build_file = "//robodog_client:u8g2.BUILD",
     sha256 = "7cc16bda1d51e0663ddc25c50d4b832405b4bcc0a2e0f77d1fc9c78eda6ca7bf",
     strip_prefix = "u8g2-d6c8499c5f2707cac8eccd09fd8f677d12b17977",
     urls = ["https://github.com/olikraus/u8g2/archive/d6c8499c5f2707cac8eccd09fd8f677d12b17977.tar.gz"],
