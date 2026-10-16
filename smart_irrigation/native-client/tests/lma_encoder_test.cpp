@@ -38,47 +38,47 @@ int main() {
     using namespace lma_encoder;
 
     // Readings
-    std::string rd_t = encode_reading(3, 25.5f, "C", 123456);
-    std::string rd_h = encode_reading(2, 59.0f, "%", 123457);
-    CHECK_EQ(to_hex(rd_t), "0803150000cc411a014320c0c407", "reading temp (id3)");
-    CHECK_EQ(to_hex(rd_h), "08021500006c421a012520c1c407", "reading hum (id2)");
+    std::string rd_t = encode_reading(3, 25.5f, UNIT_CELSIUS, 123456);
+    std::string rd_h = encode_reading(2, 59.0f, UNIT_PERCENT, 123457);
+    CHECK_EQ(to_hex(rd_t), "0803150000cc41180220c0c407", "reading temp (id3)");
+    CHECK_EQ(to_hex(rd_h), "08021500006c42180120c1c407", "reading hum (id2)");
 
     // Soil moisture (id 4, %) — golden from cardputer_client/proto/lma_encoder.py.
-    std::string rd_m = encode_reading(4, 35.0f, "%", 123458);
-    CHECK_EQ(to_hex(rd_m), "08041500000c421a012520c2c407", "reading moist (id4)");
+    std::string rd_m = encode_reading(4, 35.0f, UNIT_PERCENT, 123458);
+    CHECK_EQ(to_hex(rd_m), "08041500000c42180120c2c407", "reading moist (id4)");
 
     // ONE SensorReport bundles air temp + humidity + soil moisture in the
     // same readings[] (the Sprout sensor bundle), all in one envelope.
     std::string rep3 = encode_sensor_report("a1b2c3", 7, 3.7f, {rd_t, rd_h, rd_m});
     CHECK_EQ(
         to_hex(rep3),
-        "0a0661316232633310071dcdcc6c40220e0803150000cc411a014320c0c407"
-        "220e08021500006c421a012520c1c407"
-        "220e08041500000c421a012520c2c407",
+        "0a0661316232633310071dcdcc6c40220d0803150000cc41180220c0c407"
+        "220d08021500006c42180120c1c407"
+        "220d08041500000c42180120c2c407",
         "sensor_report_3_readings");
 
     std::string env3 = encode_envelope(rep3);
     CHECK_EQ(
         to_hex(env3),
-        "523f0a0661316232633310071dcdcc6c40220e0803150000cc411a014320c0c407"
-        "220e08021500006c421a012520c1c407"
-        "220e08041500000c421a012520c2c407",
+        "523c0a0661316232633310071dcdcc6c40220d0803150000cc41180220c0c407"
+        "220d08021500006c42180120c1c407"
+        "220d08041500000c42180120c2c407",
         "lmao_envelope_3_readings");
 
     // SensorReport
     std::string rep = encode_sensor_report("a1b2c3", 7, 3.7f, {rd_t, rd_h});
     CHECK_EQ(
         to_hex(rep),
-        "0a0661316232633310071dcdcc6c40220e0803150000cc411a014320c0c407"
-        "220e08021500006c421a012520c1c407",
+        "0a0661316232633310071dcdcc6c40220d0803150000cc41180220c0c407"
+        "220d08021500006c42180120c1c407",
         "sensor_report");
 
     // LMAOEnvelope (field 10)
     std::string env = encode_envelope(rep);
     CHECK_EQ(
         to_hex(env),
-        "522f0a0661316232633310071dcdcc6c40220e0803150000cc411a014320c0c407"
-        "220e08021500006c421a012520c1c407",
+        "522d0a0661316232633310071dcdcc6c40220d0803150000cc41180220c0c407"
+        "220d08021500006c42180120c1c407",
         "lmao_envelope");
 
     if (failures == 0) {

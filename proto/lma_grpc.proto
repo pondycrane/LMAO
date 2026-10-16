@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package lma;
 
-import "lma_messages.proto";
+import "proto/lma_messages.proto";
 
 // ============================================================
 // gRPC API — K8s Integration

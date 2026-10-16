@@ -168,6 +168,9 @@ py_test(
     srcs = ["test_chart.py"],
     deps = [
         "//cardputer_client:chart_lib",
+        "//cardputer_client/proto:lma_encoder",
+        "//lma_core",
+        "@lmao_pip//protobuf",
         "@lmao_pip//pytest",
     ],
 )
@@ -296,6 +299,7 @@ py_test(
     srcs = ["test_calendar_pics.py"],
     deps = [
         "//lma_core",
+        "@lmao_pip//pillow",
         "@lmao_pip//pytest",
     ],
 )
