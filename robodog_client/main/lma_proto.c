@@ -312,7 +312,7 @@ static int event_decode(const uint8_t *data, size_t *pos, size_t end,
             ev->deleted = (v != 0);
             break;
         case LMA_PB_EV_PICDATA:
-            /* bytes: 1-bit 32x32 tile served from CalEvent.pic_data. */
+            /* bytes: 1-bit 144x144 image served from CalEvent.pic_data. */
             if (wt != 2 || uv_decode(data, end, pos, &v) != 0 ||
                 (size_t)v > end - *pos) {
                 if (skip_field(data, end, pos, wt) != 0) {
