@@ -3,8 +3,11 @@ idf_component_register(
         "main.c"
         "robodog.c"
         "lma_proto.c"
-        # lma_proto_selftest.c is a HOST-only test binary (it defines its own
-        # main()); it is intentionally NOT part of the IDF build.
+        "rd_clip.c"
+        "rd_datetime.c"
+        # lma_proto_selftest.c and rd_datetime_selftest.c are HOST-only test
+        # binaries (each defines its own main()); they are intentionally NOT
+        # part of the IDF build.
     INCLUDE_DIRS "."
     REQUIRES
         nvs_flash

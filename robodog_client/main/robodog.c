@@ -41,7 +41,17 @@
 #include "lma_proto.h"
 #include "u8g2_st7305.h"
 
+/* Host-clean pure logic (date/meta formatting + measured clip length): the
+ * firmware wraps their width/string callbacks; rd_datetime_selftest.c proves
+ * the identical code on the host `cc` gate. */
+#include "rd_clip.h"
+#include "rd_datetime.h"
+
 static const char *TAG = "robodog";
+
+/* rd_clip's internal prefix buffer must hold any server-served title. */
+_Static_assert(LMA_PB_EVENT_TITLE_MAX <= RD_CLIP_TITLE_MAX,
+               "rd_clip prefix buffer must cover the event title cap");
 
 /* ------------------------------------------------------------------ state */
 
@@ -638,43 +648,61 @@ static void draw_right(u8g2_t *u8g2, int right_x, int baseline_y, const char *s)
     u8g2_DrawStr(u8g2, right_x - u8g2_GetStrWidth(u8g2, s), baseline_y, s);
 }
 
-/* 10x20 monospace-ish estimate for the clip length. */
-#define RD_TITLE_CHAR_PX 10
+/* ---- clipped row text ----------------------------------------------- */
 
-/* Row cap: at most 3 event rows are drawn — the headline (pic + right-side
- * info) plus 2 compact text rows; a 4th+ visible event is dropped by design. */
-#define RD_MAX_EVENT_ROWS 3
+/* Clip a title to max_px by MEASURED width under the active font: u8g2 is
+ * un-kerned so u8g2_GetStrWidth is the exact sum of glyph advances, and a
+ * fixed chars-per-px divisor can never bound a proportional headline
+ * (helvB24 W/M run 23-33 px/char).  The pure boundary search lives in
+ * rd_clip.c (host-tested), so a clipped title is structurally guaranteed to
+ * fit max_px and never to silently overrun the panel edge. */
+static int rd_u8g2_width(const char *prefix, void *ctx)
+{
+    return u8g2_GetStrWidth((u8g2_t *)ctx, prefix);
+}
 
 static void draw_clipped_title(u8g2_t *u8g2, int x, int base, const char *s,
                                int max_px)
 {
+    if (max_px <= 0) {
+        /* Never draw the full untruncated title into a zero/negative box (a
+         * negative budget is the classic int -> huge-size_t cast footgun that
+         * would collide with the right-aligned meta); drop it loudly. */
+        ESP_LOGW(TAG, "title clip budget %dpx <= 0; dropping '%s'", max_px, s);
+        return;
+    }
     size_t n = strlen(s);
-    size_t maxch = (size_t)(max_px / RD_TITLE_CHAR_PX);
-    if (maxch >= n) {
+    if ((int)u8g2_GetStrWidth(u8g2, s) <= max_px) {
+        u8g2_DrawStr(u8g2, x, base, s); /* whole title fits: no cut marker */
+        return;
+    }
+    /* Prefer the real "…" (U+2026, UTF-8 \xE2\x80\xA6) when the active font
+     * carries it; the _tf subsets lack it and u8g2 would render a fallback
+     * blob glyph, so fall back to plain ASCII "..." -- a clipped title is
+     * always visibly cut, in either font. */
+    const char *ell = u8g2_IsGlyph(u8g2, 0x2026) ? "\xE2\x80\xA6" : "...";
+    const int ell_w = u8g2_GetStrWidth(u8g2, ell);
+    const size_t lo = rd_clip_prefix(s, n, max_px, ell_w, rd_u8g2_width,
+                                     u8g2);
+    if (lo == 0) {
+        ESP_LOGW(TAG, "no prefix of '%s' + ellipsis fits in %dpx; dropping",
+                 s, max_px);
+        return;
+    }
+    if (lo >= n) { /* whole title fits alongside the ellipsis: draw it whole */
         u8g2_DrawStr(u8g2, x, base, s);
         return;
     }
-    if (maxch < 2) {
-        return;
-    }
     char tmp[LMA_PB_EVENT_TITLE_MAX + 1];
-    /* Leave room for "…" (3 UTF-8 bytes) + NUL inside tmp. */
-    if (maxch > sizeof(tmp) - 1 - 3) {
-        maxch = sizeof(tmp) - 1 - 3;
-    }
-    /* A clipped title must be visibly cut: reserve one slot for the ellipsis */
-    /* so the most prominent line can't be silently mistaken for complete.   */
-    maxch -= 1;
-    memcpy(tmp, s, maxch);
-    /* do not split a UTF-8 sequence: back off trailing continuation bytes */
-    while (maxch > 0 && ((uint8_t)tmp[maxch - 1] & 0xC0) == 0x80) {
-        maxch--;
-    }
-    tmp[maxch] = '\0';
-    /* "…" (U+2026, UTF-8 \xE2\x80\xA6) — hard-cut titles read as cut. */
-    strncat(tmp, "\xE2\x80\xA6", sizeof(tmp) - strlen(tmp) - 1);
+    memcpy(tmp, s, lo);
+    tmp[lo] = '\0';
+    strncat(tmp, ell, sizeof(tmp) - strlen(tmp) - 1);
     u8g2_DrawStr(u8g2, x, base, tmp);
 }
+
+/* Row cap: at most 3 event rows are drawn — the headline (pic + right-side
+ * info) plus 2 compact text rows; a 4th+ visible event is dropped by design. */
+#define RD_MAX_EVENT_ROWS 3
 
 /* ---- Display clock: derived from the server's epoch-ms watermark, and
  * advanced by esp_timer so the screen shows a live date/time to the minute.
@@ -698,42 +726,10 @@ static uint64_t clock_now_ms(void)
            (esp_timer_get_time() / 1000 - s_epoch_base_tick);
 }
 
-/* Epoch ms (UTC) -> local Y/M/D hh:mm, applying tz_min minutes east of UTC.
- * Civil-from-days conversion, pure arithmetic, no libc tm required. */
-static void utc_ms_to_dt(uint64_t ms, int tz_min, int *yr, int *mo, int *dy,
-                         int *hh, int *mm)
-{
-    int64_t s = (int64_t)(ms / 1000) + (int64_t)tz_min * 60;
-    int64_t days = s / 86400;
-    int64_t tod = s % 86400;
-    if (tod < 0) {
-        tod += 86400;
-        days--;
-    }
-    int64_t z = days + 719468;
-    int64_t era = (z >= 0 ? z : z - 146096) / 146097;
-    unsigned doe = (unsigned)(z - era * 146097);
-    unsigned yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    int yy = (int)yoe + (int)(era * 400);
-    unsigned doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    unsigned mp = (5 * doy + 2) / 153;
-    unsigned dd = doy - (153 * mp + 2) / 5 + 1;
-    unsigned moo = mp + (mp < 10 ? 3 : -9);
-    yy += (moo <= 2) ? 1 : 0;
-    *yr = yy;
-    *mo = (int)moo;
-    *dy = (int)dd;
-    *hh = (int)(tod / 3600);
-    *mm = (int)((tod % 3600) / 60);
-}
-
-/* "%04d-%02d-%02d  %02d:%02d" into out (cap >= 24). */
-static void utc_ms_to_datetime(uint64_t ms, int tz_min, char *out, size_t cap)
-{
-    int y, mo, d, hh, mm;
-    utc_ms_to_dt(ms, tz_min, &y, &mo, &d, &hh, &mm);
-    snprintf(out, cap, "%04d-%02d-%02d  %02d:%02d", y, mo, d, hh, mm);
-}
+/* The pure calendar math lives in rd_datetime.c (rd_utc_ms_to_dt /
+ * rd_utc_ms_to_local_day / rd_utc_ms_to_datetime / rd_format_event_meta) —
+ * single source of truth, host-tested by rd_datetime_selftest.c.
+ */
 
 /* "pic" is just an icon-pack key; until real icon bitmaps are rendered,
  * draw a clean (un-credited) image slot box.  No fake glyph — an event with
@@ -789,12 +785,11 @@ static void render_screen(rd_state_t state)
     u8g2_SetDrawColor(u8g2, 0);
 
     /* header: only the live date/time (title line removed) */
-    int y, mo, d, hh, mm;
     char line[32];
     uint64_t now = clock_now_ms();
     if (now != 0) {
         u8g2_SetFont(u8g2, u8g2_font_10x20_tf);
-        utc_ms_to_datetime(now, RD_TZ_OFFSET_MINUTES, line, sizeof(line));
+        rd_utc_ms_to_datetime(now, RD_TZ_OFFSET_MINUTES, line, sizeof(line));
         draw_centered(u8g2, 24, line);
     }
     u8g2_DrawHLine(u8g2, 4, 40, W - 8);
@@ -819,7 +814,17 @@ static void render_screen(rd_state_t state)
     }
 
     const uint64_t now_ck = clock_now_ms(); /* 0 = clock not set yet (boot) */
-    const int time_w = 5 * 10 + 6;          /* "HH:MM" at 10px/char + margin */
+
+    /* Qualifier anchor: local civil day + year of the display clock.  0/0
+     * before the first sync (now_ck == 0) -> rows render range-only. */
+    int64_t day_now = 0;
+    int yr_now = 0;
+    if (now_ck != 0) {
+        int mo_tmp, dy_tmp, hh_tmp, mm_tmp;
+        day_now = rd_utc_ms_to_local_day(now_ck, RD_TZ_OFFSET_MINUTES);
+        rd_utc_ms_to_dt(now_ck, RD_TZ_OFFSET_MINUTES, &yr_now, &mo_tmp,
+                        &dy_tmp, &hh_tmp, &mm_tmp);
+    }
 
     /* Visible events = ongoing + future, sorted by start_ms.  The panel draws
      * the picture only for the headliner; the rest are text-only rows. */
@@ -843,12 +848,11 @@ static void render_screen(rd_state_t state)
     const int img_x = 20;                      /* LEFT-aligned (was centered) */
     const int img_y = 54;
     const int txt_x = img_x + img_sz + 12;     /* info column right of image */
-    char hhmm[8];
 
     /* Headline event: the big picture (or a tidy slot, none served yet).
-     * LEFT-aligned image; its start time + clipped title are drawn to the
-     * RIGHT, inside the image's row band (the text block is vertically
-     * centred roughly on the picture).
+     * LEFT-aligned image; its range+qualifier meta line and clipped title are
+     * drawn to the RIGHT, inside the image's row band (the text block is
+     * vertically centred roughly on the picture).
      *
      * Draw with u8g2_DrawBitmap (MSB-first, bit 7 = leftmost pixel), NOT
      * u8g2_DrawXBM (LSB-first): the served tile_1bpp is MSB-first row-major
@@ -865,11 +869,20 @@ static void render_screen(rd_state_t state)
                  (unsigned)LMA_PB_PIC_TILE_BYTES);
         draw_pic_placeholder(u8g2, img_x, img_y, img_sz);
     }
-    utc_ms_to_dt(hl->start_ms, RD_TZ_OFFSET_MINUTES, &y, &mo, &d, &hh, &mm);
-    snprintf(hhmm, sizeof(hhmm), "%02d:%02d", hh, mm);
+    /* Headline title: large helvB24 face, then restore 10x20 before the meta
+     * line and compact rows draw (the font is global state on the u8g2_t). */
+    u8g2_SetFont(u8g2, u8g2_font_helvB24_tf);
     draw_clipped_title(u8g2, txt_x, img_y + img_sz / 2 - 14, hl->title,
                        (W - 6) - txt_x);
-    u8g2_DrawStr(u8g2, txt_x, img_y + img_sz / 2 + 22, hhmm);
+    u8g2_SetFont(u8g2, u8g2_font_10x20_tf);
+    /* Right-aligned meta (range + qualifier): stays clear of the picture edge
+     * (x=164) even for the widest "YYYY/MM/DD HH:MM-HH:MM" (~220 px). */
+    {
+        char meta[32];
+        rd_format_event_meta(hl, RD_TZ_OFFSET_MINUTES, day_now, yr_now,
+                             meta, sizeof(meta));
+        draw_right(u8g2, W - 6, img_y + img_sz / 2 + 22, meta);
+    }
 
     /* Following events: text-only compact rows — the 2nd..RD_MAX_EVENT_ROWS-1
      * visible only; anything beyond the third is dropped by design (time
@@ -879,11 +892,14 @@ static void render_screen(rd_state_t state)
     size_t rendered = 1; /* the headline is always drawn */
     for (size_t v = 1; v < nvis && v < RD_MAX_EVENT_ROWS; v++) {
         const lma_cal_event_t *ev = vis[v];
-        utc_ms_to_dt(ev->start_ms, RD_TZ_OFFSET_MINUTES, &y, &mo, &d,
-                     &hh, &mm);
-        snprintf(hhmm, sizeof(hhmm), "%02d:%02d", hh, mm);
-        draw_right(u8g2, W - 6, yy, hhmm);
-        int avail = (W - 6) - 20 - time_w;
+        /* Right block = the measured meta (range + qualifier); the left title
+         * clip follows its width so a qualifier can't be clipped away. */
+        char meta[32];
+        rd_format_event_meta(ev, RD_TZ_OFFSET_MINUTES, day_now, yr_now,
+                             meta, sizeof(meta));
+        draw_right(u8g2, W - 6, yy, meta);
+        const int meta_w = u8g2_GetStrWidth(u8g2, meta);
+        const int avail = (W - 6) - 20 - meta_w - 6; /* 6px meta margin */
         draw_clipped_title(u8g2, 20, yy, ev->title, avail);
         yy += row_stride;
         rendered++;
