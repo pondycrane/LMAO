@@ -243,6 +243,17 @@ cc -std=c11 -Wall -Wextra robodog_client/main/lma_proto_selftest.c \
    robodog_client/main/lma_proto.c -o /tmp/lma_selftest && /tmp/lma_selftest
 ```
 
+### 7.1b Render/datetime host selftest (always)
+
+The panel row-meta qualifiers (today / tomorrow / MM/DD / YYYY/MM/DD), the
+EDT civil-day underflow math, and the measured clamp-length silhouette are
+host-testable pure units in `rd_datetime.c` + `rd_clip.c`:
+```bash
+cc -std=c11 -Wall -Wextra robodog_client/main/rd_datetime_selftest.c \
+   robodog_client/main/rd_datetime.c robodog_client/main/rd_clip.c \
+   -o /tmp/rd_dt_selftest && /tmp/rd_dt_selftest
+```
+
 ### 7.2 Firmware compile check (when C sources changed)
 
 `bazel build //...` skips the manual-tagged firmware targets, so a C error would
@@ -287,6 +298,7 @@ Write to `$ARTIFACTS_DIR/validation.md`:
 | mypy | ✅ | changed files only |
 | Unit tests | ✅ | {N} passed, {M} skipped |
 | lma_proto host selftest | ✅ | `lma_proto_selftest` exit 0 |
+| rd_datetime/clip host selftest | ✅ | `rd_dt_selftest` exit 0 |
 | Firmware compile (if C changed) | ✅/UNVERIFIABLE | ESP-IDF Docker build |
 | Capture tool sanity | ✅ | `capture.py --help` parses |
 
@@ -314,6 +326,7 @@ Write to `$ARTIFACTS_DIR/validation.md`:
 | mypy | ✅ |
 | Unit tests | ✅ ({N} passed) |
 | lma_proto selftest | ✅ |
+| rd_datetime/clip selftest | ✅ | `rd_datetime_selftest` exit 0 |
 | Firmware compile | ✅ / UNVERIFIABLE |
 
 Artifact: `$ARTIFACTS_DIR/validation.md`
