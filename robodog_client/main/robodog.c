@@ -641,6 +641,10 @@ static void draw_right(u8g2_t *u8g2, int right_x, int baseline_y, const char *s)
 /* 10x20 monospace-ish estimate for the clip length. */
 #define RD_TITLE_CHAR_PX 10
 
+/* Row cap: at most 3 event rows are drawn — the headline (pic + right-side
+ * info) plus 2 compact text rows; a 4th+ visible event is dropped by design. */
+#define RD_MAX_EVENT_ROWS 3
+
 static void draw_clipped_title(u8g2_t *u8g2, int x, int base, const char *s,
                                int max_px)
 {
@@ -654,16 +658,21 @@ static void draw_clipped_title(u8g2_t *u8g2, int x, int base, const char *s,
         return;
     }
     char tmp[LMA_PB_EVENT_TITLE_MAX + 1];
-    if (maxch > sizeof(tmp) - 1) {
-        maxch = sizeof(tmp) - 1;
+    /* Leave room for "…" (3 UTF-8 bytes) + NUL inside tmp. */
+    if (maxch > sizeof(tmp) - 1 - 3) {
+        maxch = sizeof(tmp) - 1 - 3;
     }
+    /* A clipped title must be visibly cut: reserve one slot for the ellipsis */
+    /* so the most prominent line can't be silently mistaken for complete.   */
+    maxch -= 1;
     memcpy(tmp, s, maxch);
-    tmp[maxch] = '\0';
     /* do not split a UTF-8 sequence: back off trailing continuation bytes */
     while (maxch > 0 && ((uint8_t)tmp[maxch - 1] & 0xC0) == 0x80) {
         maxch--;
     }
     tmp[maxch] = '\0';
+    /* "…" (U+2026, UTF-8 \xE2\x80\xA6) — hard-cut titles read as cut. */
+    strncat(tmp, "\xE2\x80\xA6", sizeof(tmp) - strlen(tmp) - 1);
     u8g2_DrawStr(u8g2, x, base, tmp);
 }
 
@@ -850,6 +859,10 @@ static void render_screen(rd_state_t state)
         u8g2_DrawBitmap(u8g2, img_x, img_y, img_sz >> 3, img_sz,
                         hl->pic_data);
     } else {
+        ESP_LOGW(TAG, "headline uid=%s has no pic data "
+                      "(len=%u, expected %u); drawing placeholder",
+                 hl->uid, (unsigned)hl->pic_data_len,
+                 (unsigned)LMA_PB_PIC_TILE_BYTES);
         draw_pic_placeholder(u8g2, img_x, img_y, img_sz);
     }
     utc_ms_to_dt(hl->start_ms, RD_TZ_OFFSET_MINUTES, &y, &mo, &d, &hh, &mm);
@@ -858,12 +871,13 @@ static void render_screen(rd_state_t state)
                        (W - 6) - txt_x);
     u8g2_DrawStr(u8g2, txt_x, img_y + img_sz / 2 + 22, hhmm);
 
-    /* Following events: text-only compact rows — the 2nd..3rd visible only;
-     * anything beyond the third is dropped (time right-aligned, title
-     * left-clipped). */
+    /* Following events: text-only compact rows — the 2nd..RD_MAX_EVENT_ROWS-1
+     * visible only; anything beyond the third is dropped by design (time
+     * right-aligned, title left-clipped). */
     int yy = img_y + img_sz + 32;
     const int row_stride = 24;
-    for (size_t v = 1; v < nvis && v < 3; v++) {
+    size_t rendered = 1; /* the headline is always drawn */
+    for (size_t v = 1; v < nvis && v < RD_MAX_EVENT_ROWS; v++) {
         const lma_cal_event_t *ev = vis[v];
         utc_ms_to_dt(ev->start_ms, RD_TZ_OFFSET_MINUTES, &y, &mo, &d,
                      &hh, &mm);
@@ -872,6 +886,10 @@ static void render_screen(rd_state_t state)
         int avail = (W - 6) - 20 - time_w;
         draw_clipped_title(u8g2, 20, yy, ev->title, avail);
         yy += row_stride;
+        rendered++;
+        /* Defensive backstop for future layout-constant edits (row 3 lands
+         * at y=254 < H-16=284 today, so the RD_MAX_EVENT_ROWS cap is the
+         * effective rule; keep guarding the panel's bottom edge anyway). */
         if (yy > H - 16) {
             break;
         }
@@ -879,8 +897,8 @@ static void render_screen(rd_state_t state)
 
     u8g2_SendBuffer(u8g2);
     rd_shot_dump(u8g2);
-    ESP_LOGI(TAG, "rendered %u of %u events (headline uid=%s)",
-             (unsigned)nvis, (unsigned)s_cache_count, vis[0]->uid);
+    ESP_LOGI(TAG, "rendered %u visible of %u cached events (headline uid=%s)",
+             (unsigned)rendered, (unsigned)s_cache_count, vis[0]->uid);
 }
 
 /* ------------------------------------------------------------------ hold */
