@@ -38,33 +38,33 @@ int main() {
     using namespace lma_encoder;
 
     // Die temp (id 1, the Cardputer's core reading) and humidity (id 2).
-    std::string rd_die = encode_reading(1, 42.5f, "C", 123458);
-    CHECK_EQ(to_hex(rd_die), "08011500002a421a014320c2c407", "reading die (id1)");
-    std::string rd_h = encode_reading(2, 59.0f, "%", 123457);
-    CHECK_EQ(to_hex(rd_h), "08021500006c421a012520c1c407", "reading hum (id2)");
+    std::string rd_die = encode_reading(1, 42.5f, UNIT_CELSIUS, 123458);
+    CHECK_EQ(to_hex(rd_die), "08011500002a42180220c2c407", "reading die (id1)");
+    std::string rd_h = encode_reading(2, 59.0f, UNIT_PERCENT, 123457);
+    CHECK_EQ(to_hex(rd_h), "08021500006c42180120c1c407", "reading hum (id2)");
 
     // One SensorReport bundling die temp + humidity (DHT20 attached).
     std::string rep2 = encode_sensor_report("a1b2c3", 7, 3.7f, {rd_die, rd_h});
     CHECK_EQ(
         to_hex(rep2),
-        "0a0661316232633310071dcdcc6c40220e08011500002a421a014320c2c407"
-        "220e08021500006c421a012520c1c407",
+        "0a0661316232633310071dcdcc6c40220d08011500002a42180220c2c407"
+        "220d08021500006c42180120c1c407",
         "sensor_report_die_hum");
     CHECK_EQ(
         to_hex(encode_envelope(rep2)),
-        "522f0a0661316232633310071dcdcc6c40220e08011500002a421a014320c2c407"
-        "220e08021500006c421a012520c1c407",
+        "522d0a0661316232633310071dcdcc6c40220d08011500002a42180220c2c407"
+        "220d08021500006c42180120c1c407",
         "lmao_envelope_die_hum");
 
     // Single reading (die temp only — no DHT20 attached).
     std::string rep1 = encode_sensor_report("a1b2c3", 7, 3.7f, {rd_die});
     CHECK_EQ(
         to_hex(rep1),
-        "0a0661316232633310071dcdcc6c40220e08011500002a421a014320c2c407",
+        "0a0661316232633310071dcdcc6c40220d08011500002a42180220c2c407",
         "sensor_report_single");
     CHECK_EQ(
         to_hex(encode_envelope(rep1)),
-        "521f0a0661316232633310071dcdcc6c40220e08011500002a421a014320c2c407",
+        "521e0a0661316232633310071dcdcc6c40220d08011500002a42180220c2c407",
         "lmao_envelope_single");
 
     if (failures == 0) {

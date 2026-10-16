@@ -222,10 +222,12 @@ class TestAnnounceOnStartup:
         with patch.object(server_mod.logger, "info"):
             server_mod._announce_delivery_destinations(mock_router)
 
-        # Announced each registered delivery destination by hash.
+        # Announced each registered delivery destination by hash.  The helper
+        # forwards the optional interface-scoping param to router.announce
+        # (its default is None) — see _start_wifi_announce_loop.
         assert mock_router.announce.call_count == 2
-        mock_router.announce.assert_any_call(b"\x02" * 16)
-        mock_router.announce.assert_any_call(b"\x03" * 16)
+        mock_router.announce.assert_any_call(b"\x02" * 16, attached_interface=None)
+        mock_router.announce.assert_any_call(b"\x03" * 16, attached_interface=None)
 
         cleanup_common_mocks()
 
