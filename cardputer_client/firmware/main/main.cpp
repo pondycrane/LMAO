@@ -120,7 +120,7 @@ static void send_sensor_report(const Identity& my_identity, bool dht_ok) {
         ESP_LOGW(TAG, "die temp read failed (NAN) — skipping SensorReport");
         return;
     }
-    readings.push_back(lma_encoder::encode_reading(1, die, "C", now_ms));
+    readings.push_back(lma_encoder::encode_reading(1, die, lma_encoder::UNIT_CELSIUS, now_ms));
     ESP_LOGI(TAG, "die temp = %.1f C", (double)die);
 
     // sensor_id 2 — optional DHT20 humidity ("%"); on-sensor temperature is
@@ -129,7 +129,7 @@ static void send_sensor_report(const Identity& my_identity, bool dht_ok) {
         float t = 0.0f, h = 0.0f;
         const bool ok = dht_ok && dht20::read(&t, &h);
         if (ok && h >= 0.0f && h <= 100.0f) {
-            readings.push_back(lma_encoder::encode_reading(2, h, "%", now_ms));
+            readings.push_back(lma_encoder::encode_reading(2, h, lma_encoder::UNIT_PERCENT, now_ms));
             ESP_LOGI(TAG, "humidity = %.1f %%", (double)h);
         } else {
             ESP_LOGW(TAG, "DHT20 read failed — sensor_id 1 only");
