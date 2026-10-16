@@ -640,16 +640,20 @@ static void draw_right(u8g2_t *u8g2, int right_x, int baseline_y, const char *s)
 
 /* 10x20 monospace-ish estimate for the clip length. */
 #define RD_TITLE_CHAR_PX 10
+/* helvB24 is proportional with a wider average advance; this is the headline
+ * clip divisor, calibrated against the real panel in the Task-2 capture
+ * (bias upward so a clipped title never overflows its max_px budget). */
+#define RD_TITLE_CHAR_PX_HELVB24 13
 
 /* Row cap: at most 3 event rows are drawn — the headline (pic + right-side
  * info) plus 2 compact text rows; a 4th+ visible event is dropped by design. */
 #define RD_MAX_EVENT_ROWS 3
 
 static void draw_clipped_title(u8g2_t *u8g2, int x, int base, const char *s,
-                               int max_px)
+                               int max_px, int char_px)
 {
     size_t n = strlen(s);
-    size_t maxch = (size_t)(max_px / RD_TITLE_CHAR_PX);
+    size_t maxch = (size_t)(max_px / char_px);
     if (maxch >= n) {
         u8g2_DrawStr(u8g2, x, base, s);
         return;
@@ -727,12 +731,65 @@ static void utc_ms_to_dt(uint64_t ms, int tz_min, int *yr, int *mo, int *dy,
     *mm = (int)((tod % 3600) / 60);
 }
 
+/* Local civil day number for an epoch-ms instant, applying tz_min minutes
+ * east of UTC.  Same days/tod arithmetic as utc_ms_to_dt (incl. the tod<0
+ * underflow fix); exposed so event rows can diff (event day - today day). */
+static int64_t utc_ms_to_local_day(uint64_t ms, int tz_min)
+{
+    int64_t s = (int64_t)(ms / 1000) + (int64_t)tz_min * 60;
+    int64_t days = s / 86400;
+    int64_t tod = s % 86400;
+    if (tod < 0) {
+        tod += 86400;
+        days--;
+    }
+    return days;
+}
+
 /* "%04d-%02d-%02d  %02d:%02d" into out (cap >= 24). */
 static void utc_ms_to_datetime(uint64_t ms, int tz_min, char *out, size_t cap)
 {
     int y, mo, d, hh, mm;
     utc_ms_to_dt(ms, tz_min, &y, &mo, &d, &hh, &mm);
     snprintf(out, cap, "%04d-%02d-%02d  %02d:%02d", y, mo, d, hh, mm);
+}
+
+/* Right-hand meta for an event row: a "HH:MM-HH:MM" time range (ASCII '-' -
+ * the _tf fonts carry no U+2013 en-dash glyph) prefixed by a date qualifier
+ * when the event is not today's civil day: "tomorrow", "MM/DD" for a later
+ * day in the same civil year, "YYYY/MM/DD" for a later day in a different
+ * year; today renders range-only.  day_now is the display clock's local civil
+ * day (0 when the clock is unset -> no qualifier, range only); yr_now is its
+ * civil year.  Writes at most 23 chars + NUL (cap >= 32). */
+static void format_event_meta(const lma_cal_event_t *ev, int tz_min,
+                              int64_t day_now, int yr_now,
+                              char *out, size_t cap)
+{
+    int sy, sm, sd, sh, smi;
+    utc_ms_to_dt(ev->start_ms, tz_min, &sy, &sm, &sd, &sh, &smi);
+
+    char range[16];
+    if (ev->end_ms != 0) {
+        int ey, em, ed, eh, emi;
+        utc_ms_to_dt(ev->end_ms, tz_min, &ey, &em, &ed, &eh, &emi);
+        snprintf(range, sizeof(range), "%02d:%02d-%02d:%02d",
+                 sh, smi, eh, emi);
+    } else {
+        snprintf(range, sizeof(range), "%02d:%02d", sh, smi);
+    }
+
+    const int64_t day_ev = utc_ms_to_local_day(ev->start_ms, tz_min);
+    const int64_t diff = (day_now != 0) ? (day_ev - day_now) : 0;
+
+    if (day_now == 0 || diff == 0) {
+        snprintf(out, cap, "%s", range);
+    } else if (diff == 1) {
+        snprintf(out, cap, "tomorrow %s", range);
+    } else if (sy == yr_now) {
+        snprintf(out, cap, "%02d/%02d %s", sm, sd, range);
+    } else {
+        snprintf(out, cap, "%04d/%02d/%02d %s", sy, sm, sd, range);
+    }
 }
 
 /* "pic" is just an icon-pack key; until real icon bitmaps are rendered,
@@ -789,7 +846,6 @@ static void render_screen(rd_state_t state)
     u8g2_SetDrawColor(u8g2, 0);
 
     /* header: only the live date/time (title line removed) */
-    int y, mo, d, hh, mm;
     char line[32];
     uint64_t now = clock_now_ms();
     if (now != 0) {
@@ -819,7 +875,17 @@ static void render_screen(rd_state_t state)
     }
 
     const uint64_t now_ck = clock_now_ms(); /* 0 = clock not set yet (boot) */
-    const int time_w = 5 * 10 + 6;          /* "HH:MM" at 10px/char + margin */
+
+    /* Qualifier anchor: local civil day + year of the display clock.  0/0
+     * before the first sync (now_ck == 0) -> rows render range-only. */
+    int64_t day_now = 0;
+    int yr_now = 0;
+    if (now_ck != 0) {
+        int mo_tmp, dy_tmp, hh_tmp, mm_tmp;
+        day_now = utc_ms_to_local_day(now_ck, RD_TZ_OFFSET_MINUTES);
+        utc_ms_to_dt(now_ck, RD_TZ_OFFSET_MINUTES, &yr_now, &mo_tmp,
+                     &dy_tmp, &hh_tmp, &mm_tmp);
+    }
 
     /* Visible events = ongoing + future, sorted by start_ms.  The panel draws
      * the picture only for the headliner; the rest are text-only rows. */
@@ -843,7 +909,6 @@ static void render_screen(rd_state_t state)
     const int img_x = 20;                      /* LEFT-aligned (was centered) */
     const int img_y = 54;
     const int txt_x = img_x + img_sz + 12;     /* info column right of image */
-    char hhmm[8];
 
     /* Headline event: the big picture (or a tidy slot, none served yet).
      * LEFT-aligned image; its start time + clipped title are drawn to the
@@ -865,11 +930,20 @@ static void render_screen(rd_state_t state)
                  (unsigned)LMA_PB_PIC_TILE_BYTES);
         draw_pic_placeholder(u8g2, img_x, img_y, img_sz);
     }
-    utc_ms_to_dt(hl->start_ms, RD_TZ_OFFSET_MINUTES, &y, &mo, &d, &hh, &mm);
-    snprintf(hhmm, sizeof(hhmm), "%02d:%02d", hh, mm);
+    /* Headline title: large helvB24 face, then restore 10x20 before the meta
+     * line and compact rows draw (the font is global state on the u8g2_t). */
+    u8g2_SetFont(u8g2, u8g2_font_helvB24_tf);
     draw_clipped_title(u8g2, txt_x, img_y + img_sz / 2 - 14, hl->title,
-                       (W - 6) - txt_x);
-    u8g2_DrawStr(u8g2, txt_x, img_y + img_sz / 2 + 22, hhmm);
+                       (W - 6) - txt_x, RD_TITLE_CHAR_PX_HELVB24);
+    u8g2_SetFont(u8g2, u8g2_font_10x20_tf);
+    /* Right-aligned meta (range + qualifier): stays clear of the picture edge
+     * (x=164) even for the widest "YYYY/MM/DD HH:MM-HH:MM" (~220 px). */
+    {
+        char meta[32];
+        format_event_meta(hl, RD_TZ_OFFSET_MINUTES, day_now, yr_now,
+                          meta, sizeof(meta));
+        draw_right(u8g2, W - 6, img_y + img_sz / 2 + 22, meta);
+    }
 
     /* Following events: text-only compact rows — the 2nd..RD_MAX_EVENT_ROWS-1
      * visible only; anything beyond the third is dropped by design (time
@@ -879,12 +953,16 @@ static void render_screen(rd_state_t state)
     size_t rendered = 1; /* the headline is always drawn */
     for (size_t v = 1; v < nvis && v < RD_MAX_EVENT_ROWS; v++) {
         const lma_cal_event_t *ev = vis[v];
-        utc_ms_to_dt(ev->start_ms, RD_TZ_OFFSET_MINUTES, &y, &mo, &d,
-                     &hh, &mm);
-        snprintf(hhmm, sizeof(hhmm), "%02d:%02d", hh, mm);
-        draw_right(u8g2, W - 6, yy, hhmm);
-        int avail = (W - 6) - 20 - time_w;
-        draw_clipped_title(u8g2, 20, yy, ev->title, avail);
+        /* Right block = the measured meta (range + qualifier); the left title
+         * clip follows its width so a qualifier can't be clipped away. */
+        char meta[32];
+        format_event_meta(ev, RD_TZ_OFFSET_MINUTES, day_now, yr_now,
+                          meta, sizeof(meta));
+        draw_right(u8g2, W - 6, yy, meta);
+        const int meta_w = u8g2_GetStrWidth(u8g2, meta);
+        const int avail = (W - 6) - 20 - meta_w - 6; /* 6px meta margin */
+        draw_clipped_title(u8g2, 20, yy, ev->title, avail,
+                           RD_TITLE_CHAR_PX);
         yy += row_stride;
         rendered++;
         /* Defensive backstop for future layout-constant edits (row 3 lands
