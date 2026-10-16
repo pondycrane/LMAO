@@ -132,9 +132,7 @@ class TestAnnounceOnStartup:
 
         # Make asyncio.sleep raise KeyboardInterrupt after two sleeps
         # (one normal sleep, one periodic check)
-        with patch.object(
-            server_mod.asyncio, "sleep", side_effect=[None, KeyboardInterrupt]
-        ):
+        with patch.object(server_mod.asyncio, "sleep", side_effect=[None, KeyboardInterrupt]):
             await server_mod.async_main()
 
         captured = capsys.readouterr()
@@ -175,9 +173,7 @@ class TestAnnounceOnStartup:
         mock_router.delivery_destinations = {b"\x02" * 16: MagicMock()}
         mock_router.announce.side_effect = OSError("RNode not connected")
 
-        with patch.object(
-            server_mod.asyncio, "sleep", side_effect=[None, KeyboardInterrupt]
-        ):
+        with patch.object(server_mod.asyncio, "sleep", side_effect=[None, KeyboardInterrupt]):
             await server_mod.async_main()
 
         captured = capsys.readouterr()
