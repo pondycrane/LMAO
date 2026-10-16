@@ -2,9 +2,10 @@
 
 Event pictures (``CalEvent.pic`` keys) are small **1-bit black-and-white**
 PNGs, generated out-of-band by the ``tools/calendar_pics.py`` skill tooling
-(an agent rasterizes an SVG/PNG source at the RLCD tile size, converts it to
-black/white, and upserts the bytes here).  This module only *stores and
-serves* those bytes — no image processing runs in the server pod.
+(an agent rasterizes an SVG/PNG source — a local file or a small line drawing
+found online — at the RLCD tile size, converts it to black/white, and upserts
+the bytes here).  This module only *stores and serves* those bytes — no image
+processing runs in the server pod.
 
 Storage contract (RLCD display constraints)
 -------------------------------------------
@@ -76,8 +77,8 @@ CREATE TABLE IF NOT EXISTS cal_pics (
     height     SMALLINT NOT NULL,
     mime       TEXT NOT NULL DEFAULT 'image/png',
     bytes      BYTEA NOT NULL,
-    tile_1bpp  BYTEA,                   -- 32x32 1-bit row-major tile (128 B),
-                                        -- MSB-first, 1 = ink; for the RLCD row icon
+    tile_1bpp  BYTEA,                   -- 144x144 1-bit row-major image (2592 B),
+                                        -- MSB-first, 1 = ink; panel headline pic
     created_ms BIGINT NOT NULL,
     updated_ms BIGINT NOT NULL
 )
@@ -117,8 +118,13 @@ class PicStore:
     def put(self, pic_key: str, png_bytes: bytes, width: int, height: int) -> dict[str, Any]:
         """Upsert a picture by key (idempotent; regenerating a key overwrites).
 
-        Also computes and stores the 32x32 1-bit RLCD tile when Pillow is
-        available (the host skill tooling has it; the server pod only reads).
+        Also computes and stores the TILE_WxTILE_H 1-bit RLCD tile when Pillow
+        is available (the host skill tooling has it; the server pod only reads).
+
+        Regenerating a tile must reach displays that already show the event:
+        clients sync a *delta* keyed by ``cal_events.updated_ms``, so the
+        ``lmao_cal_touch_trg`` is exercised against every live event with this
+        ``pic`` to bump ``updated_ms``/``rev`` and re-deliver the new tile.
         """
         tile = _png_bytes_to_tile_1bpp(png_bytes)  # None if Pillow absent
         now_ms = _now_ms()
@@ -139,6 +145,15 @@ class PicStore:
                     """,
                 (pic_key, int(width), int(height), self.DEFAULT_MIME,
                  png_bytes, tile, now_ms, now_ms),
+            )
+            # Force a delta for every non-tombstoned event that uses this pic,
+            # so displays re-fetch the (possibly new-size) tile.  A no-op-value
+            # UPDATE still fires the BEFORE UPDATE touch trigger (stamps
+            # updated_ms/rev) — see lmao_cal_touch_trg.
+            cur.execute(
+                "UPDATE cal_events SET title = title"
+                " WHERE pic = %s AND deleted = FALSE",
+                (pic_key,),
             )
             cur.execute(_GET_SQL, (pic_key,))
             row = cur.fetchone()
@@ -165,22 +180,26 @@ SELECT pic_key, width, height, mime, bytes, tile_1bpp, created_ms, updated_ms
 FROM cal_pics WHERE pic_key = %s
 """
 
-# RLCD row-icon tile contract shared with robodog_client (lma_proto.h) and the
-# server (CalEvent.pic_data = field 8).  32x32, row-major, MSB-first, 1 = ink.
-TILE_W = 32
-TILE_H = 32
-TILE_1BPP_SIZE = (TILE_W * TILE_H + 7) // 8  # 128
+# RLCD image contract shared with robodog_client (lma_proto.h) and the server
+# (CalEvent.pic_data = field 8).  144x144, row-major, MSB-first, 1 = ink.
+# The RoboDog panel shows this (the whole line drawing) only for the first
+# ongoing/future event, so the payload stays one image per reply.  Keep
+# TILE_W/H in lockstep with lma_proto.h LMA_PB_PIC_TILE.
+TILE_W = 144
+TILE_H = 144
+TILE_1BPP_SIZE = (TILE_W * TILE_H + 7) // 8  # 2592
 
 
 def _png_bytes_to_tile_1bpp(
     png_bytes: bytes, tw: int = TILE_W, th: int = TILE_H,
 ) -> bytes | None:
-    """Downscale a 1-bit-PNG to the RLCD tile: 32x32 row-major 1bpp, MSB
+    """Downscale a 1-bit-PNG to the RLCD tile: TILE_WxTILE_H row-major 1bpp, MSB
     first, bit 1 = ink (black line work).  Returns None if Pillow is absent
     (the server pod never calls this; the host skill tooling has Pillow)."""
     try:
-        from PIL import Image  # noqa: PLC0415
         import io  # noqa: PLC0415
+
+        from PIL import Image  # noqa: PLC0415
     except ImportError:
         return None
     img = Image.open(io.BytesIO(png_bytes)).convert("L")

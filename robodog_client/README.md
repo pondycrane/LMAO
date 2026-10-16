@@ -141,15 +141,16 @@ Still environment-dependent / worth a look on real air:
 
 ## Screenshot-driven validation (feature + state)
 
-Every UI/data change is validated from the **real panel pixels**, not a
-re-render.  The (opt-in) capture firmware streams its exact full-frame buffer
-after each render — for each frame it reconstructs `panel_raw_portrait.png`
-(300×400 panel memory) and `panel_landscape.png` (as seen in landscape) so a
-change is verifiable pixel-for-pixel.
+Every UI/data change is validated from the **panel pixels**, not a
+re-render.  The capture hook is compiled into every build (it must confirm the
+current production firmware's render — no separate opt-in build); it streams
+the exact full-frame buffer after each render — for each frame it reconstructs
+`panel_raw_portrait.png` (300×400 panel memory) and `panel_landscape.png` (as
+seen in landscape) so a change is verifiable pixel-for-pixel.
 
 ```bash
-# one-time: capture-enabled firmware (normal builds are unaffected)
-RD_SHOT_CAPTURE=1 ./build.sh
+# capture is built into every firmware — just build+flash normally:
+bash ./build.sh
 bash flash.sh --port /dev/ttyACM0
 
 # capture: reset the board, then read frames; make --n/--timeout wide enough
@@ -170,8 +171,8 @@ python3 capture.py --port /dev/ttyACM0 --reset --n 4 --timeout 100 --describe
   set means the cache is being shown (compare timestamps against the header).
 
 **Validation loop after a change** (layout, status hints, row logic,
-data path): flash the change with `RD_SHOT_CAPTURE=1`, run the capture command
-above, and read the state from `frameN_analysis.txt` + the PNGs.
+data path): build + flash normally (capture is compiled in), run the capture
+command above, and read the state from `frameN_analysis.txt` + the PNGs.
 
 **Vision readback (so the agent can reason):** `--describe` sends the
 landscape frame to the same self-hosted vision model hermes uses —

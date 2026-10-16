@@ -555,7 +555,9 @@ The optional `pic` field on each event is a line-drawing pack key (e.g.
 title rows — generated and stored in Postgres (`cal_pics` table) by the
 **line-drawing skill** for agent use (see
 `.archon/skills/line-drawing/SKILL.md`) via `bazel run //tools:calendar_pics --
---key <key>`. The client resolves the key to the stored tile for display.
+--key <key>` — either from a pack SVG or a small line drawing found online and
+fetched as a URL (`--source https://…`). The client resolves the key to the
+stored tile for display.
 
 ### 7d. RoboDog — RLCD family-calendar display client (native, ESP-IDF)
 
@@ -594,8 +596,8 @@ bash robodog_client/build.sh
 FLASH_PORT=/dev/ttyACM0 bash robodog_client/flash.sh
 # or: bazel run //robodog_client:build_firmware  /  //robodog_client:flash_firmware
 
-# optional: pixel-capture firmware (see §7d.1)
-RD_SHOT_CAPTURE=1 ./build.sh && bash flash.sh --port /dev/ttyACM0
+# capture is built into the normal firmware (see §7d.1) — no opt-in build.
+bash robodog_client/build.sh && bash flash.sh --port /dev/ttyACM0
 ```
 
 WiFi/server credentials and `RD_SYNC_INTERVAL_SECONDS` are NVS-backed
@@ -613,18 +615,24 @@ Status:
 
 #### 7d.1 Screenshot-driven validation (`robodog_client/capture.py`)
 
-Every feature/state change is validated from the **real panel pixels**, never a
-re-render: the (opt-in) capture firmware streams its exact full-frame buffer
-after each render, `capture.py` reconstructs it, and a vision model reads it
-back so the agent can reason about the render:
+Every feature/state change is validated from the **panel pixels**, never a
+re-render: the **normal** firmware streams its exact full-frame buffer after
+each render (the capture hook is always compiled in — it must confirm the
+*current production firmware*, not a separate opt-in build), `capture.py`
+reconstructs it, and a vision model reads it back so the agent can reason
+about the render:
 
 ```bash
-bash robodog_client/build.sh            # once, with RD_SHOT_CAPTURE=1 (above)
+bash robodog_client/build.sh            # normal build already includes capture
 bash robodog_client/flash.sh --port /dev/ttyACM0
 # capture after a reset — keep --n/--timeout wide enough for WiFi+gRPC sync:
 python3 robodog_client/capture.py --port /dev/ttyACM0 --reset --n 4 \
     --timeout 100 --describe
 ```
+
+Note: the dump is the u8g2 frame buffer (what the firmware drew); the driver
+write path is locked to Waveshare's reference `u8g2_st7305`, so the panel
+output matches it 1:1.
 
 Outputs in `robodog_client/shots/` (gitignored):
 

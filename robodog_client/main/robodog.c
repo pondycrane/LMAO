@@ -18,6 +18,7 @@
  *   response = CalendarBundle
  */
 #include <string.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <time.h>
 
@@ -69,6 +70,11 @@ static void clock_set(uint64_t utc_ms);
 #define NVS_NS "robodog"
 #define NVS_KEY_WM "wm"
 #define NVS_KEY_EC "ec"
+
+/* NVS persists only the non-image prefix of each event: the 24 KB NVS
+ * partition can't hold per-event 2592 B pictures, and the panel re-fetches
+ * the headline image on every (boot) full sync anyway. */
+#define NVS_EV_PREFIX offsetof(lma_cal_event_t, pic_data)
 
 static char s_cachekey[12];
 
@@ -148,10 +154,11 @@ static void cache_load(void)
     uint8_t cnt = 0;
     if (nvs_get_u8(h, NVS_KEY_EC, &cnt) == ESP_OK) {
         for (size_t i = 0; i < cnt && i < LMA_PB_EVENT_MAX; i++) {
-            size_t sz = sizeof(s_cache[i]);
+            size_t sz = NVS_EV_PREFIX;
             if (nvs_get_blob(h, cache_key(i), &s_cache[i], &sz) != ESP_OK) {
-                continue;
+                continue; /* stale full-size blob (older FW) -> re-fetched */
             }
+            s_cache[i].pic_data_len = 0; /* images live in RAM only */
             s_cache_count++;
         }
     }
@@ -167,7 +174,7 @@ static void cache_persist(void)
     }
     nvs_set_u8(h, NVS_KEY_EC, (uint8_t)s_cache_count);
     for (size_t i = 0; i < s_cache_count; i++) {
-        nvs_set_blob(h, cache_key(i), &s_cache[i], sizeof(s_cache[i]));
+        nvs_set_blob(h, cache_key(i), &s_cache[i], NVS_EV_PREFIX);
     }
     for (size_t i = s_cache_count; i < LMA_PB_EVENT_MAX; i++) {
         nvs_erase_key(h, cache_key(i)); /* may be NOT_FOUND -> ignored */
@@ -498,6 +505,7 @@ static bool tcp_sync(void)
     lma_proto_req_init(&req);
     snprintf(req.calendar_id, sizeof(req.calendar_id), "%s", RD_CALENDAR_ID);
     req.since_ms = s_watermark;          /* 0 -> full fetch on first boot */
+    const bool is_full = (req.since_ms == 0);
     int plen = lma_proto_req_encode(&req, s_frame, sizeof(s_frame));
     if (plen < 0) {
         ESP_LOGE(TAG, "request does not fit frame buffer");
@@ -574,6 +582,13 @@ static bool tcp_sync(void)
         if (s_frame[0] == 0u && (size_t)5 + (size_t)mlen <= resp &&
             lma_proto_bundle_decode(s_frame + 5, mlen, &s_bundle)) {
             clock_set(s_bundle.watermark_ms);  /* server epoch-ms as clock base */
+            if (is_full) {
+                /* A full fetch (since_ms=0) is the server's complete truth:
+                 * the server sends live events only, so drop cached events
+                 * that are no longer in it (deletions don't ship as
+                 * tombstones on a full fetch). */
+                s_cache_count = 0;
+            }
             cache_apply(&s_bundle);
             ok = true;
         } else {
@@ -726,13 +741,14 @@ typedef enum {
 } rd_state_t;
 
 /* ----------------------------------------------------------------- shot --
- * RD_SHOT_CAPTURE (build flag): stream the exact u8g2 full-frame buffer
- * (== the bytes pushed to the ST7305) over the USB-JTAG console so a host
- * tool can reconstruct what is really displayed, pixel for pixel. Off in
- * normal builds; enabled via `RD_SHOT_CAPTURE=1 build.sh`.
- * Protocol: RD_SHOT_BEGIN/<bufsize,w,h>/lowercase-hex/RD_SHOT_END.
+ * Always-on: stream the exact u8g2 full-frame buffer (== the bytes pushed to
+ * the ST7305) over the USB-JTAG console so a host tool can reconstruct the
+ * image the firmware drew, pixel for pixel.  Part of the normal build — the
+ * whole point is to confirm the CURRENT production firmware's display, not a
+ * special opt-in build.  Protocol: RD_SHOT_BEGIN/<bufsize,w,h>/lowercase-hex
+ * /RD_SHOT_END.  Data is what the firmware rendered (frame buffer); the panel
+ * also depends on the (reference-locked u8g2_st7305) write path.
  */
-#if defined(RD_SHOT_CAPTURE)
 static void rd_shot_dump(u8g2_t *u8g2)
 {
     const uint8_t *buf = u8g2_GetBufferPtr(u8g2);
@@ -749,9 +765,6 @@ static void rd_shot_dump(u8g2_t *u8g2)
     printf("\nRD_SHOT_END\n");
     fflush(stdout);
 }
-#else
-#define rd_shot_dump(u8g2) ((void)0)
-#endif
 
 static void render_screen(rd_state_t state)
 {
@@ -789,54 +802,81 @@ static void render_screen(rd_state_t state)
 
     u8g2_SetFont(u8g2, u8g2_font_10x20_tf);
 
-    /* small status hint above the first row when data is not fresh */
+    /* small status hint when data is not fresh (above the headline image) */
     if (state == RD_STATE_STALE) {
         draw_right(u8g2, W - 6, 50, "stale");
     } else if (state == RD_STATE_OFFLINE) {
         draw_right(u8g2, W - 6, 50, "no wifi");
     }
 
-    const int row_top = 58;
-    const int row_stride = 46;
-    const int box_x = 6;
-    const int box_sz = (int)LMA_PB_PIC_TILE; /* 32 — matches the served tile */
-    const int title_x = box_x + box_sz + 8;
-    const int time_w = 5 * 10 + 6;   /* "HH:MM" at 10px/char + margin */
+    const uint64_t now_ck = clock_now_ms(); /* 0 = clock not set yet (boot) */
+    const int time_w = 5 * 10 + 6;          /* "HH:MM" at 10px/char + margin */
 
-    int yy = row_top;
-    size_t visible = 0;
-    for (size_t i = 0; i < s_cache_count; i++) {
-        if (yy + row_stride > H) {
-            break; /* rest of the day is off-screen; split is fine for v1 */
-        }
+    /* Visible events = ongoing + future, sorted by start_ms.  The panel draws
+     * the picture only for the headliner; the rest are text-only rows. */
+    const lma_cal_event_t *vis[LMA_PB_EVENT_MAX];
+    size_t nvis = 0;
+    for (size_t i = 0; i < s_cache_count && nvis < LMA_PB_EVENT_MAX; i++) {
         const lma_cal_event_t *ev = &s_cache[i];
-
-        /* icon slot: render the served 1-bit tile when present, else a clean
-         * empty box (no fake glyph). */
-        if (ev->pic_data_len == LMA_PB_PIC_TILE_BYTES) {
-            u8g2_DrawXBM(u8g2, box_x, yy, LMA_PB_PIC_TILE, LMA_PB_PIC_TILE,
-                         ev->pic_data);
-        } else {
-            draw_pic_placeholder(u8g2, box_x, yy, box_sz);
+        if (now_ck != 0 && ev->end_ms != 0 && ev->end_ms < now_ck) {
+            continue; /* past — a family-calendar panel lists what's next */
         }
+        vis[nvis++] = ev;
+    }
+    if (nvis == 0) {
+        draw_centered(u8g2, (H / 2) + 7, "no upcoming events");
+        u8g2_SendBuffer(u8g2);
+        rd_shot_dump(u8g2);
+        return;
+    }
 
-        char hhmm[8];
+    const int img_sz = (int)LMA_PB_PIC_TILE;   /* 144 — the whole drawing */
+    const int img_x = (W - img_sz) / 2;        /* centered */
+    const int img_y = 54;
+    char hhmm[8];
+
+    /* Headline event: the big picture (or a tidy slot, none served yet).
+     *
+     * Draw with u8g2_DrawBitmap (MSB-first, bit 7 = leftmost pixel), NOT
+     * u8g2_DrawXBM (LSB-first): the served tile_1bpp is MSB-first row-major
+     * ("1 = ink", 2592 B). DrawXBM mirrors each 8-px byte, which showed up as
+     * periodic stripes / mis-centering at byte boundaries on the real panel. */
+    const lma_cal_event_t *hl = vis[0];
+    if (hl->pic_data_len == LMA_PB_PIC_TILE_BYTES) {
+        u8g2_DrawBitmap(u8g2, img_x, img_y, img_sz >> 3, img_sz,
+                        hl->pic_data);
+    } else {
+        draw_pic_placeholder(u8g2, img_x, img_y, img_sz);
+    }
+    utc_ms_to_dt(hl->start_ms, RD_TZ_OFFSET_MINUTES, &y, &mo, &d, &hh, &mm);
+    snprintf(hhmm, sizeof(hhmm), "%02d:%02d", hh, mm);
+    draw_right(u8g2, W - 6, img_y + img_sz + 8, hhmm);
+    {
+        int avail = (W - 6) - 20 - time_w;
+        draw_clipped_title(u8g2, 20, img_y + img_sz + 8, hl->title, avail);
+    }
+
+    /* Following events: text-only rows (no picture per event). */
+    int yy = img_y + img_sz + 32;
+    const int row_stride = 24;
+    for (size_t v = 1; v < nvis; v++) {
+        const lma_cal_event_t *ev = vis[v];
         utc_ms_to_dt(ev->start_ms, RD_TZ_OFFSET_MINUTES, &y, &mo, &d,
                      &hh, &mm);
         snprintf(hhmm, sizeof(hhmm), "%02d:%02d", hh, mm);
-        draw_right(u8g2, W - 6, yy + 20, hhmm);
-
-        int avail = (W - 6) - title_x - time_w;
-        draw_clipped_title(u8g2, title_x, yy + 20, ev->title, avail);
-
+        draw_right(u8g2, W - 6, yy, hhmm);
+        int avail = (W - 6) - 20 - time_w;
+        draw_clipped_title(u8g2, 20, yy, ev->title, avail);
         yy += row_stride;
-        visible++;
+        if (yy > H - 16) {
+            break;
+        }
     }
 
     u8g2_SendBuffer(u8g2);
     rd_shot_dump(u8g2);
-    ESP_LOGI(TAG, "rendered %u rows (cache=%u)", (unsigned)visible,
-             (unsigned)s_cache_count);
+    ESP_LOGI(TAG, "rendered %u of %u events (headline uid=%s)",
+             (unsigned)nvis, (unsigned)s_cache_count, vis[0]->uid);
 }
 
 /* ------------------------------------------------------------------ hold */
@@ -881,6 +921,10 @@ void robodog_app_main(void)
     config_load();
     watermark_load();
     cache_load();
+    /* Full fetch on every boot: NVS stores no pic data, so each boot must
+     * re-serve the headline image into RAM (the calendar is small; this is a
+     * single small HTTPS-style reply every cycle, not per-event growth). */
+    s_watermark = 0;
 
     wifi_init();
     display_init();

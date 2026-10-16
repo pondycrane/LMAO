@@ -18,11 +18,6 @@ idf_component_register(
         u8g2_st7305
 )
 
-# Opt-in (build with `-DRD_SHOT_CAPTURE=ON`): enable the u8g2 frame-dump hook
-# that streams the exact panel buffer over the USB-JTAG console for host pixel
-# capture (robodog_native/capture.py). Off by default — normal builds are
-# unaffected.
-option(RD_SHOT_CAPTURE "Enable u8g2 frame-dump capture hook" OFF)
-if(RD_SHOT_CAPTURE)
-    target_compile_definitions(${COMPONENT_LIB} PRIVATE RD_SHOT_CAPTURE=1)
-endif()
+# The u8g2 frame-dump capture hook is ALWAYS compiled in (rd_shot_dump in
+# robodog.c): capture.py is how a host confirms what the current production
+# firmware rendered, so it must not be a separate opt-in build.
