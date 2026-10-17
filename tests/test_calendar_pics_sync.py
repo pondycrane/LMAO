@@ -85,6 +85,40 @@ class TestExtractJsonArray:
         assert cps._extract_json_array("no array here") == []
 
 
+class TestParseBbox:
+    def test_parses_array(self):
+        assert cps._parse_bbox("[100, 200, 300, 400]", 500, 500) == (100, 200, 300, 400)
+
+    def test_clamps_to_image(self):
+        # 2000 clamps to width 1000; still a real (non-full-frame) crop
+        assert cps._parse_bbox("[50, 50, 2000, 300]", 1000, 500) == (50, 50, 1000, 300)
+
+    def test_near_full_frame_is_none(self):
+        assert cps._parse_bbox("[0, 0, 495, 495]", 500, 500) is None
+
+    def test_tiny_box_is_none(self):
+        assert cps._parse_bbox("[10, 10, 20, 20]", 500, 500) is None
+
+    def test_garbage_is_none(self):
+        assert cps._parse_bbox("I don't see a subject clearly", 500, 500) is None
+
+
+class TestExtractJsonObject:
+    def test_object(self):
+        assert cps._extract_json_object('{"subject":"seal","queries":["a","b"]}') == \
+            {"subject": "seal", "queries": ["a", "b"]}
+
+    def test_code_fence(self):
+        s = '```json\n{"subject":"pikachu"}\n```'
+        assert cps._extract_json_object(s) == {"subject": "pikachu"}
+
+    def test_prose_around(self):
+        assert cps._extract_json_object('Here: {"a":1}.') == {"a": 1}
+
+    def test_garbage(self):
+        assert cps._extract_json_object("nothing here") == {}
+
+
 class TestPickSource:
     def test_prefers_title_matching_query_token(self):
         results = [_r("Monster Ball Tour 2009.jpg"),
