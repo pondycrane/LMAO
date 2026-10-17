@@ -477,6 +477,65 @@ def crop_to_subject(raw: bytes) -> bytes:
     return cropped
 
 
+def _parse_match(text: str):
+    """Extract a boolean verdict from a vision reply, or None if unparseable."""
+    obj = _extract_json_object(text)
+    if obj and "match" in obj:
+        v = obj["match"]
+        return v if isinstance(v, bool) else str(v).strip().lower() in ("true", "yes", "1")
+    return None
+
+
+def verify_subject(raw: bytes, subject: str, theme: str) -> bool:
+    """Confirm the image's MAIN subject actually depicts the intended theme.
+
+    Fail-open: if the vision box is unavailable or gives no clear verdict, allow
+    the image (consistent with the crop step). If it clearly says the subject is
+    unrelated (e.g. a boat named "Slowpoke" instead of a pokemon), reject.
+    """
+    if Image is None:
+        return True
+    base = os.environ.get("LMAO_IMAGE_VISION_URL", _VISION_BASE_DEFAULT).rstrip("/")
+    model = os.environ.get("LMAO_IMAGE_VISION_MODEL", _VISION_MODEL_DEFAULT)
+    import base64 as _b64
+
+    b64 = _b64.b64encode(raw).decode()
+    endpoint = base + "/chat/completions" if base.endswith("/v1") else base + "/v1/chat/completions"
+    prompt = (
+        f"Is the MAIN subject of this image a {theme} resembling '{subject}' — i.e. "
+        "the intended character/topic for a kid's calendar tile? If it is an "
+        "unrelated object that merely shares the name (a boat named 'Slowpoke', a "
+        "random person, a map), answer false. Reply ONLY a JSON object: "
+        '{"match": true or false, "reason": "one short clause"}.' 
+    )
+    body = json.dumps({
+        "model": model,
+        "messages": [{"role": "user", "content": [
+            {"type": "text", "text": prompt},
+            {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + b64}},
+        ]}],
+        "max_tokens": 200,
+    }).encode()
+    req = urllib.request.Request(
+        endpoint, data=body,
+        headers={"Content-Type": "application/json", "User-Agent": _UA},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            payload = json.load(resp)
+        text = (payload["choices"][0]["message"].get("content") or "").strip()
+    except Exception as exc:  # noqa: BLE001
+        print(f"  (vision content gate unavailable: {exc})")
+        return True
+    verdict = _parse_match(text)
+    if verdict is None:
+        print("  (vision content gate: no clear verdict — allowing)")
+        return True
+    if not verdict:
+        print(f"  (vision content gate REJECTED: not a {theme})")
+    return verdict
+
+
 def kid_events_needing_pics(cal, pic_store, force: bool = False) -> list[tuple]:
     have = set(pic_store.keys()) if not force else set()
     sql = """
@@ -558,6 +617,12 @@ def main(argv: list[str] | None = None) -> int:
             _, url, w, h = src
             raw = download(url)
             raw = crop_to_subject(raw)  # tighten to the main subject (vision)
+            subject_word = primary.split()[0]  # primary is never empty
+            theme_label = "pokemon" if participant == "juliet" else "sea animal"
+            if not verify_subject(raw, subject_word, theme_label):
+                print(f"   rejected: main subject is not a {theme_label} for {primary!r}")
+                failed += 1
+                continue
             png = to_1bit_png(raw, tw, th, args.threshold)
             rec = pic_store.put(pic, png, tw, th)
             print(f"   stored {pic}: {src[0]} ({w}x{h}) -> "
