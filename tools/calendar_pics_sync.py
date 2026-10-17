@@ -94,6 +94,12 @@ _UA = "LMAO-calendar-pics/1.0 (family calendar)"
 _TILE_W, _TILE_H = 144, 144
 _THRESHOLD = 140  # generous white so photos don't go fully black
 
+# Local Qwen-VL vision box for subject cropping. Default is the ML endpoint IP
+# (the `spark-eefb` hostname fails to resolve from this Pi even though it is in
+# /etc/hosts — the IP works). Override with LMAO_IMAGE_VISION_URL / _MODEL.
+_VISION_BASE_DEFAULT = "http://192.168.50.200:8000/v1"
+_VISION_MODEL_DEFAULT = "Qwen/Qwen2.5-VL-72B-Instruct"
+
 
 def _prefer_ipv4() -> None:
     import socket as _s
@@ -129,22 +135,24 @@ def pick_subject(participant: str, action: str, uid: str) -> str:
 def build_combo(title: str, participant: str, uid: str) -> list[str]:
     """Return search queries (primary first) pairing subject + event action.
 
-    A model-reasoning override (``LMAO_IMAGE_LLM_URL``) supplies richer phrases
-    WHEN the event has an action to pair (ice skating, tennis...). For
-    actionless or ambiguous titles (an "Open house") the reasoning model tends
-    to overthink / rabbit-hole, so those skip the LLM and use the deterministic
-    reasoned fallback.
+    When ``LMAO_IMAGE_LLM_URL`` is set, the local model picks the best THEME
+    subject + action combo for the event and returns the search queries it
+    thinks will produce clean line drawings (always called — tokens are free on
+    the local box; if the reasoning model spins out and returns nothing, we
+    gracefully fall back to the deterministic combo).  Otherwise a deterministic
+    reasoned fallback is used.
     """
     action = extract_action(title)
     subject = pick_subject(participant, action, uid)
     primary = f"{subject} {action}".strip() if action else subject
     queries = [primary, subject]
     url = os.environ.get("LMAO_IMAGE_LLM_URL")
-    if url and action:
+    if url:
         try:
-            llm_q = _llm_keywords(url, title, participant, subject, action)
-            if llm_q:
-                return llm_q + [subject]
+            combo = _llm_combo(url, title, participant)
+            if combo and combo.get("queries"):
+                subj = combo.get("subject") or subject
+                return list(combo["queries"]) + [subj]
         except Exception as exc:  # noqa: BLE001
             print(f"  (LLM keyword reasoning unavailable: {exc})")
     return queries
@@ -171,24 +179,47 @@ def _extract_json_array(text: str) -> list[str]:
     return []
 
 
-def _llm_keywords(url: str, title: str, participant: str, subject: str, action: str) -> list[str]:
+def _extract_json_object(text: str) -> dict:
+    """Robustly pull the first JSON object from a model reply."""
+    import json as _json
+
+    text = text.strip()
+    if text.startswith("```"):
+        text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+    start = text.find("{")
+    end = text.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        return {}
+    try:
+        obj = _json.loads(text[start:end + 1])
+    except _json.JSONDecodeError:
+        return {}
+    return obj if isinstance(obj, dict) else {}
+
+
+def _llm_combo(url: str, title: str, participant: str) -> dict:
+    """Ask the local model for the best theme subject + action combo + queries."""
     base = url.rstrip("/")
     endpoint = base + "/chat/completions" if base.endswith("/v1") else base + "/v1/chat/completions"
     theme = "pokemon" if participant == "juliet" else "sea animal"
     sys_msg = (
-        "You choose image-search queries for a kid's family calendar tile. "
-        "Given the theme character and the event, return 2-3 concise image-search "
-        "queries pairing the character with the event action. Reject physically "
-        "impossible pairings (a legless fish cannot ice-skate) and prefer a "
-        "coherent character that can do the action. Reply with ONLY a JSON array "
-        "of strings, e.g. [\"seal ice skating\", \"cartoon penguin on ice\"]. No "
-        "prose, no code fences."
+        "You choose image-search queries for a kid's family-calendar picture tile. "
+        f"The kid's theme is {theme}. Given an event, pick ONE subject from that "
+        "theme that can clearly do the event's action, a concrete action word or "
+        "short phrase, and 2-3 image-search queries that would return clean, "
+        "simple LINE DRAWINGS of that character doing it (e.g. \"seal ice "
+        "skating\", \"cartoon penguin on ice\"). If the event has no obvious "
+        "action (e.g. an \"open house\"), invent a simple visual one the character "
+        "can be shown doing that reads well as a line drawing. Avoid physically "
+        "impossible pairings (a legless fish cannot ice-skate). Reply with ONLY a "
+        "JSON object: {\"subject\":\"...\", \"action\":\"...\", "
+        "\"queries\":[\"a\",\"b\",\"c\"]}. No prose, no code fences."
     )
     body = json.dumps({
         "model": os.environ.get("LMAO_IMAGE_LLM_MODEL", "deepseek-ai/DeepSeek-V4-Flash-0731"),
         "messages": [
             {"role": "system", "content": sys_msg},
-            {"role": "user", "content": f"Theme: {subject} ({theme}). Event: {title}."},
+            {"role": "user", "content": f"Event: {title}."},
         ],
         "temperature": 0.7,
         "max_tokens": 768,  # reasoning models spend tokens on CoT before content
@@ -203,8 +234,8 @@ def _llm_keywords(url: str, title: str, participant: str, subject: str, action: 
     text = (message.get("content") or "").strip()
     if not text:
         # reasoning model that spun on CoT and never emitted content
-        return []
-    return _extract_json_array(text)
+        return {}
+    return _extract_json_object(text)
 
 
 # ---------------------------------------------------------------------------
@@ -350,6 +381,102 @@ def to_1bit_png(raw: bytes, width: int, height: int, threshold: int) -> bytes:
     return buf.getvalue()
 
 
+def _parse_bbox(text: str, width: int, height: int):
+    """Parse a vision reply to a valid pixel bbox or None.
+
+    Accepts a ``[x1,y1,x2,y2]`` array (or bare numbers). Clamps to the image,
+    rejects degenerate/at-least-near-full-frame boxes (no point cropping) and
+    overly tiny boxes.
+    """
+    import re
+
+    m = re.search(r"\[\s*([0-9.,\s\-]+)\]", text)
+    if m:
+        import json as _json
+
+        try:
+            arr = _json.loads("[" + m.group(1) + "]")
+        except _json.JSONDecodeError:
+            arr = []
+    else:
+        arr = [int(t) for t in re.findall(r"-?\d+", text)][:4]
+    if len(arr) < 4:
+        return None
+    try:
+        x1, y1, x2, y2 = (int(v) for v in arr[:4])
+    except (TypeError, ValueError):
+        return None
+    x1, y1 = max(0, x1), max(0, y1)
+    x2, y2 = min(width, x2), min(height, y2)
+    if x2 <= x1 or y2 <= y1:
+        return None
+    if (x2 - x1) >= 0.98 * width and (y2 - y1) >= 0.98 * height:
+        return None  # basically the full frame — nothing to crop
+    if (x2 - x1) < 32 or (y2 - y1) < 32:
+        return None  # degenerately small box
+    return (x1, y1, x2, y2)
+
+
+def crop_to_subject(raw: bytes) -> bytes:
+    """Crop the downloaded image to its main subject via the local vision box.
+
+    Returns the cropped re-encoded PNG, or ``raw`` unchanged if the vision box
+    is unavailable or returns no usable box (never fatal).
+    """
+    if Image is None:
+        return raw
+    base = os.environ.get("LMAO_IMAGE_VISION_URL", _VISION_BASE_DEFAULT).rstrip("/")
+    model = os.environ.get("LMAO_IMAGE_VISION_MODEL", _VISION_MODEL_DEFAULT)
+    try:
+        with Image.open(io.BytesIO(raw)) as _im0:
+            W, H = _im0.size
+    except Exception:
+        return raw
+
+    import base64 as _b64
+
+    b64 = _b64.b64encode(raw).decode()
+    endpoint = base + "/chat/completions" if base.endswith("/v1") else base + "/v1/chat/completions"
+    prompt = (
+        "Return ONLY a JSON array [x1,y1,x2,y2] with the PIXEL bounding box of "
+        "the MAIN foreground subject in this image, so it can be cropped to "
+        "fill the frame. If the subject already fills most of the frame, return "
+        f"the full frame [0,0,{W},{H}]. No prose."
+    )
+    body = json.dumps({
+        "model": model,
+        "messages": [{"role": "user", "content": [
+            {"type": "text", "text": prompt},
+            {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + b64}},
+        ]}],
+        "max_tokens": 160,
+    }).encode()
+    req = urllib.request.Request(
+        endpoint, data=body,
+        headers={"Content-Type": "application/json", "User-Agent": _UA},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            payload = json.load(resp)
+        text = (payload["choices"][0]["message"].get("content") or "").strip()
+    except Exception as exc:  # noqa: BLE001
+        print(f"  (vision crop unavailable: {exc})")
+        return raw
+
+    bbox = _parse_bbox(text, W, H)
+    if bbox is None:
+        print("  (vision crop: no usable box — using full frame)")
+        return raw
+    x1, y1, x2, y2 = bbox
+    with Image.open(io.BytesIO(raw)) as im:
+        im = im.crop((x1, y1, x2, y2))
+        buf = io.BytesIO()
+        im.save(buf, format="PNG")
+        cropped = buf.getvalue()
+    print(f"  (vision cropped to {x2 - x1}x{y2 - y1})")
+    return cropped
+
+
 def kid_events_needing_pics(cal, pic_store, force: bool = False) -> list[tuple]:
     have = set(pic_store.keys()) if not force else set()
     sql = """
@@ -430,6 +557,7 @@ def main(argv: list[str] | None = None) -> int:
                 continue
             _, url, w, h = src
             raw = download(url)
+            raw = crop_to_subject(raw)  # tighten to the main subject (vision)
             png = to_1bit_png(raw, tw, th, args.threshold)
             rec = pic_store.put(pic, png, tw, th)
             print(f"   stored {pic}: {src[0]} ({w}x{h}) -> "
