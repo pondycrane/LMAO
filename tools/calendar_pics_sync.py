@@ -308,54 +308,53 @@ def search_sources(query: str):
     return results
 
 
-def pick_source(results, query: str = ""):
-    """Pick the most usable candidate anchored to *query*, or None if none fit.
+def _norm_title(t: str) -> str:
+    import unicodedata
+    t = unicodedata.normalize("NFKD", t.lower())
+    t = "".join(c for c in t if not unicodedata.combining(c))
+    return "".join(c for c in t if c.isalnum())
 
-    A candidate is REJECTED unless its title contains at least one token of the
-    primary query — so we never store a big random photo ("pokemon-livery
-    airplane" for "goldeen tennis").  Among fits, the SUBJECT (first query word)
-    match scores highest (a seal beats a human-skater painting for "seal ice
-    skating"), and matching the action/other tokens adds more.
-    """
-    def norm(t: str) -> str:
-        import unicodedata
-        t = unicodedata.normalize("NFKD", t.lower())
-        t = "".join(c for c in t if not unicodedata.combining(c))
-        return "".join(c for c in t if c.isalnum())
 
-    words = (query or "").split()
-    subject = norm(words[0]) if words else ""
-    tokens = [norm(t) for t in words if len(t) >= 4]
-
-    def score(r):
-        title, url, w, h = r
-        if not url or not w or not h:
-            return None
-        if w > 6000 or h > 6000 or max(w, h) / max(1, min(w, h)) > 3.0:
-            return None
-        tn = norm(title)
-        if tokens and not any(t in tn for t in tokens):
-            return None  # no query token in the title -> unrelated, reject
-        s = 0
-        if subject and subject in tn:
-            s += 60  # the character/subject is present
-        for t in tokens:
-            if t in tn and t != subject:
-                s += 25  # matches the action / other query words too
-        if "map" in tn or "diagram" in tn or "seating" in tn:
-            s -= 20
-        if 300 <= w <= 4000:
-            s += 2
-        if 0.5 <= min(w, h) / max(1, max(w, h)):
-            s += 1
-        return s
-
-    scored = [(score(r), r) for r in results]
-    scored = [(s, r) for s, r in scored if s is not None]
-    if not scored:
+def _score_result(r, query: str = ""):
+    """Score one candidate (title,url,w,h) for *query*; None = reject."""
+    title, url, w, h = r
+    if not url or not w or not h:
         return None
+    if w > 6000 or h > 6000 or max(w, h) / max(1, min(w, h)) > 3.0:
+        return None
+    words = (query or "").split()
+    subject = _norm_title(words[0]) if words else ""
+    tokens = [_norm_title(t) for t in words if len(t) >= 4]
+    tn = _norm_title(title)
+    if tokens and not any(t in tn for t in tokens):
+        return None  # no query token in the title -> unrelated, reject
+    s = 0
+    if subject and subject in tn:
+        s += 60  # the character/subject is present
+    for t in tokens:
+        if t in tn and t != subject:
+            s += 25  # matches the action / other query words too
+    if "map" in tn or "diagram" in tn or "seating" in tn:
+        s -= 20
+    if 300 <= w <= 4000:
+        s += 2
+    if 0.5 <= min(w, h) / max(1, max(w, h)):
+        s += 1
+    return s
+
+
+def rank_candidates(results, query: str = ""):
+    """Return results sorted best-first that match the query (rejecting none-fit)."""
+    scored = [(_score_result(r, query), r) for r in results]
+    scored = [(s, r) for s, r in scored if s is not None]
     scored.sort(key=lambda x: x[0], reverse=True)
-    return scored[0][1]
+    return [r for _, r in scored]
+
+
+def pick_source(results, query: str = ""):
+    """Best candidate for *query*, or None if none fit."""
+    ranked = rank_candidates(results, query)
+    return ranked[0] if ranked else None
 
 
 def download(url: str) -> bytes:
@@ -477,6 +476,65 @@ def crop_to_subject(raw: bytes) -> bytes:
     return cropped
 
 
+def _parse_match(text: str):
+    """Extract a boolean verdict from a vision reply, or None if unparseable."""
+    obj = _extract_json_object(text)
+    if obj and "match" in obj:
+        v = obj["match"]
+        return v if isinstance(v, bool) else str(v).strip().lower() in ("true", "yes", "1")
+    return None
+
+
+def verify_subject(raw: bytes, subject: str, theme: str) -> bool:
+    """Confirm the image's MAIN subject actually depicts the intended theme.
+
+    Fail-open: if the vision box is unavailable or gives no clear verdict, allow
+    the image (consistent with the crop step). If it clearly says the subject is
+    unrelated (e.g. a boat named "Slowpoke" instead of a pokemon), reject.
+    """
+    if Image is None:
+        return True
+    base = os.environ.get("LMAO_IMAGE_VISION_URL", _VISION_BASE_DEFAULT).rstrip("/")
+    model = os.environ.get("LMAO_IMAGE_VISION_MODEL", _VISION_MODEL_DEFAULT)
+    import base64 as _b64
+
+    b64 = _b64.b64encode(raw).decode()
+    endpoint = base + "/chat/completions" if base.endswith("/v1") else base + "/v1/chat/completions"
+    prompt = (
+        f"Is the MAIN subject of this image a {theme} resembling '{subject}' — i.e. "
+        "the intended character/topic for a kid's calendar tile? If it is an "
+        "unrelated object that merely shares the name (a boat named 'Slowpoke', a "
+        "random person, a map), answer false. Reply ONLY a JSON object: "
+        '{"match": true or false, "reason": "one short clause"}.' 
+    )
+    body = json.dumps({
+        "model": model,
+        "messages": [{"role": "user", "content": [
+            {"type": "text", "text": prompt},
+            {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + b64}},
+        ]}],
+        "max_tokens": 200,
+    }).encode()
+    req = urllib.request.Request(
+        endpoint, data=body,
+        headers={"Content-Type": "application/json", "User-Agent": _UA},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            payload = json.load(resp)
+        text = (payload["choices"][0]["message"].get("content") or "").strip()
+    except Exception as exc:  # noqa: BLE001
+        print(f"  (vision content gate unavailable: {exc})")
+        return True
+    verdict = _parse_match(text)
+    if verdict is None:
+        print("  (vision content gate: no clear verdict — allowing)")
+        return True
+    if not verdict:
+        print(f"  (vision content gate REJECTED: not a {theme})")
+    return verdict
+
+
 def kid_events_needing_pics(cal, pic_store, force: bool = False) -> list[tuple]:
     have = set(pic_store.keys()) if not force else set()
     sql = """
@@ -550,19 +608,32 @@ def main(argv: list[str] | None = None) -> int:
                 if r[1] and r[1] not in seen:
                     seen.add(r[1])
                     uniq.append(r)
-            src = pick_source(uniq, primary)
-            if src is None:
-                print(f"   no usable image for {primary!r}")
+            candidates = rank_candidates(uniq, primary)
+            subject_word = primary.split()[0]  # primary is never empty
+            theme_label = "pokemon" if participant == "juliet" else "sea animal"
+            stored = False
+            for cand in candidates:
+                _, url, w, h = cand
+                try:
+                    raw = download(url)
+                    raw = crop_to_subject(raw)  # tighten to the main subject (vision)
+                    if not verify_subject(raw, subject_word, theme_label):
+                        print(f"   gate rejected candidate ({w}x{h}): {cand[0]!r}")
+                        continue
+                    png = to_1bit_png(raw, tw, th, args.threshold)
+                    rec = pic_store.put(pic, png, tw, th)
+                    print(f"   stored {pic}: {cand[0]} ({w}x{h}) -> "
+                          f"{rec['width']}x{rec['height']} {rec['mime']} {len(rec['bytes'])}B")
+                    done += 1
+                    stored = True
+                    break
+                except Exception as exc2:  # noqa: BLE001
+                    print(f"   candidate failed ({cand[0]!r}): {exc2}")
+                    continue
+            if not stored:
+                print(f"   no acceptable image for {primary!r} "
+                      f"({len(candidates)} candidate(s) rejected/failed)")
                 failed += 1
-                continue
-            _, url, w, h = src
-            raw = download(url)
-            raw = crop_to_subject(raw)  # tighten to the main subject (vision)
-            png = to_1bit_png(raw, tw, th, args.threshold)
-            rec = pic_store.put(pic, png, tw, th)
-            print(f"   stored {pic}: {src[0]} ({w}x{h}) -> "
-                  f"{rec['width']}x{rec['height']} {rec['mime']} {len(rec['bytes'])}B")
-            done += 1
         except Exception as exc:  # noqa: BLE001
             print(f"   FAILED for {primary!r}: {exc}")
             failed += 1

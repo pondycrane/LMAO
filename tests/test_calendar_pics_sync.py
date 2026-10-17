@@ -119,6 +119,17 @@ class TestExtractJsonObject:
         assert cps._extract_json_object("nothing here") == {}
 
 
+class TestParseMatch:
+    def test_true(self):
+        assert cps._parse_match('{"match": true, "reason": "it is a pokemon"}') is True
+
+    def test_false(self):
+        assert cps._parse_match('{"match": false, "reason": "it is a boat"}') is False
+
+    def test_unparseable_is_none(self):
+        assert cps._parse_match("no verdict") is None
+
+
 class TestPickSource:
     def test_prefers_title_matching_query_token(self):
         results = [_r("Monster Ball Tour 2009.jpg"),
