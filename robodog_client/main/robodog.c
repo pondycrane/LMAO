@@ -824,6 +824,16 @@ static void render_screen(rd_state_t state)
         day_now = rd_utc_ms_to_local_day(now_ck, RD_TZ_OFFSET_MINUTES);
         rd_utc_ms_to_dt(now_ck, RD_TZ_OFFSET_MINUTES, &yr_now, &mo_tmp,
                         &dy_tmp, &hh_tmp, &mm_tmp);
+    } else {
+        /* Clock unset (pre-first-sync / lost): every event renders range-only
+         * and past-event filtering is off, so cached rows can look current
+         * while offline.  Log once per run so that state is diagnosable. */
+        static bool s_warned_clock_unset = false;
+        if (!s_warned_clock_unset) {
+            s_warned_clock_unset = true;
+            ESP_LOGW(TAG, "display clock unset (now_ck==0): date qualifiers "
+                          "and past-event filtering are off");
+        }
     }
 
     /* Visible events = ongoing + future, sorted by start_ms.  The panel draws
