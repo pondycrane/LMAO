@@ -170,11 +170,20 @@ python3 capture.py --port /dev/ttyACM0 --reset --n 4 --timeout 100 --describe
 - `stale` hint → connected but last sync failed (showing NVS cache).
 - Row set == Postgres/`GetCalendar` output → data path live; a stale/different
   set means the cache is being shown (compare timestamps against the header).
-- At most 3 event rows are drawn: the headline (big picture, LEFT, with start
-  time + clipped title to its right) plus 2 compact text rows; a 4th+ visible
-  event is dropped by design (`RD_MAX_EVENT_ROWS` in `render_screen`) — a
-  shorter row set is not a data-path error unless the header hints
-  (`stale`/`no wifi`) say otherwise.
+- At most 3 event rows are drawn: the headline (big picture, LEFT; title in
+  the large `helvB24` face + right-aligned `HH:MM-HH:MM` range meta beside it)
+  plus 2 compact text rows, each title-clipped left with a measured,
+  right-aligned `HH:MM-HH:MM` range meta; a 4th+ visible event is dropped by
+  design (`RD_MAX_EVENT_ROWS` in `render_screen`) — a shorter row set is not a
+  data-path error unless the header hints (`stale`/`no wifi`) say otherwise.
+- Non-today events prefix their right-hand meta with a day qualifier so the
+  family panel reads unambiguously: `tomorrow` for the next civil day,
+  `MM/DD` for a later day in the same civil year, `YYYY/MM/DD` for a later
+  day in a different year; today's events show the bare time range. The
+  qualifier is keyed off the event **start** civil day (see
+  `rd_datetime.h`), and the header clock (`YYYY-MM-DD HH:MM`) is the "today"
+  anchor — rows render range-only while the clock is still unset (pre-first
+  sync).
 
 **Validation loop after a change** (layout, status hints, row logic,
 data path): build + flash normally (capture is compiled in), run the capture
