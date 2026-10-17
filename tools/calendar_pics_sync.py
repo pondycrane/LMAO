@@ -129,22 +129,46 @@ def pick_subject(participant: str, action: str, uid: str) -> str:
 def build_combo(title: str, participant: str, uid: str) -> list[str]:
     """Return search queries (primary first) pairing subject + event action.
 
-    A model-reasoning override (``LMAO_IMAGE_LLM_URL``) can supply richer
-    phrase; otherwise the deterministic reasoned fallback is used.
+    A model-reasoning override (``LMAO_IMAGE_LLM_URL``) supplies richer phrases
+    WHEN the event has an action to pair (ice skating, tennis...). For
+    actionless or ambiguous titles (an "Open house") the reasoning model tends
+    to overthink / rabbit-hole, so those skip the LLM and use the deterministic
+    reasoned fallback.
     """
     action = extract_action(title)
     subject = pick_subject(participant, action, uid)
     primary = f"{subject} {action}".strip() if action else subject
     queries = [primary, subject]
     url = os.environ.get("LMAO_IMAGE_LLM_URL")
-    if url:
+    if url and action:
         try:
             llm_q = _llm_keywords(url, title, participant, subject, action)
             if llm_q:
-                return (llm_q if llm_q[0] else [primary]) + [subject]
+                return llm_q + [subject]
         except Exception as exc:  # noqa: BLE001
             print(f"  (LLM keyword reasoning unavailable: {exc})")
     return queries
+
+
+def _extract_json_array(text: str) -> list[str]:
+    """Robustly pull a JSON array (possibly wrapped in prose/code fences)."""
+    import json as _json
+
+    text = text.strip()
+    # strip markdown code fences
+    if text.startswith("```"):
+        text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+    start = text.find("[")
+    end = text.rfind("]")
+    if start == -1 or end == -1 or end <= start:
+        return []
+    try:
+        arr = _json.loads(text[start:end + 1])
+    except _json.JSONDecodeError:
+        return []
+    if isinstance(arr, list):
+        return [str(x).strip() for x in arr if str(x).strip()]
+    return []
 
 
 def _llm_keywords(url: str, title: str, participant: str, subject: str, action: str) -> list[str]:
@@ -153,32 +177,34 @@ def _llm_keywords(url: str, title: str, participant: str, subject: str, action: 
     theme = "pokemon" if participant == "juliet" else "sea animal"
     sys_msg = (
         "You choose image-search queries for a kid's family calendar tile. "
-        "Given a theme character and an event, return 2-3 concise image-search "
+        "Given the theme character and the event, return 2-3 concise image-search "
         "queries pairing the character with the event action. Reject physically "
         "impossible pairings (a legless fish cannot ice-skate) and prefer a "
         "coherent character that can do the action. Reply with ONLY a JSON array "
-        "of strings, e.g. [\"seal ice skating\", \"cartoon penguin on ice\"]."
+        "of strings, e.g. [\"seal ice skating\", \"cartoon penguin on ice\"]. No "
+        "prose, no code fences."
     )
     body = json.dumps({
-        "model": os.environ.get("LMAO_IMAGE_LLM_MODEL", "qwen2.5"),
+        "model": os.environ.get("LMAO_IMAGE_LLM_MODEL", "deepseek-ai/DeepSeek-V4-Flash-0731"),
         "messages": [
             {"role": "system", "content": sys_msg},
             {"role": "user", "content": f"Theme: {subject} ({theme}). Event: {title}."},
         ],
         "temperature": 0.7,
-        "max_tokens": 120,
+        "max_tokens": 768,  # reasoning models spend tokens on CoT before content
     }).encode()
-    req = urllib.request.Request(
-        endpoint, data=body,
-        headers={"Content-Type": "application/json", "User-Agent": _UA},
-    )
-    with urllib.request.urlopen(req, timeout=60) as resp:
+    headers = {"Content-Type": "application/json", "User-Agent": _UA}
+    if os.environ.get("LMAO_IMAGE_LLM_KEY"):
+        headers["Authorization"] = f"Bearer {os.environ['LMAO_IMAGE_LLM_KEY']}"
+    req = urllib.request.Request(endpoint, data=body, headers=headers)
+    with urllib.request.urlopen(req, timeout=180) as resp:
         payload = json.load(resp)
-    text = payload["choices"][0]["message"]["content"]
-    arr = json.loads(text)
-    if isinstance(arr, list):
-        return [str(x).strip() for x in arr if str(x).strip()]
-    return []
+    message = payload["choices"][0]["message"]
+    text = (message.get("content") or "").strip()
+    if not text:
+        # reasoning model that spun on CoT and never emitted content
+        return []
+    return _extract_json_array(text)
 
 
 # ---------------------------------------------------------------------------
