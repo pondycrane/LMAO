@@ -652,6 +652,11 @@ Outputs in `robodog_client/shots/` (gitignored):
   Postgres/`GetCalendar` to confirm a data-path change. Note the panel caps at
   3 event rows by design (headline picture + 2 compact text rows; 4th+
   dropped), so a shorter set is not a data-path error unless a hint says so.
+- Row meta reads `HH:MM-HH:MM` (start–end range) right-aligned on every row;
+  the headline title uses the large `helvB24` face. Non-today events prefix
+  the meta with `tomorrow` / `MM/DD` / `YYYY/MM/DD` (keyed off the event's
+  start civil day; today events show the bare range), with the header clock as
+  the "today" anchor — rows render range-only until the clock is synced.
 
 **Vision readback**: `--describe` sends `panel_landscape.png` to the same
 self-hosted vision model hermes uses (Qwen2.5-VL at `spark-eebf`, config in
