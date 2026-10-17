@@ -3,6 +3,8 @@
 import sys
 from pathlib import Path
 
+import pytest
+
 _REPO = Path(__file__).resolve().parents[1]
 if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
@@ -45,6 +47,12 @@ class TestSubjectSelection:
 
 
 class TestCombo:
+    @pytest.fixture(autouse=True)
+    def _force_deterministic(self, monkeypatch):
+        # never hit the live LLM hook in tests; exercise the reasoned fallback
+        monkeypatch.delenv("LMAO_IMAGE_LLM_URL", raising=False)
+        monkeypatch.delenv("LMAO_IMAGE_LLM_MODEL", raising=False)
+
     def test_wesley_ice_skating_query_is_coherent(self):
         q = cps.build_combo("W ice skating 1:30", "wesley", "uid1")
         assert q[0].endswith("ice skating")
@@ -59,6 +67,22 @@ class TestCombo:
         q = cps.build_combo("Swim meet", "wesley", "uid3")
         assert q[0].endswith("swimming")
         assert q[0] in q
+
+
+class TestExtractJsonArray:
+    def test_plain_array(self):
+        assert cps._extract_json_array('["seal ice skating", "penguin on ice"]') == \
+            ["seal ice skating", "penguin on ice"]
+
+    def test_code_fence_wrapped(self):
+        s = '```json\n["pikachu tennis"]\n```'
+        assert cps._extract_json_array(s) == ["pikachu tennis"]
+
+    def test_prose_around_array(self):
+        assert cps._extract_json_array('Here: ["a", "b"].') == ["a", "b"]
+
+    def test_garbage_returns_empty(self):
+        assert cps._extract_json_array("no array here") == []
 
 
 class TestPickSource:

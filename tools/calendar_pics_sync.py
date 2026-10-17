@@ -147,38 +147,61 @@ def build_combo(title: str, participant: str, uid: str) -> list[str]:
     return queries
 
 
+def _extract_json_array(text: str) -> list[str]:
+    """Robustly pull a JSON array (possibly wrapped in prose/code fences)."""
+    import json as _json
+
+    text = text.strip()
+    # strip markdown code fences
+    if text.startswith("```"):
+        text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+    start = text.find("[")
+    end = text.rfind("]")
+    if start == -1 or end == -1 or end <= start:
+        return []
+    try:
+        arr = _json.loads(text[start:end + 1])
+    except _json.JSONDecodeError:
+        return []
+    if isinstance(arr, list):
+        return [str(x).strip() for x in arr if str(x).strip()]
+    return []
+
+
 def _llm_keywords(url: str, title: str, participant: str, subject: str, action: str) -> list[str]:
     base = url.rstrip("/")
     endpoint = base + "/chat/completions" if base.endswith("/v1") else base + "/v1/chat/completions"
     theme = "pokemon" if participant == "juliet" else "sea animal"
     sys_msg = (
         "You choose image-search queries for a kid's family calendar tile. "
-        "Given a theme character and an event, return 2-3 concise image-search "
+        "Given the theme character and the event, return 2-3 concise image-search "
         "queries pairing the character with the event action. Reject physically "
         "impossible pairings (a legless fish cannot ice-skate) and prefer a "
         "coherent character that can do the action. Reply with ONLY a JSON array "
-        "of strings, e.g. [\"seal ice skating\", \"cartoon penguin on ice\"]."
+        "of strings, e.g. [\"seal ice skating\", \"cartoon penguin on ice\"]. No "
+        "prose, no code fences."
     )
     body = json.dumps({
-        "model": os.environ.get("LMAO_IMAGE_LLM_MODEL", "qwen2.5"),
+        "model": os.environ.get("LMAO_IMAGE_LLM_MODEL", "deepseek-ai/DeepSeek-V4-Flash-0731"),
         "messages": [
             {"role": "system", "content": sys_msg},
             {"role": "user", "content": f"Theme: {subject} ({theme}). Event: {title}."},
         ],
         "temperature": 0.7,
-        "max_tokens": 120,
+        "max_tokens": 768,  # reasoning models spend tokens on CoT before content
     }).encode()
-    req = urllib.request.Request(
-        endpoint, data=body,
-        headers={"Content-Type": "application/json", "User-Agent": _UA},
-    )
-    with urllib.request.urlopen(req, timeout=60) as resp:
+    headers = {"Content-Type": "application/json", "User-Agent": _UA}
+    if os.environ.get("LMAO_IMAGE_LLM_KEY"):
+        headers["Authorization"] = f"Bearer {os.environ['LMAO_IMAGE_LLM_KEY']}"
+    req = urllib.request.Request(endpoint, data=body, headers=headers)
+    with urllib.request.urlopen(req, timeout=180) as resp:
         payload = json.load(resp)
-    text = payload["choices"][0]["message"]["content"]
-    arr = json.loads(text)
-    if isinstance(arr, list):
-        return [str(x).strip() for x in arr if str(x).strip()]
-    return []
+    message = payload["choices"][0]["message"]
+    text = (message.get("content") or "").strip()
+    if not text:
+        # reasoning model that stopped before emitting content — no usable output
+        return []
+    return _extract_json_array(text)
 
 
 # ---------------------------------------------------------------------------
