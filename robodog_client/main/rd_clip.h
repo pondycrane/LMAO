@@ -50,7 +50,8 @@ typedef int (*rd_width_fn)(const char *prefix, void *ctx);
 /* One wrapped line: a byte range into the (NUL-terminated) title string, s.
  * Every line is a contiguous substring of s, so a caller can draw it as-is by
  * copying s[off .. off+len) and NUL-terminating; measured width <= max_px by
- * construction (see rd_wrap_lines). */
+ * construction -- sole exception is the Degenerate-budget lone-glyph line
+ * (below), which only a sub-glyph max_px can produce. */
 typedef struct {
     size_t off;    /* byte offset of this line's first char in s */
     size_t len;    /* byte length of this line (never 0, never splits UTF-8) */
@@ -78,7 +79,9 @@ typedef struct {
  *
  * Fills at most out_cap entries of out[] and returns the TOTAL line count,
  * which may exceed out_cap (the caller draws at most out_cap lines and adds
- * an ellipsis to the last SHOWN line itself).
+ * an ellipsis to the last SHOWN line itself).  out may be NULL only when
+ * out_cap == 0 (the entry guard fails closed on any NULL out with
+ * out_cap > 0).
  *
  * Degenerate budget note: if max_px is smaller than a single glyph in s, that
  * glyph is emitted alone (best-effort -- the wrap never silently drops title

@@ -693,7 +693,7 @@ static void draw_clipped_title(u8g2_t *u8g2, int x, int base, const char *s,
         u8g2_DrawStr(u8g2, x, base, s);
         return;
     }
-    char tmp[LMA_PB_EVENT_TITLE_MAX + 1];
+    char tmp[RD_CLIP_TITLE_MAX + 4];   /* line + "…" (3B) + NUL always fit */
     memcpy(tmp, s, lo);
     tmp[lo] = '\0';
     strncat(tmp, ell, sizeof(tmp) - strlen(tmp) - 1);
@@ -723,10 +723,18 @@ static void draw_wrapped_final(u8g2_t *u8g2, int x, int base,
     const int ell_w = u8g2_GetStrWidth(u8g2, ell);
     const size_t lo = rd_clip_prefix(s, len, max_px, ell_w, rd_u8g2_width,
                                      u8g2);
-    char tmp[LMA_PB_EVENT_TITLE_MAX + 1];
+    char tmp[RD_CLIP_TITLE_MAX + 4];   /* line + "…" (3B) + NUL always fit */
     if (lo == 0) {
         /* Even one glyph + the marker is too wide: draw just the marker (it
-         * always fits at the real 218 px budget). */
+         * always fits at the real 218 px budget).  Keep the same budget
+         * contract the marker enforces: if the marker itself is wider than
+         * max_px, drop loudly rather than draw over the meta. */
+        if (ell_w > max_px) {
+            ESP_LOGW(TAG, "wrapped final line: only ellipsis fits of '%s' "
+                          "but ellipsis %dpx > %dpx budget; dropping",
+                     s, ell_w, max_px);
+            return;
+        }
         memcpy(tmp, ell, strlen(ell) + 1);
         ESP_LOGW(TAG, "wrapped final line: only ellipsis fits of '%s'", s);
     } else {
@@ -743,13 +751,13 @@ static void draw_wrapped_final(u8g2_t *u8g2, int x, int base,
 
 /* Headline wrapped-title vertical band (render_screen): the bottom-anchored
  * helvB18 block sits between the header hline (y=40) and the meta glyph top
- * (148 - 10x20 ascent 16 = 132).  TITLE_TOP_MARGIN is the clearance below
+ * (148 - 10x20 ascent 13 = 135).  TITLE_TOP_MARGIN is the clearance below
  * the hline before the first line's glyph top; TITLE_META_GAP is the gap
  * between the last line's glyph bottom and the meta glyph top.  Both are
  * panel-tuned against capture.py.  Real helvB18 metrics (measured via
  * u8g2_GetAscent/GetDescent, never assumed): ascent 19, descent -5, so the
  * 24px pitch fits 3 lines whose cap tops stay below the hline (baselines
- * 76/100/124); a 4th line would cross the hline and is truncated instead. */
+ * 79/103/127); a 4th line would cross the hline and is truncated instead. */
 #define TITLE_TOP_MARGIN 6
 #define TITLE_META_GAP   3
 
@@ -941,9 +949,22 @@ static void render_screen(rd_state_t state)
         u8g2_SetFont(u8g2, u8g2_font_helvB18_tf);
         const int t_asc = u8g2_GetAscent(u8g2);
         const int t_desc = u8g2_GetDescent(u8g2);   /* <= 0 */
-        const int t_line_h = t_asc - t_desc;        /* 29 for helvB18 */
+        const int t_line_h = t_asc - t_desc;        /* 24 = 19 - (-5), measured */
         u8g2_SetFont(u8g2, u8g2_font_10x20_tf);
-        const int meta_asc = u8g2_GetAscent(u8g2);  /* 16; measured, never 0 */
+        const int meta_asc = u8g2_GetAscent(u8g2);  /* 13; measured, never 0 */
+        /* "never 0" is a hope, not a guarantee: a degenerate measurement
+         * would silently mis-place the whole wrapped block, so surface it
+         * once instead (the band guard below then fails closed). */
+        if (t_line_h <= 0 || meta_asc <= 0) {
+            static bool s_warned_degenerate_metrics = false;
+            if (!s_warned_degenerate_metrics) {
+                s_warned_degenerate_metrics = true;
+                ESP_LOGW(TAG, "degenerate font metrics: helvB18 line_h=%d, "
+                              "10x20 ascent=%d; headline block may be "
+                              "mis-positioned",
+                         t_line_h, meta_asc);
+            }
+        }
         u8g2_SetFont(u8g2, u8g2_font_helvB18_tf);
 
         const int max_px = (W - 6) - txt_x;         /* 218 -- never widened */
@@ -965,9 +986,15 @@ static void render_screen(rd_state_t state)
          * or below top_anchor -- i.e. the first line never rises above the
          * header hline.  The ascent is subtracted from the raw band: with
          * helvB18 ascent 19 / line_h 24 the band holds 3 lines (baselines
-         * 76/100/124) whose cap tops stay cleanly below the hline; a 4th
-         * line would cross it, so longer titles truncate here instead. */
-        const int band = (bottom_last - top_anchor - t_asc) / t_line_h + 1;
+         * 79/103/127) whose cap tops stay cleanly below the hline; a 4th
+         * line would cross it, so longer titles truncate here instead.
+         * Defensive opposite edge: if the band cannot hold even one line
+         * (band < 0, or a degenerate font whose line_h <= 0), n_fit = 0 and
+         * the title is dropped for that frame -- unreachable at the tuned
+         * 218px/24px metrics. */
+        const int band = (t_line_h > 0)
+            ? (bottom_last - top_anchor - t_asc) / t_line_h + 1
+            : -1;   /* degenerate font metrics: no lines fit (fail closed) */
         if (band < 0 || (size_t)band < n_fit) {
             n_fit = (band < 0) ? 0u : (size_t)band;
         }
@@ -992,9 +1019,16 @@ static void render_screen(rd_state_t state)
             }
         }
         if (truncated) {
-            ESP_LOGW(TAG, "headline '%s' wrapped to %u lines, showing %u "
-                          "with final-line ellipsis",
-                     hl->title, (unsigned)nl, (unsigned)n_fit);
+            if (n_fit == 0) {
+                ESP_LOGW(TAG, "headline '%s' wrapped to %u lines but the "
+                              "band cannot hold even one; dropping the title "
+                              "block for this frame",
+                         hl->title, (unsigned)nl);
+            } else {
+                ESP_LOGW(TAG, "headline '%s' wrapped to %u lines, showing %u "
+                              "with final-line ellipsis",
+                         hl->title, (unsigned)nl, (unsigned)n_fit);
+            }
         }
         u8g2_SetFont(u8g2, u8g2_font_10x20_tf);
     }
