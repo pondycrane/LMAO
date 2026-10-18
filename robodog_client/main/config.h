@@ -49,6 +49,16 @@
 /* Server-side live calendar id; empty request == server default "family". */
 #define RD_CALENDAR_ID         "family"
 
+/* ---- Per-board kid assignment (NVS "kid_name" wins at runtime) ----
+   A non-empty value makes this board a kid-dedicated panel: the request
+   carries `participant=<kid>` (server filters to that kid's events) and the
+   header shows the kid name left + live clock right.  "" = family mode
+   (no participant sent, centered datetime header).  Set per board at flash
+   time with `flash_firmware --kid-name <kid>`; empty keeps family mode. */
+#ifndef RD_KID_NAME_DEFAULT
+#define RD_KID_NAME_DEFAULT ""
+#endif
+
 /* ---- SNTP (best-effort; the esp_sntp component is not in the espressif/idf
    :v5.3.1 build image, so it is off — guarded by RD_SNTP_ENABLED). ---- */
 #define RD_SNTP_ENABLED       0

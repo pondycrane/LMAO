@@ -176,6 +176,11 @@ int lma_proto_req_encode(const lma_cal_request_t *req, uint8_t *buf, size_t cap)
         !write_varint_field(buf, cap, &pos, LMA_PB_CALREQ_MAX, req->max_events)) {
         return -1;
     }
+    if (req->participant[0] != '\0' &&
+        !write_ld_field(buf, cap, &pos, LMA_PB_CALREQ_PARTICIPANT,
+                        req->participant)) {
+        return -1;
+    }
     return (int)pos;
 }
 
@@ -188,6 +193,7 @@ int lma_proto_req_decode(const uint8_t *data, size_t len, lma_cal_request_t *out
         return 0;
     }
     memset(out->calendar_id, 0, sizeof(out->calendar_id));
+    memset(out->participant, 0, sizeof(out->participant));
     out->since_ms = 0;
     out->max_events = 0;
 
@@ -228,6 +234,17 @@ int lma_proto_req_decode(const uint8_t *data, size_t len, lma_cal_request_t *out
                 break;
             }
             out->max_events = (uint32_t)v;
+            break;
+        case LMA_PB_CALREQ_PARTICIPANT:
+            if (wt != 2 || uv_decode(data, len, &pos, &v) != 0 ||
+                (size_t)v > len - pos) {
+                if (skip_field(data, len, &pos, wt) != 0) {
+                    return 0;
+                }
+                break;
+            }
+            read_string(data, &pos, (size_t)v, out->participant,
+                        sizeof(out->participant));
             break;
         default:
             if (skip_field(data, len, &pos, wt) != 0) {

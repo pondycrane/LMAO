@@ -216,6 +216,14 @@ archon workflow run lmao-feature-dev "description of feature"
 # vision model (Qwen2.5-VL via capture.py --describe). Loud skip when no board.
 archon workflow run robodog-client-dev "description of feature"
 
+# Kid panels (per-kid dedicated boards, one firmware image): the per-board
+# `kid_name` is set at flash time with `flash_firmware --kid-name <kid>` (writes
+# the NVS `kid_name` key at 0x9000, wiping the 24 KB NVS partition — desired for
+# re-assignment delta-safety); an empty/absent `--kid-name` leaves NVS untouched
+# = family mode.  A kid panel only shows that kid's events (server filters on
+# `participants @> '"<kid>"'::jsonb`) and prints the kid name LEFT + live clock
+# RIGHT on the single header row.
+
 # Sprout — smart irrigation node (Atom Lite + DTU base + Watering Unit + ENV III). Blueprint phases.
 # Firmware work is hard-blocked until smart_irrigation/docs/algorithm-evaluation.md
 # exists (blueprint Appendix 13). ⚠️ The smart-irrigation-dev workflow is NOT ready

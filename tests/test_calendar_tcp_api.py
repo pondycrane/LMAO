@@ -33,6 +33,7 @@ async def _sync(
     calendar_id: str | None,
     since_ms: int,
     max_events: int = 0,
+    participant: str = "",
 ) -> tuple[int, CalendarBundle]:
     req = CalendarRequest()
     if calendar_id is not None:
@@ -41,6 +42,8 @@ async def _sync(
         req.since_ms = since_ms
     if max_events:
         req.max_events = max_events
+    if participant:
+        req.participant = participant
     reader, writer = await asyncio.open_connection("127.0.0.1", server_port)
     try:
         writer.write(_frame(req.SerializeToString()))
@@ -114,6 +117,37 @@ async def test_empty_calendar_returns_framed_empty_bundle():
         assert bundle.watermark_ms == 999
         assert len(bundle.events) == 0
         assert length > 0
+    finally:
+        server.close()
+        await server.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_request_participant_threaded_to_store():
+    store = _fake_store([])
+    server = await start_calendar_tcp_server(store, port=0)
+    port = server.sockets[0].getsockname()[1]
+    try:
+        length, bundle = await _sync(port, "family", 5, participant="juliet")
+        assert length > 0
+        assert store.sync.call_args.kwargs["participant"] == "juliet"
+        assert store.sync.call_args.kwargs["calendar_id"] == "family"
+        assert store.sync.call_args.kwargs["since_ms"] == 5
+    finally:
+        server.close()
+        await server.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_family_request_defaults_participant_to_empty():
+    store = _fake_store([])
+    server = await start_calendar_tcp_server(store, port=0)
+    port = server.sockets[0].getsockname()[1]
+    try:
+        length, bundle = await _sync(port, "family", 0)
+        assert length > 0
+        assert store.sync.call_args.kwargs["participant"] == ""
+        assert store.sync.call_args.kwargs["calendar_id"] == "family"
     finally:
         server.close()
         await server.wait_closed()
