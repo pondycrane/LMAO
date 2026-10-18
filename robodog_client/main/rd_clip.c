@@ -51,10 +51,10 @@ size_t rd_clip_prefix(const char *s, size_t n, int max_px, int ell_w,
     return 0;
 }
 
-/* Append one wrapped line [off, len) to out[] (bounded by out_cap) and return
- * the updated total line count.  The caller owns the off/len reset; keeping
- * the flush in one place guarantees every emitted line is recorded exactly
- * once and never beyond out_cap. */
+/* Append one wrapped line [off, len) to out[] (recording only the first
+ * out_cap lines) and return the updated total line count.  The caller owns
+ * the off/len reset; the single flush point guarantees each line is emitted
+ * once and out[] is never written past out_cap. */
 static size_t rd_wrap_emit(rd_wrap_line_t *out, size_t out_cap,
                            size_t nlines, size_t off, size_t len)
 {
@@ -70,10 +70,12 @@ size_t rd_wrap_lines(const char *s, size_t n, int max_px,
                      rd_wrap_line_t *out, size_t out_cap)
 {
     /* Negative/zero budget (classic int -> huge-size_t cast footgun), nothing
-     * to wrap, or an out-of-contract title: fail closed, exactly like
-     * rd_clip_prefix.  n is thus <= RD_CLIP_TITLE_MAX below, so any emitted
-     * line (a contiguous substring of s) fits our 128-byte scratch buffer. */
-    if (max_px <= 0 || n == 0 || n > RD_CLIP_TITLE_MAX) {
+     * to wrap, an out-of-contract title, or a NULL out with out_cap > 0:
+     * fail closed, exactly like rd_clip_prefix.  n is thus <=
+     * RD_CLIP_TITLE_MAX below, so any emitted line (a contiguous substring of
+     * s) fits our 128-byte scratch buffer. */
+    if (max_px <= 0 || n == 0 || n > RD_CLIP_TITLE_MAX ||
+        (out == NULL && out_cap > 0)) {
         return 0;
     }
 
@@ -84,8 +86,8 @@ size_t rd_wrap_lines(const char *s, size_t n, int max_px,
 
     while (i < n) {
         /* A line never starts with spaces: skip the leading run (also trims
-         * trailing spaces once nothing follows them, and collapses a run of
-         * separators to an invisible boundary). */
+         * trailing spaces once nothing follows them, and treats an interior
+         * separator run as one logical gap whose bytes stay in the line). */
         while (i < n && s[i] == ' ') {
             i++;
         }
@@ -107,9 +109,10 @@ size_t rd_wrap_lines(const char *s, size_t n, int max_px,
         if (len > 0) {
             const size_t span = (tok + toklen) - off;
             if (span > RD_CLIP_TITLE_MAX) {
-                /* Unreachable (n <= RD_CLIP_TITLE_MAX); defensive only. */
-                len = span;
-                continue;
+                /* Unreachable (n <= RD_CLIP_TITLE_MAX here); never open a
+                 * line wider than the 128-byte scratch buffer -- fail closed
+                 * like every other out-of-contract input. */
+                return 0;
             }
             memcpy(tmp, s + off, span);
             tmp[span] = '\0';

@@ -458,6 +458,48 @@ static int test_word_wrap(void)
         CHECK(strncmp(s + ln[0].off, "lead trail", ln[0].len) == 0);
     }
 
+    /* 9. Degenerate sub-glyph budget (w_fixed model): with a per-glyph
+     *    advance of 3 px and a 1 px budget EVERY glyph is wider than max_px,
+     *    so each is emitted alone, over-budget by construction -- the sole
+     *    documented exception to "each line fits max_px".  Assert every glyph
+     *    stays whole (no bytes dropped) and the UTF-8 'é' is never split by
+     *    the lone-glyph walk. */
+    {
+        const char *t8 = "ab\xC3\xA9";        /* a b é == 4 bytes */
+        int adv3 = 3;
+        nl = rd_wrap_lines(t8, 4, 1, w_fixed, &adv3, ln, 8);
+        CHECK(nl == 3);                        /* 'a' | 'b' | 'é' lone glyphs */
+        CHECK(ln[0].off == 0 && ln[0].len == 1);
+        CHECK(ln[1].off == 1 && ln[1].len == 1);
+        CHECK(ln[2].off == 2 && ln[2].len == 2);   /* é whole, never split */
+        CHECK(ln[0].off + ln[0].len == ln[1].off); /* contiguous tiling */
+        CHECK(ln[1].off + ln[1].len == ln[2].off);
+        CHECK(ln[2].off + ln[2].len == 4);         /* no bytes dropped */
+        CHECK((int)(ln[2].len * adv3) > 1);        /* the over-budget exception */
+    }
+
+    /* 10. full capacity: a hard-broken title yielding more than
+     *     RD_WRAP_MAX_LINES lines; the true count comes back while only the
+     *     first out_cap entries are filled (mirrors the renderer's clamp). */
+    {
+        char long_t[RD_CLIP_TITLE_MAX + 1];
+        memset(long_t, 'x', sizeof long_t - 1);
+        long_t[sizeof long_t - 1] = '\0';
+        int adv1 = 1;
+        nl = rd_wrap_lines(long_t, RD_CLIP_TITLE_MAX, 1, w_fixed, &adv1,
+                           ln, RD_WRAP_MAX_LINES);
+        CHECK(nl == RD_CLIP_TITLE_MAX);        /* one 'x' per line */
+        CHECK(nl > RD_WRAP_MAX_LINES);
+        for (size_t k = 0; k < RD_WRAP_MAX_LINES; k++) {
+            CHECK(ln[k].off == k && ln[k].len == 1);
+        }
+    }
+
+    /* 11. out_cap == 0 with out == NULL: nothing is written yet the TRUE
+     *     count is still returned -- the boundary (plus the NULL-contract
+     *     guard) that proves rd_wrap_emit never writes past its capacity. */
+    CHECK(rd_wrap_lines("abc", 3, 5, w_bytes, NULL, NULL, 0) == 1);
+
     printf("test_word_wrap: %d checks passed\n", passed);
     return 0;
 }
