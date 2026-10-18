@@ -696,12 +696,31 @@ class TestCalendarEncoder:
         req = enc.encode_calendar_request("family", 1700000000000, 30)
         assert enc.decode_calendar_request(req) == {
             "calendar_id": "family", "since_ms": 1700000000000, "max_events": 30,
+            "participant": "",
         }
 
     def test_calendar_request_defaults(self):
         assert enc.decode_calendar_request(enc.encode_calendar_request()) == {
             "calendar_id": "family", "since_ms": 0, "max_events": 0,
+            "participant": "",
         }
+
+    def test_calendar_request_participant_round_trip(self):
+        blob = enc.encode_calendar_request("family", 1700000000000, 30,
+                                           participant="juliet")
+        assert enc.decode_calendar_request(blob) == {
+            "calendar_id": "family", "since_ms": 1700000000000, "max_events": 30,
+            "participant": "juliet",
+        }
+
+    def test_calendar_request_empty_participant_is_omitted(self):
+        # Empty participant must not add bytes: family frames stay byte-identical
+        # to the pre-field-4 wire format.
+        assert enc.encode_calendar_request("family", 5, 10, participant="") == \
+            enc.encode_calendar_request("family", 5, 10)
+        assert enc.encode_calendar_request("family", 5, 10, participant=None) == \
+            enc.encode_calendar_request("family", 5, 10)
+
 
     def test_cal_event_round_trip(self):
         blob = enc.encode_cal_event("u1", title="Swim", notes="towel",
@@ -738,11 +757,18 @@ class TestCalendarEncoder:
     def test_calendar_request_byte_identical_to_protobuf(self):
         from lma_core import CalendarRequest
 
+        # Empty participant (default) stays byte-identical to the generated stub.
         pb = CalendarRequest()
         pb.calendar_id = "family"
         pb.since_ms = 1700000000000
         pb.max_events = 30
         assert enc.encode_calendar_request("family", 1700000000000, 30) == pb.SerializeToString()
+
+        # Non-empty participant round-trips byte-identical to the generated stub.
+        pb.participant = "juliet"
+        assert enc.encode_calendar_request(
+            "family", 1700000000000, 30, participant="juliet"
+        ) == pb.SerializeToString()
 
     @pytest.mark.skipif(not HAS_PROTOBUF, reason="protobuf not installed")
     def test_calendar_bundle_byte_identical_to_protobuf(self):

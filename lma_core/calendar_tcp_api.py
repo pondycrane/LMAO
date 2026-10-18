@@ -50,13 +50,14 @@ async def _read_frame(reader: asyncio.StreamReader) -> bytes:
 
 
 def _sync_to_bundle(
-    store: Any, calendar_id: str, since_ms: int, max_events: int
+    store: Any, calendar_id: str, since_ms: int, max_events: int, participant: str = ""
 ) -> bytes:
     """Run a delta sync and serialize a CalendarBundle reply frame payload."""
     events, watermark = store.sync(
         calendar_id=calendar_id or "family",
         since_ms=since_ms,
         max_events=max_events,
+        participant=participant or "",
     )
     bundle = CalendarBundle()
     bundle.format = 1
@@ -88,6 +89,7 @@ async def _handle_conn(reader: asyncio.StreamReader, writer: asyncio.StreamWrite
             calendar_id=req.calendar_id or "family",
             since_ms=req.since_ms,
             max_events=req.max_events,
+            participant=req.participant or "",
         )
         writer.write(_frame(payload))
         await writer.drain()
