@@ -45,8 +45,12 @@ RUN pip install --no-cache-dir \
 # Copy project files
 COPY . .
 
-# Generate protobuf/gRPC stubs
-RUN python -m grpc_tools.protoc -I proto --python_out=proto --grpc_python_out=proto proto/lma_messages.proto proto/lma_grpc.proto
+# Generate protobuf/gRPC stubs.  Repo-root include root (-I .) because
+# lma_grpc.proto imports "proto/lma_messages.proto" (bare-import resolution
+# broke when the proto files were split; see commit 74c0f4a).  The generated
+# lma_grpc_pb2/grpc files already import `from proto import ...` under this
+# root, so the sed rewrites below are now no-ops kept as belt-and-suspenders.
+RUN python -m grpc_tools.protoc -I . --python_out=. --grpc_python_out=. proto/lma_messages.proto proto/lma_grpc.proto
 
 # Fix generated import path for package usage
 RUN sed -i 's/^import lma_grpc_pb2/from proto import lma_grpc_pb2/' proto/lma_grpc_pb2_grpc.py \

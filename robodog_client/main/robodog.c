@@ -63,6 +63,8 @@ static char s_wifi_ssid[33];
 static char s_wifi_pass[65];
 static char s_server_host[65];
 static uint64_t s_watermark = 0;
+static char s_kid_name[32];   /* per-board kid assignment; "" = family mode */
+static char s_wm_kid[32];     /* kid the persisted cache/watermark were synced under */
 
 static lma_cal_event_t s_cache[LMA_PB_EVENT_MAX];
 static size_t s_cache_count = 0;
@@ -80,6 +82,8 @@ static void clock_set(uint64_t utc_ms);
 #define NVS_NS "robodog"
 #define NVS_KEY_WM "wm"
 #define NVS_KEY_EC "ec"
+#define NVS_KEY_KID "kid_name"   /* per-board kid assignment (string) */
+#define NVS_KEY_WM_KID "wm_kid"  /* kid owning the persisted wm/ec/e* cache */
 
 /* NVS persists only the non-image prefix of each event: the 24 KB NVS
  * partition can't hold per-event 2592 B pictures, and the panel re-fetches
@@ -99,25 +103,28 @@ static const char *cache_key(size_t i)
 static void config_load(void)
 {
     nvs_handle_t h;
-    const char *defs[3];
-    char *dsts[3];
-    size_t caps[3];
-    const char *keys[3] = {"wifi_ssid", "wifi_pass", "server_host"};
+    const char *defs[4];
+    char *dsts[4];
+    size_t caps[4];
+    const char *keys[4] = {"wifi_ssid", "wifi_pass", "server_host", "kid_name"};
     defs[0] = RD_WIFI_SSID_DEFAULT;
     defs[1] = RD_WIFI_PASS_DEFAULT;
     defs[2] = RD_SERVER_HOST_DEFAULT;
+    defs[3] = RD_KID_NAME_DEFAULT;
     dsts[0] = s_wifi_ssid;
     dsts[1] = s_wifi_pass;
     dsts[2] = s_server_host;
+    dsts[3] = s_kid_name;
     caps[0] = sizeof(s_wifi_ssid);
     caps[1] = sizeof(s_wifi_pass);
     caps[2] = sizeof(s_server_host);
+    caps[3] = sizeof(s_kid_name);
 
-    for (int i = 0; i < 3; i++) {
+    for (int i = 0; i < 4; i++) {
         snprintf(dsts[i], caps[i], "%s", defs[i]);
     }
     if (nvs_open(NVS_NS, NVS_READONLY, &h) == ESP_OK) {
-        for (int i = 0; i < 3; i++) {
+        for (int i = 0; i < 4; i++) {
             size_t sz = caps[i];
             if (nvs_get_str(h, keys[i], dsts[i], &sz) != ESP_OK) {
                 snprintf(dsts[i], caps[i], "%s", defs[i]);
@@ -138,8 +145,12 @@ static void nvs_open_rw(nvs_handle_t *h)
 static void watermark_load(void)
 {
     nvs_handle_t h;
+    s_wm_kid[0] = '\0'; /* absent key -> "" (family) */
     if (nvs_open(NVS_NS, NVS_READONLY, &h) == ESP_OK) {
         nvs_get_u64(h, NVS_KEY_WM, &s_watermark); /* NOT_FOUND -> 0 is fine */
+        size_t sz = sizeof(s_wm_kid);
+        /* absent -> stays "" (family) */
+        nvs_get_str(h, NVS_KEY_WM_KID, s_wm_kid, &sz);
         nvs_close(h);
     }
 }
@@ -150,6 +161,7 @@ static void watermark_save(void)
     nvs_open_rw(&h);
     if (h != 0) {
         nvs_set_u64(h, NVS_KEY_WM, s_watermark);
+        nvs_set_str(h, NVS_KEY_WM_KID, s_kid_name);
         nvs_commit(h);
         nvs_close(h);
     }
@@ -189,8 +201,27 @@ static void cache_persist(void)
     for (size_t i = s_cache_count; i < LMA_PB_EVENT_MAX; i++) {
         nvs_erase_key(h, cache_key(i)); /* may be NOT_FOUND -> ignored */
     }
+    nvs_set_str(h, NVS_KEY_WM_KID, s_kid_name);
     nvs_commit(h);
     nvs_close(h);
+}
+
+/* Clear the in-RAM event cache and its persisted NVS blobs.  Called on a
+ * kid-assignment change so a re-assigned board never renders the previous
+ * kid's cached rows in the pre-sync boot frame. */
+static void cache_clear(void)
+{
+    s_cache_count = 0;
+    nvs_handle_t h;
+    nvs_open_rw(&h);
+    if (h != 0) {
+        nvs_erase_key(h, NVS_KEY_EC);
+        for (size_t i = 0; i < LMA_PB_EVENT_MAX; i++) {
+            nvs_erase_key(h, cache_key(i)); /* may be NOT_FOUND -> ignored */
+        }
+        nvs_commit(h);
+        nvs_close(h);
+    }
 }
 
 /* -------------------------------------------------------------- cache merge */
@@ -515,6 +546,10 @@ static bool tcp_sync(void)
     lma_proto_req_init(&req);
     snprintf(req.calendar_id, sizeof(req.calendar_id), "%s", RD_CALENDAR_ID);
     req.since_ms = s_watermark;          /* 0 -> full fetch on first boot */
+    if (s_kid_name[0] != '\0') {
+        /* kid panel: server filters to this kid's events (empty = family) */
+        snprintf(req.participant, sizeof(req.participant), "%s", s_kid_name);
+    }
     const bool is_full = (req.since_ms == 0);
     int plen = lma_proto_req_encode(&req, s_frame, sizeof(s_frame));
     if (plen < 0) {
@@ -745,14 +780,18 @@ static void draw_wrapped_final(u8g2_t *u8g2, int x, int base,
     u8g2_DrawStr(u8g2, x, base, tmp);
 }
 
-/* Row cap: at most 3 event rows are drawn — the headline (pic + right-side
- * info) plus 2 compact text rows; a 4th+ visible event is dropped by design. */
-#define RD_MAX_EVENT_ROWS 3
+/* Row cap: at most 5 event rows are drawn — the headline (pic + right-side
+ * info) plus 4 compact text rows (capture-tuned: yy 214, row_stride 20,
+ * backstop yy>H-16=284 -> headline + 4 compact; the 5th compact would land
+ * at 294 and is dropped by the backstop).  A 6th+ visible event is dropped
+ * by design. */
+#define RD_MAX_EVENT_ROWS 5
 
 /* Headline wrapped-title vertical band (render_screen): the bottom-anchored
- * helvB18 block sits between the header hline (y=40) and the meta glyph top
- * (148 - 10x20 ascent 13 = 135).  TITLE_TOP_MARGIN is the clearance below
- * the hline before the first line's glyph top; TITLE_META_GAP is the gap
+ * helvB18 block sits between the header band (y=40; the old divider hline
+ * at y=40 was removed — the band is now the glyph-top anchor only) and the
+ * meta glyph top (148 - 10x20 ascent 13 = 135).  TITLE_TOP_MARGIN is the
+ * clearance below the y=40 band before the first line's glyph top; TITLE_META_GAP is the gap
  * between the last line's glyph bottom and the meta glyph top.  Both are
  * panel-tuned against capture.py.  Real helvB18 metrics (measured via
  * u8g2_GetAscent/GetDescent, never assumed): ascent 19, descent -5, so the
@@ -841,15 +880,22 @@ static void render_screen(rd_state_t state)
     u8g2_DrawBox(u8g2, 0, 0, W, H);
     u8g2_SetDrawColor(u8g2, 0);
 
-    /* header: only the live date/time (title line removed) */
+    /* header one-liner (no divider — the old hline at y=40 is removed to
+     * reclaim vertical space for the compact rows at the bottom): family ->
+     * centered live datetime; kid panel -> kid name LEFT + live datetime
+     * RIGHT on the same baseline. */
     char line[32];
     uint64_t now = clock_now_ms();
     if (now != 0) {
         u8g2_SetFont(u8g2, u8g2_font_10x20_tf);
         rd_utc_ms_to_datetime(now, RD_TZ_OFFSET_MINUTES, line, sizeof(line));
-        draw_centered(u8g2, 24, line);
+        if (s_kid_name[0] != '\0') {
+            u8g2_DrawStr(u8g2, 6, 24, s_kid_name);
+            draw_right(u8g2, W - 6, 24, line);
+        } else {
+            draw_centered(u8g2, 24, line);
+        }
     }
-    u8g2_DrawHLine(u8g2, 4, 40, W - 8);
 
     if (s_cache_count == 0) {
         const char *msg = (state == RD_STATE_OFFLINE) ? "no wifi  :  offline"
@@ -974,9 +1020,10 @@ static void render_screen(rd_state_t state)
                                         RD_WRAP_MAX_LINES);
         /* Vertical fit is bottom-anchored and COMPUTED (never assumed): the
          * last line's baseline keeps its glyph bottom clear of the meta
-         * glyph top, and the first line stays below the header hline (40).
-         * gap/margin are panel-tuned constants; final value validated by
-         * capture.py. */
+         * glyph top, and the first line stays at/below the y=40 band anchor
+         * (the divider hline was removed; 40 is now just the line-top
+         * anchor).  gap/margin are panel-tuned constants; final value
+         * validated by capture.py. */
         const int meta_base = img_y + img_sz / 2 + 22;      /* 148 */
         const int bottom_last =
             meta_base - meta_asc - TITLE_META_GAP - (-t_desc);
@@ -1042,10 +1089,13 @@ static void render_screen(rd_state_t state)
     }
 
     /* Following events: text-only compact rows — the 2nd..RD_MAX_EVENT_ROWS-1
-     * visible only; anything beyond the third is dropped by design (time
-     * right-aligned, title left-clipped). */
-    int yy = img_y + img_sz + 32;
-    const int row_stride = 24;
+     * visible only; anything beyond the fifth is dropped by design (time
+     * right-aligned, title left-clipped).  Row 2 starts at img_y+img_sz+16
+     * (214, below the headline meta baseline 148) with stride 20 so rows
+     * 214/234/254/274 fit under the yy>H-16=284 backstop: headline + 4
+     * compact = 5 event rows (capture-tuned constants). */
+    int yy = img_y + img_sz + 16;
+    const int row_stride = 20;
     size_t rendered = 1; /* the headline is always drawn */
     for (size_t v = 1; v < nvis && v < RD_MAX_EVENT_ROWS; v++) {
         const lma_cal_event_t *ev = vis[v];
@@ -1060,9 +1110,9 @@ static void render_screen(rd_state_t state)
         draw_clipped_title(u8g2, 20, yy, ev->title, avail);
         yy += row_stride;
         rendered++;
-        /* Defensive backstop for future layout-constant edits (row 3 lands
-         * at y=254 < H-16=284 today, so the RD_MAX_EVENT_ROWS cap is the
-         * effective rule; keep guarding the panel's bottom edge anyway). */
+        /* Defensive backstop for future layout-constant edits (row 5 lands
+         * at y=274 < H-16=284 today; the 6th would be at 294 and is dropped
+         * here, so the backstop is the effective rule for the bottom edge). */
         if (yy > H - 16) {
             break;
         }
@@ -1116,6 +1166,26 @@ void robodog_app_main(void)
     config_load();
     watermark_load();
     cache_load();
+
+    /* Delta-safety: the persisted cache/watermark are owned by the kid the
+     * board was last synced under (wm_kid).  On a kid-assignment change
+     * (different kid, or set<->empty) the previous kid's cached rows must
+     * NEVER render in the pre-sync boot frame, so clear the in-RAM + NVS
+     * cache and record ownership of the cleared state immediately. */
+    if (strcmp(s_kid_name, s_wm_kid) != 0) {
+        ESP_LOGW(TAG, "kid assignment change: '%s' -> '%s': cleared cache, full refetch",
+                 s_wm_kid, s_kid_name);
+        s_watermark = 0;
+        cache_clear();
+        nvs_handle_t h;
+        nvs_open_rw(&h);
+        if (h != 0) {
+            nvs_set_str(h, NVS_KEY_WM_KID, s_kid_name);
+            nvs_commit(h);
+            nvs_close(h);
+        }
+    }
+
     /* Full fetch on every boot: NVS stores no pic data, so each boot must
      * re-serve the headline image into RAM (the calendar is small; this is a
      * single small HTTPS-style reply every cycle, not per-event growth). */

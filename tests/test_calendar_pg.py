@@ -183,6 +183,38 @@ class TestSync:
         assert len(select_params) == 1
         assert select_params[0] == ("others", 7, cal.DEFAULT_MAX_EVENTS + 1)
 
+    def test_participant_filter_applied(self, mock_pg):
+        cal, captures, make_cursor = mock_pg
+        store = _make_store(cal)
+        cursor = make_cursor()
+        store._conn.cursor = staticmethod(lambda: cursor)
+        cursor.fetchall_rows = []
+
+        # kid filter -> SQL gains `participants @> %s::jsonb` and the JSON-encoded
+        # string param slots in between since_ms and the LIMIT (params order
+        # calendar_id, since_ms, participant, max_events+1).
+        store.sync(calendar_id="family", since_ms=0, max_events=10, participant="juliet")
+        select_sql = [s for s, _ in captures["executes"] if "FROM cal_events" in s][0]
+        assert "participants @> %s::jsonb" in select_sql
+        assert "ORDER BY updated_ms" in select_sql
+        select_params = [p for s, p in captures["executes"] if "FROM cal_events" in s]
+        assert [list(p) for p in select_params] == [["family", 0, '"juliet"', 11]]
+
+    def test_empty_participant_leaves_query_unchanged(self, mock_pg):
+        cal, captures, make_cursor = mock_pg
+        store = _make_store(cal)
+        cursor = make_cursor()
+        store._conn.cursor = staticmethod(lambda: cursor)
+        cursor.fetchall_rows = []
+
+        # No participant -> same exact param list as the pre-field-4 family query
+        # (guards family mode: empty participant never adds the %s::jsonb clause).
+        store.sync(calendar_id="family", since_ms=500, max_events=10)
+        select_sql = [s for s, _ in captures["executes"] if "FROM cal_events" in s][0]
+        assert "participants @> %s::jsonb" not in select_sql
+        select_params = [p for s, p in captures["executes"] if "FROM cal_events" in s]
+        assert [list(p) for p in select_params] == [["family", 500, 11]]
+
 
 # ---------------------------------------------------------------------------
 # upsert / tombstone

@@ -642,8 +642,13 @@ def encode_chart_envelope(node_id, dry, wet, start_ms, period_ms, soil, temp, hu
 # LMAOEnvelope.payload = "calendar" (field 24).
 
 
-def encode_calendar_request(calendar_id="family", since_ms=0, max_events=0):
-    """Encode a CalendarRequest (Request.kind.calendar body)."""
+def encode_calendar_request(calendar_id="family", since_ms=0, max_events=0,
+                            participant=""):
+    """Encode a CalendarRequest (Request.kind.calendar body).
+
+    participant is optional (kid name); empty == family mode (no filter).  It is
+    encoded on the wire only when non-empty so family frames stay byte-same.
+    """
     result = bytearray()
     if calendar_id:
         result.extend(encode_field(1, 2, encode_length_delimited(calendar_id.encode("utf-8"))))
@@ -651,6 +656,8 @@ def encode_calendar_request(calendar_id="family", since_ms=0, max_events=0):
         result.extend(encode_field(2, 0, encode_varint(since_ms)))
     if max_events:
         result.extend(encode_field(3, 0, encode_varint(max_events)))
+    if participant:
+        result.extend(encode_field(4, 2, encode_length_delimited(participant.encode("utf-8"))))
     return bytes(result)
 
 
@@ -662,6 +669,7 @@ def decode_calendar_request(data):
             1: (2, "calendar_id", lambda b: b.decode("utf-8", "replace"), ""),
             2: (0, "since_ms", int, 0),
             3: (0, "max_events", int, 0),
+            4: (2, "participant", lambda b: b.decode("utf-8", "replace"), ""),
         },
     )
 

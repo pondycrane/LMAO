@@ -75,12 +75,13 @@ static int test_req_roundtrip(void)
     int passed = 0;
     uint8_t buf[64];
 
-    /* Non-default request: calendar_id + since_ms + max_events. */
+    /* Non-default request: calendar_id + since_ms + max_events + participant. */
     lma_cal_request_t req;
     lma_proto_req_init(&req);
     snprintf(req.calendar_id, sizeof(req.calendar_id), "family");
     req.since_ms = 1234567890123ULL;
     req.max_events = 5;
+    snprintf(req.participant, sizeof(req.participant), "juliet");
 
     int n = lma_proto_req_encode(&req, buf, sizeof(buf));
     CHECK(n > 0);
@@ -90,6 +91,7 @@ static int test_req_roundtrip(void)
     CHECK(strcmp(out.calendar_id, "family") == 0);
     CHECK(out.since_ms == 1234567890123ULL);
     CHECK(out.max_events == 5);
+    CHECK(strcmp(out.participant, "juliet") == 0);
 
     /* All-default request -> empty payload (documented "defaults" frame). */
     lma_cal_request_t def;
@@ -97,6 +99,25 @@ static int test_req_roundtrip(void)
     CHECK(lma_proto_req_encode(&def, buf, sizeof(buf)) == 0);
     CHECK(lma_proto_req_decode(buf, 0, &out) == 1);
     CHECK(out.calendar_id[0] == '\0' && out.since_ms == 0 && out.max_events == 0);
+    CHECK(out.participant[0] == '\0');
+
+    /* An empty participant adds 0 bytes vs the same request without it. */
+    {
+        lma_cal_request_t no_kid = req;
+        no_kid.participant[0] = '\0';
+        CHECK((size_t)lma_proto_req_encode(&req, buf, sizeof(buf)) ==
+              (size_t)lma_proto_req_encode(&no_kid, buf, sizeof(buf)) + 8);
+        /* 8 bytes = tag(2)+len(1)+"juliet"(6): tag varint 0x22, len 0x06. */
+    }
+
+    /* Manual field-4 wire encoding decodes into participant. */
+    {
+        wbuf w = {{0}, 0};
+        wfield_ld(&w, 4u, "juliet");
+        CHECK(lma_proto_req_decode(w.b, w.n, &out) == 1);
+        CHECK(strcmp(out.participant, "juliet") == 0);
+        CHECK(out.calendar_id[0] == '\0' && out.since_ms == 0 && out.max_events == 0);
+    }
 
     /* Max uint64 since_ms round-trips (10-byte varint). */
     lma_cal_request_t big;

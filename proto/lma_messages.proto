@@ -156,6 +156,7 @@ message CalendarRequest {
   string calendar_id = 1;   // logical calendar, default "family"
   uint64 since_ms    = 2;   // events with updated_ms > since_ms; 0 = full fetch
   uint32 max_events  = 3;   // page-size cap; 0 = server default (see calendar_pg)
+  string participant = 4;   // kid name; empty == no filter (family)
 }
 
 message CalEvent {

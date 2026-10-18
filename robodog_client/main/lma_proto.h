@@ -5,7 +5,8 @@
  * pinned in proto/lma_messages.proto:
  *
  *   CalendarRequest { string calendar_id = 1;  uint64 since_ms    = 2;
- *                     uint32 max_events = 3; }
+ *                     uint32 max_events = 3;  string participant = 4; }
+ *                     (participant empty == no filter / family mode)
  *   CalEvent        { string uid = 1;  string title = 2;  string notes = 3;
  *                     uint64 start_ms = 4;  uint64 end_ms = 5;
  *                     bool deleted = 6;  string pic = 7; }
@@ -30,9 +31,10 @@ extern "C" {
 #endif
 
 /* Field-number tags -- keep in sync with proto/lma_messages.proto. */
-#define LMA_PB_CALREQ_ID    1u /* CalendarRequest.calendar_id  string          */
-#define LMA_PB_CALREQ_SINCE 2u /* CalendarRequest.since_ms    varint uint64   */
-#define LMA_PB_CALREQ_MAX   3u /* CalendarRequest.max_events  varint uint32   */
+#define LMA_PB_CALREQ_ID          1u /* CalendarRequest.calendar_id  string        */
+#define LMA_PB_CALREQ_SINCE       2u /* CalendarRequest.since_ms    varint uint64 */
+#define LMA_PB_CALREQ_MAX         3u /* CalendarRequest.max_events  varint uint32 */
+#define LMA_PB_CALREQ_PARTICIPANT 4u /* CalendarRequest.participant string; ""=family */
 
 #define LMA_PB_BUNDLE_FORMAT 1u /* CalendarBundle.format      varint uint32   */
 #define LMA_PB_BUNDLE_CALID  2u /* CalendarBundle.calendar_id string          */
@@ -57,6 +59,7 @@ extern "C" {
 
 /* Fixed-buffer sizes (character byte caps, NUL not counted in these macros). */
 #define LMA_PB_CAL_ID_MAX    31u
+#define LMA_PB_PARTICIPANT_MAX 31u  /* kid name; empty == family (no filter) */
 #define LMA_PB_EVENT_UID_MAX  63u
 #define LMA_PB_EVENT_TITLE_MAX 127u
 #define LMA_PB_EVENT_NOTES_MAX 255u
@@ -78,6 +81,9 @@ typedef struct {
     char calendar_id[LMA_PB_CAL_ID_MAX + 1];
     uint64_t since_ms;    /* 0 = full fetch from server */
     uint32_t max_events;  /* 0 = server default page cap */
+    /* kid participant -- empty string == no filter (family mode).  Encoded on
+     * the wire only when non-empty, so family/default frames stay byte-same. */
+    char participant[LMA_PB_PARTICIPANT_MAX + 1];
 } lma_cal_request_t;
 
 typedef struct {

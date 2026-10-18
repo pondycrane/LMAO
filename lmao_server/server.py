@@ -933,11 +933,17 @@ if GRPC_AVAILABLE:
                     calendar_id=request.calendar_id or "family",
                     since_ms=request.since_ms,
                     max_events=request.max_events,
+                    participant=request.participant or "",
                 )
             except Exception as e:
                 logger.error("GetCalendar sync failed: %s", e, exc_info=True)
                 await context.abort(grpc.StatusCode.INTERNAL,
                                     f"Calendar sync failed: {e}")
+            logger.info(
+                "GetCalendar participant='%s' events=%d",
+                request.participant or "",
+                len(events),
+            )
             if request.since_ms == 0:
                 # Full fetch = snapshot of live events; tombstones only matter
                 # to delta clients that already hold the events.
