@@ -33,13 +33,27 @@ KID_FLAG=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --port)
-            PORT="${2:-$PORT}"
-            shift 2 || true
+            # A missing/option-shaped value is an ERROR, not a silent default:
+            # `--port` with no value used to fall back to ${2:-$PORT} and then
+            # `shift 2 || true` never advanced on a trailing flag, spinning
+            # forever with no error (code-review repro).
+            if [ $# -lt 2 ] || [[ "$2" == -* ]]; then
+                echo "error: --port requires a value (default: /dev/ttyACM0)" >&2
+                exit 2
+            fi
+            PORT="$2"
+            shift 2
             ;;
         --kid-name)
-            KID="${2:-}"
-            KID_FLAG=1
-            shift 2 || true
+            # A missing/option-shaped value is an ERROR, not an implicit wipe:
+            # only an explicit `--kid-name ""` clears the board back to family.
+            # Previously `--kid-name` (trailing typo) aliased onto the explicit
+            # empty string and hit the DESTRUCTIVE empty-NVS wipe branch.
+            if [ $# -lt 2 ] || [[ "$2" == -* ]]; then
+                echo 'error: --kid-name requires a value (use --kid-name "" to clear to family)' >&2
+                exit 2
+            fi
+            KID="$2"; KID_FLAG=1; shift 2
             ;;
         *)
             echo "unknown argument: $1 (expected --port <port>, --kid-name <kid>)" >&2
