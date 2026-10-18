@@ -146,6 +146,7 @@ class CalendarStore:
         calendar_id: str,
         since_ms: int = 0,
         max_events: int = 0,
+        participant: str = "",
     ) -> tuple[list[dict[str, Any]], int]:
         """Return events with ``updated_ms > since_ms`` plus a sync watermark.
 
@@ -155,11 +156,23 @@ class CalendarStore:
         the next sync (worst case a duplicate, which clients upsert by uid).
         Ordering is by ``updated_ms`` for deterministic deltas.
 
+        ``participant`` (a kid name) filters the delta to events whose JSONB
+        ``participants`` array contains that kid (``participants @> '"kid"'
+        ::jsonb``).  Empty string = no filter (family mode) and the SQL/
+        params stay byte-identical to the unfiltered query.  The watermark
+        remains the global DB clock and stays safe under the filter.
+
         Truncation (``max_events`` exceeded) is logged; callers/NATS should
         treat it as "ask again".
         """
         if max_events <= 0:
             max_events = DEFAULT_MAX_EVENTS
+        where = "WHERE calendar_id = %s AND updated_ms > %s"
+        params: list[Any] = [calendar_id, int(since_ms)]
+        if participant:
+            where += " AND participants @> %s::jsonb"
+            params.append(json.dumps(participant))
+        params.append(max_events + 1)
         with self._lock:
             with self._conn.cursor() as cur:
                 cur.execute(
@@ -167,14 +180,14 @@ class CalendarStore:
                 )
                 watermark = int(cur.fetchone()[0])
                 cur.execute(
-                    """
+                    f"""
                     SELECT uid, calendar_id, title, notes, start_ms, end_ms, deleted, pic, participants
                     FROM cal_events
-                    WHERE calendar_id = %s AND updated_ms > %s
+                    {where}
                     ORDER BY updated_ms
                     LIMIT %s
                     """,
-                    (calendar_id, int(since_ms), max_events + 1),
+                    tuple(params),
                 )
                 rows = cur.fetchall()
         if len(rows) > max_events:

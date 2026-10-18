@@ -183,6 +183,54 @@ class TestLMAOGrpcService:
         assert response.node_name == "lmao-server"
 
     @pytest.mark.asyncio
+    async def test_get_calendar_threads_participant(self, grpc_service_with_mocks):
+        """GetCalendar must thread request.participant into store.sync — the
+        single enforcement point that makes per-kid panels work (a dropped
+        participant= would silently regress every kid board to family)."""
+        grpc_svc, _ = grpc_service_with_mocks
+
+        import lmao_server.server as server_mod
+
+        fake = MagicMock()
+        fake.sync.return_value = ([], 1000)
+        server_mod.CALENDAR = fake
+
+        req = MagicMock()
+        req.calendar_id = "family"
+        req.since_ms = 0
+        req.max_events = 10
+        req.participant = "juliet"
+
+        await grpc_svc.GetCalendar(req, AsyncMock())
+
+        fake.sync.assert_called_once_with(
+            calendar_id="family", since_ms=0, max_events=10, participant="juliet"
+        )
+
+    @pytest.mark.asyncio
+    async def test_get_calendar_defaults_participant_to_empty(self, grpc_service_with_mocks):
+        """A request without participant must sync with participant='' (family)."""
+        grpc_svc, _ = grpc_service_with_mocks
+
+        import lmao_server.server as server_mod
+
+        fake = MagicMock()
+        fake.sync.return_value = ([], 1000)
+        server_mod.CALENDAR = fake
+
+        req = MagicMock()
+        req.calendar_id = ""
+        req.since_ms = 0
+        req.max_events = 0
+        req.participant = ""
+
+        await grpc_svc.GetCalendar(req, AsyncMock())
+
+        fake.sync.assert_called_once_with(
+            calendar_id="family", since_ms=0, max_events=0, participant=""
+        )
+
+    @pytest.mark.asyncio
     async def test_subscribe_receives_messages(self, grpc_service_with_mocks):
         """Subscribe should yield events from the message queue."""
         grpc_svc, server_inst = grpc_service_with_mocks

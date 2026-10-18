@@ -90,8 +90,9 @@ then install dependencies with pip:
 
 ```bash
 # Generate protobuf Python stubs (required by lma_core)
-protoc --python_out=. proto/lma_messages.proto proto/lma_grpc.proto
-# The generated files will be at proto/lma_messages_pb2.py and proto/lma_grpc_pb2.py
+protoc --python_out=. --grpc_python_out=. proto/lma_messages.proto proto/lma_grpc.proto
+# The generated files will be at proto/lma_messages_pb2.py, proto/lma_messages_pb2_grpc.py,
+# proto/lma_grpc_pb2.py and proto/lma_grpc_pb2_grpc.py
 
 # Install Python dependencies
 cd lmao_server && pip3 install -r requirements.txt
@@ -542,7 +543,8 @@ index and two triggers at startup (same pattern as the Postgres contact book):
   (tombstones are tiny and retained — no purge job needed).
 
 Clients read via the LMAO wire protocol: `LMAOEnvelope{ request.calendar }`
-(lookup `CalendarRequest{ calendar_id, since_ms, max_events }` →
+(lookup `CalendarRequest{ calendar_id, since_ms, max_events, participant }` —
+participant = kid name, empty == no filter (family) →
 `CalendarBundle{ events[], watermark_ms }`). A sync returns every event with
 `updated_ms > since_ms` (0 = full fetch) and a watermark to use as the next
 `since_ms` — delta-only, so replies stay small regardless of history length.
@@ -601,10 +603,13 @@ bash robodog_client/build.sh && bash flash.sh --port /dev/ttyACM0
 ```
 
 WiFi/server credentials and `RD_SYNC_INTERVAL_SECONDS` are NVS-backed
-(namespace `robodog`, keys `wifi_ssid`/`wifi_pass`/`server_host`); build-time
-defaults come from `main/local_secrets.h` + `config.h` (both gitignored,
-never commit). On a reachable 2.4 GHz LAN the device joins and gRPC-syncs the
-live family calendar — header date and rows verified on hardware.
+(namespace `robodog`, keys `wifi_ssid`/`wifi_pass`/`server_host`/`kid_name`);
+`kid_name` is set per board at flash time with `flash_firmware --kid-name <kid>`
+(non-empty = kid panel; empty/absent = family). Writing NVS WIPES the whole
+24 KB partition (event cache + any NVS keys). Build-time defaults come from
+`main/local_secrets.h` + `config.h` (both gitignored, never commit). On a
+reachable 2.4 GHz LAN the device joins and gRPC-syncs the live family calendar
+— header date and rows verified on hardware.
 
 Status:
 - The server gRPC `GetCalendar` (:50051) is live in-cluster (verified from the
@@ -650,8 +655,10 @@ Outputs in `robodog_client/shots/` (gitignored):
   fresh data.
 - Rows show live served events (or the exact cached set) — compare against
   Postgres/`GetCalendar` to confirm a data-path change. Note the panel caps at
-  3 event rows by design (headline picture + 2 compact text rows; 4th+
+  5 event rows by design (headline picture + 4 compact text rows; 6th+
   dropped), so a shorter set is not a data-path error unless a hint says so.
+  On a kid panel the header shows the kid name LEFT + `YYYY-MM-DD HH:MM`
+  RIGHT (no divider); family keeps the centered clock.
 - Row meta reads `HH:MM-HH:MM` (start–end range) right-aligned on every row;
   the headline title is a word-wrapped `helvB18` block (bottom-anchored, with
   an ellipsis on the final shown line when it overflows). Non-today events
@@ -1455,7 +1462,7 @@ algorithm evaluation.
 | Cardputer stops sending after ~1 h, still powered (serial shows `memory allocation failed`) | GC heap fragmentation from long-running urns traffic (#71) — free bytes remain but no contiguous 2 KiB block for inbound packets. The client gc.collects every cycle, probes the heap, and hard-resets itself when fragmented (also on `MemoryError` or 10 consecutive loop errors). If running older client code, re-flash. |
 | Cardputer REPL unreachable (write timeouts, Ctrl+C ignored) but app keeps running over LoRa | **Tier 1**: `sudo USBDEVFS_RESET /dev/bus/usb/...` — restores USB data path but **not** the MicroPython REPL. **Tier 2** (remote recovery, issue #78): Send LoRa REBOOT command — `bazel run //lmao_server:send_command -- --target <node_identity_hex> --action reboot`. The Cardputer validates the command and hard-resets itself. **Tier 3**: Physical RESET button on the device — last resort. See [issue #78](https://github.com/pondycrane/LMAO/issues/78) for details on the root cause (USB-CDC ring-buffer overflow) and the stdin drain mitigation. |
 | "Permission denied" on serial | `sudo usermod -a -G dialout $USER` |
-| Protobuf import error | Bazel: run `bazel build //proto:lma_messages_py_proto //proto:lma_grpc_py_proto`. Without Bazel: run `protoc --python_out=. proto/lma_messages.proto proto/lma_grpc.proto` from repo root, then set `PYTHONPATH="$PWD"` when running the server. |
+| Protobuf import error | Bazel: run `bazel build //proto:lma_messages_py_proto //proto:lma_grpc_py_proto`. Without Bazel: run `protoc --python_out=. --grpc_python_out=. proto/lma_messages.proto proto/lma_grpc.proto` from repo root, then set `PYTHONPATH="$PWD"` when running the server. |
 
 ---
 

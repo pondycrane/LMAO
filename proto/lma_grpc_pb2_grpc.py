@@ -3,8 +3,8 @@
 import grpc
 import warnings
 
-from proto import lma_grpc_pb2 as lma__grpc__pb2
-from proto import lma_messages_pb2 as lma__messages__pb2
+from proto import lma_grpc_pb2 as proto_dot_lma__grpc__pb2
+from proto import lma_messages_pb2 as proto_dot_lma__messages__pb2
 
 GRPC_GENERATED_VERSION = '1.81.1'
 GRPC_VERSION = grpc.__version__
@@ -19,7 +19,7 @@ except ImportError:
 if _version_not_supported:
     raise RuntimeError(
         f'The grpc package installed is at version {GRPC_VERSION},'
-        + ' but the generated code in lma_grpc_pb2_grpc.py depends on'
+        + ' but the generated code in proto/lma_grpc_pb2_grpc.py depends on'
         + f' grpcio>={GRPC_GENERATED_VERSION}.'
         + f' Please upgrade your grpc module to grpcio>={GRPC_GENERATED_VERSION}'
         + f' or downgrade your generated code using grpcio-tools<={GRPC_VERSION}.'
@@ -39,23 +39,23 @@ class LMAOStub:
         """
         self.Send = channel.unary_unary(
                 '/lma.LMAO/Send',
-                request_serializer=lma__grpc__pb2.SendRequest.SerializeToString,
-                response_deserializer=lma__grpc__pb2.SendResponse.FromString,
+                request_serializer=proto_dot_lma__grpc__pb2.SendRequest.SerializeToString,
+                response_deserializer=proto_dot_lma__grpc__pb2.SendResponse.FromString,
                 _registered_method=True)
         self.Subscribe = channel.unary_stream(
                 '/lma.LMAO/Subscribe',
-                request_serializer=lma__grpc__pb2.SubscribeRequest.SerializeToString,
-                response_deserializer=lma__grpc__pb2.SubscribeResponse.FromString,
+                request_serializer=proto_dot_lma__grpc__pb2.SubscribeRequest.SerializeToString,
+                response_deserializer=proto_dot_lma__grpc__pb2.SubscribeResponse.FromString,
                 _registered_method=True)
         self.GetIdentity = channel.unary_unary(
                 '/lma.LMAO/GetIdentity',
-                request_serializer=lma__grpc__pb2.GetIdentityRequest.SerializeToString,
-                response_deserializer=lma__grpc__pb2.GetIdentityResponse.FromString,
+                request_serializer=proto_dot_lma__grpc__pb2.GetIdentityRequest.SerializeToString,
+                response_deserializer=proto_dot_lma__grpc__pb2.GetIdentityResponse.FromString,
                 _registered_method=True)
         self.GetCalendar = channel.unary_unary(
                 '/lma.LMAO/GetCalendar',
-                request_serializer=lma__messages__pb2.CalendarRequest.SerializeToString,
-                response_deserializer=lma__messages__pb2.CalendarBundle.FromString,
+                request_serializer=proto_dot_lma__messages__pb2.CalendarRequest.SerializeToString,
+                response_deserializer=proto_dot_lma__messages__pb2.CalendarBundle.FromString,
                 _registered_method=True)
 
 
@@ -103,23 +103,23 @@ def add_LMAOServicer_to_server(servicer, server):
     rpc_method_handlers = {
             'Send': grpc.unary_unary_rpc_method_handler(
                     servicer.Send,
-                    request_deserializer=lma__grpc__pb2.SendRequest.FromString,
-                    response_serializer=lma__grpc__pb2.SendResponse.SerializeToString,
+                    request_deserializer=proto_dot_lma__grpc__pb2.SendRequest.FromString,
+                    response_serializer=proto_dot_lma__grpc__pb2.SendResponse.SerializeToString,
             ),
             'Subscribe': grpc.unary_stream_rpc_method_handler(
                     servicer.Subscribe,
-                    request_deserializer=lma__grpc__pb2.SubscribeRequest.FromString,
-                    response_serializer=lma__grpc__pb2.SubscribeResponse.SerializeToString,
+                    request_deserializer=proto_dot_lma__grpc__pb2.SubscribeRequest.FromString,
+                    response_serializer=proto_dot_lma__grpc__pb2.SubscribeResponse.SerializeToString,
             ),
             'GetIdentity': grpc.unary_unary_rpc_method_handler(
                     servicer.GetIdentity,
-                    request_deserializer=lma__grpc__pb2.GetIdentityRequest.FromString,
-                    response_serializer=lma__grpc__pb2.GetIdentityResponse.SerializeToString,
+                    request_deserializer=proto_dot_lma__grpc__pb2.GetIdentityRequest.FromString,
+                    response_serializer=proto_dot_lma__grpc__pb2.GetIdentityResponse.SerializeToString,
             ),
             'GetCalendar': grpc.unary_unary_rpc_method_handler(
                     servicer.GetCalendar,
-                    request_deserializer=lma__messages__pb2.CalendarRequest.FromString,
-                    response_serializer=lma__messages__pb2.CalendarBundle.SerializeToString,
+                    request_deserializer=proto_dot_lma__messages__pb2.CalendarRequest.FromString,
+                    response_serializer=proto_dot_lma__messages__pb2.CalendarBundle.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -149,8 +149,8 @@ class LMAO:
             request,
             target,
             '/lma.LMAO/Send',
-            lma__grpc__pb2.SendRequest.SerializeToString,
-            lma__grpc__pb2.SendResponse.FromString,
+            proto_dot_lma__grpc__pb2.SendRequest.SerializeToString,
+            proto_dot_lma__grpc__pb2.SendResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -176,8 +176,8 @@ class LMAO:
             request,
             target,
             '/lma.LMAO/Subscribe',
-            lma__grpc__pb2.SubscribeRequest.SerializeToString,
-            lma__grpc__pb2.SubscribeResponse.FromString,
+            proto_dot_lma__grpc__pb2.SubscribeRequest.SerializeToString,
+            proto_dot_lma__grpc__pb2.SubscribeResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -203,8 +203,8 @@ class LMAO:
             request,
             target,
             '/lma.LMAO/GetIdentity',
-            lma__grpc__pb2.GetIdentityRequest.SerializeToString,
-            lma__grpc__pb2.GetIdentityResponse.FromString,
+            proto_dot_lma__grpc__pb2.GetIdentityRequest.SerializeToString,
+            proto_dot_lma__grpc__pb2.GetIdentityResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -230,8 +230,8 @@ class LMAO:
             request,
             target,
             '/lma.LMAO/GetCalendar',
-            lma__messages__pb2.CalendarRequest.SerializeToString,
-            lma__messages__pb2.CalendarBundle.FromString,
+            proto_dot_lma__messages__pb2.CalendarRequest.SerializeToString,
+            proto_dot_lma__messages__pb2.CalendarBundle.FromString,
             options,
             channel_credentials,
             insecure,
