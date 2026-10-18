@@ -653,8 +653,10 @@ Outputs in `robodog_client/shots/` (gitignored):
   3 event rows by design (headline picture + 2 compact text rows; 4th+
   dropped), so a shorter set is not a data-path error unless a hint says so.
 - Row meta reads `HH:MM-HH:MM` (start–end range) right-aligned on every row;
-  the headline title uses the large `helvB24` face. Non-today events prefix
-  the meta with `tomorrow` / `MM/DD` / `YYYY/MM/DD` (keyed off the event's
+  the headline title is a word-wrapped `helvB18` block (bottom-anchored, with
+  an ellipsis on the final shown line when it overflows). Non-today events
+  prefix the meta with `tomorrow` / `MM/DD` / `YYYY/MM/DD` (keyed off the
+  event's
   start civil day; today events show the bare range), with the header clock as
   the "today" anchor — rows render range-only until the clock is synced.
 

@@ -137,8 +137,10 @@ Still environment-dependent / worth a look on real air:
 - **WiFi**: credentials are NVS/built-in (`wifi_ssid`/`wifi_pass`); the board
   is 2.4 GHz-only, so the AP must be 2.4 GHz and reachable from the node.
 - **Frame/width tuning**: title clipping and the icon boxes are tuned for the
-  current data — adjust with the screenshot loop below. (Row count is a fixed
-  cap: the headline picture + 2 compact text rows.)
+  current data — adjust with the screenshot loop below. The wrapped headline
+  band (top margin / meta gap) is tuned via `TITLE_TOP_MARGIN` /
+  `TITLE_META_GAP` in `render_screen`. (Row count is a fixed cap: the
+  headline picture + 2 compact text rows.)
 
 ## Screenshot-driven validation (feature + state)
 
@@ -170,9 +172,10 @@ python3 capture.py --port /dev/ttyACM0 --reset --n 4 --timeout 100 --describe
 - `stale` hint → connected but last sync failed (showing NVS cache).
 - Row set == Postgres/`GetCalendar` output → data path live; a stale/different
   set means the cache is being shown (compare timestamps against the header).
-- At most 3 event rows are drawn: the headline (big picture, LEFT; title in
-  the large `helvB24` face + right-aligned `HH:MM-HH:MM` range meta beside it)
-  plus 2 compact text rows, each title-clipped left with a measured,
+- At most 3 event rows are drawn: the headline (big picture, LEFT;
+  word-wrapped `helvB18` title block + right-aligned `HH:MM-HH:MM` range meta
+  beside it) plus 2 compact text rows, each title-clipped left with a
+  measured,
   right-aligned `HH:MM-HH:MM` range meta; a 4th+ visible event is dropped by
   design (`RD_MAX_EVENT_ROWS` in `render_screen`) — a shorter row set is not a
   data-path error unless the header hints (`stale`/`no wifi`) say otherwise.

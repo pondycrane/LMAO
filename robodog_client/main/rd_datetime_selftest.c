@@ -8,7 +8,7 @@
  *
  * Build & run (from robodog_client/):
  *   cc -std=c11 -Wall -Wextra main/rd_datetime_selftest.c main/rd_datetime.c \
- *      main/rd_clip.c main/lma_proto.c -o /tmp/rd_dt_selftest \
+ *      main/rd_clip.c -o /tmp/rd_dt_selftest \
  *      && /tmp/rd_dt_selftest
  */
 #include <stdio.h>
@@ -319,12 +319,198 @@ static int test_clip_prefix(void)
     return 0;
 }
 
+/* 4. Greedy first-fit word wrap: rd_wrap_lines must split a title into
+ *    contiguous-budget lines (each fitted line's measured width <= max_px),
+ *    hard-break an over-long token into glyph-aligned chunks, never split a
+ *    UTF-8 sequence, trim leading/trailing space runs, and fold runs of
+ *    spaces into a single logical gap. */
+static int test_word_wrap(void)
+{
+    int passed = 0;
+    rd_wrap_line_t ln[RD_WRAP_MAX_LINES];
+    size_t nl;
+
+    /* 1. short title -> a single whole line, off=0 len=n. */
+    nl = rd_wrap_lines("Peck", 4, 218, w_bytes, NULL, ln, 8);
+    CHECK(nl == 1);
+    CHECK(ln[0].off == 0);
+    CHECK(ln[0].len == 4);
+
+    /* 2. greedy multi-token wrap (byte-width model): exact line boundaries. */
+    /*    "one two three" at 7px -> "one two" (7) then "three" (5). */
+    nl = rd_wrap_lines("one two three", 13, 7, w_bytes, NULL, ln, 8);
+    CHECK(nl == 2);
+    CHECK(ln[0].off == 0 && ln[0].len == 7);
+    CHECK(ln[1].off == 8 && ln[1].len == 5);
+    CHECK(ln[0].len <= 7 && ln[1].len <= 7);
+
+    /*    a token exactly filling max_px lets the NEXT token start a line. */
+    nl = rd_wrap_lines("aa bbbb cc", 10, 5, w_bytes, NULL, ln, 8);
+    CHECK(nl == 3);                       /* "aa" | "bbbb" | "cc" */
+    CHECK(ln[0].len == 2 && ln[1].len == 4 && ln[2].len == 2);
+    CHECK(ln[0].len <= 5 && ln[1].len <= 5 && ln[2].len <= 5);
+
+    /* 3. a single word wider than max_px -> hard char-break; every chunk
+     *    fits max_px and the chunks tile the word byte-for-byte. */
+    nl = rd_wrap_lines("abcdefgh", 8, 3, w_bytes, NULL, ln, 8);
+    CHECK(nl == 3);                       /* abc | def | gh */
+    CHECK(ln[0].off == 0 && ln[0].len == 3);
+    CHECK(ln[1].off == 3 && ln[1].len == 3);
+    CHECK(ln[2].off == 6 && ln[2].len == 2);
+    CHECK(ln[0].len <= 3 && ln[1].len <= 3 && ln[2].len <= 3);
+    /* contiguous tiling: no gaps or overlap across the word */
+    CHECK(ln[0].off + ln[0].len == ln[1].off);
+    CHECK(ln[1].off + ln[1].len == ln[2].off);
+
+    /* 4. no-space title hard-break (same path as #3). */
+    nl = rd_wrap_lines("abcdef", 6, 2, w_bytes, NULL, ln, 8);
+    CHECK(nl == 3);                       /* ab | cd | ef */
+    CHECK(ln[0].len == 2 && ln[1].len == 2 && ln[2].len == 2);
+
+    /* 5. UTF-8 safety: "abéd" must never split the é (C3 A9).
+     *    At 2px: "ab" | "é" | "d" -- the é stays whole. */
+    {
+        const char *t8 = "ab\xC3\xA9" "d";      /* abéd == a b é d */
+        nl = rd_wrap_lines(t8, 5, 2, w_bytes, NULL, ln, 8);
+        CHECK(nl == 3);
+        CHECK(ln[0].off == 0 && ln[0].len == 2);
+        CHECK(ln[1].off == 2 && ln[1].len == 2);   /* all é bytes together */
+        CHECK(ln[2].off == 4 && ln[2].len == 1);
+    }
+
+    /* 6. fail closed: max_px <= 0, n == 0, n > RD_CLIP_TITLE_MAX -> 0 lines. */
+    CHECK(rd_wrap_lines("abc", 3, 0, w_bytes, NULL, ln, 8) == 0);
+    CHECK(rd_wrap_lines("abc", 3, -5, w_bytes, NULL, ln, 8) == 0);
+    CHECK(rd_wrap_lines("abc", 0, 100, w_bytes, NULL, ln, 8) == 0);
+    {
+        char long_t[RD_CLIP_TITLE_MAX + 2];
+        memset(long_t, 'x', sizeof long_t - 1);
+        long_t[sizeof long_t - 1] = '\0';
+        CHECK(rd_wrap_lines(long_t, RD_CLIP_TITLE_MAX + 1, 218,
+                            w_bytes, NULL, ln, 8) == 0);
+    }
+
+    /* 7. property sweep: for a mixed-ASCII/UTF-8 title and a sweep of
+     *    budgets (>= the widest 2-byte glyph, so even a hard-broken
+     *    single-glyph line fits literally), every returned line's measured
+     *    width <= budget and every line stays UTF-8-safe. */
+    {
+        const char *t = "hey \xC3\xA9t\xC3\xA9 d\xC3\xBC" "de tails";
+        const size_t n = strlen(t);
+        for (int budget = 2; budget <= (int)n * 4; budget++) {
+            nl = rd_wrap_lines(t, n, budget, w_bytes, NULL, ln, 8);
+            CHECK(nl >= 1);
+            /* wide budget collapses the title to a single whole line */
+            if (budget >= (int)n) {
+                CHECK(nl == 1);
+                CHECK(ln[0].off == 0 && ln[0].len == n);
+            }
+            for (size_t k = 0; k < nl && k < RD_WRAP_MAX_LINES; k++) {
+                CHECK(ln[k].len > 0);
+                CHECK(ln[k].off + ln[k].len <= n);
+                CHECK((int)ln[k].len <= budget);          /* width fits */
+                CHECK(((unsigned char)t[ln[k].off] & 0xC0) != 0x80);        /* start */
+                CHECK(((unsigned char)t[ln[k].off + ln[k].len] & 0xC0) != 0x80); /* end */
+            }
+        }
+    }
+
+    /* out_cap bound: function returns the TRUE line count even when it
+     * exceeds out_cap; only the first out_cap entries are written. */
+    {
+        rd_wrap_line_t capped[2];
+        capped[0].off = capped[0].len = 99;
+        capped[1].off = capped[1].len = 99;
+        nl = rd_wrap_lines("abcdefghij", 10, 2, w_bytes, NULL, capped, 2);
+        CHECK(nl == 5);                    /* ab cd ef gh ij */
+        CHECK(nl > 2);
+        CHECK(capped[0].off == 0 && capped[0].len == 2);
+        CHECK(capped[1].off == 2 && capped[1].len == 2);
+        /* out stays untouched beyond out_cap (no overflow). */
+    }
+
+    /* 8. interior runs of spaces fold into ONE logical gap: both words join
+     *    a single line carrying the original spacing, and when the budget is
+     *    tight the split lands at the space boundary with no dangling
+     *    leading/trailing spaces on either line. */
+    {
+        const char *s = "aa    bb";
+        /* big budget: one line spanning both tokens (original spacing kept) */
+        nl = rd_wrap_lines(s, 8, 10, w_bytes, NULL, ln, 8);
+        CHECK(nl == 1);
+        CHECK(ln[0].off == 0 && ln[0].len == 8);   /* "aa    bb" == 8 bytes */
+        /* tight budget: "aa" then "bb" -- line 1 never ends with spaces */
+        nl = rd_wrap_lines(s, 8, 5, w_bytes, NULL, ln, 8);
+        CHECK(nl == 2);
+        CHECK(ln[0].off == 0 && ln[0].len == 2);
+        CHECK(ln[1].off == 6 && ln[1].len == 2);
+        /* line 1's last byte is not a space (no dangling separator) */
+        CHECK(s[ln[0].off + ln[0].len - 1] != ' ');
+    }
+
+    /* leading/trailing space runs are trimmed off the lines. */
+    {
+        const char *s = "  lead trail  ";
+        nl = rd_wrap_lines(s, 14, 100, w_bytes, NULL, ln, 8);
+        CHECK(nl == 1);
+        CHECK(s[ln[0].off] != ' ');
+        CHECK(s[ln[0].off + ln[0].len - 1] != ' ');
+        CHECK(strncmp(s + ln[0].off, "lead trail", ln[0].len) == 0);
+    }
+
+    /* 9. Degenerate sub-glyph budget (w_fixed model): with a per-glyph
+     *    advance of 3 px and a 1 px budget EVERY glyph is wider than max_px,
+     *    so each is emitted alone, over-budget by construction -- the sole
+     *    documented exception to "each line fits max_px".  Assert every glyph
+     *    stays whole (no bytes dropped) and the UTF-8 'é' is never split by
+     *    the lone-glyph walk. */
+    {
+        const char *t8 = "ab\xC3\xA9";        /* a b é == 4 bytes */
+        int adv3 = 3;
+        nl = rd_wrap_lines(t8, 4, 1, w_fixed, &adv3, ln, 8);
+        CHECK(nl == 3);                        /* 'a' | 'b' | 'é' lone glyphs */
+        CHECK(ln[0].off == 0 && ln[0].len == 1);
+        CHECK(ln[1].off == 1 && ln[1].len == 1);
+        CHECK(ln[2].off == 2 && ln[2].len == 2);   /* é whole, never split */
+        CHECK(ln[0].off + ln[0].len == ln[1].off); /* contiguous tiling */
+        CHECK(ln[1].off + ln[1].len == ln[2].off);
+        CHECK(ln[2].off + ln[2].len == 4);         /* no bytes dropped */
+        CHECK((int)(ln[2].len * adv3) > 1);        /* the over-budget exception */
+    }
+
+    /* 10. full capacity: a hard-broken title yielding more than
+     *     RD_WRAP_MAX_LINES lines; the true count comes back while only the
+     *     first out_cap entries are filled (mirrors the renderer's clamp). */
+    {
+        char long_t[RD_CLIP_TITLE_MAX + 1];
+        memset(long_t, 'x', sizeof long_t - 1);
+        long_t[sizeof long_t - 1] = '\0';
+        int adv1 = 1;
+        nl = rd_wrap_lines(long_t, RD_CLIP_TITLE_MAX, 1, w_fixed, &adv1,
+                           ln, RD_WRAP_MAX_LINES);
+        CHECK(nl == RD_CLIP_TITLE_MAX);        /* one 'x' per line */
+        CHECK(nl > RD_WRAP_MAX_LINES);
+        for (size_t k = 0; k < RD_WRAP_MAX_LINES; k++) {
+            CHECK(ln[k].off == k && ln[k].len == 1);
+        }
+    }
+
+    /* 11. out_cap == 0 with out == NULL: nothing is written yet the TRUE
+     *     count is still returned -- the boundary (plus the NULL-contract
+     *     guard) that proves rd_wrap_emit never writes past its capacity. */
+    CHECK(rd_wrap_lines("abc", 3, 5, w_bytes, NULL, NULL, 0) == 1);
+
+    printf("test_word_wrap: %d checks passed\n", passed);
+    return 0;
+}
+
 int main(void)
 {
     printf("rd_datetime self-test\n");
     if (test_meta_qualifiers() != 0 ||
         test_local_day_arithmetic() != 0 ||
-        test_clip_prefix() != 0) {
+        test_clip_prefix() != 0 ||
+        test_word_wrap() != 0) {
         printf("RESULT: FAIL\n");
         return 1;
     }
