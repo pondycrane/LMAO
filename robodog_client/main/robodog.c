@@ -41,9 +41,9 @@
 #include "lma_proto.h"
 #include "u8g2_st7305.h"
 
-/* Host-clean pure logic (date/meta formatting + measured clip length): the
- * firmware wraps their width/string callbacks; rd_datetime_selftest.c proves
- * the identical code on the host `cc` gate. */
+/* Host-clean pure logic (date/meta formatting + measured clip length and
+ * word wrap): the firmware wraps their width/string callbacks; the selftest
+ * proves the identical code on the host `cc` gate. */
 #include "rd_clip.h"
 #include "rd_datetime.h"
 
@@ -700,9 +700,58 @@ static void draw_clipped_title(u8g2_t *u8g2, int x, int base, const char *s,
     u8g2_DrawStr(u8g2, x, base, tmp);
 }
 
+/* Final SHOWN line of a vertically-truncated wrapped headline title.  The
+ * wrapped block is bottom-anchored with room for n_fit lines (see
+ * render_screen); when the title wrapped to more lines than that, the last
+ * shown line MUST carry the cut marker — unlike draw_clipped_title the
+ * whole-title fast path is deliberately SKIPPED, because even a line that
+ * fits the 218 px column horizontally still signals the hidden tail.  Same
+ * measured ellipsis selection (u8g2_IsGlyph(0x2026) -> real "…" or "...") and
+ * the same rd_clip_prefix contract, so prefix + marker never exceed max_px. */
+static void draw_wrapped_final(u8g2_t *u8g2, int x, int base,
+                               const char *s, size_t len, int max_px)
+{
+    if (max_px <= 0) {
+        /* Negative budget: the classic int -> huge-size_t cast footgun; drop
+         * loudly rather than draw an over-wide line over the meta. */
+        ESP_LOGW(TAG, "wrapped final-line budget %dpx <= 0; dropping '%s'",
+                 max_px, s);
+        return;
+    }
+    /* Measure the ellipsis under the ACTIVE (helvB18) font. */
+    const char *ell = u8g2_IsGlyph(u8g2, 0x2026) ? "\xE2\x80\xA6" : "...";
+    const int ell_w = u8g2_GetStrWidth(u8g2, ell);
+    const size_t lo = rd_clip_prefix(s, len, max_px, ell_w, rd_u8g2_width,
+                                     u8g2);
+    char tmp[LMA_PB_EVENT_TITLE_MAX + 1];
+    if (lo == 0) {
+        /* Even one glyph + the marker is too wide: draw just the marker (it
+         * always fits at the real 218 px budget). */
+        memcpy(tmp, ell, strlen(ell) + 1);
+        ESP_LOGW(TAG, "wrapped final line: only ellipsis fits of '%s'", s);
+    } else {
+        memcpy(tmp, s, lo);
+        tmp[lo] = '\0';
+        strncat(tmp, ell, sizeof(tmp) - strlen(tmp) - 1);
+    }
+    u8g2_DrawStr(u8g2, x, base, tmp);
+}
+
 /* Row cap: at most 3 event rows are drawn — the headline (pic + right-side
  * info) plus 2 compact text rows; a 4th+ visible event is dropped by design. */
 #define RD_MAX_EVENT_ROWS 3
+
+/* Headline wrapped-title vertical band (render_screen): the bottom-anchored
+ * helvB18 block sits between the header hline (y=40) and the meta glyph top
+ * (148 - 10x20 ascent 16 = 132).  TITLE_TOP_MARGIN is the clearance below
+ * the hline before the first line's glyph top; TITLE_META_GAP is the gap
+ * between the last line's glyph bottom and the meta glyph top.  Both are
+ * panel-tuned against capture.py.  Real helvB18 metrics (measured via
+ * u8g2_GetAscent/GetDescent, never assumed): ascent 19, descent -5, so the
+ * 24px pitch fits 3 lines whose cap tops stay below the hline (baselines
+ * 76/100/124); a 4th line would cross the hline and is truncated instead. */
+#define TITLE_TOP_MARGIN 6
+#define TITLE_META_GAP   3
 
 /* ---- Display clock: derived from the server's epoch-ms watermark, and
  * advanced by esp_timer so the screen shows a live date/time to the minute.
@@ -879,12 +928,76 @@ static void render_screen(rd_state_t state)
                  (unsigned)LMA_PB_PIC_TILE_BYTES);
         draw_pic_placeholder(u8g2, img_x, img_y, img_sz);
     }
-    /* Headline title: large helvB24 face, then restore 10x20 before the meta
-     * line and compact rows draw (the font is global state on the u8g2_t). */
-    u8g2_SetFont(u8g2, u8g2_font_helvB24_tf);
-    draw_clipped_title(u8g2, txt_x, img_y + img_sz / 2 - 14, hl->title,
-                       (W - 6) - txt_x);
-    u8g2_SetFont(u8g2, u8g2_font_10x20_tf);
+    /* Headline title: word-wrapped helvB18 block drawn in the vertical band
+     * above the right-aligned meta line (baseline 148), bottom-anchored so
+     * the last line's glyph bottom clears the meta glyph top (148 - 10x20
+     * ascent).  A single clipped helvB24 line used to ellipsise even a modest
+     * title mid-word ("Peck Open ..."); wrapping renders the whole title on
+     * up to n_fit lines, with the ellipsis ONLY on the final shown line and
+     * only when the wrapped block overflows the band.  helvB18 ascent/descent
+     * are measured at runtime (never hardcoded); the font is global state on
+     * the u8g2_t, so 10x20 is restored below before the meta/compact rows. */
+    {
+        u8g2_SetFont(u8g2, u8g2_font_helvB18_tf);
+        const int t_asc = u8g2_GetAscent(u8g2);
+        const int t_desc = u8g2_GetDescent(u8g2);   /* <= 0 */
+        const int t_line_h = t_asc - t_desc;        /* 29 for helvB18 */
+        u8g2_SetFont(u8g2, u8g2_font_10x20_tf);
+        const int meta_asc = u8g2_GetAscent(u8g2);  /* 16; measured, never 0 */
+        u8g2_SetFont(u8g2, u8g2_font_helvB18_tf);
+
+        const int max_px = (W - 6) - txt_x;         /* 218 -- never widened */
+        rd_wrap_line_t wl[RD_WRAP_MAX_LINES];
+        const size_t nl = rd_wrap_lines(hl->title, strlen(hl->title), max_px,
+                                        rd_u8g2_width, u8g2, wl,
+                                        RD_WRAP_MAX_LINES);
+        /* Vertical fit is bottom-anchored and COMPUTED (never assumed): the
+         * last line's baseline keeps its glyph bottom clear of the meta
+         * glyph top, and the first line stays below the header hline (40).
+         * gap/margin are panel-tuned constants; final value validated by
+         * capture.py. */
+        const int meta_base = img_y + img_sz / 2 + 22;      /* 148 */
+        const int bottom_last =
+            meta_base - meta_asc - TITLE_META_GAP - (-t_desc);
+        const int top_anchor = 40 + TITLE_TOP_MARGIN;
+        size_t n_fit = nl;
+        /* Number of whole lines whose GLYPH TOP (baseline - ascent) stays at
+         * or below top_anchor -- i.e. the first line never rises above the
+         * header hline.  The ascent is subtracted from the raw band: with
+         * helvB18 ascent 19 / line_h 24 the band holds 3 lines (baselines
+         * 76/100/124) whose cap tops stay cleanly below the hline; a 4th
+         * line would cross it, so longer titles truncate here instead. */
+        const int band = (bottom_last - top_anchor - t_asc) / t_line_h + 1;
+        if (band < 0 || (size_t)band < n_fit) {
+            n_fit = (band < 0) ? 0u : (size_t)band;
+        }
+        if (n_fit > RD_WRAP_MAX_LINES) {
+            n_fit = RD_WRAP_MAX_LINES;   /* we only hold that many lines */
+        }
+        const bool truncated = (nl > n_fit);
+
+        for (size_t k = 0; k < n_fit; k++) {
+            const int base = bottom_last - (int)(n_fit - 1 - k) * t_line_h;
+            char tmp[LMA_PB_EVENT_TITLE_MAX + 1];
+            const size_t lo = wl[k].off, ln = wl[k].len;
+            memcpy(tmp, hl->title + lo, ln);
+            tmp[ln] = '\0';
+            if (k == n_fit - 1 && truncated) {
+                /* Final shown line of an overflowing block: prefix + marker. */
+                draw_wrapped_final(u8g2, txt_x, base, tmp, ln, max_px);
+            } else {
+                /* Whole line (fits max_px by construction); never ellipsise an
+                 * intermediate line. */
+                u8g2_DrawStr(u8g2, txt_x, base, tmp);
+            }
+        }
+        if (truncated) {
+            ESP_LOGW(TAG, "headline '%s' wrapped to %u lines, showing %u "
+                          "with final-line ellipsis",
+                     hl->title, (unsigned)nl, (unsigned)n_fit);
+        }
+        u8g2_SetFont(u8g2, u8g2_font_10x20_tf);
+    }
     /* Right-aligned meta (range + qualifier): stays clear of the picture edge
      * (x=164) even for the widest "YYYY/MM/DD HH:MM-HH:MM" (~220 px). */
     {
