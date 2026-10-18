@@ -160,7 +160,17 @@ class TestPickSource:
 
 
 class TestGoogleSource:
-    def test_google_disabled_without_env(self, monkeypatch):
-        monkeypatch.delenv("GOOGLE_CSE_KEY", raising=False)
-        monkeypatch.delenv("GOOGLE_CSE_CX", raising=False)
-        assert cps.search_google("seal ice skating") == []
+    def test_google_removed_commons_only(self):
+        # Google CSE is discontinued for new signups — search_sources is Commons only
+        assert "search_google" not in dir(cps)
+
+
+class TestGenPrompt:
+    def test_sea_animal_theme(self):
+        p = cps.build_gen_prompt("seal", "sea animal", "ice skating")
+        assert "seal" in p and "sea animal" in p and "ice skating" in p
+        assert "line art" in p and "WHITE" in p
+
+    def test_pokemon_theme_and_no_action(self):
+        p = cps.build_gen_prompt("pikachu", "pokemon", "")
+        assert "pokemon-like" in p and "pikachu" in p and "fun activity" in p

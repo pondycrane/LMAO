@@ -275,37 +275,93 @@ def search_commons(query: str, limit: int = 12):
     return out
 
 
-def search_google(query: str, limit: int = 5):
-    """Google Custom Search Image API; needs GOOGLE_CSE_KEY + GOOGLE_CSE_CX."""
-    key = os.environ.get("GOOGLE_CSE_KEY")
-    cx = os.environ.get("GOOGLE_CSE_CX")
-    if not key or not cx:
-        return []
-    url = "https://www.googleapis.com/customsearch/v1?" + urllib.parse.urlencode({
-        "key": key, "cx": cx, "q": query, "searchType": "image",
-        "num": limit, "safe": "active",
-    })
-    try:
-        data = _get_json(url)
-    except urllib.error.HTTPError as e:
-        if e.code == 403:  # bad key/quota
-            print("  (Google Images: quota/key 403 — using Commons only)")
-            return []
-        raise
-    out = []
-    for it in data.get("items", []) or []:
-        mime = (it.get("mimeType") or "image/jpeg")
-        if mime.startswith("image/"):
-            img = it.get("image", {}) or {}
-            out.append((it.get("title", ""), it.get("link", ""),
-                        int(img.get("width", 0) or 0), int(img.get("height", 0) or 0)))
-    return out
+_GEN_URL_DEFAULT = "http://192.168.10.37:8188"
 
 
 def search_sources(query: str):
-    results = list(search_commons(query))
-    results += search_google(query)
-    return results
+    """Wikimedia Commons only — Google CSE is discontinued for new signups;
+    on-demand themed art comes from local generation instead."""
+    return list(search_commons(query))
+
+
+def build_gen_prompt(subject_word: str, theme_label: str, action: str) -> str:
+    theme = ("a cute sea animal" if theme_label == "sea animal"
+             else "a cute pokemon-like creature")
+    activity = f" doing {action}" if action else " doing a fun activity"
+    return (
+        f"{subject_word}, {theme}{activity}, flat BLACK line art on a WHITE "
+        "background, clean bold black outline, coloring book style, no shading, "
+        "no text, simple, kid-friendly"
+    )
+
+
+def generate_local(prompt: str, width: int, height: int) -> bytes | None:
+    """Generate an image on the local ComfyUI node; return PNG bytes or None.
+
+    Uses the FLUX.1-schnell checkpoint the node is set up with (falls back to
+    the caller's search path if ComfyUI is down, the checkpoint isn't ready, or
+    generation fails).
+    """
+    base = os.environ.get("LMAO_IMAGE_GEN_URL", _GEN_URL_DEFAULT).rstrip("/")
+    # FLUX.1-schnell: transformer-only checkpoint + separate clip/t5/vae models.
+    # This exact graph is verified on the node (ComfyUI docs FLUX template).
+    workflow = {
+        "1": {"class_type": "UNETLoader",
+              "inputs": {"unet_name": "flux1-schnell.safetensors", "weight_dtype": "default"}},
+        "2": {"class_type": "DualCLIPLoader",
+              "inputs": {"clip_name1": "clip_l.safetensors",
+                         "clip_name2": "t5xxl_fp8_e4m3fn.safetensors",
+                         "type": "flux"}},
+        "3": {"class_type": "VAELoader",
+              "inputs": {"vae_name": "ae.safetensors"}},
+        "4": {"class_type": "CLIPTextEncode",
+              "inputs": {"text": prompt, "clip": ["2", 0]}},
+        "5": {"class_type": "CLIPTextEncode",
+              "inputs": {"text": "text, watermark, logo, lowres, blurry, photograph, shading, gray, realistic", "clip": ["2", 0]}},
+        "6": {"class_type": "EmptyLatentImage",
+              "inputs": {"width": width, "height": height, "batch_size": 1}},
+        "7": {"class_type": "KSampler",
+              "inputs": {
+                  "model": ["1", 0], "positive": ["4", 0], "negative": ["5", 0],
+                  "latent_image": ["6", 0], "seed": 0, "steps": 4, "cfg": 1.0,
+                  "sampler_name": "euler", "scheduler": "simple", "denoise": 1.0}},
+        "8": {"class_type": "VAEDecode", "inputs": {"samples": ["7", 0], "vae": ["3", 0]}},
+        "9": {"class_type": "SaveImage",
+              "inputs": {"images": ["8", 0], "filename_prefix": "kids"}},
+    }
+    try:
+        req = urllib.request.Request(
+            f"{base}/prompt", data=json.dumps({"prompt": workflow}).encode(),
+            headers={"Content-Type": "application/json", "User-Agent": _UA},
+        )
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            pid = json.load(resp)["prompt_id"]
+        # poll /history until the job completes and an image is written
+        out_image = None
+        for _ in range(240):  # up to ~4 min
+            time.sleep(1)
+            try:
+                with urllib.request.urlopen(f"{base}/history/{pid}", timeout=20) as r:
+                    hist = json.load(r)
+            except Exception:
+                continue
+            entry = (hist.get(pid) or {})
+            outputs = entry.get("outputs", {})
+            for node in outputs.values():
+                for im in node.get("images", []) or []:
+                    out_image = im
+            if entry.get("status", {}).get("completed"):
+                break
+        if not out_image:
+            return None
+        view = (f"{base}/view?filename={urllib.parse.quote(out_image['filename'])}"
+                f"&subfolder={urllib.parse.quote(out_image.get('subfolder', ''))}"
+                f"&type={out_image.get('type', 'output')}")
+        with urllib.request.urlopen(view, timeout=30) as r:
+            return r.read()
+    except Exception as exc:  # noqa: BLE001
+        print(f"  (local generation unavailable: {exc})")
+        return None
 
 
 def _norm_title(t: str) -> str:
@@ -589,50 +645,67 @@ def main(argv: list[str] | None = None) -> int:
         cal.close()
         return 0
 
-    google_on = bool(os.environ.get("GOOGLE_CSE_KEY") and os.environ.get("GOOGLE_CSE_CX"))
     done, failed = 0, 0
     for uid, title, pic, participants in needed:
         participant = participants[0] if participants else "kid"
         queries = build_combo(title, participant, uid)
         primary = queries[0]
         kw = "LLM" if os.environ.get("LMAO_IMAGE_LLM_URL") else "reasoned"
+        subject_word = primary.split()[0] if primary.split() else participant
+        theme_label = "pokemon" if participant == "juliet" else "sea animal"
+        action = extract_action(title)
         print(f"== {pic} ({','.join(participants)}): '{title}' "
-              f"-> [{kw}] {queries} [commons{' + google' if google_on else ''}]")
+              f"-> [{kw}] {queries} [local-gen + commons]")
         try:
-            allres = []
-            for q in queries:
-                allres += search_sources(q)
-            # dedupe by url, keep order
-            seen, uniq = set(), []
-            for r in allres:
-                if r[1] and r[1] not in seen:
-                    seen.add(r[1])
-                    uniq.append(r)
-            candidates = rank_candidates(uniq, primary)
-            subject_word = primary.split()[0]  # primary is never empty
-            theme_label = "pokemon" if participant == "juliet" else "sea animal"
             stored = False
-            for cand in candidates:
-                _, url, w, h = cand
-                try:
-                    raw = download(url)
-                    raw = crop_to_subject(raw)  # tighten to the main subject (vision)
-                    if not verify_subject(raw, subject_word, theme_label):
-                        print(f"   gate rejected candidate ({w}x{h}): {cand[0]!r}")
-                        continue
-                    png = to_1bit_png(raw, tw, th, args.threshold)
+            # 1) on-demand local generation first (bespoke themed art)
+            gen = generate_local(build_gen_prompt(subject_word, theme_label, action),
+                                 1024, 1024)
+            if gen:
+                gen = crop_to_subject(gen)  # tighten to the subject (vision)
+                if verify_subject(gen, subject_word, theme_label):
+                    png = to_1bit_png(gen, tw, th, args.threshold)
                     rec = pic_store.put(pic, png, tw, th)
-                    print(f"   stored {pic}: {cand[0]} ({w}x{h}) -> "
-                          f"{rec['width']}x{rec['height']} {rec['mime']} {len(rec['bytes'])}B")
+                    print(f"   stored {pic} [generated]: {subject_word} {theme_label}"
+                          f" ({action or 'general'}) -> "
+                          f"{rec['width']}x{rec['height']} {len(rec['bytes'])}B")
                     done += 1
                     stored = True
-                    break
-                except Exception as exc2:  # noqa: BLE001
-                    print(f"   candidate failed ({cand[0]!r}): {exc2}")
-                    continue
+                else:
+                    print(f"   gate rejected generated art for {primary!r}")
+            else:
+                print("   (local generation unavailable — falling back to Commons)")
+            # 2) fall back to Wikimedia search if generation didn't land
             if not stored:
-                print(f"   no acceptable image for {primary!r} "
-                      f"({len(candidates)} candidate(s) rejected/failed)")
+                allres = []
+                for q in queries:
+                    allres += search_sources(q)
+                seen, uniq = set(), []
+                for r in allres:
+                    if r[1] and r[1] not in seen:
+                        seen.add(r[1])
+                        uniq.append(r)
+                candidates = rank_candidates(uniq, primary)
+                for cand in candidates:
+                    _, url, w, h = cand
+                    try:
+                        raw = download(url)
+                        raw = crop_to_subject(raw)  # tighten to the subject (vision)
+                        if not verify_subject(raw, subject_word, theme_label):
+                            print(f"   gate rejected candidate ({w}x{h}): {cand[0]!r}")
+                            continue
+                        png = to_1bit_png(raw, tw, th, args.threshold)
+                        rec = pic_store.put(pic, png, tw, th)
+                        print(f"   stored {pic}: {cand[0]} ({w}x{h}) -> "
+                              f"{rec['width']}x{rec['height']} {rec['mime']} {len(rec['bytes'])}B")
+                        done += 1
+                        stored = True
+                        break
+                    except Exception as exc2:  # noqa: BLE001
+                        print(f"   candidate failed ({cand[0]!r}): {exc2}")
+                        continue
+            if not stored:
+                print(f"   no acceptable image for {primary!r}")
                 failed += 1
         except Exception as exc:  # noqa: BLE001
             print(f"   FAILED for {primary!r}: {exc}")
