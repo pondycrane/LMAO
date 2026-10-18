@@ -303,23 +303,31 @@ def generate_local(prompt: str, width: int, height: int) -> bytes | None:
     generation fails).
     """
     base = os.environ.get("LMAO_IMAGE_GEN_URL", _GEN_URL_DEFAULT).rstrip("/")
+    # FLUX.1-schnell: transformer-only checkpoint + separate clip/t5/vae models.
+    # This exact graph is verified on the node (ComfyUI docs FLUX template).
     workflow = {
-        "1": {"class_type": "CheckpointLoaderSimple",
-              "inputs": {"ckpt_name": "sd_xl_base_1.0.safetensors"}},
-        "2": {"class_type": "CLIPTextEncode",
-              "inputs": {"text": prompt, "clip": ["1", 1]}},
-        "3": {"class_type": "CLIPTextEncode",
-              "inputs": {"text": "text, watermark, logo, lowres, blurry, photograph, shading, gray, realistic", "clip": ["1", 1]}},
-        "4": {"class_type": "EmptyLatentImage",
+        "1": {"class_type": "UNETLoader",
+              "inputs": {"unet_name": "flux1-schnell.safetensors", "weight_dtype": "default"}},
+        "2": {"class_type": "DualCLIPLoader",
+              "inputs": {"clip_name1": "clip_l.safetensors",
+                         "clip_name2": "t5xxl_fp8_e4m3fn.safetensors",
+                         "type": "flux"}},
+        "3": {"class_type": "VAELoader",
+              "inputs": {"vae_name": "ae.safetensors"}},
+        "4": {"class_type": "CLIPTextEncode",
+              "inputs": {"text": prompt, "clip": ["2", 0]}},
+        "5": {"class_type": "CLIPTextEncode",
+              "inputs": {"text": "text, watermark, logo, lowres, blurry, photograph, shading, gray, realistic", "clip": ["2", 0]}},
+        "6": {"class_type": "EmptyLatentImage",
               "inputs": {"width": width, "height": height, "batch_size": 1}},
-        "5": {"class_type": "KSampler",
+        "7": {"class_type": "KSampler",
               "inputs": {
-                  "model": ["1", 0], "positive": ["2", 0], "negative": ["3", 0],
-                  "latent_image": ["4", 0], "seed": 0, "steps": 20, "cfg": 7.0,
-                  "sampler_name": "euler", "scheduler": "normal", "denoise": 1.0}},
-        "6": {"class_type": "VAEDecode", "inputs": {"samples": ["5", 0], "vae": ["1", 2]}},
-        "7": {"class_type": "SaveImage",
-              "inputs": {"images": ["6", 0], "filename_prefix": "kids"}},
+                  "model": ["1", 0], "positive": ["4", 0], "negative": ["5", 0],
+                  "latent_image": ["6", 0], "seed": 0, "steps": 4, "cfg": 1.0,
+                  "sampler_name": "euler", "scheduler": "simple", "denoise": 1.0}},
+        "8": {"class_type": "VAEDecode", "inputs": {"samples": ["7", 0], "vae": ["3", 0]}},
+        "9": {"class_type": "SaveImage",
+              "inputs": {"images": ["8", 0], "filename_prefix": "kids"}},
     }
     try:
         req = urllib.request.Request(
