@@ -37,3 +37,38 @@ sh_binary(
     ]),
     tags = ["manual"],
 )
+
+# ── Voice-AI firmware (XiaoZhi) — fetched, never vendored ─────────────────
+# The XiaoZhi AI voice firmware for the same Waveshare board is a prebuilt
+# release fetched via the robodog_xiaozhi_fetch() macro in repos.bzl (Bazel
+# cache + immutable commit + sha256 pin). This replaces the calendar app —
+# reflash //robodog_client:flash_firmware to restore the calendar firmware.
+genrule(
+    name = "xiaozhi_fw_bin",
+    srcs = ["@xiaozhi_rlcd_firmware//file"],
+    outs = ["xiaozhi_fw/merged-binary.bin"],
+    cmd = "unzip -p $(location @xiaozhi_rlcd_firmware//file) merged-binary.bin > $@",
+    tags = ["manual"],
+)
+
+sh_binary(
+    name = "flash_robodog_hermes",
+    srcs = ["xiaozhi_flash.sh"],
+    data = [":xiaozhi_fw_bin"],
+    tags = ["manual"],
+)
+
+# ── Voice-AI backend glue (host-side services) ────────────────────────────
+# Bridge + TTS server + systemd units that give the XiaoZhi voice firmware a
+# local conversation loop (see README "Voice mode"). Reference/deploy copy —
+# the running instance is ops-managed at ~/xiaozhi + spark-5307:8004.
+filegroup(
+    name = "voice_backend",
+    srcs = [
+        "voice/voice_bridge.py",
+        "voice/kokoro_server.py",
+        "voice/lmao-robodog-voice.service",
+        "voice/kokoro-tts.service",
+    ],
+    tags = ["manual"],
+)

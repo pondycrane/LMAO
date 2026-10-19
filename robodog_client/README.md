@@ -107,6 +107,60 @@ cc -std=c11 -Wall -Wextra main/lma_proto_selftest.c main/lma_proto.c \
 `lma_proto_selftest.c` is host-only (defines its own `main`) and is not part
 of the IDF build.
 
+## Voice mode (XiaoZhi voice firmware + local bridge)
+
+The same board can be reflashed into an always-on **AI voice assistant** — a
+separate firmware plus host-side glue under `robodog_client/voice/`. This is
+independent of the calendar firmware; `//robodog_client:flash_firmware`
+restores the calendar app.
+
+### Firmware flash (Bazelized, fetched — never vendored)
+
+```sh
+bazel run //robodog_client:flash_robodog_hermes   # XiaoZhi v2.4.2, pinned commit+sha256 in repos.bzl
+```
+
+This is the board's **only** sanctioned esptool path (button-free reset; the
+Docker ttyACM RTS passthrough breaks it). The prebuilt binary is fetched via
+`http_file` and cached by Bazel — nothing vendored.
+
+The board provisions itself over WiFi by POSTing the OTA URL configured in its
+NVS by `tools`-style offline provisioning (external `provision_nvs.py`: reads
+the WiFi PSK from netplan via sudo, writes the 16 KB NVS at `0x9000` with
+`ssid`/`password` and `ota_url=http://<bridge-host>:8003/xiaozhi/ota/`). The
+OTA reply gives the board the bridge WebSocket URL, so no xiaozhi.me
+dependency.
+
+### Voice backend (`robodog_client/voice/`)
+
+| File | Purpose |
+|------|---------|
+| `voice_bridge.py` | XiaoZhi WebSocket bridge + OTA/`/healthz` server (`:8000` WS, `:8003` OTA). Negotiates the 16 kHz uplink for ASR, sends **24 kHz Opus** downlink (the board codec rate → no 16↔24 resample, no distortion). Server-side energy VAD finalizes a turn ~0.8 s after you stop talking — required because the device streams `realtime` and never sends `listen stop`. |
+| `lmao-robodog-voice.service` | systemd **user** unit for the bridge, run from `~/xiaozhi/` with a Python venv (`fastapi`, `uvicorn`, `websockets`, `opuslib`, `faster-whisper`, `numpy`). |
+| `kokoro_server.py` + `kokoro-tts.service` | **Kokoro-82M** TTS (Apache-2.0, ~82M params, 24 kHz native) exposed as OpenAI `/v1/audio/speech` on the GPU host `spark-5307:8004`, also systemd-user-managed. |
+| `lmao-robodog-voice.service` env | ASR = local faster-whisper `base`; LLM = `gx10-f156:8000/v1` (`deepseek-ai/DeepSeek-V4-Flash-0731`, the Hermes brain); TTS = `spark-5307:8004`. |
+
+Loop:
+
+```
+board --Opus/WS--> voice_bridge --PCM--> faster-whisper (local ASR)
+                      --text--> gx10 vLLM (Hermes brain)
+                      --text--> Kokoro-82M TTS (spark-5307:8004)
+voice_bridge --24 kHz Opus--> board speaker
+```
+
+**TTS selection note.** The earlier CosyVoice2 server on `spark-5307:8002`
+returns non-speech for every input on this deployment: it pins
+torch 2.3.1 / transformers 4.51.3, which cannot be satisfied on the ARM64
+GB10 host (runs torch 2.11 / transformers 5.20.1), and that version skew
+deterministically garbles the Qwen text backbone. Kokoro-82M avoids the whole
+dependency class (no torch needed for inference) and is the working voice —
+verified by feeding its output back through ASR (no human round-trip).
+
+**Usage.** Right (BOOT) button toggles listening; stop talking for ~0.8 s and
+the bridge auto-processes and speaks. Full-duplex: just talk again for the
+next turn. Logs: `journalctl --user -u lmao-robodog-voice -f`.
+
 ## Layout
 
 ```
