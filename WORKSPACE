@@ -7,6 +7,7 @@
 #   //smart_irrigation/native-client:all covers the lxmf_send / announce-decode
 #   units and the upstream doctest suite with no system-only deps.
 load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+load("//robodog_client:repos.bzl", "robodog_xiaozhi_fetch")
 
 http_archive(
     name = "mbedtls",
@@ -53,6 +54,12 @@ http_archive(
     strip_prefix = "u8g2-d6c8499c5f2707cac8eccd09fd8f677d12b17977",
     urls = ["https://github.com/olikraus/u8g2/archive/d6c8499c5f2707cac8eccd09fd8f677d12b17977.tar.gz"],
 )
+
+# ── RoboDog voice: XiaoZhi prebuilt RLCD-4.2 firmware (fetched, never vendored)
+# A Voice-AI firmware for the same Waveshare board; see repos.bzl for the
+# immutable commit + sha256 pin. Fetched into the Bazel cache, extracted by the
+# genrule below, flashed by //robodog_client:flash_xiaozhi.
+robodog_xiaozhi_fetch()
 
 # ── Rust client: pinned RNS/LXMF protocol crates (PR #168) ─────────────────
 # The five protocol crates are fetched from crates.io by SHA-256 (the source
