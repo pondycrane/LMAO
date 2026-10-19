@@ -135,19 +135,42 @@ dependency.
 
 | File | Purpose |
 |------|---------|
-| `voice_bridge.py` | XiaoZhi WebSocket bridge + OTA/`/healthz` server (`:8000` WS, `:8003` OTA). Negotiates the 16 kHz uplink for ASR, sends **24 kHz Opus** downlink (the board codec rate → no 16↔24 resample, no distortion). Server-side energy VAD finalizes a turn ~0.8 s after you stop talking — required because the device streams `realtime` and never sends `listen stop`. |
+| `voice_bridge.py` | XiaoZhi WebSocket bridge + OTA/`/healthz` server (`:8000` WS, `:8003` OTA). Negotiates the 16 kHz uplink for ASR, sends **24 kHz Opus** downlink (the board codec rate → no 16↔24 resample, no distortion). Server-side energy VAD finalizes a turn ~0.8 s after you stop talking — required because the device streams `realtime` and never sends `listen stop`. The **brain** is the board's Hermes session: each ASR'd utterance is submitted over a loopback brain WebSocket to the `xiaozhi` platform plugin inside the hermes-gateway (falls back to the stateless gx10 call if that's down). |
+| `hermes-platform/xiaozhi/` | **Hermes platform plugin** (plugin.yaml + adapter.py + __init__.py) deployed to `~/.hermes/plugins/platforms/xiaozhi/`. Makes the board a first-class Hermes gateway client (see "Hermes gateway integration" below). |
 | `lmao-robodog-voice.service` | systemd **user** unit for the bridge, run from `~/xiaozhi/` with a Python venv (`fastapi`, `uvicorn`, `websockets`, `opuslib`, `faster-whisper`, `numpy`). |
 | `kokoro_server.py` + `kokoro-tts.service` | **Kokoro-82M** TTS (Apache-2.0, ~82M params, 24 kHz native) exposed as OpenAI `/v1/audio/speech` on the GPU host `spark-5307:8004`, also systemd-user-managed. |
-| `lmao-robodog-voice.service` env | ASR = local faster-whisper `base`; LLM = `gx10-f156:8000/v1` (`deepseek-ai/DeepSeek-V4-Flash-0731`, the Hermes brain); TTS = `spark-5307:8004`. |
+| `lmao-robodog-voice.service` env | ASR = local faster-whisper `base`; brain = `HERMES_BRAIN_URL` (default `ws://127.0.0.1:8101/xiaozhi/brain`, the board's Hermes session; `DEVICE_ID` pins the identity, else hello device_id/mac or a persisted uuid); fallback LLM = `gx10-f156:8000/v1` (`deepseek-ai/DeepSeek-V4-Flash-0731`); TTS = `spark-5307:8004`. |
 
 Loop:
 
 ```
 board --Opus/WS--> voice_bridge --PCM--> faster-whisper (local ASR)
-                      --text--> gx10 vLLM (Hermes brain)
-                      --text--> Kokoro-82M TTS (spark-5307:8004)
+                      --text--> xiaozhi Hermes session (memory/tools, device-id keyed)
+                                + auto-TTS reply audio (Kokoro via Hermes tts.provider)
+                                |__fallback__> gx10 vLLM (stateless, if brain down)
 voice_bridge --24 kHz Opus--> board speaker
 ```
+
+### Hermes gateway integration (xiaozhi platform)
+
+The XiaoZhi bridge is the board's **realtime transport**; the **brain is Hermes**.
+The `xiaozhi` platform plugin runs inside the hermes-gateway process and binds a
+loopback brain WebSocket (default `ws://127.0.0.1:8101/xiaozhi/brain`):
+
+```
+board --Opus/WS:8000--> voice_bridge --ASR text--WS:8101--> xiaozhi adapter
+                                                              |-> MessageEvent(VOICE, device_id)
+                                                              |-> Hermes session + memory + tools
+                                                              |-> auto-TTS reply (tts.provider: openai -> Kokoro)
+voice_bridge <--voice/reply frames--WS:8101-- xiaozhi adapter <--send()/send_voice()
+    |-> decode audio to 24 kHz PCM -> Opus frames -> board speaker
+```
+
+- **Identity / sessions**: the board's session and chat key is its stable Device-Id/MAC; reconnects (bridge restart, board reattach) reuse it, so the conversation history and memory survive.
+- **Spoken replies**: inbound turns are VOICE-type, so Hermes auto-TTS fires by default for this platform (adapter-local `_should_auto_tts_for_chat` — the global `voice.auto_tts` stays off so telegram/matrix/signal are unaffected). `tts.provider: openai` points Hermes' TTS at **our Kokoro** (`~/.hermes/config.yaml` `tts.openai.base_url: http://spark-5307:8004/v1`, `voice: af_heart`) — the exact voice the board already uses. The reply audio returns to the bridge as a `voice` frame and is streamed to the board.
+- **Fallback**: if the brain is unreachable the bridge synthesizes the `reply` text itself with Kokoro (stateless; no memory/tools). Last-resort it calls gx10 directly.
+- **Config / deploy**: enable the platform in `~/.hermes/config.yaml` under `gateway.platforms.xiaozhi.enabled: true` + `plugins.enabled` (`platforms/xiaozhi`), set `XIAOZHI_ALLOW_ALL_USERS=true` (LAN device; `XIAOZHI_ALLOWED_USERS` for a device-id allow-list), then `systemctl --user restart hermes-gateway`. The board then appears in `hermes gateway status` (or the `Platforms:` line of `hermes status`) as **XiaoZhi Voice Companion**. The plugin's source of truth lives in the repo under `robodog_client/voice/hermes-platform/xiaozhi/`; deploy by copying it to `~/.hermes/plugins/platforms/xiaozhi/`.
+- **Latency**: measured first-audio ~6.5 s after VAD finalize on the Hermes path (ASR + agent turn + auto-TTS), vs ~3–4 s for the thin stateless path. Accepted per the issue: the Hermes path earns sessions, multi-turn memory and tools; the stateless gx10 path stays as the fallback.
 
 **TTS selection note.** The earlier CosyVoice2 server on `spark-5307:8002`
 returns non-speech for every input on this deployment: it pins

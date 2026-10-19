@@ -6,9 +6,20 @@ Implements just enough of the XiaoZhi communication protocol
 flashed XiaoZhi voice firmware a fully-local conversation loop:
 
   board --Opus/WebSocket--> bridge --PCM--> faster-whisper (ASR local)
-                                --text--> gx10 vLLM (the Hermes brain model)
+                                --text--> Hermes session (xiaozhi platform: memory/tools)
                                 --text--> Kokoro-82M TTS (spark-5307:8004)
   bridge --Opus frames--> board speaker
+
+The brain is a first-class Hermes platform: the bridge speaks a tiny WebSocket
+protocol to the xiaozhi platform plugin running inside the hermes-gateway
+(HERMES_BRAIN_URL, default ws://127.0.0.1:8101/xiaozhi/brain). Each utterance is
+submitted to the board's Hermes session (identity = board Device-Id/MAC) so the
+board gets sessions, multi-turn memory, tools/skills and allow-lists. Hermes
+auto-TTS (tts.provider: openai -> our Kokoro) returns the spoken reply as audio
+(`voice` frame); when auto-TTS is off/fails the final text returns as a `reply`
+frame and the bridge synthesizes it with Kokoro itself. If the brain is
+unreachable the bridge falls back to the old stateless gx10 call (call_llm) so
+the board keeps working.
 
 Also serves the OTA JSON the board fetches to learn our WebSocket URL, so no
 xiaozhi.me dependency. This is glue for the LMAO network only; all upstream
@@ -86,6 +97,18 @@ TTS_MODEL = os.environ.get("TTS_MODEL", "cosyvoice2")
 TTS_VOICE = os.environ.get("TTS_VOICE", TTS_SPK_ID)
 TTS_RESPONSE_FORMAT = os.environ.get("TTS_RESPONSE_FORMAT", "wav")
 TTS_API_KEY = os.environ.get("TTS_API_KEY", "dummy-local-noauth")
+
+# Hermes brain: the XiaoZhi voice board is a first-class Hermes platform. The
+# bridge keeps the realtime transport (Opus/WS/VAD) and submits each ASR'd
+# utterance to the board's Hermes session over this WebSocket. The bridge falls
+# back to the stateless gx10 call (LLM_*) when the brain is unreachable.
+HERMES_BRAIN_URL = os.environ.get(
+    "HERMES_BRAIN_URL", "ws://127.0.0.1:8101/xiaozhi/brain").strip()
+HERMES_BRAIN_TIMEOUT = float(os.environ.get("HERMES_BRAIN_TIMEOUT", "300"))
+# Stable board identity (MAC preferred). Order: env DEVICE_ID -> hello.device_id
+# -> hello.mac -> a one-time uuid persisted at DEVICE_ID_FILE.
+DEVICE_ID = os.environ.get("DEVICE_ID", "").strip()
+DEVICE_ID_FILE = os.environ.get("DEVICE_ID_FILE", os.path.expanduser("~/xiaozhi/device_id"))
 
 AUDIO_RATE = 24000  # the board codec runs at 24 kHz
 FRAME_MS = 60
@@ -274,6 +297,176 @@ def call_llm(user_text: str) -> str:
     return data["choices"][0]["message"]["content"].strip()
 
 
+# ---------------------------------------------------------------------------
+# Hermes brain client: submit ASR'd utterances to the board's Hermes session
+# (xiaozhi platform plugin in the hermes-gateway) and stream the spoken reply
+# back. Falls back to call_llm (stateless gx10) when the brain is unreachable.
+# ---------------------------------------------------------------------------
+_brain_ws = None
+_brain_connecting = False
+_brain_connected = False
+_brain_queue = None  # asyncio.Queue: frames from the single reader
+_brain_ever_connected = False  # True once a brain link has come up this run
+
+
+def _load_device_id() -> str:
+    """Stable board identity for Hermes sessions (persisted across restarts)."""
+    if DEVICE_ID:
+        return DEVICE_ID
+    try:
+        with open(DEVICE_ID_FILE) as fh:
+            value = fh.read().strip()
+            if value:
+                return value
+    except OSError:
+        pass
+    value = "device-" + os.urandom(8).hex()
+    try:
+        with open(DEVICE_ID_FILE, "w") as fh:
+            fh.write(value + "\n")
+        os.chmod(DEVICE_ID_FILE, 0o600)
+    except OSError as e:
+        log.warning("could not persist device id to %s: %s", DEVICE_ID_FILE, e)
+    return value
+
+
+async def _brain_connect_loop():
+    """Maintain one brain connection; ONE reader task feeds ``_brain_queue``.
+
+    Two concurrent ``recv()`` on a websockets connection raises
+    ConcurrencyError, so every frame is read here and turns consume the queue.
+    Reconnects keep the persisted identity, so the Hermes session survives.
+    """
+    global _brain_ws, _brain_connected, _brain_connecting, _brain_queue, _brain_ever_connected
+    while True:
+        try:
+            async with websockets.connect(HERMES_BRAIN_URL,
+                                        ping_interval=20, ping_timeout=60) as ws:
+                _brain_ws = ws
+                _brain_connected = True
+                _brain_ever_connected = True
+                _brain_queue = asyncio.Queue()
+                log.info("Hermes brain connected: %s (device=%s)",
+                         HERMES_BRAIN_URL, _load_device_id())
+                await ws.send(json.dumps({
+                    "type": "hello",
+                    "device_id": _load_device_id(),
+                    "session_id": "bridge",
+                    "firmware": "xiaozhi-bridge",
+                }))
+                async for raw in ws:
+                    try:
+                        await _brain_queue.put(json.loads(raw))
+                    except (TypeError, ValueError):
+                        continue
+        except Exception as e:
+            log.debug("Hermes brain disconnected (%s); reconnecting...", e)
+        finally:
+            _brain_connected = False
+            _brain_connecting = False
+            _brain_ws = None
+            _brain_queue = None
+        await asyncio.sleep(float(os.environ.get("HERMES_BRAIN_RETRY_SECS", "3")))
+
+
+async def brain_send_json(payload: dict) -> bool:
+    try:
+        if _brain_ws is not None:
+            await _brain_ws.send(json.dumps(payload))
+            return True
+    except Exception as e:
+        log.debug("brain send failed: %s", e)
+    return False
+
+
+async def _brain_next(deadline: float, session_id: str, timeout: float):
+    """Next frame addressed to ``session_id`` (or with no/session-agnostic id).
+
+    Returns (frame, remaining_deadline) or raises TimeoutError. Drafts the
+    turn's text-vs-voice race by refusing to return a bare text ``reply`` until
+    a short grace window confirms no auto-TTS voice frame follows it.
+    """
+    import base64
+    while True:
+        remain = deadline - time.monotonic()
+        if remain <= 0:
+            raise TimeoutError("Hermes brain reply timed out")
+        try:
+            frame = await asyncio.wait_for(_brain_queue.get() if _brain_queue is not None
+                                           else asyncio.sleep(remain), timeout=min(timeout, remain))
+        except asyncio.TimeoutError:
+            # Only the grace-window peek may time out silently; the outer deadline
+            # already raises.
+            raise
+        sid = frame.get("session_id") or ""
+        if sid not in ("", session_id, None):
+            continue  # stale turn (barge-in) — skip
+        ftype = frame.get("type")
+        if ftype == "voice":
+            try:
+                audio = base64.b64decode(frame["audio"])
+            except Exception as e:
+                raise RuntimeError(f"bad voice frame: {e}") from e
+            return ("voice", decode_audio_to_pcm24k(audio))
+        if ftype == "reply":
+            text = str(frame.get("text") or "").strip()
+            if not text:
+                continue
+            # The adapter may emit the final text BEFORE the auto-TTS voice
+            # frame; hold the text a beat to prefer voice (no double speech).
+            try:
+                late, late_pcm = await _brain_next(deadline, session_id, 0.6)
+                if late == "voice":
+                    return late, late_pcm
+            except TimeoutError:
+                pass
+            return ("reply", text)
+        if ftype == "error":
+            raise RuntimeError(str(frame.get("message") or "unknown brain error"))
+        # typing / welcome / pong / stale frames: keep waiting.
+
+
+async def hermes_turn(session_id: str, device_id: str, text: str):
+    """Send one utterance to the board's Hermes session; wait for its reply.
+
+    Returns ``("voice", pcm_bytes)`` when Hermes auto-TTS produced the spoken
+    reply (Kokoro WAV -> 24 kHz PCM), else ``("reply", text)`` when the reply
+    came back as text (auto-TTS off/failed) for the bridge to synthesize with
+    the same Kokoro voice. Raises on error/timeout so the caller can fall back.
+    """
+    if not HERMES_BRAIN_URL:
+        raise RuntimeError("HERMES_BRAIN_URL is not set")
+    # Wait briefly for a live brain. If one has EVER connected this run, give it
+    # up to ~3s to come back; if the brain was never up, fall back fast (0.5s) so
+    # an outage doesn't stall the board behind an extra sleep.
+    budget = 3.0 if _brain_ever_connected else 0.5
+    waited = 0.0
+    while waited < budget:
+        if _brain_connected:
+            break
+        await asyncio.sleep(0.05)
+        waited += 0.05
+    if not _brain_connected:
+        raise RuntimeError("Hermes brain not connected")
+
+    t0 = time.monotonic()
+    if not await brain_send_json({
+        "type": "user", "text": text, "device_id": device_id, "session_id": session_id,
+    }):
+        raise RuntimeError("failed to send utterance to Hermes brain")
+
+    try:
+        kind, payload = await _brain_next(
+            t0 + HERMES_BRAIN_TIMEOUT, session_id, HERMES_BRAIN_TIMEOUT)
+    except asyncio.TimeoutError:
+        raise TimeoutError(
+            f"Hermes brain reply timed out after {HERMES_BRAIN_TIMEOUT:.0f}s") from None
+    log.info("session=%s Hermes %s reply: %s in %.2fs",
+             session_id, kind,
+             len(payload) if kind == "voice" else repr(payload), time.monotonic() - t0)
+    return (kind, payload)
+
+
 async def ws_send(ws: WebSocket, payload: dict) -> bool:
     try:
         await ws.send_text(json.dumps(payload))
@@ -308,6 +501,7 @@ async def handle_conversation(ws: WebSocket, session_id: str):
     decode_warned = False
     had_speech = False
     silence_ms = 0
+    device_id = _load_device_id()  # Hermes session identity (stable board id)
     VAD_SILENCE_MS = 800  # trailing silence ends an utterance
     VAD_ENERGY = 300      # int16 frame mean-abs energy that counts as speech
 
@@ -323,8 +517,52 @@ async def handle_conversation(ws: WebSocket, session_id: str):
         log.info("session=%s audio negotiated: up=%dHz/%dms down=%dHz",
                  session_id, rate, fd, AUDIO_RATE)
 
+    async def _stream_pcm(pcm_buf: bytes) -> bool:
+        """Opus-encode 24 kHz PCM to the board; False if the device cut out."""
+        buf = np.frombuffer(pcm_buf, dtype=np.int16).tobytes()
+        for i in range(0, len(buf), d_frame_bytes):
+            chunk = buf[i:i + d_frame_bytes]
+            if len(chunk) < d_frame_bytes:
+                chunk = chunk + b"\x00" * (d_frame_bytes - len(chunk))
+            try:
+                await ws.send_bytes(encoder.encode(chunk, d_frame_samples))
+            except Exception:
+                log.info("session=%s device ended mid-tts (%d/%d bytes)", session_id, i, len(buf))
+                return False
+            await asyncio.sleep(0.001)
+        return True
+
+    async def _speak_audio(pcm_buf: bytes) -> None:
+        """Stream a spoken reply (Hermes auto-TTS audio) with tts start/stop brackets."""
+        if not await ws_send(ws, {"session_id": session_id, "type": "tts", "state": "start"}):
+            return
+        await _stream_pcm(pcm_buf)
+        await ws_send(ws, {"session_id": session_id, "type": "tts", "state": "stop"})
+
+    async def _speak_text(reply: str) -> None:
+        """Turn text into Kokoro audio and stream it (the stateless fallback path)."""
+        if not await ws_send(ws, {"session_id": session_id, "type": "tts", "state": "start"}):
+            return
+        if not await ws_send(ws, {
+            "session_id": session_id, "type": "tts", "state": "sentence_start", "text": reply,
+        }):
+            return
+        try:
+            audio = await asyncio.to_thread(call_tts, reply)
+            await _stream_pcm(audio)
+        except Exception as e:
+            log_response("TTS stream", "call_tts", e)
+        await ws_send(ws, {"session_id": session_id, "type": "tts", "state": "stop"})
+
     async def finalize():
-        """Transcribe buffered audio and stream a reply (realtime full-duplex)."""
+        """Transcribe buffered audio and stream a reply (realtime full-duplex).
+
+        Brain: the utterance goes to the board's Hermes session (xiaozhi platform,
+        device-id keyed) so sessions/memory/tools apply. Hermes auto-TTS returns the
+        spoken reply as audio ("voice"), or the reply as text ("reply") which the
+        bridge speaks with the same Kokoro voice. On any brain failure we fall back
+        to the stateless gx10 call so the board never goes mute.
+        """
         nonlocal pcm, processing, had_speech, silence_ms
         processing = True
         try:
@@ -338,33 +576,19 @@ async def handle_conversation(ws: WebSocket, session_id: str):
             if not await ws_send(ws, {"session_id": session_id, "type": "stt", "text": text}):
                 log.info("session=%s device ended before stt (%d pcm bytes)", session_id, len(pcm))
                 return
-            reply = await asyncio.to_thread(call_llm, text)
-            log.info("session=%s LLM reply=%r", session_id, reply)
-            if not await ws_send(ws, {"session_id": session_id, "type": "tts", "state": "start"}):
-                log.info("session=%s device ended before tts start", session_id)
-                return
-            if not await ws_send(ws, {
-                "session_id": session_id, "type": "tts", "state": "sentence_start", "text": reply,
-            }):
-                log.info("session=%s device ended before tts text", session_id)
-                return
+            t0 = time.monotonic()
             try:
-                audio = await asyncio.to_thread(call_tts, reply)
-                pcm_buf = np.frombuffer(audio, dtype=np.int16).tobytes()
-                for i in range(0, len(pcm_buf), d_frame_bytes):
-                    chunk = pcm_buf[i:i + d_frame_bytes]
-                    if len(chunk) < d_frame_bytes:
-                        chunk = chunk + b"\x00" * (d_frame_bytes - len(chunk))
-                    try:
-                        await ws.send_bytes(encoder.encode(chunk, d_frame_samples))
-                    except Exception:
-                        log.info("session=%s device ended mid-tts (%d/%d bytes)",
-                                 session_id, i, len(pcm_buf))
-                        return
-                    await asyncio.sleep(0.001)
+                kind, payload = await hermes_turn(session_id, device_id, text)
+                if kind == "voice":
+                    await _speak_audio(payload)
+                else:
+                    await _speak_text(payload)
             except Exception as e:
-                log_response("TTS stream", "call_tts", e)
-            await ws_send(ws, {"session_id": session_id, "type": "tts", "state": "stop"})
+                log.warning("session=%s Hermes brain failed (%s); stateless gx10 fallback",
+                            session_id, e)
+                await _speak_text(await asyncio.to_thread(call_llm, text))
+            log.info("session=%s turn total %.2fs brain=%s", session_id,
+                     time.monotonic() - t0, "hermes" if _brain_connected else "gx10")
         except Exception as e:
             # never sever the board's socket on a model blip
             log.exception("session=%s turn failed: %s", session_id, e)
@@ -396,6 +620,11 @@ async def handle_conversation(ws: WebSocket, session_id: str):
                 t = j.get("type")
                 if t == "hello":
                     configure(j.get("audio_params") or {})
+                    # Prefer the board's own identity when the firmware reports it
+                    # (hello "mac" is the stable chip MAC; device_id is a fw uuid).
+                    dev_id = j.get("device_id") or j.get("mac")
+                    if isinstance(dev_id, str) and dev_id.strip():
+                        device_id = dev_id.strip()
                     await ws_send(ws, {
                         "type": "hello", "transport": "websocket", "session_id": session_id,
                         "audio_params": {"format": "opus", "sample_rate": AUDIO_RATE,
@@ -480,25 +709,20 @@ async def healthz():
     return {"status": "ok"}
 
 
-def main():
-    import threading
+async def run_servers():
     import uvicorn
 
-    # HTTP (OTA) on OTA_PORT, WebSocket on WS_PORT — two servers, one process.
-    ota_cfg = uvicorn.Config(app, host=HOST, port=OTA_PORT, log_level="info")
-    ota_srv = uvicorn.Server(ota_cfg)
-
-    def run_ota():
-        ota_srv.run()
-
-    threading.Thread(target=run_ota, daemon=True).start()
+    # One event loop for both servers — the Hermes brain connection must live on
+    # the same loop as the board WebSocket handler that awaits it.
+    ota_srv = uvicorn.Server(uvicorn.Config(app, host=HOST, port=OTA_PORT, log_level="info"))
+    ws_srv = uvicorn.Server(
+        uvicorn.Config(app, host=HOST, port=WS_PORT, log_level="info", ws="websockets"))
     log.info("OTA  http://%s:%s/xiaozhi/ota/", LAN_IP, OTA_PORT)
     log.info("WS   %s", WS_URL)
-
-    ws_cfg = uvicorn.Config(app, host=HOST, port=WS_PORT, log_level="info", ws="websockets")
-    return uvicorn.Server(ws_cfg)
+    if HERMES_BRAIN_URL:
+        asyncio.create_task(_brain_connect_loop())
+    await asyncio.gather(ota_srv.serve(), ws_srv.serve())
 
 
 if __name__ == "__main__":
-    server = main()
-    server.run()
+    asyncio.run(run_servers())
