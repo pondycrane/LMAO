@@ -1,0 +1,14 @@
+[Unit]
+Description=Kokoro-82M TTS server (RoboDog bridge TTS on :8004)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/home/pondycrane/kokoro-venv/bin/python /home/pondycrane/kokoro_server.py
+WorkingDirectory=/home/pondycrane
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target
