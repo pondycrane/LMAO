@@ -4,7 +4,7 @@ The XiaoZhi AI voice firmware for the Waveshare ESP32-S3-RLCD-4.2 is a
 prebuilt release package published by Waveshare (https://github.com/waveshareteam/ESP32-AIChats).
 Per the repo no-vendoring rule we never commit the upstream binary: it is
 fetched through Bazel's http_file (cached in the Bazel repo cache) and carried
-in the flash target's runfiles by `//robodog_client:flash_xiaozhi`.
+in the flash target's runfiles by `//robodog_client:flash_robodog_hermes`.
 
 The URL is pinned to the immutable commit of the day (not the moving
 `master` branch) AND the file is sha256-pinned, so any upstream change fails

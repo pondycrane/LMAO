@@ -52,7 +52,7 @@ genrule(
 )
 
 sh_binary(
-    name = "flash_xiaozhi",
+    name = "flash_robodog_hermes",
     srcs = ["xiaozhi_flash.sh"],
     data = [":xiaozhi_fw_bin"],
     tags = ["manual"],
