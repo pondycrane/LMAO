@@ -7,7 +7,7 @@
 # `python3 -m esptool`. The firmware replaces the calendar app on the board;
 # reflash `bazel run //robodog_client:flash_firmware` to restore it.
 #
-#   bazel run //robodog_client:flash_xiaozhi [-- --port /dev/ttyACM0]
+#   bazel run //robodog_client:flash_robodog_hermes [-- --port /dev/ttyACM0]
 #
 # The image (merged-binary.bin) is fetched by Bazel (see repos.bzl: pinned
 # commit + sha256, Bazel cache) and carried in runfiles; a sha256-verified
@@ -60,7 +60,7 @@ if [ -z "$FW" ]; then
     FW="$WORK/$MERGED"
 fi
 
-[ -f "$FW" ] || { echo "error: merged-binary.bin not found (run via 'bazel run //robodog_client:flash_xiaozhi')" >&2; exit 1; }
+[ -f "$FW" ] || { echo "error: merged-binary.bin not found (run via 'bazel run //robodog_client:flash_robodog_hermes')" >&2; exit 1; }
 echo "xiaozhi firmware: $FW ($(stat -c%s "$FW") bytes)"
 
 # 2. host esptool -----------------------------------------------------------

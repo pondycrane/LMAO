@@ -58,7 +58,7 @@ http_archive(
 # ── RoboDog voice: XiaoZhi prebuilt RLCD-4.2 firmware (fetched, never vendored)
 # A Voice-AI firmware for the same Waveshare board; see repos.bzl for the
 # immutable commit + sha256 pin. Fetched into the Bazel cache, extracted by the
-# genrule below, flashed by //robodog_client:flash_xiaozhi.
+# genrule below, flashed by //robodog_client:flash_robodog_hermes.
 robodog_xiaozhi_fetch()
 
 # ── Rust client: pinned RNS/LXMF protocol crates (PR #168) ─────────────────
