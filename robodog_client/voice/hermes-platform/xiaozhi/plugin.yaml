@@ -1,0 +1,31 @@
+name: xiaozhi
+label: XiaoZhi Voice Companion
+kind: platform
+version: 1.0.0
+description: >
+  RoboDog voice-board platform adapter for Hermes Agent (Waveshare ESP32-S3-RLCD-4.2
+  running XiaoZhi voice firmware).  The board is a first-class Hermes gateway client:
+  the XiaoZhi WebSocket bridge (`robodog_client/voice/voice_bridge.py`) is the realtime
+  transport (Opus codec, energy VAD), and this adapter gives the board Hermes sessions,
+  multi-turn memory, tools/skills and auth keyed by the board Device-Id/MAC.  Spoken
+  replies use the gateway's auto-TTS (`tts.provider: openai` -> our Kokoro-82M server),
+  streamed back through the bridge to the board speaker.
+author: LMAO
+requires_env: []
+optional_env:
+  - name: XIAOZHI_BRAIN_HOST
+    description: "IP the brain WebSocket server binds (default 127.0.0.1 — the bridge is local)"
+    prompt: "Brain WebSocket bind host"
+    password: false
+  - name: XIAOZHI_BRAIN_PORT
+    description: "Port the brain WebSocket server listens on for the voice bridge (default 8101)"
+    prompt: "Brain WebSocket port"
+    password: false
+  - name: XIAOZHI_ALLOWED_USERS
+    description: "Comma-separated device IDs (board MAC/Device-Id) allowed to talk to the agent"
+    prompt: "Allowed device IDs (comma-separated)"
+    password: false
+  - name: XIAOZHI_ALLOW_ALL_USERS
+    description: "Allow any board on the LAN to trigger the agent (dev only)"
+    prompt: "Allow all devices? (true/false)"
+    password: false
