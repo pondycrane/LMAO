@@ -57,3 +57,18 @@ sh_binary(
     data = [":xiaozhi_fw_bin"],
     tags = ["manual"],
 )
+
+# ── Voice-AI backend glue (host-side services) ────────────────────────────
+# Bridge + TTS server + systemd units that give the XiaoZhi voice firmware a
+# local conversation loop (see README "Voice mode"). Reference/deploy copy —
+# the running instance is ops-managed at ~/xiaozhi + spark-5307:8004.
+filegroup(
+    name = "voice_backend",
+    srcs = [
+        "voice/voice_bridge.py",
+        "voice/kokoro_server.py",
+        "voice/lmao-robodog-voice.service",
+        "voice/kokoro-tts.service",
+    ],
+    tags = ["manual"],
+)
