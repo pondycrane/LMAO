@@ -1,5 +1,5 @@
 [Unit]
-Description=LMAO RoboDog local XiaoZhi voice bridge (spark ASR/TTS + gx10 brain)
+Description=LMAO RoboDog local XiaoZhi voice bridge (Hermes xiaozhi brain + Kokoro TTS)
 After=network-online.target
 Wants=network-online.target
 
@@ -23,6 +23,13 @@ Environment=TTS_MODEL=kokoro-82m
 Environment=TTS_VOICE=af_heart
 Environment=TTS_RESPONSE_FORMAT=wav
 Environment=TTS_API_KEY=dummy-local-noauth
+# Hermes brain: the board's Hermes session lives in the hermes-gateway process.
+# The bridge connects to the xiaozhi platform's brain WebSocket and submits each
+# utterance as a session message; replies come back as auto-TTS (Kokoro) audio.
+# HERMES_BRAIN_URL defaults to ws://127.0.0.1:8101/xiaozhi/brain.
+# DEVICE_ID: stable board identity for the Hermes session (MAC preferred); when
+# unset the bridge uses the XiaoZhi hello device_id/mac or a persisted uuid.
+#Environment=DEVICE_ID=<board-mac-here>
 Environment=LLM_BASE_URL=http://gx10-f156:8000/v1
 Environment=LLM_MODEL=deepseek-ai/DeepSeek-V4-Flash-0731
 Environment=LLM_API_KEY=dummy-local-noauth
