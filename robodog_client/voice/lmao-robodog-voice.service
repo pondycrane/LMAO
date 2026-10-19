@@ -1,0 +1,33 @@
+[Unit]
+Description=LMAO RoboDog local XiaoZhi voice bridge (spark ASR/TTS + gx10 brain)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/xiaozhi
+ExecStart=%h/xiaozhi/.venv/bin/python %h/xiaozhi/voice_bridge.py
+Environment=LAN_IP=192.168.50.153
+# ASR: local faster-whisper base (spark-5307:8001 does not return compute to
+# this host today despite reachable routing; flip ASR_BASE_URL when it does)
+Environment=WHISPER_MODEL=base
+#Environment=ASR_BASE_URL=http://spark-5307:8001
+#Environment=ASR_MODEL=small
+#Environment=ASR_API_KEY=dummy-local-noauth
+# TTS: Kokoro-82M served on spark-5307:8004 (cs: CosyVoice-8002 is broken —
+# torch/transformers skew vs the ARM64 GB10 env). Kokoro outputs 24k mono,
+# which is exactly the board downlink rate (no resample).
+Environment=TTS_MODE=openai
+Environment=TTS_BASE_URL=http://spark-5307:8004
+Environment=TTS_MODEL=kokoro-82m
+Environment=TTS_VOICE=af_heart
+Environment=TTS_RESPONSE_FORMAT=wav
+Environment=TTS_API_KEY=dummy-local-noauth
+Environment=LLM_BASE_URL=http://gx10-f156:8000/v1
+Environment=LLM_MODEL=deepseek-ai/DeepSeek-V4-Flash-0731
+Environment=LLM_API_KEY=dummy-local-noauth
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target
