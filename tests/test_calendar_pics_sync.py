@@ -31,15 +31,28 @@ class TestSubjectSelection:
     def test_juliet_picks_pokemon_pool(self):
         assert cps.pick_subject("juliet", "tennis", "uid1") in cps.POKE_SUBJECTS
 
-    def test_wesley_ice_skating_is_limbed_not_legless(self):
-        # a legless fish/dolphin must NOT be picked for ice skating
-        for i in range(30):
+    def test_wesley_subject_is_limbed_sea_or_paw_for_skating(self):
+        # a legless fish/dolphin must NOT be picked for ice skating; PAW dogs ok
+        for i in range(60):
             s = cps.pick_subject("wesley", "ice skating", f"uid{i}")
-            assert s in cps.SEA_COHERENT["ice skating"]
+            assert s in cps.PAW_SUBJECTS or s in cps.SEA_COHERENT["ice skating"]
             assert s not in ("dolphin", "whale", "shark", "fish")
 
-    def test_wesley_swimming_allows_any_sea_animal(self):
-        assert cps.pick_subject("wesley", "swimming", "u1") in cps.SEA_SUBJECTS
+    def test_wesley_allows_sea_or_paw(self):
+        for i in range(30):
+            s = cps.pick_subject("wesley", "swimming", f"uid{i}")
+            assert s in cps.SEA_SUBJECTS or s in cps.PAW_SUBJECTS
+
+    def test_wesley_gets_both_themes_across_events(self):
+        # over many uids Wesley should hit both PAW Patrol pups and sea animals
+        got = {cps.pick_subject("wesley", "tennis", f"uid{i}") for i in range(120)}
+        assert got & set(cps.PAW_SUBJECTS)   # some PAW Patrol pups appear
+        assert got & set(cps.SEA_SUBJECTS)   # and some sea animals
+
+    def test_pick_theme_deterministic_per_uid(self):
+        assert cps.pick_theme("wesley", "tennis", "abc") == \
+            cps.pick_theme("wesley", "tennis", "abc")
+        assert cps.pick_theme("juliet", "tennis", "abc") == "pokemon"
 
     def test_seeded_choice_is_deterministic_per_uid(self):
         assert cps._seeded_choice(cps.POKE_SUBJECTS, "abc") == \
@@ -56,7 +69,8 @@ class TestCombo:
     def test_wesley_ice_skating_query_is_coherent(self):
         q = cps.build_combo("W ice skating 1:30", "wesley", "uid1")
         assert q[0].endswith("ice skating")
-        assert q[0].split()[0] in cps.SEA_COHERENT["ice skating"]
+        lead = q[0].rsplit(" ice skating", 1)[0]  # subject; may be multi-word
+        assert lead in cps.SEA_COHERENT["ice skating"] or lead in cps.PAW_SUBJECTS
 
     def test_juliet_tennis_query_pairs_subject_and_action(self):
         q = cps.build_combo("J tennis 4pm Mon", "juliet", "uid2")

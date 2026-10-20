@@ -10,10 +10,11 @@ not yet in ``cal_pics``, this stage:
 4. stores it under the event's ``pic`` key.
 
 Subjects are paired with the event's ACTION and are kept physically coherent
-(a legless dolphin is not asked to ice-skate; Wesley's sea-animal theme falls
-back to a limbed sea animal like a seal/otter/penguin, Juliet's pokemon theme
-can play any sport).  The subject is chosen pseudo-randomly per event (deterministic
-per ``uid`` so re-runs are idempotent) rather than always the same animal.
+(a legless dolphin is not asked to ice-skate; Wesley alternates between a
+sea-animal theme — which falls back to a limbed seal/otter/penguin — and a
+PAW Patrol puppy; Juliet's pokemon theme can play any sport).  The theme +
+subject are chosen pseudo-randomly per event (deterministic per ``uid`` so
+re-runs are idempotent) rather than always the same character.
 
 Model reasoning: if ``LMAO_IMAGE_LLM_URL`` points at an OpenAI-compatible chat
 endpoint, a small prompt asks it to turn the seeded theme subject + event action
@@ -65,6 +66,11 @@ POKE_SUBJECTS = [
 SEA_SUBJECTS = [
     "dolphin", "orca", "sea turtle", "octopus", "crab", "jellyfish",
     "whale", "shark", "lobster", "seal", "sea lion", "otter", "penguin",
+]
+# Wesley can also draw a PAW Patrol puppy (a dog can do any action). Local model
+# only — not available from Wikimedia Commons (proprietary IP).
+PAW_SUBJECTS = [
+    "chase", "marshall", "skye", "rubble", "rocky", "zuma", "everest", "tracker",
 ]
 # for Wesley, a "limbed/coherent" pool per action (no legless fish doing tennis)
 SEA_COHERENT: dict[str, list[str]] = {
@@ -123,13 +129,35 @@ def extract_action(title: str) -> str:
     return DEFAULT_ACTION
 
 
-def pick_subject(participant: str, action: str, uid: str) -> str:
-    """A coherent, seeded per-event subject for the participant's theme."""
+def pick_theme(participant: str, action: str, uid: str) -> str:
+    """The per-event theme label ('pokemon' / 'sea animal' / 'paw patrol')."""
     if participant == "juliet":
-        return _seeded_choice(POKE_SUBJECTS, uid)
-    # wesley -> sea animal, constrained to ones that can do the action
-    pool = SEA_COHERENT.get(action, SEA_SUBJECTS)
-    return _seeded_choice(pool, uid)
+        return "pokemon"
+    # Wesley: alternate sea animal / PAW Patrol per event (uid-seeded variety).
+    return _seeded_choice(["sea animal", "paw patrol"], uid + ":theme")
+
+
+def pick_subject_theme(participant: str, action: str, uid: str) -> tuple[str, str]:
+    """Return (theme_label, subject) seeded per event so recurring events vary.
+
+    ``theme_label`` is the single label used downstream (generation prompt and
+    the vision content gate). Juliet always gets a pokemon; Wesley alternates
+    sea animal / PAW Patrol. Wesley's sea pool stays physically coherent with
+    the action (no legless fish ice-skating); PAW Patrol dogs can do anything.
+    """
+    theme = pick_theme(participant, action, uid)
+    if theme == "pokemon":
+        pool = POKE_SUBJECTS
+    elif theme == "paw patrol":
+        pool = PAW_SUBJECTS
+    else:
+        pool = SEA_COHERENT.get(action, SEA_SUBJECTS)
+    return theme, _seeded_choice(pool, uid + ":subject")
+
+
+def pick_subject(participant: str, action: str, uid: str) -> str:
+    """The uid-seeded subject (theme label not needed) — back-compat helper."""
+    return pick_subject_theme(participant, action, uid)[1]
 
 
 def build_combo(title: str, participant: str, uid: str) -> list[str]:
@@ -143,13 +171,13 @@ def build_combo(title: str, participant: str, uid: str) -> list[str]:
     reasoned fallback is used.
     """
     action = extract_action(title)
-    subject = pick_subject(participant, action, uid)
+    theme, subject = pick_subject_theme(participant, action, uid)
     primary = f"{subject} {action}".strip() if action else subject
     queries = [primary, subject]
     url = os.environ.get("LMAO_IMAGE_LLM_URL")
     if url:
         try:
-            combo = _llm_combo(url, title, participant, subject, action)
+            combo = _llm_combo(url, title, theme, subject, action)
             if combo:
                 act = combo.get("action") or action
                 base = f"{subject} {act}".strip() if act else subject
@@ -202,16 +230,16 @@ def _extract_json_object(text: str) -> dict:
     return obj if isinstance(obj, dict) else {}
 
 
-def _llm_combo(url: str, title: str, participant: str, subject: str, action: str) -> dict:
+def _llm_combo(url: str, title: str, theme: str, subject: str, action: str) -> dict:
     """Ask the local model for clean line-drawing queries for the chosen subject.
 
-    ``subject`` is the uid-seeded per-event pick (guarantees variety across
-    events); the model must keep it and may only refine the action / phrasing,
-    so a recurring event does not collapse to the same character every time.
+    ``theme`` is the resolved per-event label ('pokemon' / 'sea animal' /
+    'paw patrol'), ``subject`` the uid-seeded per-event pick. The model must
+    keep the subject and may only refine the action / phrasing, so a recurring
+    event does not collapse to the same character every time.
     """
     base = url.rstrip("/")
     endpoint = base + "/chat/completions" if base.endswith("/v1") else base + "/v1/chat/completions"
-    theme = "pokemon" if participant == "juliet" else "sea animal"
     action_hint = action or "none — invent a simple visual one the character can do that reads well as a line drawing"
     sys_msg = (
         "You write image-search queries for a kid's family-calendar picture tile. "
@@ -295,8 +323,12 @@ def search_sources(query: str):
 
 
 def build_gen_prompt(subject_word: str, theme_label: str, action: str) -> str:
-    theme = ("a cute sea animal" if theme_label == "sea animal"
-             else "a cute pokemon-like creature")
+    if theme_label == "sea animal":
+        theme = "a cute sea animal"
+    elif theme_label == "paw patrol":
+        theme = "a cute PAW Patrol puppy dog"
+    else:
+        theme = "a cute pokemon-like creature"
     activity = f" doing {action}" if action else " doing a fun activity"
     return (
         f"{subject_word}, {theme}{activity}, flat BLACK line art on a WHITE "
@@ -661,9 +693,8 @@ def main(argv: list[str] | None = None) -> int:
         queries = build_combo(title, participant, uid)
         primary = queries[0]
         kw = "LLM" if os.environ.get("LMAO_IMAGE_LLM_URL") else "reasoned"
-        subject_word = primary.split()[0] if primary.split() else participant
-        theme_label = "pokemon" if participant == "juliet" else "sea animal"
         action = extract_action(title)
+        theme_label, subject_word = pick_subject_theme(participant, action, uid)
         print(f"== {pic} ({','.join(participants)}): '{title}' "
               f"-> [{kw}] {queries} [local-gen + commons]")
         try:
