@@ -78,8 +78,11 @@ health. Absent anything → LOUD SKIP:
 
 ```bash
 export XDG_RUNTIME_DIR=/run/user/$(id -u)
-E2E_RUNS=3 ~/xiaozhi/.venv/bin/python robodog_client/voice/hermes_voice_e2e.py \
-  --corpus time --artifacts "$ARTIFACTS_DIR"
+bazel run //robodog_client:hermes_voice_e2e -- --corpus time \
+  --artifacts "$ARTIFACTS_DIR"
+# E2E_RUNS default 3; `E2E_RUNS=…` still overrides (bazel run env).
+# Equivalently, direct venv: E2E_RUNS=3 ~/xiaozhi/.venv/bin/python \
+#   robodog_client/voice/hermes_voice_e2e.py --corpus time --artifacts "$ARTIFACTS_DIR"
 ```
 
 - Default 3 consecutive loops (acceptance criterion from issue #267) — fresh

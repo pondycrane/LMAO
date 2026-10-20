@@ -76,6 +76,42 @@ sh_binary(
 # Bridge + TTS server + systemd units that give the XiaoZhi voice firmware a
 # local conversation loop (see README "Voice mode"). Reference/deploy copy —
 # the running instance is ops-managed at ~/xiaozhi + spark-5307:8004.
+#
+# The bridge/E2E run under the ops venv (~/xiaozhi/.venv): their Python deps
+# (faster_whisper, fastapi, numpy, opuslib, soundfile, pyserial, pillow ...)
+# are NOT in the @lmao_pip bazel set, so these are sh_binary entrypoints that
+# exec the SOURCE-TREE copy (via BUILD_WORKSPACE_DIRECTORY on `bazel run`) in
+# that venv — the same host-venv pattern as the firmware flash/build targets.
+#
+#   bazel run //robodog_client:hermes_voice_e2e [-- --corpus time]
+#   bazel run //robodog_client:make_corpus [-- --verify]
+sh_binary(
+    name = "hermes_voice_e2e",
+    srcs = ["voice/run_hermes_voice_e2e.sh"],
+    data = [
+        "capture.py",
+        "voice/hermes_voice_e2e.py",
+        "voice/voice_bridge.py",
+        "//robodog_client:voice_corpus",
+    ],
+    tags = ["manual"],
+)
+
+sh_binary(
+    name = "make_corpus",
+    srcs = ["voice/run_make_corpus.sh"],
+    data = ["voice/make_corpus.py"],
+    tags = ["manual"],
+)
+
+filegroup(
+    name = "voice_corpus",
+    srcs = [
+        "voice/corpus/corpus.json",
+    ] + glob(["voice/corpus/*.wav"]) + glob(["voice/corpus/*.txt"]),
+    tags = ["manual"],
+)
+
 filegroup(
     name = "voice_backend",
     srcs = [
