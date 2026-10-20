@@ -58,6 +58,18 @@ from faster_whisper import WhisperModel
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 log = logging.getLogger("voice_bridge")
+# Optional duplicate of the INFO+ stream into a plain file — the E2E
+# orchestrator's deterministic assertion source (no journalctl churn, no
+# journald dependency). Set BRIDGE_LOG_FILE in the service unit.
+_LOG_FILE = os.environ.get("BRIDGE_LOG_FILE", "").strip()
+if _LOG_FILE:
+    try:
+        _fh = logging.FileHandler(_LOG_FILE)
+        _fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s"))
+        log.addHandler(_fh)
+        log.info("voice bridge log file: %s", _LOG_FILE)
+    except OSError as e:
+        log.warning("could not open BRIDGE_LOG_FILE %s: %s", _LOG_FILE, e)
 
 HOST = os.environ.get("BRIDGE_HOST", "0.0.0.0")
 WS_PORT = int(os.environ.get("BRIDGE_WS_PORT", "8000"))
@@ -476,6 +488,85 @@ async def ws_send(ws: WebSocket, payload: dict) -> bool:
         return False
 
 
+# ---------------------------------------------------------------------------
+# Active-session registry + module-level stream helpers (shared by the live
+# conversation loop and the E2E_STT injection endpoint).
+# ---------------------------------------------------------------------------
+ACTIVE_SESSIONS = {}  # session_id -> {"ws": WebSocket, "device_id": str}
+
+
+async def stream_pcm_to(ws: WebSocket, session_id: str, pcm_buf: bytes) -> bool:
+    """Opus-encode 24 kHz PCM to the board; False if the device cut out."""
+    buf = np.frombuffer(pcm_buf, dtype=np.int16).tobytes()
+    for i in range(0, len(buf), FRAME_BYTES):
+        chunk = buf[i:i + FRAME_BYTES]
+        if len(chunk) < FRAME_BYTES:
+            chunk = chunk + b"\x00" * (FRAME_BYTES - len(chunk))
+        try:
+            await ws.send_bytes(get_encoder().encode(chunk, FRAME_SAMPLES))
+        except Exception:
+            log.info("session=%s device ended mid-tts (%d/%d bytes)",
+                     session_id, i, len(buf))
+            return False
+        await asyncio.sleep(0.001)
+    return True
+
+
+async def speak_audio_to(ws: WebSocket, session_id: str, pcm_buf: bytes) -> None:
+    """Stream a spoken reply (Hermes auto-TTS audio) with tts start/stop brackets."""
+    if not await ws_send(ws, {"session_id": session_id, "type": "tts", "state": "start"}):
+        return
+    await stream_pcm_to(ws, session_id, pcm_buf)
+    await ws_send(ws, {"session_id": session_id, "type": "tts", "state": "stop"})
+
+
+async def speak_text_to(ws: WebSocket, session_id: str, reply: str) -> None:
+    """Turn text into Kokoro audio and stream it to the board session."""
+    if not await ws_send(ws, {"session_id": session_id, "type": "tts", "state": "start"}):
+        return
+    if not await ws_send(ws, {
+        "session_id": session_id, "type": "tts", "state": "sentence_start", "text": reply,
+    }):
+        return
+    try:
+        audio = await asyncio.to_thread(call_tts, reply)
+        await stream_pcm_to(ws, session_id, audio)
+    except Exception as e:
+        log_response("TTS stream", "call_tts", e)
+    await ws_send(ws, {"session_id": session_id, "type": "tts", "state": "stop"})
+
+
+@app.post("/xiaozhi/inject")
+async def inject_utterance(payload: dict):
+    """E2E fallback: push a canned utterance into the board's live Hermes
+    session (issue #267 E2E_STT_TEXT path) — covers brain->TTS->speaker->
+    display, skipping only the real-mic/ASR leg. Mirrors handle_conversation's
+    stt -> hermes_turn -> speak sequence so the board sees the same frames.
+    """
+    text = str(payload.get("text") or "").strip()
+    if not text:
+        return {"error": "text required"}
+    sid = str(payload.get("session_id") or "").strip()
+    entry = ACTIVE_SESSIONS.get(sid) if sid else None
+    if entry is None and ACTIVE_SESSIONS:
+        sid, entry = next(reversed(ACTIVE_SESSIONS.items()))  # most recent connect
+    if entry is None:
+        return {"error": "no live board session", "status": 409}
+    ws = entry["ws"]
+    if not await ws_send(ws, {"session_id": sid, "type": "stt", "text": text}):
+        return {"error": "board session ended", "status": 409}
+    try:
+        kind, payload = await hermes_turn(sid, entry["device_id"], text)
+    except Exception as e:
+        log.warning("session=%s inject Hermes brain failed (%s)", sid, e)
+        return {"error": "hermes failed", "status": 502}
+    if kind == "voice":
+        await speak_audio_to(ws, sid, payload)
+    else:
+        await speak_text_to(ws, sid, payload)
+    return {"ok": True, "kind": kind}
+
+
 async def handle_conversation(ws: WebSocket, session_id: str):
     """Wait for listen frames until stop, then run ASR -> LLM -> TTS and stream.
 
@@ -518,41 +609,13 @@ async def handle_conversation(ws: WebSocket, session_id: str):
                  session_id, rate, fd, AUDIO_RATE)
 
     async def _stream_pcm(pcm_buf: bytes) -> bool:
-        """Opus-encode 24 kHz PCM to the board; False if the device cut out."""
-        buf = np.frombuffer(pcm_buf, dtype=np.int16).tobytes()
-        for i in range(0, len(buf), d_frame_bytes):
-            chunk = buf[i:i + d_frame_bytes]
-            if len(chunk) < d_frame_bytes:
-                chunk = chunk + b"\x00" * (d_frame_bytes - len(chunk))
-            try:
-                await ws.send_bytes(encoder.encode(chunk, d_frame_samples))
-            except Exception:
-                log.info("session=%s device ended mid-tts (%d/%d bytes)", session_id, i, len(buf))
-                return False
-            await asyncio.sleep(0.001)
-        return True
+        return await stream_pcm_to(ws, session_id, pcm_buf)
 
     async def _speak_audio(pcm_buf: bytes) -> None:
-        """Stream a spoken reply (Hermes auto-TTS audio) with tts start/stop brackets."""
-        if not await ws_send(ws, {"session_id": session_id, "type": "tts", "state": "start"}):
-            return
-        await _stream_pcm(pcm_buf)
-        await ws_send(ws, {"session_id": session_id, "type": "tts", "state": "stop"})
+        await speak_audio_to(ws, session_id, pcm_buf)
 
     async def _speak_text(reply: str) -> None:
-        """Turn text into Kokoro audio and stream it (the stateless fallback path)."""
-        if not await ws_send(ws, {"session_id": session_id, "type": "tts", "state": "start"}):
-            return
-        if not await ws_send(ws, {
-            "session_id": session_id, "type": "tts", "state": "sentence_start", "text": reply,
-        }):
-            return
-        try:
-            audio = await asyncio.to_thread(call_tts, reply)
-            await _stream_pcm(audio)
-        except Exception as e:
-            log_response("TTS stream", "call_tts", e)
-        await ws_send(ws, {"session_id": session_id, "type": "tts", "state": "stop"})
+        await speak_text_to(ws, session_id, reply)
 
     async def finalize():
         """Transcribe buffered audio and stream a reply (realtime full-duplex).
@@ -568,6 +631,11 @@ async def handle_conversation(ws: WebSocket, session_id: str):
         try:
             if not pcm:
                 return
+            buf = np.frombuffer(bytes(pcm), dtype=np.int16)
+            rms = float(np.sqrt(np.mean(np.square(buf, dtype=np.float64)))) if buf.size else 0.0
+            log.info("session=%s finalize: %d bytes pcm rms=%.0f peak=%.0f",
+                     session_id, len(pcm), rms,
+                     float(np.abs(buf).max()) if buf.size else 0.0)
             text = await asyncio.to_thread(call_asr, bytes(pcm), session_rate)
             log.info("session=%s turn: %d bytes pcm -> stt=%r",
                      session_id, len(pcm), text)
@@ -603,12 +671,21 @@ async def handle_conversation(ws: WebSocket, session_id: str):
             msg = await ws.receive()
             if msg["type"] == "websocket.disconnect":
                 if pcm:
-                    try:
-                        txt = await asyncio.to_thread(call_asr, bytes(pcm), session_rate)
-                        log.info("session=%s disconnect with %d pcm bytes -> stt=%r",
-                                 session_id, len(pcm), txt)
-                    except Exception as e:
-                        log.exception("session=%s disconnect-asr failed: %s", session_id, e)
+                    # A disconnect with a multi-minute buffer is ambient silence
+                    # from a session that never VAD-stopped (no real utterance);
+                    # ASRing it wastes the single whisper model and jams live
+                    # turns (measured: 2 min of noise -> 20+s whisper). Cap it.
+                    if len(pcm) / (session_rate * 2) <= 45:
+                        try:
+                            txt = await asyncio.to_thread(call_asr, bytes(pcm), session_rate)
+                            log.info("session=%s disconnect with %d pcm bytes -> stt=%r",
+                                     session_id, len(pcm), txt)
+                        except Exception as e:
+                            log.exception("session=%s disconnect-asr failed: %s", session_id, e)
+                    else:
+                        log.info("session=%s disconnect with %d pcm bytes; "
+                                 "skipping ASR (long/silent buffer)",
+                                 session_id, len(pcm))
                 return
             if msg["type"] != "websocket.receive":
                 continue
@@ -625,6 +702,9 @@ async def handle_conversation(ws: WebSocket, session_id: str):
                     dev_id = j.get("device_id") or j.get("mac")
                     if isinstance(dev_id, str) and dev_id.strip():
                         device_id = dev_id.strip()
+                    entry = ACTIVE_SESSIONS.get(session_id)
+                    if entry is not None:
+                        entry["device_id"] = device_id
                     await ws_send(ws, {
                         "type": "hello", "transport": "websocket", "session_id": session_id,
                         "audio_params": {"format": "opus", "sample_rate": AUDIO_RATE,
@@ -680,10 +760,12 @@ async def handle_conversation(ws: WebSocket, session_id: str):
 async def ws_endpoint(ws: WebSocket):
     await ws.accept()
     session_id = os.urandom(8).hex()
+    ACTIVE_SESSIONS[session_id] = {"ws": ws, "device_id": ""}
     log.info("device connected session=%s", session_id)
     try:
         await handle_conversation(ws, session_id)
     finally:
+        ACTIVE_SESSIONS.pop(session_id, None)
         log.info("device disconnected session=%s", session_id)
 
 

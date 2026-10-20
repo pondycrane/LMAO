@@ -680,6 +680,47 @@ synced (frames 1-3 in the shot; frame 0 is the pre-sync offline render).
 (That capture predates the `v < 3` row cap from the LEFT-align layout PR —
 current builds draw the headline picture + 2 compact rows.)
 
+#### 7d.2 Hermes voice mode (XiaoZhi) — autonomous voice-loop E2E
+
+The same Waveshare board can run the **XiaoZhi voice firmware** (the REST of
+LMAO's hermes story): self-built from the pinned upstream source with the
+RoboDog RD_SHOT capture hook **and** the **RD_LISTEN software button** (a
+serial trigger that raises the same `StartListening()` the BOOT button does —
+the WN9 wake word is unreliable on this board, so E2E uses the software
+button), flashed via `bazel run //robodog_client:flash_robodog_hermes`. This
+replaces the calendar app (reflash `//robodog_client:flash_firmware` to
+restore it).
+
+Voice loop (all local): the board streams Opus over WebSocket to the
+`lmao-robodog-voice` bridge (systemd user service, repo reference copy in
+`robodog_client/voice/`, ops copy at `~/xiaozhi`), which ASRs with
+faster-whisper, submits each utterance to the board's **Hermes session**
+(hermes-gateway's xiaozhi platform plugin, stable board identity
+`~/xiaozhi/device_id`), and streams the reply back as 24 kHz Kokoro TTS
+(`spark-5307:8004`, voice `af_heart`) to the board speaker + subtitle on the
+RLCD. `capture.py --listen` opens a session ad hoc.
+
+**Autonomous voice-loop E2E (`robodog_client/voice/hermes_voice_e2e.py`,
+coordinator of issue #267)** — one host command, no human, no wake word:
+
+```bash
+sudo gpasswd -a $(whoami) audio          # ALSA test speaker/mic access
+export XDG_RUNTIME_DIR=/run/user/$(id -u)
+E2E_RUNS=3 ~/xiaozhi/.venv/bin/python robodog_client/voice/hermes_voice_e2e.py
+```
+
+It sends `RD_LISTEN`, plays a pinned corpus command (TTS-synthesized English
+WAVs + known transcripts in `robodog_client/voice/corpus/`, faithful via
+`make_corpus.py`) into the board mic through the test speaker (USB *PnP Audio
+Device*, ALSA card `Device`, volume 0.7), asserts the bridge journal
+(`device connected` / `listen start` / `ASR text=` match / `Hermes ... reply:`
+non-empty), captures the board's spoken reply on the test mic for **ring
+closure** (re-ASR aligns with the reply/subtitle), and reads the STT/TTS
+subtitle back off the RLCD via `capture.py --describe`. `E2E_STT_TEXT=<canned>`
+switches to the bridge's `POST /xiaozhi/inject` fallback (skips only the mic
+leg). Loud-skip when the board (`0x303A:0x1001`) or the test audio card is
+absent; gate reference: `.archon/commands/robodog-voice-e2e.md`.
+
 ### 8. Docker Image
 
 The server Docker image is the release artifact for the in-cluster

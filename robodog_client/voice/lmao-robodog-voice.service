@@ -8,6 +8,9 @@ Type=simple
 WorkingDirectory=%h/xiaozhi
 ExecStart=%h/xiaozhi/.venv/bin/python %h/xiaozhi/voice_bridge.py
 Environment=LAN_IP=192.168.50.153
+# Machine-readable assertion log for robodog-voice-e2e (issue #267): the
+# orchestrator tails this file instead of hammering journalctl.
+Environment=BRIDGE_LOG_FILE=%h/xiaozhi/voice_bridge.log
 # ASR: local faster-whisper base (spark-5307:8001 does not return compute to
 # this host today despite reachable routing; flip ASR_BASE_URL when it does)
 Environment=WHISPER_MODEL=base
