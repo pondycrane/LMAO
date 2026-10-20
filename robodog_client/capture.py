@@ -1,13 +1,19 @@
 #!/usr/bin/env python3
-"""Capture the EXACT RLCD pixels from the RoboDog u8g2 native firmware.
+"""Capture the EXACT RLCD pixels from the RoboDog firmware.
 
-Reads the u8g2 full-frame buffer that the firmware streams over the USB-JTAG
-console (the dump hook is compiled into every build — capture confirms the
-current production firmware's render, not a separate opt-in build) and
-reconstructs what the firmware drew — no re-rendering, no XML interpretation.
-The dumped bytes are literally the u8g2 buffer (304x50 tiles = 300x400
-portrait panel) that the reference-locked u8g2_st7305 driver pushes to the
-ST7305.
+Two frame formats, fetched over the USB-JTAG console and auto-detected by the
+RD_SHOT header / buffer size:
+
+- Calendar app (robodog_client/main/, u8g2): buffer reads 304x50 tiles
+  (300x400 portrait panel memory) and the octet/bit order is the reference
+  u8g2_st7305 driver's.
+- Hermes voice app (XiaoZhi rebuilt with the RoboDog capture hook): the
+  ST7305 landscape panel memory (400x300) produced by the upstream
+  custom_lcd_display.cc landscape LUT — inverted here so the PNG is the
+  logical screen the app drew.
+
+No re-rendering, no XML interpretation: the dumped bytes are literally what
+the firmware pushed to the ST7305.
 
   robodog_client/capture.py [--port /dev/ttyACM0] [--reset] [--n 3]
 
@@ -42,8 +48,36 @@ ROWS = 50        # full buffer (no paging)
 PANEL_W, PANEL_H = 300, 400
 BUF_SIZE = W_TILE * ROWS   # 15200
 
+# Hermes (XiaoZhi voice) firmware frame: the ST7305 panel memory held in
+# landscape, produced by the upstream custom_lcd_display.cc landscape LUT.
+HERMES_W, HERMES_H = 400, 300
+HERMES_BUF_SIZE = HERMES_W * HERMES_H // 8    # 15000
+
 SHOT_RE = re.compile(r"RD_SHOT_BEGIN\s+bufsize=(\d+)\s+w=(\d+)\s+h=(\d+)")
 HEX_RE = re.compile(r"^[0-9a-fA-F]+$")
+
+
+def decode_hermes(buf):
+    """XiaoZhi DispBuffer -> the 400x300 logical screen (bit=0 black, 1 white).
+
+    Inverse of InitLandscapeLUT() in main/boards/waveshare/esp32-s3-rlcd-4.2/
+    custom_lcd_display.cc: for each logical (x,y) the panel bit sits at
+    index = (x>>1)*H4 + ((H-1-y)>>2), bit = 7 - (((H-1-y)&3)<<1 | (x&1)),
+    where bit==1 is white paper (ColorWhite=0xff sets the bit).
+    """
+    img = Image.new("L", (HERMES_W, HERMES_H), 255)
+    px = img.load()
+    h4 = HERMES_H >> 2
+    for y in range(HERMES_H):
+        inv_y = HERMES_H - 1 - y
+        block_y = inv_y >> 2
+        local_y = inv_y & 3
+        for x in range(HERMES_W):
+            index = (x >> 1) * h4 + block_y
+            bit = 7 - ((local_y << 1) | (x & 1))
+            if not (buf[index] >> bit) & 1:
+                px[x, y] = 0
+    return img
 
 
 def decode_raw(buf):
@@ -82,8 +116,15 @@ VISION_PROMPT = (
     "3) any status words like 'no wifi'/'stale'/'offline'.\n"
     "Reply as a short list.")
 
+HERMES_VISION_PROMPT = (
+    "This is the monochrome RLCD screen of an AI voice-assistant device "
+    "(XiaoZhi). Transcribe exactly any visible text (labels, dates, status or "
+    "subtitle lines) and describe what is shown (a face/character, icons, "
+    "layout). If the screen is blank, say BLANK.\n"
+    "Reply as a short list.")
 
-def describe_image(path):
+
+def describe_image(path, prompt=VISION_PROMPT):
     """Vision-model transcription of a captured frame (OpenAI-compatible)."""
     img = base64.b64encode(Path(path).read_bytes()).decode()
     body = {
@@ -91,7 +132,7 @@ def describe_image(path):
         "messages": [{"role": "user", "content": [
             {"type": "image_url",
              "image_url": {"url": f"data:image/png;base64,{img}"}},
-            {"type": "text", "text": VISION_PROMPT},
+            {"type": "text", "text": prompt},
         ]}],
         "max_tokens": 400,
     }
@@ -129,7 +170,10 @@ def read_frames(port, n=1, timeout=30):
         want = 0
         hex_acc = []
         while len(frames) < n and time.time() < deadline:
-            chunk = s.read(4096)
+            # 16 KiB chunks keep up with the ~11.5 KB/s RD_SHOT dump rate
+            # (a 4096-byte read onto the USB-JTAG CDC buffer overran and
+            # shortened frames during the boot-log + dump burst).
+            chunk = s.read(16384)
             if not chunk:
                 continue
             for line in chunk.split(b"\n"):
@@ -139,14 +183,17 @@ def read_frames(port, n=1, timeout=30):
                     if m:
                         in_shot = True
                         want = int(m.group(1))
+                        w = int(m.group(2))
+                        h = int(m.group(3))
                         hex_acc = []
                 else:
                     if "RD_SHOT_END" in ln:
                         body = "".join(hex_acc)
                         data = bytes.fromhex(body)
-                        frames.append((data, want))
+                        frames.append((data, want, w, h))
                         in_shot = False
-                        print(f"captured frame {len(frames)} ({len(data)} bytes",
+                        print(f"captured frame {len(frames)} "
+                              f"({len(data)} bytes, {w}x{h})",
                               file=sys.stderr)
                     elif HEX_RE.match(ln):
                         hex_acc.append(ln)
@@ -185,40 +232,60 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
 
     if args.i1:
-        frames = [(Path(args.i1).read_bytes(), BUF_SIZE)]
+        data = Path(args.i1).read_bytes()
+        # no RD_SHOT header on an offline dump — pick the decoder by size
+        if len(data) == BUF_SIZE:
+            frames = [(data, BUF_SIZE, PANEL_W, PANEL_H)]
+        elif len(data) == HERMES_BUF_SIZE:
+            frames = [(data, HERMES_BUF_SIZE, HERMES_W, HERMES_H)]
+        else:
+            sys.exit(f"cannot infer frame type from {len(data)} bytes "
+                     f"(calendar={BUF_SIZE} / hermes={HERMES_BUF_SIZE})")
     else:
         if args.reset:
             reset_board(args.port)
             time.sleep(1)
         frames = read_frames(args.port, n=args.n, timeout=args.timeout)
         if not frames:
-            sys.exit("no RD_SHOT frames captured — is robodog firmware flashed?")
+            sys.exit("no RD_SHOT frames captured — is robodog/hermes "
+                     "firmware flashed?")
 
-    for i, (data, expect) in enumerate(frames):
+    for i, (data, expect, w, h) in enumerate(frames):
         if len(data) != expect:
             print(f"frame {i}: expected {expect} bytes, got {len(data)}",
                   file=sys.stderr)
             continue
         (out / f"frame{i}.i1").write_bytes(data)
 
-        raw = decode_raw(data)
-        raw.save(out / "panel_raw_portrait.png")
-
-        # pick the orientation where the date/time text reads upright
-        best = None
-        for name, im in dihedral(raw).items():
-            hhmm, dates, _ = ocr_score(im)
-            if best is None or (hhmm, dates) > best[0]:
-                best = ((hhmm, dates), name, im)
-        best[2].save(out / "panel_landscape.png")
-        print(f"frame {i}: landscape view = {best[1]} "
-              f"(OCR hh:mm={best[0][0]}, dates={best[0][1]}) -> "
-              f"panel_raw_portrait.png / panel_landscape.png",
-              file=sys.stderr)
+        hermes = (expect == HERMES_BUF_SIZE)
+        if hermes:
+            # ST7305 landscape panel memory already reads as the logical screen.
+            raw = decode_hermes(data)
+            raw.save(out / "panel_landscape.png")
+            print(f"frame {i}: hermes landscape {w}x{h} -> "
+                  f"panel_landscape.png", file=sys.stderr)
+            shot_for_vision = out / "panel_landscape.png"
+            prompt = HERMES_VISION_PROMPT
+        else:
+            raw = decode_raw(data)
+            raw.save(out / "panel_raw_portrait.png")
+            # pick the orientation where the date/time text reads upright
+            best = None
+            for name, im in dihedral(raw).items():
+                hhmm, dates, _ = ocr_score(im)
+                if best is None or (hhmm, dates) > best[0]:
+                    best = ((hhmm, dates), name, im)
+            best[2].save(out / "panel_landscape.png")
+            print(f"frame {i}: landscape view = {best[1]} "
+                  f"(OCR hh:mm={best[0][0]}, dates={best[0][1]}) -> "
+                  f"panel_raw_portrait.png / panel_landscape.png",
+                  file=sys.stderr)
+            shot_for_vision = out / "panel_landscape.png"
+            prompt = VISION_PROMPT
         if args.describe:
             print(f"frame {i}: vision readback ...", file=sys.stderr)
             try:
-                txt = describe_image(out / "panel_landscape.png")
+                txt = describe_image(shot_for_vision, prompt=prompt)
                 (out / f"frame{i}_analysis.txt").write_text(txt)
                 print(f"--- frame {i} vision readback ---\n{txt}")
             except Exception as e:   # pragma: no cover — network/model path

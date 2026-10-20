@@ -114,15 +114,23 @@ separate firmware plus host-side glue under `robodog_client/voice/`. This is
 independent of the calendar firmware; `//robodog_client:flash_firmware`
 restores the calendar app.
 
-### Firmware flash (Bazelized, fetched — never vendored)
+### Firmware flash (self-built from pinned upstream source, capture compiled in)
 
 ```sh
-bazel run //robodog_client:flash_robodog_hermes   # XiaoZhi v2.4.2, pinned commit+sha256 in repos.bzl
+bazel run //robodog_client:flash_robodog_hermes   # build (Docker, if needed) + flash
 ```
 
 This is the board's **only** sanctioned esptool path (button-free reset; the
-Docker ttyACM RTS passthrough breaks it). The prebuilt binary is fetched via
-`http_file` and cached by Bazel — nothing vendored.
+Docker ttyACM RTS passthrough breaks it). The firmware is **no longer a
+prebuilt blob**: `//robodog_client:build_robodog_hermes` fetches the *source*
+of the exact XiaoZhi v2.4.2 release (`78/xiaozhi-esp32` @ pinned commit
+`e8d8a40`, sha256-verified — `voice/fetch_xiaozhi.sh`) into the gitignored
+`.xiaozhi/`, applies the **RoboDog capture hook**
+(`voice/robodog_hermes_capture.patch` — streams the exact 400×300 ST7305 panel
+memory as `RD_SHOT` frames over USB-JTAG, so the voice board is verifiable
+pixel-for-pixel exactly like the calendar app), and builds with the ESP-IDF
+**v6.0.x** Docker image (`XIAOZHI_IDF_IMG` overrides). Nothing vendored — the
+staged source tree is never committed.
 
 The board provisions itself over WiFi by POSTing the OTA URL configured in its
 NVS by `tools`-style offline provisioning (external `provision_nvs.py`: reads
@@ -131,10 +139,32 @@ the WiFi PSK from netplan via sudo, writes the 16 KB NVS at `0x9000` with
 OTA reply gives the board the bridge WebSocket URL, so no xiaozhi.me
 dependency.
 
+### Screen-capturing the voice board (RD_SHOT)
+
+Because the capture hook is compiled into the hermes firmware, the same
+`capture.py` pipeline reads the voice board's panel:
+
+```sh
+bazel run //robodog_client:flash_robodog_hermes     # first time / after changes
+python3 robodog_client/capture.py --port /dev/ttyACM0 --reset --n 8 --timeout 180 --describe
+#   shots/frameN.i1               raw 15000-byte ST7305 panel memory (landscape)
+#   shots/panel_landscape.png     400x300 — the logical screen the app drew
+#   shots/frameN_analysis.txt     vision transcription (--describe)
+```
+
+Frames are auto-detected by their `RD_SHOT` header/buffer size (15000 B =
+voice board 400×300 landscape LUT; 15200 B = calendar app 300×400 portrait),
+and the voice-board vision prompt transcribes the XiaoZhi status/subtitle text
+instead of calendar rows. Capture is throttled to one full frame per ~4 s so
+the serial dump never interleaves or starves the realtime audio.
+
 ### Voice backend (`robodog_client/voice/`)
 
 | File | Purpose |
 |------|---------|
+| `fetch_xiaozhi.sh` | Fetch + sha256-verify the pinned upstream xiaozhi-esp32 **source** into the gitignored `.xiaozhi/` (no-vendoring, cache-backed). |
+| `build_xiaozhi.sh` | Build the hermes firmware in the ESP-IDF v6.0 Docker image: board selection + capture hook + `idf.py build`. |
+| `robodog_hermes_capture.patch` | The RD_SHOT capture hook applied to upstream `custom_lcd_display.cc` (compiled into every hermes build). |
 | `voice_bridge.py` | XiaoZhi WebSocket bridge + OTA/`/healthz` server (`:8000` WS, `:8003` OTA). Negotiates the 16 kHz uplink for ASR, sends **24 kHz Opus** downlink (the board codec rate → no 16↔24 resample, no distortion). Server-side energy VAD finalizes a turn ~0.8 s after you stop talking — required because the device streams `realtime` and never sends `listen stop`. The **brain** is the board's Hermes session: each ASR'd utterance is submitted over a loopback brain WebSocket to the `xiaozhi` platform plugin inside the hermes-gateway (falls back to the stateless gx10 call if that's down). |
 | `hermes-platform/xiaozhi/` | **Hermes platform plugin** (plugin.yaml + adapter.py + __init__.py) deployed to `~/.hermes/plugins/platforms/xiaozhi/`. Makes the board a first-class Hermes gateway client (see "Hermes gateway integration" below). |
 | `lmao-robodog-voice.service` | systemd **user** unit for the bridge, run from `~/xiaozhi/` with a Python venv (`fastapi`, `uvicorn`, `websockets`, `opuslib`, `faster-whisper`, `numpy`). |
