@@ -220,6 +220,9 @@ def main():
     ap.add_argument("--n", type=int, default=1, help="frames to capture")
     ap.add_argument("--reset", action="store_true",
                     help="reboot the app first (fresh frame dumps)")
+    ap.add_argument("--listen", action="store_true",
+                    help="write the RD_LISTEN software-button trigger over the "
+                         "console before capturing (opens the voice session)")
     ap.add_argument("--timeout", type=int, default=30)
     ap.add_argument("--i1", metavar="FILE", default=None,
                     help="decode an already-captured .i1 dump (no device)")
@@ -244,6 +247,21 @@ def main():
     else:
         if args.reset:
             reset_board(args.port)
+            time.sleep(1)
+        if args.listen:
+            print(f"sending RD_LISTEN to {args.port} (software button) ...",
+                  file=sys.stderr)
+            s = serial.Serial(args.port, 115200, timeout=1)
+            try:
+                # USB-Serial/JTAG arms RX only after the CDC port is open+settled;
+                # writing immediately races enumeration and the byte is lost.
+                time.sleep(1.0)
+                s.reset_input_buffer()
+                s.write(b"RD_LISTEN\r\n")
+                s.flush()
+                time.sleep(0.2)
+            finally:
+                s.close()
             time.sleep(1)
         frames = read_frames(args.port, n=args.n, timeout=args.timeout)
         if not frames:
