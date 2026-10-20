@@ -158,6 +158,26 @@ and the voice-board vision prompt transcribes the XiaoZhi status/subtitle text
 instead of calendar rows. Capture is throttled to one full frame per ~4 s so
 the serial dump never interleaves or starves the realtime audio.
 
+### Software button (RD_LISTEN)
+
+The wake word is not reliable on this board, so the voice session is opened
+with a **software button**: a small firmware hook (`voice/robodog_listen.patch`)
+reads lines over the same USB-JTAG console and calls `Application::StartListening()`
+(the exact event the BOOT button raises) when it sees `RD_LISTEN`:
+
+```sh
+python3 robodog_client/capture.py --port /dev/ttyACM0 --listen
+# bridge journal: device connected session=... + listen start (mode=manual)
+```
+
+This requires the **primary console to be USB-Serial/JTAG** (full duplex,
+input + output) rather than the IDF default UART0; that is baked into
+`sdkconfig.defaults.robodog` in `voice/build_xiaozhi.sh` because the IDF
+"secondary USB-Serial/JTAG" console is output-only. The trigger works from the
+`idle` state only, and the host must keep the port open ~1 s before writing so
+the USB-Serial/JTAG RX is armed (`--listen` already does this). `RD_LISTEN` is
+compiled into every hermes build, like the capture hook.
+
 ### Voice backend (`robodog_client/voice/`)
 
 | File | Purpose |
