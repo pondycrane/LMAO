@@ -1,0 +1,47 @@
+--- a/main/boards/waveshare/esp32-s3-rlcd-4.2/custom_lcd_display.cc
++++ b/main/boards/waveshare/esp32-s3-rlcd-4.2/custom_lcd_display.cc
+@@ -11,6 +11,31 @@
+ #include "settings.h"
+ #include "config.h"
+ #include "board.h"
++#include <cstdio>
++#include "esp_timer.h"
++
++
++// ── RoboDog capture hook (LMAO-inserted) ──────────────────────────────────
++// Stream the exact ST7305 panel memory over the console (USB-JTAG) using the
++// RD_SHOT protocol so host capture.py can reconstruct the display pixel-for-
++// pixel (same contract as the calendar firmware's rd_shot_dump).  bit=0 is
++// black, bit=1 is white paper (RLCD_SetPixel: ColorBlack=0 clears the bit).
++// The dump interval must exceed the serial transfer time (15000 B -> ~30 KB of
++// hex @115200 ~= 2.6 s) or successive frames would interleave.
++static uint64_t s_rd_shot_last_us = 0;
++static const uint64_t RD_SHOT_INTERVAL_US = 4000000ULL;  // 4 s
++static void rd_shot_dump(const uint8_t *buf, int len, int w, int h)
++{
++    printf("\nRD_SHOT_BEGIN bufsize=%d w=%d h=%d\n", len, w, h);
++    for (int i = 0; i < len; i++) {
++        printf("%02x", buf[i]);
++        if ((i & 0x1f) == 0x1f) {
++            printf("\n");
++        }
++    }
++    printf("\nRD_SHOT_END\n");
++    fflush(stdout);
++}
+ 
+ void CustomLcdDisplay::Lvgl_flush_cb(lv_display_t * disp, const lv_area_t * area, uint8_t * color_p)
+ {
+@@ -27,6 +52,12 @@
+   	 	}
+   	}
+   	Disp->RLCD_Display();
++	// RoboDog capture hook: full panel memory now holds this flush's pixels.
++	const uint64_t now_us = esp_timer_get_time();
++	if (now_us - s_rd_shot_last_us >= RD_SHOT_INTERVAL_US && Disp->DispBuffer) {
++		s_rd_shot_last_us = now_us;
++		rd_shot_dump(Disp->DispBuffer, Disp->DisplayLen, Disp->width_, Disp->height_);
++	}
+ 	lv_disp_flush_ready(disp);
+ }
+ 

@@ -38,23 +38,37 @@ sh_binary(
     tags = ["manual"],
 )
 
-# ── Voice-AI firmware (XiaoZhi) — fetched, never vendored ─────────────────
-# The XiaoZhi AI voice firmware for the same Waveshare board is a prebuilt
-# release fetched via the robodog_xiaozhi_fetch() macro in repos.bzl (Bazel
-# cache + immutable commit + sha256 pin). This replaces the calendar app —
-# reflash //robodog_client:flash_firmware to restore the calendar firmware.
-genrule(
-    name = "xiaozhi_fw_bin",
-    srcs = ["@xiaozhi_rlcd_firmware//file"],
-    outs = ["xiaozhi_fw/merged-binary.bin"],
-    cmd = "unzip -p $(location @xiaozhi_rlcd_firmware//file) merged-binary.bin > $@",
+# ── Voice-AI firmware (XiaoZhi) — built from source, never vendored ───────
+# The XiaoZhi AI voice firmware for the same Waveshare board is built from the
+# PINNED UPSTREAM SOURCE (voice/build_xiaozhi.sh fetches the immutable
+# 78/xiaozhi-esp32 commit, sha256-verified, into the gitignored .xiaozhi/)
+# with the RoboDog capture hook applied — so the hermes board is verifiable
+# pixel-for-pixel exactly like the calendar firmware (RD_SHOT frames over
+# USB-JTAG consumed by capture.py). This replaces the calendar app — reflash
+# //robodog_client:flash_firmware to restore the calendar firmware.
+sh_binary(
+    name = "build_robodog_hermes",
+    srcs = ["voice/build_xiaozhi.sh"],
+    data = [
+        "voice/fetch_xiaozhi.sh",
+        "voice/robodog_hermes_capture.patch",
+    ],
     tags = ["manual"],
 )
 
 sh_binary(
     name = "flash_robodog_hermes",
     srcs = ["xiaozhi_flash.sh"],
-    data = [":xiaozhi_fw_bin"],
+    data = glob([
+        ".xiaozhi/build/flash_args",
+        ".xiaozhi/build/bootloader/bootloader.bin",
+        ".xiaozhi/build/partition_table/partition-table.bin",
+        ".xiaozhi/build/xiaozhi.bin",
+    ]) + [
+        "voice/build_xiaozhi.sh",
+        "voice/fetch_xiaozhi.sh",
+        "voice/robodog_hermes_capture.patch",
+    ],
     tags = ["manual"],
 )
 
