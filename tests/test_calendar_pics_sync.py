@@ -68,6 +68,24 @@ class TestCombo:
         assert q[0].endswith("swimming")
         assert q[0] in q
 
+    def test_llm_path_does_not_override_seeded_subject(self, monkeypatch):
+        # Regression: the local model used to return its own uid-agnostic
+        # subject, so two recurring "J tennis" events both showed "pikachu".
+        # The uid-seeded per-event subject must now lead, even when the model
+        # insists on a different character.
+        monkeypatch.setenv("LMAO_IMAGE_LLM_URL", "http://localhost:1/v1")
+        monkeypatch.setenv("LMAO_IMAGE_LLM_MODEL", "m")
+
+        def fake_llm(url, title, participant, subject, action):
+            return {"subject": "meowth", "action": action,
+                    "queries": [f"meowth {action}", "pikachu line art"]}
+
+        monkeypatch.setattr(cps, "_llm_combo", fake_llm)
+        seeded = cps.pick_subject("juliet", "tennis", "uidX")
+        q = cps.build_combo("J tennis 4pm Mon", "juliet", "uidX")
+        assert q[0] == f"{seeded} tennis"
+        assert seeded in q
+
 
 class TestExtractJsonArray:
     def test_plain_array(self):

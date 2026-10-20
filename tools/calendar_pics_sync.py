@@ -16,9 +16,9 @@ can play any sport).  The subject is chosen pseudo-randomly per event (determini
 per ``uid`` so re-runs are idempotent) rather than always the same animal.
 
 Model reasoning: if ``LMAO_IMAGE_LLM_URL`` points at an OpenAI-compatible chat
-endpoint, a small prompt asks it to return 2-3 image-search queries pairing the
-theme subject with the event action; otherwise a deterministic reasoned fallback
-builds them.
+endpoint, a small prompt asks it to turn the seeded theme subject + event action
+into 2-3 clean line-drawing search queries (the subject is fixed per event so
+recurring events vary); otherwise a deterministic reasoned fallback builds them.
 
 Idempotent: a ``pic`` key already present in ``cal_pics`` is skipped, so re-runs
 only do new events (``--force`` regenerates).
@@ -149,10 +149,15 @@ def build_combo(title: str, participant: str, uid: str) -> list[str]:
     url = os.environ.get("LMAO_IMAGE_LLM_URL")
     if url:
         try:
-            combo = _llm_combo(url, title, participant)
-            if combo and combo.get("queries"):
-                subj = combo.get("subject") or subject
-                return list(combo["queries"]) + [subj]
+            combo = _llm_combo(url, title, participant, subject, action)
+            if combo:
+                act = combo.get("action") or action
+                base = f"{subject} {act}".strip() if act else subject
+                out = [base, subject]
+                for q in (combo.get("queries") or []):
+                    if q not in out:
+                        out.append(q)
+                return out
         except Exception as exc:  # noqa: BLE001
             print(f"  (LLM keyword reasoning unavailable: {exc})")
     return queries
@@ -197,23 +202,28 @@ def _extract_json_object(text: str) -> dict:
     return obj if isinstance(obj, dict) else {}
 
 
-def _llm_combo(url: str, title: str, participant: str) -> dict:
-    """Ask the local model for the best theme subject + action combo + queries."""
+def _llm_combo(url: str, title: str, participant: str, subject: str, action: str) -> dict:
+    """Ask the local model for clean line-drawing queries for the chosen subject.
+
+    ``subject`` is the uid-seeded per-event pick (guarantees variety across
+    events); the model must keep it and may only refine the action / phrasing,
+    so a recurring event does not collapse to the same character every time.
+    """
     base = url.rstrip("/")
     endpoint = base + "/chat/completions" if base.endswith("/v1") else base + "/v1/chat/completions"
     theme = "pokemon" if participant == "juliet" else "sea animal"
+    action_hint = action or "none — invent a simple visual one the character can do that reads well as a line drawing"
     sys_msg = (
-        "You choose image-search queries for a kid's family-calendar picture tile. "
-        f"The kid's theme is {theme}. Given an event, pick ONE subject from that "
-        "theme that can clearly do the event's action, a concrete action word or "
-        "short phrase, and 2-3 image-search queries that would return clean, "
-        "simple LINE DRAWINGS of that character doing it (e.g. \"seal ice "
-        "skating\", \"cartoon penguin on ice\"). If the event has no obvious "
-        "action (e.g. an \"open house\"), invent a simple visual one the character "
-        "can be shown doing that reads well as a line drawing. Avoid physically "
-        "impossible pairings (a legless fish cannot ice-skate). Reply with ONLY a "
-        "JSON object: {\"subject\":\"...\", \"action\":\"...\", "
-        "\"queries\":[\"a\",\"b\",\"c\"]}. No prose, no code fences."
+        "You write image-search queries for a kid's family-calendar picture tile. "
+        f"The kid's theme is {theme}. A SUBJECT has already been chosen "
+        "(varied per event) and you MUST keep it EXACTLY: {subject!r}. The "
+        f"event action is {action_hint}. Return 2-3 queries for clean, simple "
+        "LINE DRAWINGS of that subject doing the action, varying your wording "
+        f"(e.g. \"{subject} {action or 'line drawing'}\"). Keep the subject "
+        "exactly as given in every query; never substitute another character. "
+        "Avoid physically impossible pairings. Reply with ONLY a JSON object: "
+        '{"subject":"...","action":"...","queries":["a","b","c"]}. No prose, no '
+        "code fences."
     )
     body = json.dumps({
         "model": os.environ.get("LMAO_IMAGE_LLM_MODEL", "deepseek-ai/DeepSeek-V4-Flash-0731"),
