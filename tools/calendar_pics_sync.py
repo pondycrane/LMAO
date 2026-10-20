@@ -155,6 +155,15 @@ def pick_subject_theme(participant: str, action: str, uid: str) -> tuple[str, st
     return theme, _seeded_choice(pool, uid + ":subject")
 
 
+def _subject_pool(participant: str, action: str, theme_label: str) -> list[str]:
+    """The drawable subject pool for a resolved theme."""
+    if theme_label == "pokemon":
+        return POKE_SUBJECTS
+    if theme_label == "paw patrol":
+        return PAW_SUBJECTS
+    return SEA_COHERENT.get(action, SEA_SUBJECTS)
+
+
 def pick_subject(participant: str, action: str, uid: str) -> str:
     """The uid-seeded subject (theme label not needed) — back-compat helper."""
     return pick_subject_theme(participant, action, uid)[1]
@@ -699,22 +708,39 @@ def main(argv: list[str] | None = None) -> int:
               f"-> [{kw}] {queries} [local-gen + commons]")
         try:
             stored = False
-            # 1) on-demand local generation first (bespoke themed art)
-            gen = generate_local(build_gen_prompt(subject_word, theme_label, action),
-                                 1024, 1024)
-            if gen:
+            # 1) on-demand local generation first (bespoke themed art). The vision
+            #    content gate can false-negative on obscure subjects (an
+            #    unrecognized pokemon like goldeen), so on rejection retry with a
+            #    different subject from the same theme pool — a fresh generated
+            #    tile should land rather than leaving the event stale/artless.
+            pool = _subject_pool(participant, action, theme_label)
+            base_seed = int(hashlib.sha1(uid.encode()).hexdigest(), 16)
+            order = [subject_word] + [pool[(base_seed + i) % len(pool)]
+                                      for i in range(1, len(pool))]
+            uniq, seen = [], set()
+            for s_ in order:
+                if s_ not in seen:
+                    seen.add(s_)
+                    uniq.append(s_)
+            generated_any = False
+            for subj in uniq[:4]:
+                gen = generate_local(build_gen_prompt(subj, theme_label, action),
+                                     1024, 1024)
+                if not gen:
+                    break
+                generated_any = True
                 gen = crop_to_subject(gen)  # tighten to the subject (vision)
-                if verify_subject(gen, subject_word, theme_label):
+                if verify_subject(gen, subj, theme_label):
                     png = to_1bit_png(gen, tw, th, args.threshold)
                     rec = pic_store.put(pic, png, tw, th)
-                    print(f"   stored {pic} [generated]: {subject_word} {theme_label}"
+                    print(f"   stored {pic} [generated]: {subj} {theme_label}"
                           f" ({action or 'general'}) -> "
                           f"{rec['width']}x{rec['height']} {len(rec['bytes'])}B")
                     done += 1
                     stored = True
-                else:
-                    print(f"   gate rejected generated art for {primary!r}")
-            else:
+                    break
+                print(f"   gate rejected {subj!r}: trying another {theme_label} subject...")
+            if not stored and not generated_any:
                 print("   (local generation unavailable — falling back to Commons)")
             # 2) fall back to Wikimedia search if generation didn't land
             if not stored:
