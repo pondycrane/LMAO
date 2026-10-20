@@ -83,6 +83,9 @@ filegroup(
         "voice/kokoro_server.py",
         "voice/lmao-robodog-voice.service",
         "voice/kokoro-tts.service",
-    ],
+        "voice/hermes_voice_e2e.py",
+        "voice/make_corpus.py",
+        "voice/corpus/corpus.json",
+    ] + glob(["voice/corpus/*.wav"]) + glob(["voice/corpus/*.txt"]),
     tags = ["manual"],
 )
