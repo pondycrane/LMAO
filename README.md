@@ -706,7 +706,9 @@ coordinator of issue #267)** — one host command, no human, no wake word:
 ```bash
 sudo gpasswd -a $(whoami) audio          # ALSA test speaker/mic access
 export XDG_RUNTIME_DIR=/run/user/$(id -u)
-E2E_RUNS=3 ~/xiaozhi/.venv/bin/python robodog_client/voice/hermes_voice_e2e.py
+bazel run //robodog_client:hermes_voice_e2e -- --corpus time   # E2E_RUNS=3 default
+# (equivalent, running the repo copy directly under the ops venv:)
+# E2E_RUNS=3 ~/xiaozhi/.venv/bin/python robodog_client/voice/hermes_voice_e2e.py
 ```
 
 It sends `RD_LISTEN`, plays a pinned corpus command (TTS-synthesized English
