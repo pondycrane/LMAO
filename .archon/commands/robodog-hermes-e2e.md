@@ -122,8 +122,10 @@ python3 robodog_client/capture.py --port "$PORT" --reset --n 8 --timeout 180 \
 - If `no RD_SHOT frames captured` → the flashed image lacks the capture hook or
   is wedged. FATAL for this gate — re-flash, retry once, then FAIL.
 - To capture a mid-conversation frame, press BOOT and speak while capturing
-  (the display shows STT/TTS subtitle state); the boot/idle frames alone prove
-  the render path.
+  (the display shows STT/TTS subtitle state); or use the **software button**
+  (`capture.py --listen` — the board's wake word is unreliable) to open the
+  voice session programmatically, then replay a command into the mic. The
+  boot/idle frames alone prove the render path.
 
 ## Phase 7: VISION VERIFY — read the render back
 

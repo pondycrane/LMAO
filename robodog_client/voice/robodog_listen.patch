@@ -1,0 +1,46 @@
+--- a/main/application.cc
++++ b/main/application.cc
+@@ -16,6 +16,7 @@
+ #include <arpa/inet.h>
+ #include <cJSON.h>
+ #include <cstring>
++#include <cstdio>
+ 
+ #define TAG "Application"
+ 
+@@ -163,6 +164,35 @@
+ 
+     // Update the status bar immediately to show the network state
+     display->UpdateStatusBar(true);
++
++    // ── RoboDog listen trigger (LMAO-inserted) ────────────────────────────
++    // The host writes "RD_LISTEN" over the USB-JTAG console (the same channel
++    // the capture hook streams panel frames on) to open the audio channel —
++    // the software equivalent of the BOOT button. E2E tests use this instead
++    // of the (unreliable) wake word or a physical button press.
++    xTaskCreate([](void* arg) {
++        Application* app = static_cast<Application*>(arg);
++        char line[32];
++        size_t n = 0;
++        for (;;) {
++            const int c = getchar();
++            if (c == EOF || c == '\r' || c == '\n') {
++                if (n == 0) {
++                    continue;
++                }
++                line[n] = '\0';
++                if (strcmp(line, "RD_LISTEN") == 0) {
++                    ESP_LOGI(TAG, "RD_LISTEN -> StartListening (software button)");
++                    app->StartListening();
++                }
++                n = 0;
++            } else if (n < sizeof(line) - 1) {
++                line[n++] = static_cast<char>(c);
++            } else {
++                n = 0;  // line too long: drop
++            }
++        }
++    }, "rd_listen", 4096, this, 1, nullptr);
+ }
+ 
+ void Application::Run() {

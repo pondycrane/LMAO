@@ -24,13 +24,22 @@ IDF_IMG="${XIAOZHI_IDF_IMG:-espressif/idf:v6.0.2}"
 "$APP/voice/fetch_xiaozhi.sh" "$APP"
 SRC="$APP/.xiaozhi"
 
-# 2. apply the RoboDog capture hook (idempotent via marker)
-PATCH="$APP/voice/robodog_hermes_capture.patch"
-if [ ! -f "$SRC/.robodog_capture_patched" ]; then
-    echo "applying $PATCH"
-    (cd "$SRC" && patch -p1 < "$PATCH")
-    touch "$SRC/.robodog_capture_patched"
-    # patching the source invalidates a prior build
+# 2. apply the RoboDog patches (capture hook + RD_LISTEN trigger; each is
+#    idempotent via its own marker). Patching the source invalidates a build.
+REBUILD_FLAG=""
+for spec in \
+    "robodog_hermes_capture.patch:.robodog_capture_patched" \
+    "robodog_listen.patch:.robodog_listen_patched"; do
+    P="$APP/voice/${spec%%:*}"
+    MARK="$SRC/${spec##*:}"
+    if [ ! -f "$MARK" ]; then
+        echo "applying $P"
+        (cd "$SRC" && patch -p1 < "$P")
+        touch "$MARK"
+        REBUILD_FLAG=1
+    fi
+done
+if [ -n "$REBUILD_FLAG" ]; then
     rm -rf "$SRC/build"
 fi
 
@@ -41,6 +50,11 @@ cat > "$SRC/sdkconfig.defaults.robodog" <<'EOF'
 CONFIG_BOARD_TYPE_WAVESHARE_ESP32_S3_RLCD_4_2=y
 CONFIG_USE_WECHAT_MESSAGE_STYLE=n
 CONFIG_USE_DEVICE_AEC=y
+# RD_LISTEN (software button) needs INPUT on the USB-Serial/JTAG console; the
+# IDF "secondary USB-Serial/JTAG" console is output-only, so make it primary.
+CONFIG_ESP_CONSOLE_UART_DEFAULT=n
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
 EOF
 
 # 4. build in the ESP-IDF Docker image (idf.py applies the three default files,
