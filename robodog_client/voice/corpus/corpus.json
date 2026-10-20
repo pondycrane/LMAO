@@ -1,0 +1,30 @@
+{
+  "time": {
+    "transcript": "what time is it",
+    "wav": "time.wav",
+    "sha256": "6d77e84cf5244835fa6f8a740f2d9c5f5e26a38d53a38c3135f56ea483e59414",
+    "voice": "af_heart",
+    "model": "kokoro-82m"
+  },
+  "joke": {
+    "transcript": "tell me a joke",
+    "wav": "joke.wav",
+    "sha256": "9792e0829e6ddde2a64cbe1007ad7b9af9dbd9da4a4d5833c2d4024cfa772689",
+    "voice": "af_heart",
+    "model": "kokoro-82m"
+  },
+  "greeting": {
+    "transcript": "how are you today",
+    "wav": "greeting.wav",
+    "sha256": "f89e0d5d34e4e648d55796a5d4ce6fa0e527c8f8fb38751ff9a42ddec9ae7d61",
+    "voice": "af_heart",
+    "model": "kokoro-82m"
+  },
+  "capabilities": {
+    "transcript": "what can you do",
+    "wav": "capabilities.wav",
+    "sha256": "0885739f35d5173116a7de11976823caa917c29b6b5296f7314b349f05d8a495",
+    "voice": "af_heart",
+    "model": "kokoro-82m"
+  }
+}
