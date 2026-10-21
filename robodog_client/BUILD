@@ -6,6 +6,8 @@
 #   bazel run //robodog_client:build_firmware
 #   bazel run //robodog_client:flash_firmware [-- --port /dev/ttyACM0]
 
+load("@rules_python//python:defs.bzl", "py_library")
+
 sh_binary(
     name = "build_firmware",
     srcs = ["build.sh"],
@@ -124,4 +126,15 @@ filegroup(
         "voice/corpus/corpus.json",
     ] + glob(["voice/corpus/*.wav"]) + glob(["voice/corpus/*.txt"]),
     tags = ["manual"],
+)
+
+# Host-side voice bridge, as a Bazel Python library so //tests:test_voice_bridge
+# can import it. The bridge itself runs under the ops venv (~/xiaozhi/.venv);
+# its runtime deps (fastapi, faster_whisper, numpy, opuslib, websockets) are NOT
+# in @lmao_pip, so unit tests stub those modules in sys.modules before importing
+# (see tests/test_voice_bridge.py) and this target needs no pip deps to build.
+py_library(
+    name = "voice_bridge",
+    srcs = ["voice/voice_bridge.py"],
+    visibility = ["//tests:__pkg__"],
 )
