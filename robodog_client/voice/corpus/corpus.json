@@ -13,6 +13,13 @@
     "voice": "af_heart",
     "model": "kokoro-82m"
   },
+  "planets": {
+    "transcript": "name the planets in order from the sun",
+    "wav": "planets.wav",
+    "sha256": "ded3ee1926b0d209b8bc8348ab4fad4a7800e7ab1fb361392ec4418cef34b032",
+    "voice": "af_heart",
+    "model": "kokoro-82m"
+  },
   "greeting": {
     "transcript": "how are you today",
     "wav": "greeting.wav",
@@ -24,6 +31,13 @@
     "transcript": "what can you do",
     "wav": "capabilities.wav",
     "sha256": "0885739f35d5173116a7de11976823caa917c29b6b5296f7314b349f05d8a495",
+    "voice": "af_heart",
+    "model": "kokoro-82m"
+  },
+  "count": {
+    "transcript": "count slowly from twenty to thirty",
+    "wav": "count.wav",
+    "sha256": "a442da622ec0ddaa005249bf0183a4aad724894c1a308741fd8d35d83199316d",
     "voice": "af_heart",
     "model": "kokoro-82m"
   }

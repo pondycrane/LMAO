@@ -14,6 +14,19 @@ Every assertion is read from the live bridge journal
 so one command yields PASS/FAIL + verbatim evidence. Loud-skip when the board
 (0x303A:0x1001) or the ALSA test-sound card is absent.
 
+Issue #274 adds two asserts the #267 RING-only check was blind to:
+- READOUT_COMPLETE: the full active-play span of the reply on the test mic vs
+  the bridge's reported TTS duration (played_fraction >= 0.85) — a read-out
+  truncated by the decode-queue drop (#272's pacing removes it) now FAILs
+  instead of passing as RING "audible". Uses the `story` long-reply corpus so
+  the reply reliably exceeds READOUT_MIN_REPLY (3.5 s) and is decisive.
+- POST_READOUT_RELISTEN: a fresh RD_LISTEN right after the bridge logs the
+  reply's `tts stop` must re-arm listening (the shrunken replacement for the
+  old flat 12 s settle between loops). The realtime auto-relisten users hit in
+  normal conversation is NOT observable here: the board returns to idle after
+  TTS with no reliable wake trigger, and the E2E drives RD_LISTEN (`mode=manual`)
+  for every open — so this fresh-RD_LISTEN-success is the reachable proxy.
+
 Fallback: E2E_STT_TEXT=<canned> skips the real-mic/ASR leg and injects the
 utterance straight into the board's Hermes session via the bridge's
 POST /xiaozhi/inject endpoint (covers brain->TTS->speaker->display).
@@ -56,6 +69,13 @@ sys.path.insert(0, str(REPO))
 
 # Components that must live in the same interpreter (faster-whisper etc.).
 import capture  # noqa: E402  (RD_SHOT decode + vision readback)
+from e2e_readout import (  # noqa: E402  (issue #274 read-out metrics, stdlib)
+    active_play_span,
+    energy_burst_window,
+    played_fraction,
+    quiet_floor,
+    wave_rms,
+)
 from voice_bridge import call_asr  # noqa: E402
 
 BOARD_VID, BOARD_PID = 0x303A, 0x1001
@@ -66,12 +86,29 @@ BRIDGE_UNIT = os.environ.get("BRIDGE_UNIT", "lmao-robodog-voice")
 N_RUNS = int(os.environ.get("E2E_RUNS", "3"))
 E2E_STT_TEXT = os.environ.get("E2E_STT_TEXT", "").strip()
 ASR_TIMEOUT = int(os.environ.get("E2E_ASR_TIMEOUT", "72"))
-REPLY_TIMEOUT = int(os.environ.get("E2E_REPLY_TIMEOUT", "60"))
+REPLY_TIMEOUT = int(os.environ.get("E2E_REPLY_TIMEOUT", "180"))
 # Seconds to let the board's mic/AEC ramp after StartListening() before the
 # test speaker plays. Playing earlier attenuates the command below the bridge
 # VAD threshold (no utterance -> no ASR): measured live play at listen+4.2-5.1s
 # -> clean ASR every time; listen+1..2.8s -> nothing. 6.0 is safely inside.
 PLAY_SETTLE = float(os.environ.get("RD_PLAY_SETTLE", "6.0"))
+# Issue #274 post-readout re-listening: after the bridge logs the reply's
+# `tts stop`, wait this grace (board drains the last paced frames) then issue a
+# fresh RD_LISTEN and require a `listen start` within RE_LISTEN_TIMEOUT — the
+# shrunken replacement for the old flat 12 s settle between loops.
+RE_LISTEN_GRACE = float(os.environ.get("RD_RELISTEN_GRACE", "1.5"))
+RE_LISTEN_TIMEOUT = int(os.environ.get("RD_RELISTEN_TIMEOUT", "15"))
+# Issue #274 read-out completeness: below this reply length the ~0.5 s
+# truncation delta is not discriminative (a `time`-class ~3.0 s reply is
+# marginal) — long-reply corpus replies must beat it.
+READOUT_MIN_REPLY = float(os.environ.get("RD_READOUT_MIN_REPLY", "3.5"))
+# Drain between loops: the end-of-loop POST_READOUT_RELISTEN opens the next
+# loop's session, so only a short pause is needed before its command plays.
+BETWEEN_LOOP_SETTLE = float(os.environ.get("RD_BETWEEN_LOOP_SETTLE", "3"))
+# When the (flaky) mic ASR falls back to the E2E_STT injection, the injected
+# reply is streamed during the inject call — so the test-mic capture starts
+# BEFORE it, with this fixed window covering a ~6-8 s reply plus tail.
+MIC_INJECT_CAP = float(os.environ.get("RD_INJECT_CAP_SECS", "20"))
 SILENCE = os.environ.get("E2E_AUDIO_SG", "sg audio -c")
 
 
@@ -158,8 +195,15 @@ def send_rd_listen(port: str):
         s.close()
 
 
-def inject_text(text: str):
-    body = json.dumps({"text": text}).encode()
+def inject_text(text: str, session_id: str | None = None):
+    """E2E fallback: push a canned utterance into the board's live Hermes
+    session (issue #267 E2E_STT_TEXT path). ``session_id`` ties the injection to
+    THIS loop's board session so the brain reply is addressed back to it (the
+    bridge otherwise picks the most recent session, which can be a stale one)."""
+    payload = {"text": text}
+    if session_id:
+        payload["session_id"] = session_id
+    body = json.dumps(payload).encode()
     req = urllib.request.Request(
         f"http://127.0.0.1:{BRIDGE_OTA_PORT}/xiaozhi/inject", data=body,
         headers={"Content-Type": "application/json"})
@@ -305,57 +349,6 @@ def overlap(a, b):
     return len(content_tokens(a) & content_tokens(b))
 
 
-def wave_rms(path):
-    import array
-    import wave
-    try:
-        with wave.open(str(path)) as w:
-            data = w.readframes(w.getnframes())
-    except Exception:
-        return 0.0
-    a = array.array("h", data)
-    return (sum(x * x for x in a) / len(a)) ** 0.5 if a else 0.0
-
-
-def quiet_floor(path, win=16000, rate=16000):
-    """Robust ambient floor = median of the 1 s window RMS values (immune to
-    the speech burst inflating a whole-file average)."""
-    import array
-    import statistics
-    import wave
-    try:
-        with wave.open(str(path)) as w:
-            a = array.array("h", w.readframes(w.getnframes()))
-    except Exception:
-        return 0.0
-    ws = []
-    for i in range(0, len(a) - win, win // 2):
-        ws.append((sum(x * x for x in a[i:i + win]) / win) ** 0.5)
-    return statistics.median(ws) if ws else 0.0
-
-
-def energy_burst_window(path, total_seconds, rate=16000):
-    """(start, end) around the loudest 1 s window — the TTS reply burst — so
-    re-ASR only sees the reply, not room tone."""
-    import array
-    import wave
-    with wave.open(str(path)) as w:
-        a = array.array("h", w.readframes(w.getnframes()))
-    if not a:
-        return (0.0, min(total_seconds, 1.0))
-    win = rate
-    best, best_i = 0.0, 0
-    for i in range(0, len(a) - win, win // 2):
-        e = sum(x * x for x in a[i:i + win]) / win
-        if e > best:
-            best, best_i = e, i
-    if best == 0:
-        return (0.0, min(total_seconds, 1.0))
-    start = best_i / rate
-    return (max(0, start - 0.3),
-            min(total_seconds, start + min(total_seconds, 1.5) + 0.3))
-
-
 def re_asr_file(path):
     import wave as _w
     with _w.open(str(path)) as w:
@@ -366,11 +359,18 @@ def re_asr_file(path):
 # ---------------------------------------------------------------------------
 # One voice loop
 # ---------------------------------------------------------------------------
-def run_loop(n, instr, artifacts):
+def run_loop(n, instr, artifacts, prev_listen=None):
     log(f"--- loop {n + 1}/{N_RUNS} ---")
     res = {"loop": n + 1, "asserts": {}, "artifacts": {}}
     run_dir = artifacts / f"loop{n + 1}"
     run_dir.mkdir(parents=True, exist_ok=True)
+    # Test-mic capture state shared by the inject-fallback and the normal
+    # BRAIN path (the inject starts it BEFORE the reply plays; the normal path
+    # starts it right as the reply begins).
+    mic_path = run_dir / "mic_ring.wav"
+    mic_thread = None
+    cap_len = MIC_INJECT_CAP
+    mic_started = False
     port = detect_board_port()
     if not port:
         res["asserts"]["OPEN_SESSION"] = "SKIP (no board); ASR/BRAIN/RING/SUBTITLE SKIP"
@@ -380,17 +380,26 @@ def run_loop(n, instr, artifacts):
     tail.new_lines()
     tail.clear_pending()  # drop pre-send lines (stale listens/replies)
 
-    # 1. OPEN: software button -> WS session (fresh WS or reuse of the board's
-    # still-open session). The `listen start` line is the one definitive signal
-    # and carries the session id; a single wait avoids double-consuming it.
-    send_rd_listen(port)
-    got = wait_for(tail, r"listen start", timeout=25)
-    m = re.search(r"session=([0-9a-f]+)", got or "")
-    ses = m.group(1) if m else None
-    if not ses:
-        res["asserts"]["OPEN_SESSION"] = "FAIL (no listen start after RD_LISTEN)"
-        return res
-    res["asserts"]["OPEN_SESSION"] = "PASS " + (got.split(": ", 1)[-1] if got else ses)
+    # 1. OPEN: loop 1 opens with its own RD_LISTEN; later loops reuse the listen
+    # armed by the PREVIOUS loop's POST_READOUT_RELISTEN (done at the very end
+    # of that loop, so it is only ~seconds old when this loop's command plays).
+    # The board's listen stays armed for many minutes, so a fresh RD_LISTEN
+    # while it is still armed is a no-op — reusing it is the only reliable open
+    # (measured live: a fresh RD_LISTEN after a re-listen yielded no listen start).
+    carry = prev_listen or {}
+    if carry.get("ok"):
+        ses = carry.get("ses")
+        res["asserts"]["OPEN_SESSION"] = (
+            "PASS (re-listen armed at prior tts-stop, session=" + (ses or "?") + ")")
+    else:
+        send_rd_listen(port)
+        got = wait_for(tail, r"listen start", timeout=25)
+        m = re.search(r"session=([0-9a-f]+)", got or "")
+        ses = m.group(1) if m else None
+        if not ses:
+            res["asserts"]["OPEN_SESSION"] = "FAIL (no listen start after RD_LISTEN)"
+            return res
+        res["asserts"]["OPEN_SESSION"] = "PASS " + (got.split(": ", 1)[-1] if got else ses)
     res["artifacts"]["session"] = ses
 
     # 2. ASR: real-mic leg (or E2E_STT injection fallback)
@@ -418,8 +427,16 @@ def run_loop(n, instr, artifacts):
         res["artifacts"]["asr"] = asr_text
     if E2E_STT_TEXT or not ok:
         text = E2E_STT_TEXT or instr["transcript"]
+        # The injected reply is streamed during inject_text, so the test-mic
+        # capture must be running BEFORE the injection for READOUT/RING to hear
+        # it (a capture started after inject always misses the reply).
+        mic_path = run_dir / "mic_ring.wav"
+        cap_len = MIC_INJECT_CAP
+        mic_thread = threading.Thread(target=capture_mic, args=(mic_path, cap_len))
+        mic_thread.start()
+        mic_started = True
         try:
-            inject_text(text)
+            inject_text(text, session_id=ses)
         except Exception as e:
             res["asserts"]["BRAIN_REPLY"] = f"FAIL (inject: {e})"
             return res
@@ -467,19 +484,43 @@ def run_loop(n, instr, artifacts):
     res["asserts"]["BRAIN_REPLY"] = f"PASS kind={kind} {payload!r}"
     reply_secs = int(payload) / 48000.0 if kind == "voice" else 4.0
 
-    # 4+5. RING + SUBTITLE: test-mic hears the board speaker (panel dumps are
-    # already running since just after the ASR leg — shot_thread above).
-    mic_path = run_dir / "mic_ring.wav"
-    cap_len = min(15.0, reply_secs + 7.0)
-    mic_thread = threading.Thread(target=capture_mic, args=(mic_path, cap_len))
-    mic_thread.start()
-    time.sleep(0.7)
+    # 4-6. RING + SUBTITLE + READOUT: test-mic hears the board speaker (panel
+    # dumps already running since just after the ASR leg — shot_thread above).
+    # The bridge's `session=<id> tts stop` anchor (issue #274) marks when the
+    # reply's last paced frame + tts-stop were sent, so a fresh RD_LISTEN right
+    # then is the post-readout re-listening proxy — the reachable version of
+    # the realtime auto-relisten this board does not expose to the E2E.
+    if not mic_started:
+        cap_len = min(15.0, reply_secs + 7.0)
+        mic_thread = threading.Thread(target=capture_mic, args=(mic_path, cap_len))
+        mic_thread.start()
+        time.sleep(0.7)
+
+    # POST_READOUT_RELISTEN: after the TTS ends, open a fresh listen
+    # immediately (the shrunken replacement for the old flat 12 s settle).
+    tts_stop = wait_for(tail, r"tts stop", session_id=ses,
+                        timeout=int(reply_secs) + 12)
+    res["artifacts"]["tts_stop_anchor"] = bool(tts_stop)
+    # Authoritative spoken duration: the bridge logs the EXACT streamed PCM size
+    # right before tts-stop (bytes @24 kHz s16le = 48000 B/s) — exact for both
+    # auto-TTS voice replies and bridge-synthesized text replies (the latter
+    # were previously guessed at 4.0 s). Refreshes reply_secs feeding the
+    # READOUT assert measured a moment later.
+    streamed = wait_for(tail, r"tts streamed full (\d+)", session_id=ses, timeout=5)
+    m_sz = re.search(r"tts streamed full (\d+)", streamed or "")
+    if m_sz:
+        reply_secs = int(m_sz.group(1)) / 48000.0
+        res["artifacts"]["reply_secs_streamed"] = reply_secs
+
     mic_thread.join(timeout=cap_len + 30)
     time.sleep(2.0)  # let the board play the reply / drop a frame
     shot_thread.join(timeout=120)
     if not mic_path.exists():
         res["asserts"]["RING"] = "FAIL (no test-mic capture)"
         res["asserts"]["SUBTITLE"] = "FAIL (no test-mic capture)"
+        res["asserts"]["READOUT_COMPLETE"] = "FAIL (no test-mic capture)"
+        res["asserts"]["POST_READOUT_RELISTEN"] = "FAIL (no test-mic capture)"
+        res["next_listen"] = {"ok": False, "ses": None}
         return res
 
     # RING: re-ASR the loudest window of the test-mic capture
@@ -534,13 +575,71 @@ def run_loop(n, instr, artifacts):
     else:
         res["asserts"]["SUBTITLE"] = "FAIL no-subtitle-readback (panel blank)"
     res["artifacts"]["subtitle"] = subtitle_txt
+
+    # READOUT_COMPLETE: the full active-play span vs the reply's reported TTS
+    # duration. This is the #274 regression — a read-out truncated to ~2.4 s by
+    # the decode-queue drop (#272's pacing removes it) must FAIL, not pass as
+    # mere "audible" like the RING burst re-ASR does.
+    span, pstart, pend = 0.0, 0.0, 0.0
+    try:
+        span, pstart, pend = active_play_span(mic_path)
+    except Exception as e:
+        log(f"readout span failed: {e}")
+    frac = played_fraction(span, reply_secs)
+    res["artifacts"]["play_span"] = span
+    res["artifacts"]["played_fraction"] = frac
+    if span == 0.0:
+        res["asserts"]["READOUT_COMPLETE"] = "FAIL (no active play heard on test mic)"
+    elif reply_secs < READOUT_MIN_REPLY:
+        res["asserts"]["READOUT_COMPLETE"] = (
+            f"SKIP (reply {reply_secs:.1f}s < {READOUT_MIN_REPLY:.1f}s — not "
+            "discriminative for the ~0.5 s truncation delta)")
+    elif frac >= 0.85:
+        res["asserts"]["READOUT_COMPLETE"] = (
+            f"PASS played={span:.1f}s reply={reply_secs:.1f}s frac={frac:.2f}")
+    else:
+        res["asserts"]["READOUT_COMPLETE"] = (
+            f"FAIL played={span:.1f}s of reply {reply_secs:.1f}s "
+            f"(frac={frac:.2f} < 0.85) — truncated read-out?")
+
+    # POST_READOUT_RELISTEN (issue #274): the reachable proxy for the realtime
+    # auto-relisten the board does not expose to the E2E — after the reply's
+    # tts-stop, a fresh RD_LISTEN must re-arm listening. Done at the END of the
+    # loop so the armed listen is only seconds old when the NEXT loop's command
+    # plays (it is reused as that loop's open; a fresh RD_LISTEN into an already-
+    # armed board is a measured no-op, and a long-idle armed listen starves the
+    # next command's ASR).
+    if not tts_stop:
+        res["asserts"]["POST_READOUT_RELISTEN"] = (
+            "SKIP (no `tts stop` journal anchor — bridge not updated)")
+        res["next_listen"] = {"ok": False, "ses": None}
+    else:
+        time.sleep(RE_LISTEN_GRACE)      # let the board drain the last frames
+        send_rd_listen(port)
+        got2 = wait_for(tail, r"listen start", timeout=RE_LISTEN_TIMEOUT)
+        m2 = re.search(r"session=([0-9a-f]+)", got2 or "")
+        ses2 = m2.group(1) if m2 else None
+        if ses2:
+            res["asserts"]["POST_READOUT_RELISTEN"] = ("PASS " +
+                (got2.split(": ", 1)[-1] if got2 else ses2))
+            res["next_listen"] = {"ok": True, "ses": ses2}
+        else:
+            res["asserts"]["POST_READOUT_RELISTEN"] = (
+                "FAIL (no `listen start` right after tts stop)")
+            res["next_listen"] = {"ok": False, "ses": None}
     return res
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--corpus", default="time",
-                    help="corpus slug to drive (see voice/corpus/corpus.json)")
+    ap.add_argument("--corpus", default="count",
+                    help="corpus slug to drive (see voice/corpus/corpus.json); "
+                         "'count' ('count slowly from twenty to thirty') is the "
+                         "long-reply corpus: a deterministic 11-number list the "
+                         "brain reads as a reliably ~7-10 s spoken VOICE reply, "
+                         "comfortably above READOUT_MIN_REPLY (3.5 s) and the "
+                         "~0.85 played-fraction floor, and well inside the "
+                         "read-out capture window (~15 s cap)")
     ap.add_argument("--artifacts", default=str(Path.home() / "artifacts"))
     args = ap.parse_args()
     artifacts = Path(args.artifacts) / "robodog-voice-e2e"
@@ -569,14 +668,18 @@ def main():
     instr = man[args.corpus]
 
     results = []
+    prev_listen = None
     for i in range(N_RUNS):
-        r = run_loop(i, instr, artifacts)
+        r = run_loop(i, instr, artifacts, prev_listen)
         results.append(r)
         for k, v in r["asserts"].items():
             log(f"{k}: {v}")
+        # The end-of-loop POST_READOUT_RELISTEN arms the next loop's open, so
+        # only a short drain is needed between loops.
+        prev_listen = r.get("next_listen")
         if i < N_RUNS - 1:
             log("settling between loops ...")
-            time.sleep(12)  # board idle + WS drain before the next open
+            time.sleep(BETWEEN_LOOP_SETTLE)
 
     lines = [
         "# RoboDog Hermes Voice-Loop E2E Results\n",
@@ -610,9 +713,19 @@ def main():
         return "unknown"
 
     def passed(r):
+        # Issue #274: the read-out must be complete (not merely "audible" like
+        # the RING burst) and the board must re-listen right after tts-stop.
+        # SKIP is accepted only for the documented data/env conditions (short
+        # reply below the discriminative floor; bridge without the tts-stop
+        # anchor) — a real FAIL fails the gate.
+        def ok(v):
+            return v is not None and (v.startswith("PASS") or v.startswith("SKIP"))
+
         return (r["asserts"].get("OPEN_SESSION", "FAIL").startswith("PASS")
                 and r["asserts"].get("BRAIN_REPLY", "FAIL").startswith("PASS")
-                and asr_ok(r["asserts"].get("ASR_MATCH", "FAIL")))
+                and asr_ok(r["asserts"].get("ASR_MATCH", "FAIL"))
+                and ok(r["asserts"].get("READOUT_COMPLETE"))
+                and ok(r["asserts"].get("POST_READOUT_RELISTEN")))
 
     for r in results:
         r["artifacts"]["mode"] = mode_of(r)
