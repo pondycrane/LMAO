@@ -14,6 +14,7 @@ rescue (see issue #89 for the full post-mortem of the #87 run).
 | `lmao-feature-dev` | Feature idea → plan → implement → **gates** → PR → 5-agent review → fixes → **gates re-run** → summary. |
 | `smart-irrigation-dev` | **⚠️ NOT READY TO RUN** (pending refinement in [#122](https://github.com/pondycrane/LMAO/issues/122)) — do not run until refined. When ready: Smart Irrigation node (Sprout) work from the blueprint in `smart_irrigation/docs/development-plan.md`: phase features, or the mandatory Phase 0 algorithm evaluation. Firmware work is hard-blocked until `smart_irrigation/docs/algorithm-evaluation.md` exists (blueprint Appendix 13). |
 | `robodog-client-dev` | Feature idea → plan → implement → **gates** → PR → 5-agent review → fixes → **gates re-run** → summary, for the **RoboDog** device (Waveshare ESP32-S3 RLCD-4.2 / ST7305 family-calendar display). Verification is **pixel-driven**: the mandatory hardware gate builds + flashes the real board and **screen-captures the exact ST7305 pixels** (`capture.py` streams the live u8g2 buffer over USB-JTAG), then reads the render back with the **vision model** (Qwen2.5-VL via `capture.py --describe`) — the PR carries the captured frames + verbatim transcription, not a re-render. Loud skip when the board (VID `0x303A` PID `0x1001`) is not attached. |
+| `robodog-hermes-dev` | Feature idea → plan → implement → **gates** → PR → 5-agent review → fixes → **gates re-run** → summary, for the **RoboDog hermes voice device** — the SAME Waveshare board running the XiaoZhi voice firmware (`robodog_client/voice`, self-built; RD_SHOT capture hook + **RD_LISTEN software button**) + the voice bridge (ASR → Hermes brain → Kokoro TTS) + the acoustic **voice-loop E2E** ([#267](https://github.com/pondycrane/LMAO/issues/267), `robodog-voice-e2e`). Verification is **voice-loop-driven**: the mandatory gates flash the hermes image and drive RD_LISTEN → WS session → test-speaker command → board-mic ASR → Hermes reply → test-mic **ring closure** → RLCD **subtitle readback**, plus the hermes screen capture. **Same board, mutually exclusive with the calendar firmware** — never run both workflows at once, and never the calendar gates during hermes work. |
 
 Both run entirely on pi routing to the in-house GX10 box — every node uses
 the local DeepSeek V4 Flash model (`gx10/deepseek-ai/DeepSeek-V4-Flash-0731`,
@@ -112,7 +113,49 @@ robodog-validate  →  robodog-hardware-e2e  →  robodog-production-health
   a live sync, plus a best-effort probe that the LMAO server (the panel's
   `GetCalendar` data source) is serving. Honest UNVERIFIABLE is recorded loudly.
 
-### The irrigation evaluation-first gate
+### The robodog hermes voice-loop gate chain
+
+`robodog-hermes-dev` is the **same board** (Waveshare ESP32-S3 RLCD-4.2,
+`0x303A:0x1001`) running the **XiaoZhi voice firmware instead of the calendar
+app** — the two are mutually exclusive flashes, so the hermes chain runs its OWN
+gates (never `robodog-hardware-e2e`) and this whole section assumes the hermes
+image is on the board:
+
+```
+robodog-hermes-validate → robodog-hermes-e2e → robodog-voice-e2e →
+robodog-production-health
+```
+
+- **`robodog-hermes-validate`** — the same LMAO host gate (BUILD completeness,
+  `bazel build //...`, ruff/mypy, `bazel test //tests:all
+  --test_tag_filters=-requires_hardware`) but the firmware-compile step is
+  `bazel run //robodog_client:build_robodog_hermes` (XiaoZhi, ESP-IDF Docker)
+  and it adds a `robodog_client/voice/` corpus sanity
+  (`make_corpus --verify`). Coverage uses reverse-dep matching so the voice
+  `*.py` wired as `data` of the `sh_binary` targets count as covered.
+- **`robodog-hermes-e2e`** — builds + flashes the hermes image via
+  `bazel run //robodog_client:build_robodog_hermes` /
+  `:flash_robodog_hermes`, then **screen-captures the exact ST7305 pixels**
+  (`capture.py --port <port> --reset --n 8 --timeout 180 --describe`; RD_SHOT
+  frames → `panel_landscape.png` → Qwen2.5-VL readback). Writes
+  `$ARTIFACTS_DIR/hermes-hardware-e2e.md` (verbatim transcriptions + PNGs).
+- **`robodog-voice-e2e`** — the acoustic **voice loop** (issue #267):
+  `bazel run //robodog_client:hermes_voice_e2e` drives `RD_LISTEN` (software
+  button) → `device connected`/`listen start` → test speaker plays a pinned
+  corpus command into the board mic → `ASR text=` normalized match → `Hermes …
+  reply:` non-empty → test-mic **ring closure** re-ASR → `capture.py --describe`
+  subtitle readback. Six assertions reported per loop; flaky real-speech ASR
+  loops fall back to the documented `E2E_STT` injection (`POST /xiaozhi/inject`)
+  and are reported verbatim. Loud skip when the board or the ALSA test card is
+  absent. Writes `$ARTIFACTS_DIR/robodog-voice-loop-e2e.md`.
+- **`robodog-production-health`** — owns `.gate-head`, shared with the calendar
+  workflow (never written by any gate before it).
+
+**PR contract**: `robodog-hermes-finalize-pr` requires `hermes-hardware-e2e.md`
+**and** `robodog-voice-loop-e2e.md` (not the calendar `hardware-e2e.md`);
+embedding both verbatim in the PR body is mandatory.
+
+
 
 `smart-irrigation-dev` additionally enforces the blueprint's Appendix 13
 mandate: if a request touches firmware/algorithm/protocol code and
