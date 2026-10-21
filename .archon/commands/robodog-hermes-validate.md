@@ -39,6 +39,14 @@ units. Focused step: run checks, fix issues, repeat until green.
 
 ## Phase -1: LOCATE THE RUN TREE (MANDATORY)
 
+Run all phases with strict shell semantics and a validated base ref:
+
+```bash
+set -euo pipefail
+[ -n "${BASE_BRANCH:-}" ] || { echo "BASE_BRANCH is unset/empty — abort" >&2; exit 2; }
+git rev-parse --verify "$BASE_BRANCH" >/dev/null 2>&1 || { echo "BASE_BRANCH '$BASE_BRANCH' is not a ref" >&2; exit 2; }
+```
+
 ```bash
 git worktree list --porcelain | grep -E "^(worktree|branch)"
 ```
@@ -99,8 +107,8 @@ done
 
 For every MISSING file: wire it into the appropriate BUILD target (e.g. extend
 `//robodog_client:hermes_voice_e2e` data / `:voice_backend`), then re-run until
-clean. (Known gap: the calendar `robodog-validate`'s name-alias match does not
-see `voice/*.py` — this rdeps check is the hermes-correct version.)
+clean. (Both `robodog-validate` and `robodog-hermes-validate` share this
+rdeps matching, including `voice/*.py`.)
 
 **Record**: ✅ Pass / ❌ Fail (fixed)
 

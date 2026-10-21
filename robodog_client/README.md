@@ -189,7 +189,7 @@ compiled into every hermes build, like the capture hook.
 | `hermes-platform/xiaozhi/` | **Hermes platform plugin** (plugin.yaml + adapter.py + __init__.py) deployed to `~/.hermes/plugins/platforms/xiaozhi/`. Makes the board a first-class Hermes gateway client (see "Hermes gateway integration" below). |
 | `lmao-robodog-voice.service` | systemd **user** unit for the bridge, run from `~/xiaozhi/` with a Python venv (`fastapi`, `uvicorn`, `websockets`, `opuslib`, `faster-whisper`, `numpy`). |
 | `kokoro_server.py` + `kokoro-tts.service` | **Kokoro-82M** TTS (Apache-2.0, ~82M params, 24 kHz native) exposed as OpenAI `/v1/audio/speech` on the GPU host `spark-5307:8004`, also systemd-user-managed. |
-| `lmao-robodog-voice.service` env | ASR = local faster-whisper `base`; brain = `HERMES_BRAIN_URL` (default `ws://127.0.0.1:8101/xiaozhi/brain`, the board's Hermes session; `DEVICE_ID` pins the identity, else hello device_id/mac or a persisted uuid); fallback LLM = `gx10-f156:8000/v1` (`deepseek-ai/DeepSeek-V4-Flash-0731`); TTS = `spark-5307:8004`. |
+| `lmao-robodog-voice.service` env | ASR = local faster-whisper `base`; brain = `HERMES_BRAIN_URL` (default `ws://127.0.0.1:8101/xiaozhi/brain`, the board's Hermes session; `DEVICE_ID` pins the identity, else hello device_id/mac or a persisted uuid); fallback LLM = `gx10-f156:8000/v1` (`deepseek-ai/DeepSeek-V4-Flash-0731`); TTS = `spark-5307:8004`; downlink = `DOWNLINK_PACE` (seconds per 60 ms Opus frame, default `0.0582` = ~97% real-time), so the 24 kHz reply is streamed at play-rate and the board's ~2.5 s decode pipeline never overflows (issue #267). |
 
 Loop:
 
