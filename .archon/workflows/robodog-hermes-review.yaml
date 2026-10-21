@@ -1,0 +1,209 @@
+name: robodog-hermes-review
+description: |
+  Review-entry twin of robodog-hermes-dev for the LMAO RoboDog **hermes voice
+  device** (Waveshare ESP32-S3 RLCD-4.2 / ST7305, robodog_client/voice XiaoZhi
+  voice firmware + bridge ASR -> Hermes brain -> Kokoro TTS + the acoustic
+  voice-loop E2E). It starts AT the code review of an EXISTING PR — create the
+  PR manually first (e.g. `gh pr create` from the feature branch), then run
+  this. On first node it re-points the (isolated) worktree at the PR's head
+  branch so gh resolves it, then runs the full review + re-gate cycle.
+  Input: natural language naming the PR to review, e.g. "review PR #123";
+  the PR must already exist (head pushed; base = $BASE_BRANCH).
+  Output: 5-agent review findings synthesized onto the PR, any agreed fixes
+  committed, and the COMPLETE gate chain re-run (fast-pass only when HEAD is
+  unchanged — #87 guard) so a regression cannot hide.
+
+  Flow (phases 6-9 of robodog-hermes-dev, no earlier phases):
+  1. checkout-pr: resolve PR #N from ARGUMENTS and check out its head branch
+     in this worktree (works in default isolation mode)
+  2. verify-pr-base (re-targets the PR onto $BASE_BRANCH if needed)
+  3. review-scope + sync the PR with main
+  4. 5 parallel review agents (code-review / error-handling / test-coverage /
+     comment-quality / docs-impact) -> synthesize
+  5. implement-fixes: act on the review findings, commit, push
+  6. FINAL gate chain re-run: robodog-hermes-validate -> robodog-hermes-e2e
+     (build + flash the real board, ST7305 pixel capture + vision readback) ->
+     robodog-voice-e2e (acoustic voice-loop via RD_LISTEN + test-mic ring) ->
+     robodog-production-health (.gate-head owner). Fast-pass ONLY when HEAD is
+     unchanged since the last full chain.
+  7. Final summary with decision matrix -> GitHub comment, ntfy push.
+
+  NOT for: creating the feature (use robodog-hermes-dev), Cardputer/LoRa
+  (lmao-feature-dev), GitHub-issue fixes (lmao-fix-issue), Smart Irrigation
+  (smart-irrigation-dev), or the RoboDog *calendar* firmware (robodog-client-dev
+  — same board, mutually exclusive flashes; never run both at once).
+
+  Models: gx10 DeepSeek V4 Flash (gx10/deepseek-ai/DeepSeek-V4-Flash-0731) for
+  the agent; the screen-capture/vision READBACK and ASR re-read are fixed
+  pipelines. No Claude anywhere.
+
+nodes:
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 6: CODE REVIEW (entry point)
+  # ═══════════════════════════════════════════════════════════════════
+
+  # The review workflow assumes the PR to review ALREADY EXISTS (create it
+  # manually first, e.g. `gh pr create` from the feature branch). In isolation
+  # mode archon starts on a fresh auto-named branch that has no PR, so we
+  # re-point this worktree at the PR's head branch (ARGUMENTS: "PR #N").
+  # RoboDog rule: the review runs against an EXISTING PR — never creates it.
+
+  - id: checkout-pr
+    bash: |
+      set -euo pipefail
+      PR_NUMBER=$(printf '%s' "$ARGUMENTS" | grep -oE 'PR[[:space:]]*#[0-9]+' | grep -oE '[0-9]+' | head -1 || true)
+      [ -n "$PR_NUMBER" ] || PR_NUMBER=$(printf '%s' "$ARGUMENTS" | grep -oE '#[0-9]+' | grep -oE '[0-9]+' | head -1 || true)
+      if [ -z "$PR_NUMBER" ]; then
+        echo "Could not find a PR number in ARGUMENTS='$ARGUMENTS' (pass e.g. \"review PR #123\")" >&2
+        exit 2
+      fi
+      PR_HEAD=$(gh pr view "$PR_NUMBER" --json headRefName -q '.headRefName')
+      CUR=$(git branch --show-current)
+      if [ "$CUR" != "$PR_HEAD" ]; then
+        git fetch -q origin "$PR_HEAD"
+        git checkout -B "$PR_HEAD" "origin/$PR_HEAD"
+      fi
+      echo "reviewing PR #$PR_NUMBER ($PR_HEAD @ $(git rev-parse --short HEAD))"
+    context: fresh
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+
+  - id: verify-pr-base
+    bash: |
+      set -euo pipefail
+      EXPECTED="$BASE_BRANCH"
+      ACTUAL=$(gh pr view --json baseRefName -q '.baseRefName')
+      if [ "$ACTUAL" != "$EXPECTED" ]; then
+        PR_NUMBER=$(gh pr view --json number -q '.number')
+        echo "Base mismatch on PR #$PR_NUMBER: expected=$EXPECTED actual=$ACTUAL — re-targeting" >&2
+        gh pr edit "$PR_NUMBER" --base "$EXPECTED"
+      else
+        echo "PR base verified: $EXPECTED"
+      fi
+    depends_on: [checkout-pr]
+    context: fresh
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+
+  - id: review-scope
+    command: archon-pr-review-scope
+    depends_on: [verify-pr-base]
+    context: fresh
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+
+  - id: sync
+    command: lmao-sync-pr-with-main
+    depends_on: [review-scope]
+    context: fresh
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+
+  - id: code-review
+    command: archon-code-review-agent
+    depends_on: [sync]
+    context: fresh
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+
+  - id: error-handling
+    command: archon-error-handling-agent
+    depends_on: [sync]
+    context: fresh
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+
+  - id: test-coverage
+    command: archon-test-coverage-agent
+    depends_on: [sync]
+    context: fresh
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+
+  - id: comment-quality
+    command: archon-comment-quality-agent
+    depends_on: [sync]
+    context: fresh
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+
+  - id: docs-impact
+    command: archon-docs-impact-agent
+    depends_on: [sync]
+    context: fresh
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+
+  - id: synthesize
+    command: archon-synthesize-review
+    depends_on: [code-review, error-handling, test-coverage, comment-quality, docs-impact]
+    trigger_rule: one_success
+    context: fresh
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 7: FIX REVIEW ISSUES (hermes-adapted)
+  # ═══════════════════════════════════════════════════════════════════
+
+  - id: implement-fixes
+    command: robodog-hermes-implement-review-fixes
+    depends_on: [synthesize]
+    context: fresh
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    effort: max
+
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 8: FINAL GATE CHAIN — re-run after review-fix commits.
+  # Fast-pass ONLY when HEAD is unchanged since the first gate chain
+  # (.gate-head marker, written by robodog-production-health); any new commit
+  # forces the FULL chain including a re-flash + re-capture of the board.
+  # The #87 regression guard.
+  # ═══════════════════════════════════════════════════════════════════
+
+  - id: final-validate
+    command: robodog-hermes-validate
+    depends_on: [implement-fixes]
+    context: fresh
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+
+  - id: final-hermes-hardware-e2e
+    command: robodog-hermes-e2e
+    depends_on: [final-validate]
+    context: fresh
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+
+  - id: final-voice-loop-e2e
+    command: robodog-voice-e2e
+    depends_on: [final-hermes-hardware-e2e]
+    context: fresh
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+
+  - id: final-production-health
+    command: robodog-production-health
+    depends_on: [final-voice-loop-e2e]
+    context: fresh
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 9: FINAL SUMMARY & FOLLOW-UP
+  # ═══════════════════════════════════════════════════════════════════
+
+  - id: workflow-summary
+    command: archon-workflow-summary
+    depends_on: [final-production-health]
+    context: fresh
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+
+  # ─── Push notification via ntfy (bash + curl) ─────────────────
+  # To enable, create .archon/mcp/ntfy.json with {"NTFY_TOPIC": "..."}
+  # in the project root. No-op when the file is absent.
+
+  - id: ntfy-result
+    bash: |
+      if [ ! -f .archon/mcp/ntfy.json ]; then exit 0; fi
+      NTFY_TOPIC="${NTFY_TOPIC:-$(grep -oP '"NTFY_TOPIC":\s*"\K[^"]+' .archon/mcp/ntfy.json 2>/dev/null)}"
+      [ -z "$NTFY_TOPIC" ] && exit 0
+      if [ -f "$ARTIFACTS_DIR/workflow-summary.md" ]; then
+        TITLE="✅ RoboDog-Hermes-Review Complete"
+        TAGS="white_check_mark"
+        BODY="Review workflow completed successfully for: $ARGUMENTS"
+      else
+        TITLE="❌ RoboDog-Hermes-Review Failed"
+        TAGS="x"
+        BODY="Review workflow failed for: $ARGUMENTS"
+      fi
+      curl -sf -H "Title: $TITLE" -H "Priority: 4" -H "Tags: $TAGS" \
+        -d "$BODY" "https://ntfy.sh/$NTFY_TOPIC" > /dev/null 2>&1
+    depends_on: [workflow-summary]
+    trigger_rule: all_done

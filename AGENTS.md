@@ -216,6 +216,17 @@ archon workflow run lmao-feature-dev "description of feature"
 # vision model (Qwen2.5-VL via capture.py --describe). Loud skip when no board.
 archon workflow run robodog-client-dev "description of feature"
 
+# RoboDog hermes VOICE — the SAME board running the XiaoZhi voice firmware
+# (robodog_client/voice/, RD_SHOT capture hook + RD_LISTEN software button) +
+# the voice bridge + acoustic voice-loop E2E (issue #267). Mutually exclusive
+# with the calendar firmware. Verification is VOICE-LOOP-DRIVEN: robodog-hermes-e2e
+# (screen capture) + robodog-voice-e2e (RD_LISTEN -> ASR -> Hermes reply ->
+# test-mic ring closure -> RLCD subtitle). Never run the calendar gates.
+archon workflow run robodog-hermes-dev "description of feature"
+# Review an EXISTING hermes-voice PR (starts AT the code review, no planning/
+# implement/finalize): the PR must already exist — `gh pr create` first, then:
+archon workflow run robodog-hermes-review "review PR #NNN"
+
 # Kid panels (per-kid dedicated boards, one firmware image): the per-board
 # `kid_name` is set at flash time with `flash_firmware --kid-name <kid>` (writes
 # the NVS `kid_name` key at 0x9000, wiping the 24 KB NVS partition — desired for
