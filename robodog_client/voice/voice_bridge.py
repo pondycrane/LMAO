@@ -126,6 +126,13 @@ AUDIO_RATE = 24000  # the board codec runs at 24 kHz
 FRAME_MS = 60
 FRAME_SAMPLES = AUDIO_RATE * FRAME_MS // 1000  # 1440 samples/channel @24 kHz
 FRAME_BYTES = FRAME_SAMPLES * 2 * 1  # s16le mono
+# Real-time TTS downlink pacing: each Opus frame is FRAME_MS of audio; stream it
+# slightly ahead of real-time (~97%) so the board's ~2.5 s decode/playback
+# pipeline NEVER overflows. Dumping the whole reply in one burst overran the
+# board's 40-frame decode queue (MAX_DECODE_PACKETS_IN_QUEUE=2400ms/60ms) —
+# dropped the tail, so the read-out was cut at ~2.4 s and the board re-armed
+# listening mid-reply. Tune with DOWNLINK_PACE (seconds per frame).
+DOWNLINK_PACE = float(os.environ.get("DOWNLINK_PACE", str(FRAME_MS * 0.97 / 1000.0)))
 
 app = FastAPI(title="LMAO RoboDog VoIP bridge")
 
@@ -508,7 +515,7 @@ async def stream_pcm_to(ws: WebSocket, session_id: str, pcm_buf: bytes) -> bool:
             log.info("session=%s device ended mid-tts (%d/%d bytes)",
                      session_id, i, len(buf))
             return False
-        await asyncio.sleep(0.001)
+        await asyncio.sleep(DOWNLINK_PACE)
     return True
 
 
