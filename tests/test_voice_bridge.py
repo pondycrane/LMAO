@@ -79,13 +79,12 @@ async def test_stream_pcm_paces_each_frame(monkeypatch):
     sleeps: list[float] = []
     real_sleep = asyncio.sleep  # capture before patching (avoids recursion)
     monkeypatch.setattr(vb, "DOWNLINK_PACE", 0.0582)
-    monkeypatch.setattr(vb.asyncio, "sleep",
-                        lambda d: sleeps.append(d) or real_sleep(0))
+    monkeypatch.setattr(vb.asyncio, "sleep", lambda d: sleeps.append(d) or real_sleep(0))
 
     ok = await vb.stream_pcm_to(ws, "s1", pcm)
 
     assert ok is True
-    assert len(ws.sent) == 3           # 2 full + 1 zero-padded trailing frame
+    assert len(ws.sent) == 3  # 2 full + 1 zero-padded trailing frame
     assert sleeps == [0.0582, 0.0582]  # one pace per inter-frame gap, no burst
 
 
@@ -97,8 +96,7 @@ async def test_stream_pcm_returns_false_when_device_ends_mid_tts(monkeypatch):
     sleeps: list[float] = []
     real_sleep = asyncio.sleep
     monkeypatch.setattr(vb, "DOWNLINK_PACE", 0.0582)
-    monkeypatch.setattr(vb.asyncio, "sleep",
-                        lambda d: sleeps.append(d) or real_sleep(0))
+    monkeypatch.setattr(vb.asyncio, "sleep", lambda d: sleeps.append(d) or real_sleep(0))
 
     ok = await vb.stream_pcm_to(ws, "s1", pcm)
 
