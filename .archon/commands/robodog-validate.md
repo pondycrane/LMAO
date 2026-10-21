@@ -146,7 +146,7 @@ for f in $CHANGED_PY; do
   else
     label="//$pkg_dir:${f#$pkg_dir/}"
   fi
-  if [ -n "$label" ] && bazel query "$label" >/dev/null 2>&1; then
+  if [ -n "$label" ] && bazel query "rdeps('//$pkg_dir/...', '$label', 1)" >/dev/null 2>&1; then
     echo "COVERED:   $f"
   else
     echo "MISSING:   $f  ← not referenced by any BUILD target"
