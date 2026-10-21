@@ -541,3 +541,16 @@ py_test(
         "@lmao_pip//pytest",
     ],
 )
+
+# RoboDog voice bridge TTS downlink pacing — regression guard for issue #267.
+# voice_bridge's runtime deps are stubbed in sys.modules before import (the
+# module-level mocks in the test), so only pytest + pytest_asyncio are needed.
+py_test(
+    name = "test_voice_bridge",
+    srcs = ["test_voice_bridge.py"],
+    deps = [
+        "//robodog_client:voice_bridge",
+        "@lmao_pip//pytest",
+        "@lmao_pip//pytest_asyncio",
+    ],
+)

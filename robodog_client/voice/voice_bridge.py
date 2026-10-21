@@ -49,6 +49,7 @@ import time
 import urllib.parse
 import urllib.request
 import wave
+from typing import cast
 
 import numpy as np
 import opuslib
@@ -126,6 +127,52 @@ AUDIO_RATE = 24000  # the board codec runs at 24 kHz
 FRAME_MS = 60
 FRAME_SAMPLES = AUDIO_RATE * FRAME_MS // 1000  # 1440 samples/channel @24 kHz
 FRAME_BYTES = FRAME_SAMPLES * 2 * 1  # s16le mono
+# Real-time TTS downlink pacing: each Opus frame is FRAME_MS of audio; sleep 97%
+# of each 60 ms frame interval (~58 ms) between frames, i.e. stream ~3% *faster*
+# than real-time so the board's 40-frame decode queue never overruns in normal
+# operation. Dumping the whole reply in one burst overran that queue
+# (MAX_DECODE_PACKETS_IN_QUEUE=2400ms/60ms) — dropped the tail, so the read-out
+# was cut at ~2.4 s and the board re-armed listening mid-reply (#267). Tune with
+# DOWNLINK_PACE (seconds per frame).
+
+
+def _resolve_downlink_pace() -> float:
+    """Resolve + validate DOWNLINK_PACE (seconds per Opus frame) at import time.
+
+    The calibrated default (97% of a frame, i.e. ~3% faster than real-time) keeps
+    the board's 40-frame decode queue from overrunning during normal replies. A
+    <=0 pace (e.g. a stuck literal "0") silently re-enables the burst overrun
+    that cut read-outs at ~2.4 s (#267); a pace >2x real-time starves the decode
+    queue and stutters the reply. Both look like audio/firmware regressions, so
+    fail loudly here — the bridge is a long-running service, and a config typo
+    must not take it down at boot with a bare traceback that doesn't name the env
+    var.
+    """
+    default = FRAME_MS * 0.97 / 1000.0
+    raw = os.environ.get("DOWNLINK_PACE")
+    if raw is None:
+        return default
+    try:
+        pace = float(raw)
+    except ValueError as e:
+        raise ValueError(
+            f"DOWNLINK_PACE={raw!r} is not a number (seconds per Opus frame; expected ~{default!r})"
+        ) from e
+    if not 0.0 < pace <= 2 * FRAME_MS / 1000.0:
+        raise ValueError(
+            f"DOWNLINK_PACE={raw!r} out of range (0, {2 * FRAME_MS / 1000.0!r}]; "
+            "<=0 re-enables the #267 read-out cut; >2x real-time starves the "
+            "board's decode queue"
+        )
+    return pace
+
+
+DOWNLINK_PACE = _resolve_downlink_pace()
+log.info(
+    "downlink pacing: %.2f ms/frame (%.0f%% of real-time)",
+    DOWNLINK_PACE * 1000.0,
+    DOWNLINK_PACE * 1000.0 / FRAME_MS * 100.0,
+)
 
 app = FastAPI(title="LMAO RoboDog VoIP bridge")
 
@@ -192,7 +239,7 @@ def _urlopen_bytes(req, timeout, attempts=4):
     raise last if last else RuntimeError("unknown failure")
 
 
-def _multipart(fields, filename, filedata, ctype="audio/wav") -> bytes:
+def _multipart(fields, filename, filedata, ctype="audio/wav") -> tuple[bytes, str]:
     """Minimal multipart/form-data body for OpenAI-style file uploads."""
     boundary = "--lmao-bridge-" + os.urandom(8).hex()
     parts = []
@@ -508,7 +555,7 @@ async def stream_pcm_to(ws: WebSocket, session_id: str, pcm_buf: bytes) -> bool:
             log.info("session=%s device ended mid-tts (%d/%d bytes)",
                      session_id, i, len(buf))
             return False
-        await asyncio.sleep(0.001)
+        await asyncio.sleep(DOWNLINK_PACE)
     return True
 
 
@@ -561,9 +608,9 @@ async def inject_utterance(payload: dict):
         log.warning("session=%s inject Hermes brain failed (%s)", sid, e)
         return {"error": "hermes failed", "status": 502}
     if kind == "voice":
-        await speak_audio_to(ws, sid, payload)
+        await speak_audio_to(ws, sid, cast(bytes, payload))
     else:
-        await speak_text_to(ws, sid, payload)
+        await speak_text_to(ws, sid, cast(str, payload))
     return {"ok": True, "kind": kind}
 
 
@@ -732,6 +779,7 @@ async def handle_conversation(ws: WebSocket, session_id: str):
             data = msg.get("bytes")
             if data is not None and speaking and not processing:
                 frames_recv += 1
+                assert decoder is not None  # configure() always runs before frames
                 try:
                     frame = decoder.decode(bytes(data), ul_frame_samples)
                 except Exception as e:
