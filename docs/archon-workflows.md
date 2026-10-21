@@ -145,7 +145,8 @@ robodog-production-health
   button) → `device connected`/`listen start` → test speaker plays a pinned
   corpus command into the board mic → `ASR text=` normalized match → `Hermes …
   reply:` non-empty → test-mic **ring closure** re-ASR → `capture.py --describe`
-  subtitle readback. Six assertions reported per loop; flaky real-speech ASR
+  subtitle readback. Five assertions reported per loop (`OPEN_SESSION`,
+  `ASR_MATCH`, `BRAIN_REPLY`, `RING`, `SUBTITLE`); flaky real-speech ASR
   loops fall back to the documented `E2E_STT` injection (`POST /xiaozhi/inject`)
   and are reported verbatim. Loud skip when the board or the ALSA test card is
   absent. Writes `$ARTIFACTS_DIR/robodog-voice-loop-e2e.md`.
