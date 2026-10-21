@@ -698,7 +698,10 @@ faster-whisper, submits each utterance to the board's **Hermes session**
 (hermes-gateway's xiaozhi platform plugin, stable board identity
 `~/xiaozhi/device_id`), and streams the reply back as 24 kHz Kokoro TTS
 (`spark-5307:8004`, voice `af_heart`) to the board speaker + subtitle on the
-RLCD. `capture.py --listen` opens a session ad hoc.
+RLCD. `capture.py --listen` opens a session ad hoc. The TTS reply is streamed
+in **real time** at ~97% play-rate (`DOWNLINK_PACE`, default 58.2 ms/frame) so
+the board's fixed ~2.5 s decode/playback pipeline never overflows — the full
+read-out plays and re-listening starts only after it (issue #267).
 
 **Autonomous voice-loop E2E (`robodog_client/voice/hermes_voice_e2e.py`,
 coordinator of issue #267)** — one host command, no human, no wake word:
