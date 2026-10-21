@@ -85,7 +85,7 @@ sh_binary(
 # exec the SOURCE-TREE copy (via BUILD_WORKSPACE_DIRECTORY on `bazel run`) in
 # that venv — the same host-venv pattern as the firmware flash/build targets.
 #
-#   bazel run //robodog_client:hermes_voice_e2e [-- --corpus time]
+#   bazel run //robodog_client:hermes_voice_e2e [-- --corpus planets]
 #   bazel run //robodog_client:make_corpus [-- --verify]
 sh_binary(
     name = "hermes_voice_e2e",
@@ -94,6 +94,7 @@ sh_binary(
         "capture.py",
         "voice/hermes_voice_e2e.py",
         "voice/voice_bridge.py",
+        "voice/e2e_readout.py",
         "//robodog_client:voice_corpus",
     ],
     tags = ["manual"],
@@ -123,6 +124,7 @@ filegroup(
         "voice/kokoro-tts.service",
         "voice/hermes_voice_e2e.py",
         "voice/make_corpus.py",
+        "voice/e2e_readout.py",
         "voice/corpus/corpus.json",
     ] + glob(["voice/corpus/*.wav"]) + glob(["voice/corpus/*.txt"]),
     tags = ["manual"],
@@ -136,5 +138,13 @@ filegroup(
 py_library(
     name = "voice_bridge",
     srcs = ["voice/voice_bridge.py"],
+    visibility = ["//tests:__pkg__"],
+)
+
+# Read-out metrics for the voice-loop E2E (issue #274) — pure stdlib so
+# //tests:test_e2e_readout runs without the ops venv.
+py_library(
+    name = "e2e_readout",
+    srcs = ["voice/e2e_readout.py"],
     visibility = ["//tests:__pkg__"],
 )

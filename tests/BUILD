@@ -554,3 +554,13 @@ py_test(
         "@lmao_pip//pytest_asyncio",
     ],
 )
+
+# Read-out metrics helper (issue #274): active-play-span / played-fraction.
+py_test(
+    name = "test_e2e_readout",
+    srcs = ["test_e2e_readout.py"],
+    deps = [
+        "//robodog_client:e2e_readout",
+        "@lmao_pip//pytest",
+    ],
+)

@@ -30,6 +30,8 @@ COMMANDS = [
     ("tell me a joke", "joke"),
     ("how are you today", "greeting"),
     ("what can you do", "capabilities"),
+    ("name the planets in order from the sun", "planets"),
+    ("count slowly from twenty to thirty", "count"),
 ]
 
 TTS_BASE_URL = os.environ.get("TTS_BASE_URL", "http://spark-5307:8004").rstrip("/")
