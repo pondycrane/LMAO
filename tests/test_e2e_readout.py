@@ -51,6 +51,33 @@ def test_truncated_readout_fails_boundary(tmp_path):
     assert ro.played_fraction(span, 4.0) < 0.85  # the alarm the gate must raise
 
 
+def test_truncated_to_80pct_still_fails_boundary(tmp_path):
+    """An 80%-truncated 4 s reply must still FAIL the 0.85 gate.
+
+    This pins the metric's true discrimination: with a coarse window the ~0.35 s
+    boundary bleed pads 3.2 s up to ~0.84-0.88 and an 80% read-out false-passes
+    as "full". The 0.1 s window keeps the bleed ~0.1-0.15 s so the measured
+    span stays under the 0.85 line — the gate really is ~0.85, not ~0.80."""
+    f = make_wav(tmp_path / "trunc80.wav", [("silence", 1.0), ("tone", 3.2), ("silence", 7.0)])
+    span, _, _ = ro.active_play_span(f)
+    assert ro.played_fraction(span, 4.0) < 0.85
+
+
+def test_gap_splits_when_wide_enough(tmp_path):
+    """A 0.9 s silent gap splits two reply segments into separate runs.
+
+    The windowed boundary bleed means the *effective* split threshold is wider
+    than the ``gap=0.6`` merge window — a ~0.85-0.9 s blank is where two runs
+    actually separate (each run extends ~0.1 s past its tone). Pins the split
+    side of the merge/split contract so an over-merge regression fails."""
+    f = make_wav(
+        tmp_path / "split.wav",
+        [("silence", 1.0), ("tone", 3.0), ("silence", 0.9), ("tone", 3.0), ("silence", 5.0)],
+    )
+    span, _, _ = ro.active_play_span(f)
+    assert span < 3.9  # the runs stay separate (~one 3 s run + bleed), not merged ~6 s
+
+
 def test_inter_word_gaps_merge(tmp_path):
     """0.4 s pauses between reply segments merge into one contiguous span."""
     f = make_wav(

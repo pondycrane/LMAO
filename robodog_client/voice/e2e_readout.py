@@ -35,10 +35,8 @@ def wave_rms(path: str) -> float:
 def quiet_floor(path: str, win: int = 16000, rate: int = 16000) -> float:
     """Robust ambient floor = median of the 1 s window RMS values (immune to a
     speech burst inflating a whole-file average). Relocated unchanged from the
-    RING path; ``active_play_span`` uses a lower-quartile floor instead so a
+    RING path; ``active_play_span`` uses a 10th-percentile floor instead so a
     *long* reply dominating the capture window still yields an ambient floor."""
-    import statistics as _st
-
     try:
         with wave.open(str(path)) as w:
             a = array.array("h", w.readframes(w.getnframes()))
@@ -47,7 +45,7 @@ def quiet_floor(path: str, win: int = 16000, rate: int = 16000) -> float:
     ws = []
     for i in range(0, max(1, len(a) - win), win // 2):
         ws.append((sum(x * x for x in a[i : i + win]) / win) ** 0.5)
-    return _st.median(ws) if ws else 0.0
+    return statistics.median(ws) if ws else 0.0
 
 
 def energy_burst_window(path: str, total_seconds: float, rate: int = 16000):
@@ -73,9 +71,9 @@ def energy_burst_window(path: str, total_seconds: float, rate: int = 16000):
 
 
 def window_rms(
-    path: str, win: int = 16000, hop: int = 4000, rate: int = 16000
+    path: str, win: int = 1600, hop: int = 800, rate: int = 16000
 ) -> list[tuple[float, float]]:
-    """(start_sec, rms) per sliding window, 0.25 s cadence by default."""
+    """(start_sec, rms) per sliding window, 0.1 s window / 0.05 s hop by default."""
     with wave.open(str(path)) as w:
         a = array.array("h", w.readframes(w.getnframes()))
     out: list[tuple[float, float]] = []
@@ -88,8 +86,8 @@ def window_rms(
 def active_play_span(
     path: str,
     rate: int = 16000,
-    win: int = 4000,
-    hop: int = 2000,
+    win: int = 1600,
+    hop: int = 800,
     gap: float = 0.6,
     floor_factor: float = 2.0,
     abs_min: float = 60.0,
@@ -98,13 +96,18 @@ def active_play_span(
     gaps <= ``gap`` s.
 
     Returns ``(span_s, start_s, end_s)`` — the played span of the reply on the
-    test mic. The floor is the *lower-quartile* of per-window RMS (robust to a
-    long reply occupying up to ~75% of the capture, where a median would track
+    test mic. The floor is the *10th percentile* of per-window RMS (robust to a
+    long reply occupying up to ~90% of the capture, where a median would track
     the reply itself and under-count the span); ``abs_min`` guards a totally
-    silent/ambient-less capture. The 0.25 s window keeps boundary bleed small so
-    a short truncated reply is measured accurately (a 1 s window would pad a
-    ~2.4 s truncation up to the 0.85 boundary — the exact false-pass this gate
-    removes). ``(0.0, 0.0, 0.0)`` on no speech (never raises on empty/missing).
+    silent/ambient-less capture. The 0.1 s window keeps boundary bleed small
+    (with a 0.05 s hop a run extends past its true edges by ~0.1-0.15 s total,
+    so an 80%-truncated reply still measures under the 0.85 gate — a coarse
+    1 s window pads a ~2.4 s truncation up to the 0.85 boundary, the exact
+    false-pass this gate removes). Note the windowed boundary bleed also makes
+    the *effective* silence-gap split wider than ``gap``: on fixtures a blank of
+    ~0.85-0.9 s is where two runs actually separate (each run extends ~0.1 s
+    past its tone through partially-voiced windows). ``(0.0, 0.0, 0.0)`` on no
+    speech (never raises on empty/missing).
     """
     try:
         ws = window_rms(path, win=win, hop=hop, rate=rate)

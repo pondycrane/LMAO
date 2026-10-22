@@ -85,7 +85,7 @@ sh_binary(
 # exec the SOURCE-TREE copy (via BUILD_WORKSPACE_DIRECTORY on `bazel run`) in
 # that venv — the same host-venv pattern as the firmware flash/build targets.
 #
-#   bazel run //robodog_client:hermes_voice_e2e [-- --corpus planets]
+#   bazel run //robodog_client:hermes_voice_e2e [-- --corpus count]
 #   bazel run //robodog_client:make_corpus [-- --verify]
 sh_binary(
     name = "hermes_voice_e2e",

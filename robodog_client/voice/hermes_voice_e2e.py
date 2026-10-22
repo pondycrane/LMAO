@@ -18,8 +18,9 @@ Issue #274 adds two asserts the #267 RING-only check was blind to:
 - READOUT_COMPLETE: the full active-play span of the reply on the test mic vs
   the bridge's reported TTS duration (played_fraction >= 0.85) — a read-out
   truncated by the decode-queue drop (#272's pacing removes it) now FAILs
-  instead of passing as RING "audible". Uses the `story` long-reply corpus so
-  the reply reliably exceeds READOUT_MIN_REPLY (3.5 s) and is decisive.
+  instead of passing as RING "audible". Uses the `count` long-reply corpus
+  (default) so the reply reliably exceeds READOUT_MIN_REPLY (3.5 s) and is
+  decisive.
 - POST_READOUT_RELISTEN: a fresh RD_LISTEN right after the bridge logs the
   reply's `tts stop` must re-arm listening (the shrunken replacement for the
   old flat 12 s settle between loops). The realtime auto-relisten users hit in
@@ -438,6 +439,11 @@ def run_loop(n, instr, artifacts, prev_listen=None):
         try:
             inject_text(text, session_id=ses)
         except Exception as e:
+            # Reap the pre-inject capture: ffmpeg holds the exclusive ALSA
+            # capture PCM for up to MIC_INJECT_CAP s. If it is left running,
+            # the next loop's capture_mic fails busy and that loop's RING/
+            # READOUT/POST_READOUT all drop as "no test-mic capture".
+            mic_thread.join(timeout=cap_len + 30)
             res["asserts"]["BRAIN_REPLY"] = f"FAIL (inject: {e})"
             return res
         if not E2E_STT_TEXT:
@@ -496,20 +502,34 @@ def run_loop(n, instr, artifacts, prev_listen=None):
         mic_thread.start()
         time.sleep(0.7)
 
-    # POST_READOUT_RELISTEN: after the TTS ends, open a fresh listen
-    # immediately (the shrunken replacement for the old flat 12 s settle).
-    tts_stop = wait_for(tail, r"tts stop", session_id=ses,
-                        timeout=int(reply_secs) + 12)
+    # Authoritative spoken duration + the post-readout anchor, read in ONE
+    # session-scoped poll window. The bridge logs `tts streamed full <N>` right
+    # BEFORE `tts stop`; a wait_for('tts stop') that runs first would consume
+    # the streamed line under it (JournalTail drops everything through the
+    # matched line), so the refresh never fired. Poll once: track the LATEST
+    # streamed size (an inject loop plays a second, longer reply whose byte
+    # count differs from the BRAIN assert) until tts-stop lands, then refresh
+    # reply_secs — exact for auto-TTS voice replies AND bridge-synthesized
+    # text replies (the latter were previously guessed at 4.0 s).
+    tts_stop = None
+    streamed_sz = 0
+    deadline = time.monotonic() + int(reply_secs) + 15
+    while time.monotonic() < deadline:
+        tail.new_lines()
+        for line in tail._pending:
+            if f"session={ses}" not in line:
+                continue
+            m_sz = re.search(r"tts streamed full (\d+)", line)
+            if m_sz:
+                streamed_sz = max(streamed_sz, int(m_sz.group(1)))
+            if not tts_stop and re.search(r"tts stop", line, re.I):
+                tts_stop = line
+        if tts_stop or time.monotonic() >= deadline:
+            break
+        time.sleep(0.5)
     res["artifacts"]["tts_stop_anchor"] = bool(tts_stop)
-    # Authoritative spoken duration: the bridge logs the EXACT streamed PCM size
-    # right before tts-stop (bytes @24 kHz s16le = 48000 B/s) — exact for both
-    # auto-TTS voice replies and bridge-synthesized text replies (the latter
-    # were previously guessed at 4.0 s). Refreshes reply_secs feeding the
-    # READOUT assert measured a moment later.
-    streamed = wait_for(tail, r"tts streamed full (\d+)", session_id=ses, timeout=5)
-    m_sz = re.search(r"tts streamed full (\d+)", streamed or "")
-    if m_sz:
-        reply_secs = int(m_sz.group(1)) / 48000.0
+    if streamed_sz:
+        reply_secs = streamed_sz / 48000.0
         res["artifacts"]["reply_secs_streamed"] = reply_secs
 
     mic_thread.join(timeout=cap_len + 30)
@@ -611,7 +631,10 @@ def run_loop(n, instr, artifacts, prev_listen=None):
     # next command's ASR).
     if not tts_stop:
         res["asserts"]["POST_READOUT_RELISTEN"] = (
-            "SKIP (no `tts stop` journal anchor — bridge not updated)")
+            "FAIL (no `tts stop` anchor — deployed bridge predates this PR's "
+            "anchor; POST_READOUT cannot be proven). Redeploy "
+            "robodog_client/voice/voice_bridge.py and restart "
+            "systemctl --user lmao-robodog-voice")
         res["next_listen"] = {"ok": False, "ses": None}
     else:
         time.sleep(RE_LISTEN_GRACE)      # let the board drain the last frames
