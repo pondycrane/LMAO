@@ -78,15 +78,24 @@ health. Absent anything → LOUD SKIP:
 
 ```bash
 export XDG_RUNTIME_DIR=/run/user/$(id -u)
-bazel run //robodog_client:hermes_voice_e2e -- --corpus time \
+bazel run //robodog_client:hermes_voice_e2e -- --corpus count \
   --artifacts "$ARTIFACTS_DIR"
 # E2E_RUNS default 3; `E2E_RUNS=…` still overrides (bazel run env).
+# the `count` corpus ("count slowly from twenty to thirty") is the long-reply
+# corpus (issue #274): a deterministic 11-number list the brain reads as a
+# reliably ~7-10 s spoken VOICE reply whose replies reliably exceed
+# the 3.5 s discriminative floor so READOUT_COMPLETE is decisive, instead of
+# `time`-class ~3.0 s replies that the ~0.5 s truncation delta washes out.
 # Equivalently, direct venv: E2E_RUNS=3 ~/xiaozhi/.venv/bin/python \
-#   robodog_client/voice/hermes_voice_e2e.py --corpus time --artifacts "$ARTIFACTS_DIR"
+#   robodog_client/voice/hermes_voice_e2e.py --corpus count --artifacts "$ARTIFACTS_DIR"
 ```
 
-- Default 3 consecutive loops (acceptance criterion from issue #267) — fresh
-  RD_LISTEN each loop, 12 s settle so the board idles/WS drains between runs.
+- Default 3 consecutive loops (acceptance criterion from issue #267). Loop 1
+  opens with its own `RD_LISTEN`; every later loop reuses the listen the
+  PREVIOUS loop's `POST_READOUT_RELISTEN` armed a few seconds earlier (a fresh
+  `RD_LISTEN` into an already-listening board is a measured no-op) — with a
+  short `RD_BETWEEN_LOOP_SETTLE=3` drain between runs (the old flat 12 s
+  settle is gone).
 - Volume default `RD_PLAY_VOL=0.7`: louder saturates the board mic so its VAD
   never sees silence and the ASR buffer explodes (measured live).
 - Per-loop evidence under `$ARTIFACTS_DIR/robodog-voice-e2e/loopN/`:
@@ -105,15 +114,37 @@ Assertions (each PASS/FAIL/SKIP, logs verbatim):
 
 1. **OPEN_SESSION** — `device connected session=...` + `listen start
    (mode=manual)` in the bridge journal right after `RD_LISTEN` (no button, no
-   wake word).
+   wake word). From loop 2 onward this is the `RD_LISTEN` the PREVIOUS loop's
+   `POST_READOUT_RELISTEN` fired (one open per boundary — no double-open).
 2. **ASR_MATCH** — journal `ASR text='...'` normalized-match the pinned corpus
    transcript (the acoustic test-speaker→board-mic leg).
 3. **BRAIN_REPLY** — journal `Hermes voice|reply reply:` non-empty (Hermes
    brain + auto-TTS).
-4. **RING** — the test mic captured the board speaker's TTS and the host
+4. **READOUT_COMPLETE** (issue #274) — the full active-play span of the reply
+   on the test mic (below the ambient floor) vs the bridge's reported TTS
+   duration: `played_fraction = span / reply_secs >= 0.85` proves the reply was
+   read out to the end (a read-out truncated at ~2.4 s by the decode-queue drop
+   that #272's pacing removes FAILs instead of passing as RING "audible").
+   SKIP only when `reply_secs < 3.5 s` (too short to discriminate); the `count`
+   corpus makes that rare. `reply_secs` is refreshed from the bridge's exact
+   `tts streamed full <N>` byte count polled up to the reply's `tts stop` (the
+   0.1 s-windowed play-span metric keeps the ~0.85 discriminant real — an
+   80%-truncated reply measures below it).
+5. **POST_READOUT_RELISTEN** (issue #274) — after the bridge logs the reply's
+   `session=<id> tts stop`, a fresh `RD_LISTEN` must produce a `listen start`
+   within ~15 s (the shrunken replacement for the old flat 12 s settle between
+   loops). **FAIL (not SKIP) when the running bridge does not log the `tts
+   stop` anchor** — that is the deployment prerequisite this gate must catch:
+   redeploy `robodog_client/voice/voice_bridge.py` and restart
+   `systemctl --user lmao-robodog-voice`. The **realtime auto-relisten** normal
+   conversation hits is NOT observable here: the board returns to idle after
+   TTS with no reliable wake trigger and the E2E drives `RD_LISTEN`
+   (`mode=manual`) for every open — the fresh `RD_LISTEN` right after tts-stop
+   is the reachable proxy.
+6. **RING** — the test mic captured the board speaker's TTS and the host
    re-ASR aligns with the reply/subtitle (acoustic TTS→speaker→test-mic→ASR
    closure); loud note when only "audible" (weak placement).
-5. **SUBTITLE** — `capture.py --describe` readback of a panel dump carries the
+7. **SUBTITLE** — `capture.py --describe` readback of a panel dump carries the
    STT transcript phrase (RLCD render leg).
 
 Write `$ARTIFACTS_DIR/robodog-voice-loop-e2e.md` (distinct from the calendar
@@ -126,13 +157,15 @@ gate NEVER writes `.gate-head`):
 **Status**: ✅ PASS | ⚠️ SKIPPED (see Phase 2) | ❌ FAIL
 **Board**: Waveshare ESP32-S3 RLCD-4.2 (0x303A:0x1001)
 **Mode**: real-microphone | E2E_STT injection
-**Corpus**: time ('what time is it')  **Runs**: 3
+**Corpus**: count ('count slowly from twenty to thirty')  **Runs**: 3
 | Assertion | loop 1 | loop 2 | loop 3 |
 |---|---|---|---|
 | OPEN_SESSION | ✅ | ✅ | ✅ |
 | ASR_MATCH | ✅ | ... | ... |
 | BRAIN_REPLY | ... | ... | ... |
+| READOUT_COMPLETE | ... | ... | ... |
+| POST_READOUT_RELISTEN | ... | ... | ... |
 | RING | ... | ... | ... |
 | SUBTITLE | ... | ... | ... |
-## Verbatim transcripts + re-ASR per loop (the evidence)
+## Verbatim transcripts + re-ASR + read-out spans per loop (the evidence)
 ```
