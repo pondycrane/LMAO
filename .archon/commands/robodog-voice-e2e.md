@@ -90,8 +90,12 @@ bazel run //robodog_client:hermes_voice_e2e -- --corpus count \
 #   robodog_client/voice/hermes_voice_e2e.py --corpus count --artifacts "$ARTIFACTS_DIR"
 ```
 
-- Default 3 consecutive loops (acceptance criterion from issue #267) — fresh
-  RD_LISTEN each loop, 12 s settle so the board idles/WS drains between runs.
+- Default 3 consecutive loops (acceptance criterion from issue #267). Loop 1
+  opens with its own `RD_LISTEN`; every later loop reuses the listen the
+  PREVIOUS loop's `POST_READOUT_RELISTEN` armed a few seconds earlier (a fresh
+  `RD_LISTEN` into an already-listening board is a measured no-op) — with a
+  short `RD_BETWEEN_LOOP_SETTLE=3` drain between runs (the old flat 12 s
+  settle is gone).
 - Volume default `RD_PLAY_VOL=0.7`: louder saturates the board mic so its VAD
   never sees silence and the ASR buffer explodes (measured live).
 - Per-loop evidence under `$ARTIFACTS_DIR/robodog-voice-e2e/loopN/`:
@@ -121,16 +125,22 @@ Assertions (each PASS/FAIL/SKIP, logs verbatim):
    duration: `played_fraction = span / reply_secs >= 0.85` proves the reply was
    read out to the end (a read-out truncated at ~2.4 s by the decode-queue drop
    that #272's pacing removes FAILs instead of passing as RING "audible").
-   SKIP only when `reply_secs < 3.5 s` (too short to discriminate); the `story`
-   corpus makes that rare.
+   SKIP only when `reply_secs < 3.5 s` (too short to discriminate); the `count`
+   corpus makes that rare. `reply_secs` is refreshed from the bridge's exact
+   `tts streamed full <N>` byte count polled up to the reply's `tts stop` (the
+   0.1 s-windowed play-span metric keeps the ~0.85 discriminant real — an
+   80%-truncated reply measures below it).
 5. **POST_READOUT_RELISTEN** (issue #274) — after the bridge logs the reply's
    `session=<id> tts stop`, a fresh `RD_LISTEN` must produce a `listen start`
    within ~15 s (the shrunken replacement for the old flat 12 s settle between
-   loops). SKIP only when the running bridge predates the `tts stop` anchor.
-   The **realtime auto-relisten** normal conversation hits is NOT observable
-   here: the board returns to idle after TTS with no reliable wake trigger and
-   the E2E drives `RD_LISTEN` (`mode=manual`) for every open — the fresh
-   `RD_LISTEN` right after tts-stop is the reachable proxy.
+   loops). **FAIL (not SKIP) when the running bridge does not log the `tts
+   stop` anchor** — that is the deployment prerequisite this gate must catch:
+   redeploy `robodog_client/voice/voice_bridge.py` and restart
+   `systemctl --user lmao-robodog-voice`. The **realtime auto-relisten** normal
+   conversation hits is NOT observable here: the board returns to idle after
+   TTS with no reliable wake trigger and the E2E drives `RD_LISTEN`
+   (`mode=manual`) for every open — the fresh `RD_LISTEN` right after tts-stop
+   is the reachable proxy.
 6. **RING** — the test mic captured the board speaker's TTS and the host
    re-ASR aligns with the reply/subtitle (acoustic TTS→speaker→test-mic→ASR
    closure); loud note when only "audible" (weak placement).

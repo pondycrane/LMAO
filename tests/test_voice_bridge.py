@@ -119,8 +119,13 @@ async def test_stream_pcm_paces_each_frame(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_stream_pcm_returns_false_when_device_ends_mid_tts(monkeypatch):
-    """A failing frame halts the stream (False) and sends no further frames."""
+async def test_stream_pcm_returns_false_when_device_ends_mid_tts(monkeypatch, caplog):
+    """A failing frame halts the stream (False) and sends no further frames.
+
+    The failure path must NOT log ``tts streamed full``: the READOUT gate
+    computes reply_secs from that anchor alone, so a partial-byte log on the
+    mid-tts path would make a truncated read-out measure frac ~1.0 and pass —
+    the exact #272 regression this PR removes."""
     pcm = b"\x00" * (vb.FRAME_BYTES * 4)
     ws = FakeWs(fail_after=3)
     sleeps: list[float] = []
@@ -128,9 +133,12 @@ async def test_stream_pcm_returns_false_when_device_ends_mid_tts(monkeypatch):
     monkeypatch.setattr(vb, "DOWNLINK_PACE", 0.0582)
     monkeypatch.setattr(vb.asyncio, "sleep", lambda d: sleeps.append(d) or real_sleep(0))
 
-    ok = await vb.stream_pcm_to(ws, "s1", pcm)
+    with caplog.at_level(logging.INFO, logger="voice_bridge"):
+        ok = await vb.stream_pcm_to(ws, "s1", pcm)
 
     assert ok is False
+    assert "device ended mid-tts" in caplog.text
+    assert "tts streamed full" not in caplog.text
     assert len(ws.sent) == 2  # stream halts on the failed frame, no sleep after
 
 

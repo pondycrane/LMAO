@@ -13,13 +13,6 @@
     "voice": "af_heart",
     "model": "kokoro-82m"
   },
-  "planets": {
-    "transcript": "name the planets in order from the sun",
-    "wav": "planets.wav",
-    "sha256": "ded3ee1926b0d209b8bc8348ab4fad4a7800e7ab1fb361392ec4418cef34b032",
-    "voice": "af_heart",
-    "model": "kokoro-82m"
-  },
   "greeting": {
     "transcript": "how are you today",
     "wav": "greeting.wav",
