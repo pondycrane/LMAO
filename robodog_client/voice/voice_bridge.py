@@ -401,12 +401,13 @@ async def _brain_connect_loop():
     while True:
         try:
             async with websockets.connect(HERMES_BRAIN_URL,
-                                        # Long spoken replies come back as ONE
+                                        ping_interval=20, ping_timeout=60,
+                                        # Long spoken replies (the issue-#274
+                                        # read-out corpus) come back as ONE
                                         # base64 voice frame that exceeds the
                                         # websockets 1 MiB default; without a
                                         # larger cap the connection drops right
-                                        # at the longest replies (#274).
-                                        ping_interval=20, ping_timeout=60,
+                                        # at the longest replies.
                                         max_size=64 * 1024 * 1024) as ws:
                 _brain_ws = ws
                 _brain_connected = True
@@ -565,6 +566,7 @@ ACTIVE_SESSIONS = {}  # session_id -> {"ws": WebSocket, "device_id": str}
 
 async def stream_pcm_to(ws: WebSocket, session_id: str, pcm_buf: bytes) -> bool:
     """Opus-encode 24 kHz PCM to the board; False if the device cut out."""
+    t0 = time.monotonic()
     buf = np.frombuffer(pcm_buf, dtype=np.int16).tobytes()
     for i in range(0, len(buf), FRAME_BYTES):
         chunk = buf[i:i + FRAME_BYTES]
@@ -577,6 +579,8 @@ async def stream_pcm_to(ws: WebSocket, session_id: str, pcm_buf: bytes) -> bool:
                      session_id, i, len(buf))
             return False
         await asyncio.sleep(DOWNLINK_PACE)
+    log.info("session=%s tts streamed full %d bytes in %.2fs",
+             session_id, len(buf), time.monotonic() - t0)
     return True
 
 
@@ -618,6 +622,7 @@ async def speak_audio_to(ws: WebSocket, session_id: str, pcm_buf: bytes,
     await relay_captions(ws, session_id, captions or [])
     await stream_pcm_to(ws, session_id, pcm_buf)
     await ws_send(ws, {"session_id": session_id, "type": "tts", "state": "stop"})
+    log.info("session=%s tts stop", session_id)
 
 
 async def speak_text_to(ws: WebSocket, session_id: str, reply: str) -> None:
@@ -637,6 +642,7 @@ async def speak_text_to(ws: WebSocket, session_id: str, reply: str) -> None:
     except Exception as e:
         log_response("TTS stream", "call_tts", e)
     await ws_send(ws, {"session_id": session_id, "type": "tts", "state": "stop"})
+    log.info("session=%s tts stop", session_id)
 
 
 @app.post("/xiaozhi/inject")

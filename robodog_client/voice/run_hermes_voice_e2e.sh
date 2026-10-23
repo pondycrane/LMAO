@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Bazel entrypoint for the RoboDog hermes voice-loop E2E (issue #267):
-#   bazel run //robodog_client:hermes_voice_e2e [-- --corpus time --artifacts DIR]
+#   bazel run //robodog_client:hermes_voice_e2e [-- --corpus count --artifacts DIR]
 #
 # Runs the SOURCE-TREE copy of `hermes_voice_e2e.py` under the ops bridge venv
 # (~/xiaozhi/.venv). The script imports `voice_bridge`/`capture`, whose deps

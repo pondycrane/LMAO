@@ -709,7 +709,7 @@ coordinator of issue #267)** — one host command, no human, no wake word:
 ```bash
 sudo gpasswd -a $(whoami) audio          # ALSA test speaker/mic access
 export XDG_RUNTIME_DIR=/run/user/$(id -u)
-bazel run //robodog_client:hermes_voice_e2e -- --corpus time   # E2E_RUNS=3 default
+bazel run //robodog_client:hermes_voice_e2e -- --corpus count   # E2E_RUNS=3 default
 # (equivalent, running the repo copy directly under the ops venv:)
 # E2E_RUNS=3 ~/xiaozhi/.venv/bin/python robodog_client/voice/hermes_voice_e2e.py
 ```
@@ -721,10 +721,24 @@ Device*, ALSA card `Device`, volume 0.7), asserts the bridge journal
 (`device connected` / `listen start` / `ASR text=` match / `Hermes ... reply:`
 non-empty), captures the board's spoken reply on the test mic for **ring
 closure** (re-ASR aligns with the reply/subtitle), and reads the STT/TTS
-subtitle back off the RLCD via `capture.py --describe`. `E2E_STT_TEXT=<canned>`
-switches to the bridge's `POST /xiaozhi/inject` fallback (skips only the mic
-leg). Loud-skip when the board (`0x303A:0x1001`) or the test audio card is
-absent; gate reference: `.archon/commands/robodog-voice-e2e.md`.
+subtitle back off the RLCD via `capture.py --describe`. Since issue #274 it
+also asserts **READOUT_COMPLETE** (the full active-play span of the reply vs
+its reported TTS duration — a read-out truncated at ~2.4 s by the decode-queue
+drop #272's pacing removes FAILs instead of passing as RING "audible") and
+**POST_READOUT_RELISTEN** (a fresh `RD_LISTEN` right after the reply's
+`tts stop` must re-arm listening, replacing the old flat 12 s settle between
+loops). The default `count` corpus ("count slowly from twenty to thirty")
+triggers a deterministic 11-number list the brain reads as a reliably ~7-10 s
+spoken VOICE reply — comfortably above the 3.5 s read-out floor and the ~0.85
+played-fraction margin, and inside the 15 s
+capture window. The **realtime
+auto-relisten** real conversation hits is not observable in the E2E — the board
+returns to idle after TTS with no reliable wake trigger and `RD_LISTEN`
+(`mode=manual`) drives every open — so the post-tts-stop `RD_LISTEN` success is
+the documented reachable proxy. `E2E_STT_TEXT=<canned>` switches to the
+bridge's `POST /xiaozhi/inject` fallback (skips only the mic leg). Loud-skip
+when the board (`0x303A:0x1001`) or the test audio card is absent; gate
+reference: `.archon/commands/robodog-voice-e2e.md`.
 
 ### 8. Docker Image
 
