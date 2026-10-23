@@ -297,8 +297,8 @@ def build_gen_prompt(subject_word: str, theme_label: str, action: str) -> str:
     activity = f" doing {action}" if action else " doing a fun activity"
     return (
         f"black and white line art of {subject_word}{activity}, pure line drawing, "
-        "only thin black contour lines on plain white background, no color, no "
-        "fill, no shading, no gray, empty interior, vector line art, minimal"
+        "only thick bold black contour lines on plain white background, no color, "
+        "no fill, no shading, no gray, empty interior, vector line art, minimal"
     )
 
 
