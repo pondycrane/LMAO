@@ -26,5 +26,12 @@
     "sha256": "0885739f35d5173116a7de11976823caa917c29b6b5296f7314b349f05d8a495",
     "voice": "af_heart",
     "model": "kokoro-82m"
+  },
+  "count": {
+    "transcript": "count slowly from twenty to thirty",
+    "wav": "count.wav",
+    "sha256": "a442da622ec0ddaa005249bf0183a4aad724894c1a308741fd8d35d83199316d",
+    "voice": "af_heart",
+    "model": "kokoro-82m"
   }
 }
