@@ -245,9 +245,18 @@ class XiaoZhiAdapter(BasePlatformAdapter):
     async def send(self, chat_id: str, content: str, reply_to: str | None = None,
                    metadata: dict[str, Any] | None = None) -> SendResult:
         chat_id = str(chat_id)
-        # The board can't render text; if a voice frame already covered this turn,
-        # the text relay is a no-op (the gateway's final text still ledgered OK).
+        # The board renders the reply on its RLCD even when auto-TTS returns
+        # audio: a display-only "caption" frame streams the text at typing
+        # speed while the voice plays (never double-spoken — the bridge relays
+        # it as sentence_start without synthesizing audio).
         if _TURN_VOICE_SENT.get(chat_id, False):
+            text = (content or "").strip()
+            if text:
+                session_id = (metadata or {}).get("session_id") if isinstance(metadata, dict) else None
+                await relay_json(chat_id, {
+                    "type": "caption", "device_id": chat_id,
+                    "session_id": session_id, "text": text,
+                })
             return SendResult(success=True, message_id="text-suppressed-by-voice")
         text = (content or "").strip()
         if not text:

@@ -29,6 +29,7 @@ SRC="$APP/.xiaozhi"
 REBUILD_FLAG=""
 for spec in \
     "robodog_hermes_capture.patch:.robodog_capture_patched" \
+    "robodog_hermes_ui.patch:.robodog_ui_patched" \
     "robodog_listen.patch:.robodog_listen_patched"; do
     P="$APP/voice/${spec%%:*}"
     MARK="$SRC/${spec##*:}"
