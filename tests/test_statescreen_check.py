@@ -140,4 +140,6 @@ def test_region_size_mismatch_is_false():
 if __name__ == "__main__":
     import sys
 
-    pytest.main([__file__] + sys.argv[1:])
+    # MUST propagate pytest's exit code (PR review R5) or Bazel reports PASSED
+    # while the suite is red — the auto-run convention in test_voice_bridge.
+    sys.exit(pytest.main([__file__] + sys.argv[1:]))

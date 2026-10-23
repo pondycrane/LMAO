@@ -145,8 +145,14 @@ robodog-production-health
   button) → `device connected`/`listen start` → test speaker plays a pinned
   corpus command into the board mic → `ASR text=` normalized match → `Hermes …
   reply:` non-empty → test-mic **ring closure** re-ASR → `capture.py --describe`
-  subtitle readback. Five assertions reported per loop (`OPEN_SESSION`,
-  `ASR_MATCH`, `BRAIN_REPLY`, `RING`, `SUBTITLE`); flaky real-speech ASR
+  subtitle readback. **Ten assertions reported per loop** (`OPEN_SESSION`,
+  `ASR_MATCH`, `BRAIN_REPLY`, `RING`, `SUBTITLE`, `READOUT_COMPLETE`,
+  `POST_READOUT_RELISTEN`, plus the 3-state cursor trio `CURSOR_LISTEN` /
+  `CURSOR_PROCESS` / `CURSOR_RESPOND` — the pixel proof for the LISTENING
+  block / PROCESSING `...` / RESPONDING `_`); see
+  `.archon/commands/robodog-voice-e2e.md` for the authoritative list. The
+  cursor trio enters the gate's pass/fail predicate, so a state-screen / cursor
+  regression now fails the loop instead of soft-passing. Flaky real-speech ASR
   loops fall back to the documented `E2E_STT` injection (`POST /xiaozhi/inject`)
   and are reported verbatim. Loud skip when the board or the ALSA test card is
   absent. Writes `$ARTIFACTS_DIR/robodog-voice-loop-e2e.md`.

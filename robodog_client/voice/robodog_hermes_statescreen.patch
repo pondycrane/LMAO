@@ -26,7 +26,7 @@ index df4e743..1c6199b 100644
                          if (listening_mode_ == kListeningModeManualStop) {
                              SetDeviceState(kDeviceStateIdle);
 diff --git a/main/boards/waveshare/esp32-s3-rlcd-4.2/custom_lcd_display.cc b/main/boards/waveshare/esp32-s3-rlcd-4.2/custom_lcd_display.cc
-index 8d6aa32..f30d940 100644
+index 8d6aa32..8269dd3 100644
 --- a/main/boards/waveshare/esp32-s3-rlcd-4.2/custom_lcd_display.cc
 +++ b/main/boards/waveshare/esp32-s3-rlcd-4.2/custom_lcd_display.cc
 @@ -6,6 +6,7 @@
@@ -37,7 +37,7 @@ index 8d6aa32..f30d940 100644
  #include "esp_lvgl_port.h"
  #include "assets/lang_config.h"
  #include "settings.h"
-@@ -380,3 +381,94 @@ void CustomLcdDisplay::RLCD_Display() {
+@@ -380,3 +381,107 @@ void CustomLcdDisplay::RLCD_Display() {
  
  	RLCD_Sendbuffera(DispBuffer,DisplayLen);
  }
@@ -95,6 +95,14 @@ index 8d6aa32..f30d940 100644
 +void CustomLcdDisplay::OnTtsStream(bool streaming) {
 +    if (statescreen_ != nullptr) {
 +        statescreen_->OnTtsStream(streaming);
++        // The tts stream ended -> the conversation is over. Restore the stock
++        // emoji idle face so it is not left hidden for the rest of the session
++        // (PR review R3: HideStockConversation() only had the converse path via
++        // SetChatMessage's empty-content branch, so multi-turn sessions never
++        // brought the face back). Symmetric with HideStockConversation().
++        if (!streaming && !statescreen_->Active()) {
++            ShowStockIdle();
++        }
 +    }
 +}
 +
@@ -120,8 +128,13 @@ index 8d6aa32..f30d940 100644
 +        return;
 +    }
 +    stock_conversation_hidden_ = false;
++    // Restore BOTH objects HideStockConversation() hid (PR review R3): the
++    // emoji idle face and the stock bottom chat bar.
 +    if (emoji_box_ != nullptr) {
 +        lv_obj_remove_flag(emoji_box_, LV_OBJ_FLAG_HIDDEN);
++    }
++    if (bottom_bar_ != nullptr) {
++        lv_obj_remove_flag(bottom_bar_, LV_OBJ_FLAG_HIDDEN);
 +    }
 +}
 +
@@ -173,10 +186,10 @@ index 7ca91cc..7a7f7b5 100644
 \ No newline at end of file
 diff --git a/main/boards/waveshare/esp32-s3-rlcd-4.2/robodog_statescreen.cc b/main/boards/waveshare/esp32-s3-rlcd-4.2/robodog_statescreen.cc
 new file mode 100644
-index 0000000..672e09e
+index 0000000..ac5da0e
 --- /dev/null
 +++ b/main/boards/waveshare/esp32-s3-rlcd-4.2/robodog_statescreen.cc
-@@ -0,0 +1,419 @@
+@@ -0,0 +1,427 @@
 +#include "robodog_statescreen.h"
 +
 +#include "lvgl_theme.h"
@@ -300,7 +313,11 @@ index 0000000..672e09e
 +    }
 +    // Seed the ON/OFF phase per turn so blind 3.2 s dumps see both phases.
 +    pulse_on_ = (esp_random() & 1) != 0;
++    // This timer was created PAUSED (constructor) and only lv_timer_resume
++    // clears the paused flag (lv_timer_set_period/reset never do) — without it
++    // the block never pulses on-device (PR review R1).
 +    lv_timer_set_period(pulse_timer_, kPulsePeriodMs);
++    lv_timer_resume(pulse_timer_);
 +    lv_timer_reset(pulse_timer_);
 +}
 +
@@ -314,7 +331,11 @@ index 0000000..672e09e
 +    if (reveal_timer_ == nullptr) {
 +        return;
 +    }
++    // Same paused-forever trap as StartPulse (PR review R1): the reveal timer
++    // is created paused in the constructor and must be resumed here or the
++    // word-by-word reveal (STT + streamed reply) never runs on-device.
 +    lv_timer_set_period(reveal_timer_, kRevealPeriodMs);
++    lv_timer_resume(reveal_timer_);
 +    lv_timer_reset(reveal_timer_);
 +}
 +
@@ -598,7 +619,7 @@ index 0000000..672e09e
 +}
 diff --git a/main/boards/waveshare/esp32-s3-rlcd-4.2/robodog_statescreen.h b/main/boards/waveshare/esp32-s3-rlcd-4.2/robodog_statescreen.h
 new file mode 100644
-index 0000000..defd7c8
+index 0000000..e1841c1
 --- /dev/null
 +++ b/main/boards/waveshare/esp32-s3-rlcd-4.2/robodog_statescreen.h
 @@ -0,0 +1,109 @@

@@ -630,11 +630,26 @@ async def speak_audio_to(ws: WebSocket, session_id: str, pcm_buf: bytes, caption
     """
     if caption:
         panel = _panel_ascii(caption)
-        if not await ws_send(
-            ws, {"session_id": session_id, "type": "tts", "state": "sentence_start", "text": panel}
+        # PR review R2: a fully non-ASCII caption sanitizes to "" — sending an
+        # EMPTY sentence_start would hit the board's reset-to-idle sentinel
+        # (assistant content[0]=='\0' -> ResetToIdle) and the RESPONDING
+        # presentation would silently never run for the board's default
+        # language. Skip the wire message: the audio basket's tts/start still
+        # drives OnTtsStream(true)->BeginResponding("") so RESPONDING renders.
+        if not panel:
+            log.info(
+                "session=%s caption fully non-ASCII -> skip sentence_start "
+                "(RESPONDING via tts start; %d bytes raw)",
+                session_id,
+                len(caption),
+            )
+        elif not await ws_send(
+            ws,
+            {"session_id": session_id, "type": "tts", "state": "sentence_start", "text": panel},
         ):
             return
-        log.info("session=%s caption -> sentence_start (%d bytes)", session_id, len(panel))
+        else:
+            log.info("session=%s caption -> sentence_start (%d bytes)", session_id, len(panel))
     if not await ws_send(ws, {"session_id": session_id, "type": "tts", "state": "start"}):
         return
     await stream_pcm_to(ws, session_id, pcm_buf)
@@ -646,16 +661,29 @@ async def speak_text_to(ws: WebSocket, session_id: str, reply: str) -> None:
     """Turn text into Kokoro audio and stream it to the board session."""
     if not await ws_send(ws, {"session_id": session_id, "type": "tts", "state": "start"}):
         return
-    if not await ws_send(
-        ws,
-        {
-            "session_id": session_id,
-            "type": "tts",
-            "state": "sentence_start",
-            "text": reply,
-        },
-    ):
-        return
+    panel = _panel_ascii(reply)
+    # Same R2 guard as speak_audio_to: sanitize the reply for the basic-Latin
+    # RLCD font up front and never emit an empty sentence_start (the board
+    # decodes "" as reset-to-idle). The audio stream start alone drives the
+    # RESPONDING presentation when the reply has no printable-ASCII text.
+    if panel:
+        if not await ws_send(
+            ws,
+            {
+                "session_id": session_id,
+                "type": "tts",
+                "state": "sentence_start",
+                "text": panel,
+            },
+        ):
+            return
+    else:
+        log.info(
+            "session=%s reply fully non-ASCII -> skip sentence_start "
+            "(RESPONDING via tts start; %d bytes raw)",
+            session_id,
+            len(reply),
+        )
     try:
         audio = await asyncio.to_thread(call_tts, reply)
         await stream_pcm_to(ws, session_id, audio)
