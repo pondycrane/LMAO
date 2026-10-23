@@ -303,28 +303,30 @@ def generate_local(prompt: str, width: int, height: int) -> bytes | None:
     generation fails).
     """
     base = os.environ.get("LMAO_IMAGE_GEN_URL", _GEN_URL_DEFAULT).rstrip("/")
-    # FLUX.1-schnell: transformer-only checkpoint + separate clip/t5/vae models.
-    # This exact graph is verified on the node (ComfyUI docs FLUX template).
+    # MOSS-Image (SFT, BF16): 5B DiT + Qwen3.5-9B text encoder + flux2 VAE.
+    # Graph verified on the node 2026-10-23. CRITICAL pitfalls on this build:
+    #   - do NOT add SkipLayerGuidanceDiTSimple (official recipe node) -> pure noise
+    #   - do NOT insert ModelSamplingSD3 shift node before the sampler -> also noise
+    # Feed the UNET output STRAIGHT into KSampler; CFG 1, ~30 steps, euler/sgm_uniform.
     workflow = {
         "1": {"class_type": "UNETLoader",
-              "inputs": {"unet_name": "flux1-schnell.safetensors", "weight_dtype": "default"}},
-        "2": {"class_type": "DualCLIPLoader",
-              "inputs": {"clip_name1": "clip_l.safetensors",
-                         "clip_name2": "t5xxl_fp8_e4m3fn.safetensors",
-                         "type": "flux"}},
+              "inputs": {"unet_name": "moss_image_sft_bf16.safetensors", "weight_dtype": "default"}},
+        "2": {"class_type": "CLIPLoader",
+              "inputs": {"clip_name": "qwen3.5_9b_bf16.safetensors",
+                         "type": "moss_image", "device": "default"}},
         "3": {"class_type": "VAELoader",
-              "inputs": {"vae_name": "ae.safetensors"}},
+              "inputs": {"vae_name": "flux2-vae.safetensors"}},
         "4": {"class_type": "CLIPTextEncode",
               "inputs": {"text": prompt, "clip": ["2", 0]}},
         "5": {"class_type": "CLIPTextEncode",
-              "inputs": {"text": "text, watermark, logo, lowres, blurry, photograph, shading, gray, realistic", "clip": ["2", 0]}},
-        "6": {"class_type": "EmptyLatentImage",
+              "inputs": {"text": "", "clip": ["2", 0]}},
+        "6": {"class_type": "EmptyFlux2LatentImage",
               "inputs": {"width": width, "height": height, "batch_size": 1}},
         "7": {"class_type": "KSampler",
               "inputs": {
                   "model": ["1", 0], "positive": ["4", 0], "negative": ["5", 0],
-                  "latent_image": ["6", 0], "seed": 0, "steps": 4, "cfg": 1.0,
-                  "sampler_name": "euler", "scheduler": "simple", "denoise": 1.0}},
+                  "latent_image": ["6", 0], "seed": 0, "steps": 30, "cfg": 1.0,
+                  "sampler_name": "euler", "scheduler": "sgm_uniform", "denoise": 1.0}},
         "8": {"class_type": "VAEDecode", "inputs": {"samples": ["7", 0], "vae": ["3", 0]}},
         "9": {"class_type": "SaveImage",
               "inputs": {"images": ["8", 0], "filename_prefix": "kids"}},
@@ -338,7 +340,7 @@ def generate_local(prompt: str, width: int, height: int) -> bytes | None:
             pid = json.load(resp)["prompt_id"]
         # poll /history until the job completes and an image is written
         out_image = None
-        for _ in range(240):  # up to ~4 min
+        for _ in range(600):  # up to ~10 min (MOSS is ~5-6 min at 30 steps)
             time.sleep(1)
             try:
                 with urllib.request.urlopen(f"{base}/history/{pid}", timeout=20) as r:
@@ -350,7 +352,8 @@ def generate_local(prompt: str, width: int, height: int) -> bytes | None:
             for node in outputs.values():
                 for im in node.get("images", []) or []:
                     out_image = im
-            if entry.get("status", {}).get("completed"):
+            st = entry.get("status", {})
+            if st.get("completed") or st.get("status_str") in ("success", "error"):
                 break
         if not out_image:
             return None
