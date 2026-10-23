@@ -296,9 +296,9 @@ def search_sources(query: str):
 def build_gen_prompt(subject_word: str, theme_label: str, action: str) -> str:
     activity = f" doing {action}" if action else " doing a fun activity"
     return (
-        f"A cute cartoon drawing of {subject_word}{activity}, clean simple cartoon "
-        "outline style, bold smooth outlines, plain white background, coloring book "
-        "page, minimal shading, thick clear lines, no text, kid-friendly"
+        f"black and white line art of {subject_word}{activity}, pure line drawing, "
+        "only thin black contour lines on plain white background, no color, no "
+        "fill, no shading, no gray, empty interior, vector line art, minimal"
     )
 
 
