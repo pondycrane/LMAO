@@ -361,13 +361,35 @@ def norm(text):
 # mismatch (which forced the documented E2E_STT inject fallback on the
 # real-mic leg).
 _NUMBER_WORDS = {
-    "zero": "0", "one": "1", "two": "2", "three": "3", "four": "4",
-    "five": "5", "six": "6", "seven": "7", "eight": "8", "nine": "9",
-    "ten": "10", "eleven": "11", "twelve": "12", "thirteen": "13",
-    "fourteen": "14", "fifteen": "15", "sixteen": "16", "seventeen": "17",
-    "eighteen": "18", "nineteen": "19", "twenty": "20", "thirty": "30",
-    "forty": "40", "fifty": "50", "sixty": "60", "seventy": "70",
-    "eighty": "80", "ninety": "90", "hundred": "100",
+    "zero": "0",
+    "one": "1",
+    "two": "2",
+    "three": "3",
+    "four": "4",
+    "five": "5",
+    "six": "6",
+    "seven": "7",
+    "eight": "8",
+    "nine": "9",
+    "ten": "10",
+    "eleven": "11",
+    "twelve": "12",
+    "thirteen": "13",
+    "fourteen": "14",
+    "fifteen": "15",
+    "sixteen": "16",
+    "seventeen": "17",
+    "eighteen": "18",
+    "nineteen": "19",
+    "twenty": "20",
+    "thirty": "30",
+    "forty": "40",
+    "fifty": "50",
+    "sixty": "60",
+    "seventy": "70",
+    "eighty": "80",
+    "ninety": "90",
+    "hundred": "100",
 }
 
 
@@ -424,7 +446,7 @@ def _log_ts(line: str | None):
 
 def _frame_meta(shot_dir: Path):
     """(file, state_label, wall_t) per captured frame, from the sidecars the
-    capture thread wrote next to each frameN.i1 (state + dump-complete time).
+    capture thread wrote next to each frameN.i1 (state + per-frame dump time).
     The sidecars are written as ``frameN.state`` / ``frameN.t`` (the ``.i1``
     suffix is replaced, not appended) — ``frameN.i1.state`` never exists.
     """
@@ -445,6 +467,32 @@ def _frame_meta(shot_dir: Path):
     return metas
 
 
+def _conform_decoders() -> None:
+    """PR review R8 conformance gate: the ST7305 panel-wire decode is doubly
+    owned — ``capture.decode_hermes`` (PIL, vision path) and
+    ``statescreen_check.decode_frame`` (pure stdlib, geometry path) re-derive
+    the same InitLandscapeLUT inverse by hand. Feed one deterministic
+    15000-byte buffer through BOTH and require bit-identical pixels; a one-sided
+    LUT edit now FAILs loudly instead of silently making the geometry and vision
+    judges diverge."""
+    import random
+
+    rng = random.Random(1729)
+    buf = bytes(rng.getrandbits(8) for _ in range(capture.HERMES_BUF_SIZE))
+    img = capture.decode_hermes(buf)
+    frame = statescreen_check.decode_frame(buf)
+    px = img.load()
+    for y in range(frame.height):
+        for x in range(frame.width):
+            pil_black = not bool(px[x, y])
+            if pil_black != frame.black(x, y):
+                raise AssertionError(
+                    f"decoders disagree at ({x},{y}): capture.decode_hermes "
+                    f"black={pil_black} vs statescreen_check.decode_frame "
+                    f"black={frame.black(x, y)}"
+                )
+
+
 def _cursor_asserts(
     shot_dir: Path, run_dir: Path, stt_at, caption_at, tts_stop_at, journal_tail
 ) -> dict:
@@ -459,24 +507,82 @@ def _cursor_asserts(
     """
     import json as _json
 
+    # PR review R8: prove the two host decoders agree before trusting either
+    # frame's pixels (see _conform_decoders).
+    try:
+        _conform_decoders()
+    except AssertionError as e:
+        (run_dir / "decoder_conformance.txt").write_text(f"FAIL: {e}\n")
+        log(f"CURSOR decoder conformance FAIL: {e}")
+        return {
+            "CURSOR_LISTEN": f"FAIL (decoder conformance — {e})",
+            "CURSOR_PROCESS": f"FAIL (decoder conformance — {e})",
+            "CURSOR_RESPOND": f"FAIL (decoder conformance — {e})",
+        }
+    (run_dir / "decoder_conformance.txt").write_text(
+        "PASS: capture.decode_hermes == statescreen_check.decode_frame "
+        "on a seeded 15000-byte buffer\n"
+    )
+
     metas = _frame_meta(shot_dir)
     (run_dir / "frames.json").write_text(_json.dumps(metas, indent=2))
     if not metas:
+        # R4: zero frames captured == the pixel proof is absent -> loud FAIL,
+        # not a soft skip (otherwise the acceptance evidence cannot fail).
         return {
-            k: "SKIP (no frames captured)"
+            k: "FAIL (no frames captured — pixel proof absent)"
             for k in ("CURSOR_LISTEN", "CURSOR_PROCESS", "CURSOR_RESPOND")
         }
 
+    # R9: classify every label through the firmware-owned known set exported by
+    # capture.py; unknown labels are recorded loudly (never a silent soft-skip
+    # that ungroups frames after a firmware-side rename).
+    unknown = [m for m in metas if m["state"] not in capture.HERMES_STATES]
+    if unknown:
+        detail = "; ".join(f"{m['file']}={m['state']}" for m in unknown)
+        (run_dir / "state_label_conformance.txt").write_text(
+            f"FAIL unknown RD_SHOT state labels (firmware/host state-tag "
+            f"mismatch?): {detail}\nknown: {sorted(capture.HERMES_STATES)}\n"
+        )
+        log(f"CURSOR state-label conformance FAIL: {detail}")
+    (run_dir / "state_labels.txt").write_text(
+        "\n".join(f"{m['file']}={m['state']}" for m in metas) + "\n"
+    )
+
+    broken: list[str] = []
+
     def geom(fp):
         with open(fp, "rb") as fh:
-            fr = statescreen_check.decode_frame(fh.read())
+            data = fh.read()
+        try:
+            fr = statescreen_check.decode_frame(data)
+        except ValueError as e:
+            # R6: one bad-length frame (interleaved serial glitch) must not
+            # abort the whole gate — record it loudly, skip that frame's pixels.
+            log(f"CURSOR frame {fp.name}: undecodable ({e}); skipping")
+            broken.append(fp.name)
+            return None
         bbox = statescreen_check.block_signature(fr, *CURSOR_LINE1_BAND)
         elli = statescreen_check.ellipsis_signature(fr, *CURSOR_LINE2_BAND)
         und = statescreen_check.underscore_bbox(fr, *CURSOR_LINE2_BAND)
         return {"block_box": bbox[1] if bbox[0] else None, "ellipsis": elli, "underscore_box": und}
 
+    kept: list[dict] = []
     for m in metas:
-        m["geo"] = geom(Path(m["path"]))
+        g = geom(Path(m["path"]))
+        if g is None:
+            continue
+        m["geo"] = g
+        kept.append(m)
+    metas = kept
+    if broken:
+        (run_dir / "broken_frames.txt").write_text("\n".join(broken) + "\n")
+    if not metas:
+        # Every captured frame was corrupt: the pixel proof is absent -> FAIL.
+        return {
+            k: f"FAIL (all {len(broken)} captured frame(s) undecodable — {broken})"
+            for k in ("CURSOR_LISTEN", "CURSOR_PROCESS", "CURSOR_RESPOND")
+        }
 
     # Corroboration note: predicted state from the journal windows vs the label.
     agree = 0
@@ -580,6 +686,21 @@ def _cursor_asserts(
                 "PASS '_' on RESPONDING frame(s); <2 comparable frames "
                 "(region identity soft, verbatim)"
             )
+
+    # R9: unknown state labels must not silently soft-skip — if a verdict
+    # soft-passed because its state group came up empty while unclassifiable
+    # frames exist, the firmware/host state-tag contract is broken, so the
+    # verdicts turn into loud FAILs instead.
+    if unknown:
+        for k in ("CURSOR_LISTEN", "CURSOR_PROCESS", "CURSOR_RESPOND"):
+            v = asserts.get(k, "")
+            if v.startswith("SKIP") or v.startswith("SOFT-PASS"):
+                asserts[k] = (
+                    f"FAIL ({k}: state group empty because label(s) "
+                    f"{sorted({m['state'] for m in unknown})} are unknown to "
+                    "the host — firmware/host state-tag mismatch, not a soft "
+                    "skip; R9)"
+                )
 
     # vision readback on one representative frame per sampled state
     for st in ("LISTENING", "PROCESSING", "RESPONDING"):
@@ -705,10 +826,21 @@ def run_loop(n, instr, artifacts, prev_listen=None):
     def _capture_shots():
         try:
             frames = capture.read_frames(port, n=SHOT_COUNT, timeout=180)
-            for i, (data, _, _, _, st) in enumerate(frames):
+            for i, (data, expect, _, _, st, t) in enumerate(frames):
+                if len(data) != expect:
+                    # R6: a single interleaved/short serial frame must not abort
+                    # the whole capture — skip-and-continue like capture.py
+                    # main(), logging loudly so the loop is not silently short.
+                    log(
+                        f"RD_SHOT frame {i}: expected {expect} bytes, got "
+                        f"{len(data)} — skipping (state={st})"
+                    )
+                    continue
                 (shots / f"frame{i}.i1").write_bytes(data)
                 (shots / f"frame{i}.state").write_text(st)
-                (shots / f"frame{i}.t").write_text(f"{time.time():.3f}")
+                # Per-frame dump time stamped by read_frames AT RD_SHOT_END (R7),
+                # not a batch-end time shared by every sidecar.
+                (shots / f"frame{i}.t").write_text(f"{t:.3f}")
         except Exception as e:
             log(f"RD_SHOT capture failed: {e}")
 
@@ -792,12 +924,13 @@ def run_loop(n, instr, artifacts, prev_listen=None):
 
     # CURSOR_* asserts on the captured frames (pixel geometry + vision; the
     # RD_SHOT state= label is classification only). Recorded even when the mic
-    # leg failed — the panel evidence is independent of it.
-    if any((run_dir / "shots").glob("frame*.i1")):
-        cursor = _cursor_asserts(run_dir / "shots", run_dir, stt_at, caption_at, tts_stop_at, tail)
-        for k, v in cursor.items():
-            res["asserts"][k] = v
-        res["artifacts"]["cursor_frames"] = len(cursor)
+    # leg failed — the panel evidence is independent of it. R4: ALWAYS call it
+    # (zero frames is a loud FAIL, never omitted) so the cursor acceptance
+    # evidence can actually fail the gate.
+    cursor = _cursor_asserts(run_dir / "shots", run_dir, stt_at, caption_at, tts_stop_at, tail)
+    for k, v in cursor.items():
+        res["asserts"][k] = v
+    res["artifacts"]["cursor_frames"] = len(list((run_dir / "shots").glob("frame*.i1")))
 
     if not mic_path.exists():
         res["asserts"]["RING"] = "FAIL (no test-mic capture)"
@@ -1022,12 +1155,25 @@ def main():
         def ok(v):
             return v is not None and (v.startswith("PASS") or v.startswith("SKIP"))
 
+        def ok_cursor(v):
+            # Cursor verdicts (R4) accept PASS / SOFT-PASS (documented single
+            # phase sampled, recorded verbatim) / SKIP (documented data
+            # condition) — a real FAIL or an ABSENT verdict fails the gate. The
+            # cursor trio is the sole acceptance evidence for the 3-state
+            # presentation, so it must be able to fail.
+            if v is None:
+                return False
+            return v.startswith("PASS") or v.startswith("SOFT-PASS") or v.startswith("SKIP")
+
         return (
             r["asserts"].get("OPEN_SESSION", "FAIL").startswith("PASS")
             and r["asserts"].get("BRAIN_REPLY", "FAIL").startswith("PASS")
             and asr_ok(r["asserts"].get("ASR_MATCH", "FAIL"))
             and ok(r["asserts"].get("READOUT_COMPLETE"))
             and ok(r["asserts"].get("POST_READOUT_RELISTEN"))
+            and ok_cursor(r["asserts"].get("CURSOR_LISTEN"))
+            and ok_cursor(r["asserts"].get("CURSOR_PROCESS"))
+            and ok_cursor(r["asserts"].get("CURSOR_RESPOND"))
         )
 
     for r in results:

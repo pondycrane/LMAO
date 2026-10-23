@@ -58,6 +58,13 @@ HEX_RE = re.compile(r"^[0-9a-fA-F]+$")
 # Conversation-state label on hermes RD_SHOT frames (robodog_hermes_capture.patch).
 # A missing/legacy header defaults to UNKNOWN so calendar frames decode unchanged.
 UNKNOWN_STATE = "UNKNOWN"
+# The firmware-owned RD_SHOT ``state=`` surface-tag set
+# (main/boards/waveshare/esp32-s3-rlcd-4.2/robodog_statescreen.cc
+# RoboDogStateScreen::StateName). Exported once here (PR review R9) so the
+# hermes E2E groups/classifies frames through a single definition instead of
+# re-enumerating the tokens as host string literals — a firmware-side rename /
+# insertion is caught loudly instead of silently ungrouping every frame.
+HERMES_STATES = frozenset({"IDLE", "LISTENING", "PROCESSING", "RESPONDING"})
 
 
 def decode_hermes(buf):
@@ -186,9 +193,11 @@ def ocr_score(im):
 def read_frames(port, n=1, timeout=30):
     """Capture n RD_SHOT frames from the serial port.
 
-    Each frame is ``(data, expect, w, h, state)`` where ``state`` is the
+    Each frame is ``(data, expect, w, h, state, t)`` where ``state`` is the
     conversation-state label from the RD_SHOT header (``UNKNOWN_STATE`` for
-    calendar/legacy frames — backward compatible; callers may ignore it).
+    calendar/legacy frames — backward compatible; callers may ignore it) and
+    ``t`` is the epoch-second stamp taken the MOMENT that frame's ``RD_SHOT_END``
+    was seen on the console (PR review R7: per-frame dump time, not batch end).
     """
     frames = []
     s = serial.Serial(port, 115200, timeout=1)
@@ -220,7 +229,11 @@ def read_frames(port, n=1, timeout=30):
                     if "RD_SHOT_END" in ln:
                         body = "".join(hex_acc)
                         data = bytes.fromhex(body)
-                        frames.append((data, want, w, h, frame_state))
+                        # Stamp at the exact moment this frame's dump completed
+                        # (R7): a batch-end stamp makes every sidecar share one
+                        # time and the journal-window corroboration predict
+                        # IDLE for every conversation frame.
+                        frames.append((data, want, w, h, frame_state, time.time()))
                         in_shot = False
                         print(
                             f"captured frame {len(frames)} "
@@ -288,9 +301,9 @@ def main():
         data = Path(args.i1).read_bytes()
         # no RD_SHOT header on an offline dump — pick the decoder by size
         if len(data) == BUF_SIZE:
-            frames = [(data, BUF_SIZE, PANEL_W, PANEL_H, UNKNOWN_STATE)]
+            frames = [(data, BUF_SIZE, PANEL_W, PANEL_H, UNKNOWN_STATE, time.time())]
         elif len(data) == HERMES_BUF_SIZE:
-            frames = [(data, HERMES_BUF_SIZE, HERMES_W, HERMES_H, UNKNOWN_STATE)]
+            frames = [(data, HERMES_BUF_SIZE, HERMES_W, HERMES_H, UNKNOWN_STATE, time.time())]
         else:
             sys.exit(
                 f"cannot infer frame type from {len(data)} bytes "
@@ -318,7 +331,7 @@ def main():
         if not frames:
             sys.exit("no RD_SHOT frames captured — is robodog/hermes firmware flashed?")
 
-    for i, (data, expect, w, h, frame_state) in enumerate(frames):
+    for i, (data, expect, w, h, frame_state, _t) in enumerate(frames):
         if len(data) != expect:
             print(f"frame {i}: expected {expect} bytes, got {len(data)}", file=sys.stderr)
             continue

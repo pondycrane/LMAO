@@ -74,10 +74,11 @@ For each task:
    export XDG_RUNTIME_DIR=/run/user/$(id -u)
    E2E_RUNS=1 ~/xiaozhi/.venv/bin/python robodog_client/voice/hermes_voice_e2e.py --corpus time --artifacts /tmp/e2e-task
    ```
-   Read the asserts (OPEN_SESSION / ASR_MATCH / BRAIN_REPLY / RING / SUBTITLE)
-   and record them in `$ARTIFACTS_DIR/implementation.md`. If the mic ASR is
-   flaky, record the documented `E2E_STT` fallback path — do not re-run the
-   whole battery hoping for green; the hard gates come next.
+   Read the asserts (OPEN_SESSION / ASR_MATCH / BRAIN_REPLY / RING / SUBTITLE /
+   READOUT_COMPLETE / POST_READOUT_RELISTEN / CURSOR_LISTEN / CURSOR_PROCESS /
+   CURSOR_RESPOND) and record them in `$ARTIFACTS_DIR/implementation.md`. If the
+   mic ASR is flaky, record the documented `E2E_STT` fallback path — do not
+   re-run the whole battery hoping for green; the hard gates come next.
 5. Append the task result + evidence to `$ARTIFACTS_DIR/implementation.md`.
 
 ## Phase 4: WRAP UP

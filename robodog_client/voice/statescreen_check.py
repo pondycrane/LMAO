@@ -244,6 +244,20 @@ def underscore_bbox(frame: Frame, y0: int, y1: int, x0: int = 0, x1: int = HERME
         for s, e in _runs_in_row(frame, y, max(0, x0), x1):
             if e - s + 1 < UNDERSCORE_W_MIN:
                 continue
+            # The "_" is a THIN bar (at most UNDERSCORE_H_MAX rows tall): bound
+            # the contiguous black bar through this row so the BOTTOM EDGE of a
+            # tall solid box (block cursor, PROCESSING dots) is never read as a
+            # RESPONDING underscore (PR review R5 — the only way the old
+            # whitespace-below test let a 30 px-tall box masquerade as "_").
+            bar_h = 1
+            while (
+                bar_h < UNDERSCORE_H_MAX
+                and y - bar_h >= 0
+                and all(frame.black(xx, y - bar_h) for xx in range(s, e + 1))
+            ):
+                bar_h += 1
+            if y - bar_h >= 0 and all(frame.black(xx, y - bar_h) for xx in range(s, e + 1)):
+                continue  # bar continues past UNDERSCORE_H_MAX -> not the "_"
             below_blank = 0
             for xx in range(s, e + 1):
                 has_below = any(

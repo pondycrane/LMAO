@@ -59,9 +59,15 @@ Restate the goal. Identify the tasks. For each task classify the verification
 path:
 - **Voice-loop-affected** → must be proven by `robodog-voice-e2e`
   (`bazel run //robodog_client:hermes_voice_e2e`: OPEN_SESSION / ASR_MATCH /
-  BRAIN_REPLY / RING / SUBTITLE asserts).
-- **Panel/UI-affected** → must be proven by `robodog-hermes-e2e` (screen
-  capture + vision readback of the ST7305 pixels).
+  BRAIN_REPLY / RING / SUBTITLE / READOUT_COMPLETE / POST_READOUT_RELISTEN /
+  CURSOR_LISTEN / CURSOR_PROCESS / CURSOR_RESPOND asserts — see
+  `.archon/commands/robodog-voice-e2e.md` for the authoritative list).
+- **Panel/UI-affected** → idle/stock UI and general panel rendering proven by
+  `robodog-hermes-e2e` (screen capture + vision readback of the ST7305
+  pixels). **The 3-state cursor presentation is an exception:** the LISTENING
+  block / PROCESSING `...` / RESPONDING `_` (the CURSOR_* trio) is proven by
+  `robodog-voice-e2e`, never by `robodog-hermes-e2e` (which captures idle
+  frames and cannot produce cursor evidence).
 - **Host/bridge logic** → proven by `robodog-hermes-validate` unit/lint/build.
 List the concrete evidence each task will produce (journal lines, transcripts,
 frame PNGs, re-ASR text).
