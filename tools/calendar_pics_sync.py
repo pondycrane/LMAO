@@ -289,18 +289,18 @@ def build_gen_prompt(subject_word: str, theme_label: str, action: str) -> str:
              else "a cute pokemon-like creature")
     activity = f" doing {action}" if action else " doing a fun activity"
     return (
-        f"{subject_word}, {theme}{activity}, flat BLACK line art on a WHITE "
-        "background, clean bold black outline, coloring book style, no shading, "
-        "no text, simple, kid-friendly"
+        f"{subject_word}, {theme}{activity}, clean simple cartoon outline style, "
+        "bold smooth outlines, plain white background, coloring book page, "
+        "minimal shading, thick clear lines, no text, kid-friendly"
     )
 
 
 def generate_local(prompt: str, width: int, height: int) -> bytes | None:
     """Generate an image on the local ComfyUI node; return PNG bytes or None.
 
-    Uses the FLUX.1-schnell checkpoint the node is set up with (falls back to
-    the caller's search path if ComfyUI is down, the checkpoint isn't ready, or
-    generation fails).
+    Uses the MOSS-Image (SFT BF16) checkpoint the node is set up with (falls
+    back to the caller's search path if ComfyUI is down, the checkpoint isn't
+    ready, or generation fails).
     """
     base = os.environ.get("LMAO_IMAGE_GEN_URL", _GEN_URL_DEFAULT).rstrip("/")
     # MOSS-Image (SFT, BF16): 5B DiT + Qwen3.5-9B text encoder + flux2 VAE.
