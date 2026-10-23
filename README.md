@@ -740,6 +740,46 @@ bridge's `POST /xiaozhi/inject` fallback (skips only the mic leg). Loud-skip
 when the board (`0x303A:0x1001`) or the test audio card is absent; gate
 reference: `.archon/commands/robodog-voice-e2e.md`.
 
+**State-screen presentation (3-state canvas).** The hermes build ships a
+fresh, LMAO-owned firmware patch (`robodog_hermes_statescreen.patch`, applied
+by `build_xiaozhi.sh` with its own idempotent marker) giving the RLCD the PRD
+presentation during a conversation, rendered through the NORMAL LVGL flush
+path (no bypass — the RD_SHOT capture hook keeps streaming frames unchanged):
+
+- **LISTENING** — the comprehended STT words append left-to-right; a *pulsing
+  block cursor* (an LVGL filled rectangle, since U+2588 is not in the font)
+  stays locked exactly one character cell ahead of the newest word. No
+  underline, no bold overdraw.
+- **PROCESSING** — the cursor drops to a second line and becomes a *pulsing*
+  `...` (three ASCII dots) while the brain thinks; the STT draft stays intact
+  on line 1.
+- **RESPONDING** — the `...` is instantly overwritten by the first replied
+  word; the reply streams left-to-right with a *steady, non-flashing*
+  ASCII `_` riding the moving text edge until the tts stream ends
+  (`OnTtsStream`, wired to the `tts start/stop` frames in `application.cc`).
+
+  The stock status-bar + emoji idle face remain untouched, so `hermes-e2e`'s
+  RECOGNIZABLE idle readback is unchanged.
+
+**Reply caption for voice replies (no double audio).** Hermes auto-TTS replies
+(``voice`` frames) previously reached the board with no text — the RLCD could
+not render them. The xiaozhi adapter now carries the gateway's final reply
+text inside the existing `voice` frame as `text` (no new frame type); the
+bridge forwards it as ONE `tts/sentence_start` (printable-ASCII sanitized for
+the basic-Latin font) inside the same start/stop basket that streams the audio
+— the caption is never synthesized or bracketed separately, so there is
+single speech per turn (text-reply fallbacks already flowed via `speak_text_to`).
+
+**Cursor E2E asserts.** `hermes_voice_e2e.py` adds CURSOR_LISTEN / CURSOR_PROCESS
+/ CURSOR_RESPOND: frames captured during the conversation (n≥12, cadence 3.2 s
+while a state is active) are grouped by the RD_SHOT ` state=<S>label` the
+capture hook now prints, corroborated by journal-anchored state windows, and
+proven by `robodog_client/voice/statescreen_check.py` pixel geometry (block /
+ellipsis / underscore signatures + cursor-region bit-identity) with vision
+readback (`HERMES_CURSOR_PROMPT`) as the text-content check — evidence under
+`loopN/frames.json`, `frameN_analysis.txt`, `cursor_region_diff.txt`. The
+`state=` label alone never satisfies an accept criterion (issue #267).
+
 ### 8. Docker Image
 
 The server Docker image is the release artifact for the in-cluster

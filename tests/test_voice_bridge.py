@@ -17,6 +17,7 @@ import asyncio
 import json
 import logging
 import sys
+import time
 import types
 from unittest.mock import MagicMock
 
@@ -212,6 +213,102 @@ def test_frame_constants_match_firmware_decode_queue():
     assert vb.FRAME_MS == 60
     assert vb.FRAME_BYTES == 2880  # 1440 samples * 2 bytes, mono
     assert vb.DOWNLINK_PACE == pytest.approx(0.0582)
+
+
+# ---------------------------------------------------------------------------
+# Reply-text caption for voice replies (state screen RESPONDING state)
+# ---------------------------------------------------------------------------
+
+
+async def _make_brain_single(frame):
+    """A one-shot in-memory brain queue (bypasses the real WS brain)."""
+    q = asyncio.Queue()
+    await q.put(frame)
+    return q
+
+
+@pytest.mark.asyncio
+async def test_brain_next_voice_returns_caption(monkeypatch):
+    """A voice frame carrying the adapter's reply text yields it as the caption
+    (the adapter put the gateway's final text inside the existing voice frame)."""
+    import base64
+
+    # _brain_next calls decode_audio_to_pcm24k(audio) -> stub it to an identity
+    # pass so we only assert the caption plumbing.
+    monkeypatch.setattr(vb, "decode_audio_to_pcm24k", lambda audio: b"PCM:" + audio)
+    q = await _make_brain_single(
+        {
+            "type": "voice",
+            "session_id": "s1",
+            "audio": base64.b64encode(b"wavdata").decode(),
+            "text": "  5 user five  ",
+        }
+    )
+    monkeypatch.setattr(vb, "_brain_queue", q)
+    kind, payload, caption = await vb._brain_next(time.monotonic() + 10.0, "s1", 5.0)
+    assert kind == "voice"
+    assert payload == b"PCM:wavdata"
+    assert caption == "5 user five"  # whitespace-trimmed via the bridge
+
+
+@pytest.mark.asyncio
+async def test_brain_next_voice_caption_falls_back_to_reply_text(monkeypatch):
+    """When the voice frame carries no text, the reply text read during the
+    text-vs-voice grace window is reused so RESPONDING still renders text."""
+    import base64
+
+    monkeypatch.setattr(vb, "decode_audio_to_pcm24k", lambda audio: b"PCM:" + audio)
+    q = asyncio.Queue()
+    # voice frame without a text field, but a reply frame arrives first
+    await q.put({"type": "reply", "session_id": "s1", "text": "twenty"})
+    await q.put({"type": "voice", "session_id": "s1", "audio": base64.b64encode(b"wav").decode()})
+    monkeypatch.setattr(vb, "_brain_queue", q)
+    kind, payload, caption = await vb._brain_next(time.monotonic() + 10.0, "s1", 5.0)
+    assert kind == "voice"
+    assert caption == "twenty"
+
+
+@pytest.mark.asyncio
+async def test_speak_audio_to_caption_forwards_sentence_start_no_double_audio(monkeypatch, caplog):
+    """With a caption, speak_audio_to sends ONE tts/sentence_start (sanitized
+    ASCII) inside the same start/stop basket — and NEVER synthesizes audio from
+    the caption (no call_tts, no double speech)."""
+    ws = FakeWs()
+    _frame_sleeps(monkeypatch)
+    pcm = b"\x00" * (vb.FRAME_BYTES * 2)
+    with caplog.at_level(logging.INFO, logger="voice_bridge"):
+        await vb.speak_audio_to(ws, "s1", pcm, caption="  答案 4\ud83d\ude00 says 静  ")
+    # ordering: sentence_start (caption) BEFORE the audio start/stop basket
+    states = [f["state"] for f in ws.text]
+    assert states == ["sentence_start", "start", "stop"]
+    assert ws.text[0]["text"] == "4 says"  # CJK/emoji stripped to space, collapsed
+    assert len(ws.sent) == 2
+    assert "session=s1 caption -> sentence_start" in caplog.text
+    # no double audio: only the 2 opus frames from pcm, no extra TTS synthesis
+    assert len(ws.text) == 3  # exactly one sentence_start + start + stop
+
+
+@pytest.mark.asyncio
+async def test_speak_audio_to_without_caption_keeps_old_shape(monkeypatch, caplog):
+    """No caption -> exactly the historical start/audio/stop bracket (legacy
+    adapters without the text field keep working)."""
+    ws = FakeWs()
+    _frame_sleeps(monkeypatch)
+    pcm = b"\x00" * (vb.FRAME_BYTES * 2)
+    with caplog.at_level(logging.INFO, logger="voice_bridge"):
+        await vb.speak_audio_to(ws, "s1", pcm)
+    assert [f["state"] for f in ws.text] == ["start", "stop"]
+    assert len(ws.sent) == 2
+    assert "caption -> sentence_start" not in caplog.text
+
+
+def test_panel_ascii_sanitizer_keeps_printable_ascii_only():
+    """The RLCD font is basic-Latin: CJK/emoji become spaces, ASCII stays."""
+    assert vb._panel_ascii("count 1..2-3!? ok") == "count 1..2-3!? ok"
+    assert vb._panel_ascii("") == ""
+    assert vb._panel_ascii("静 4 \ud83d\ude00") == "4"
+    assert vb._panel_ascii("alpha\tbeta\n\rgamma") == "alpha beta gamma"
+    assert vb._panel_ascii("Spaces   collapse") == "Spaces collapse"
 
 
 # ---------------------------------------------------------------------------

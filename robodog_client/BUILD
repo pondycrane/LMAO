@@ -54,6 +54,8 @@ sh_binary(
     data = [
         "voice/fetch_xiaozhi.sh",
         "voice/robodog_hermes_capture.patch",
+        "voice/robodog_listen.patch",
+        "voice/robodog_hermes_statescreen.patch",
     ],
     tags = ["manual"],
 )
@@ -70,6 +72,8 @@ sh_binary(
         "voice/build_xiaozhi.sh",
         "voice/fetch_xiaozhi.sh",
         "voice/robodog_hermes_capture.patch",
+        "voice/robodog_listen.patch",
+        "voice/robodog_hermes_statescreen.patch",
     ],
     tags = ["manual"],
 )
@@ -95,6 +99,7 @@ sh_binary(
         "voice/hermes_voice_e2e.py",
         "voice/voice_bridge.py",
         "voice/e2e_readout.py",
+        "voice/statescreen_check.py",
         "//robodog_client:voice_corpus",
     ],
     tags = ["manual"],
@@ -125,7 +130,11 @@ filegroup(
         "voice/hermes_voice_e2e.py",
         "voice/make_corpus.py",
         "voice/e2e_readout.py",
+        "voice/statescreen_check.py",
         "voice/corpus/corpus.json",
+        "voice/hermes-platform/xiaozhi/__init__.py",
+        "voice/hermes-platform/xiaozhi/adapter.py",
+        "voice/hermes-platform/xiaozhi/plugin.yaml",
     ] + glob(["voice/corpus/*.wav"]) + glob(["voice/corpus/*.txt"]),
     tags = ["manual"],
 )
@@ -146,5 +155,16 @@ py_library(
 py_library(
     name = "e2e_readout",
     srcs = ["voice/e2e_readout.py"],
+    visibility = ["//tests:__pkg__"],
+)
+
+# Pixel-geometry signatures for the 3-state screen (issue #267) — pure stdlib
+# so //tests:test_statescreen_check runs without the ops venv, mirroring the
+# e2e_readout pattern. The C canvas logic has no host unit test (anti-re-
+# derivation); this is the mechanical pixel cross-check for the gates, and it
+# is carried as data by :hermes_voice_e2e so the loop can run it on captures.
+py_library(
+    name = "statescreen_check",
+    srcs = ["voice/statescreen_check.py"],
     visibility = ["//tests:__pkg__"],
 )

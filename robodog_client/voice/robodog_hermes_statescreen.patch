@@ -1,0 +1,728 @@
+diff --git a/main/application.cc b/main/application.cc
+index df4e743..1c6199b 100644
+--- a/main/application.cc
++++ b/main/application.cc
+@@ -583,12 +583,20 @@ void Application::InitializeProtocol() {
+                 return;
+             }
+             if (strcmp(state->valuestring, "start") == 0) {
+-                Schedule([this]() {
++                Schedule([this, display]() {
+                     aborted_ = false;
+                     SetDeviceState(kDeviceStateSpeaking);
++                    // RoboDog state screen (robodog_hermes_statescreen.patch):
++                    // tts-stream start — if no assistant caption arrived yet,
++                    // drop to RESPONDING so the steady "_" still proves; if
++                    // already RESPONDING the underscore simply stays.
++                    display->OnTtsStream(true);
+                 });
+             } else if (strcmp(state->valuestring, "stop") == 0) {
+-                Schedule([this]() {
++                Schedule([this, display]() {
++                    // RoboDog state screen: the audio stream ended — remove the
++                    // steady "_" and drop back to the stock idle UI.
++                    display->OnTtsStream(false);
+                     if (GetDeviceState() == kDeviceStateSpeaking) {
+                         if (listening_mode_ == kListeningModeManualStop) {
+                             SetDeviceState(kDeviceStateIdle);
+diff --git a/main/boards/waveshare/esp32-s3-rlcd-4.2/custom_lcd_display.cc b/main/boards/waveshare/esp32-s3-rlcd-4.2/custom_lcd_display.cc
+index 8d6aa32..f30d940 100644
+--- a/main/boards/waveshare/esp32-s3-rlcd-4.2/custom_lcd_display.cc
++++ b/main/boards/waveshare/esp32-s3-rlcd-4.2/custom_lcd_display.cc
+@@ -6,6 +6,7 @@
+ #include <esp_err.h>
+ #include "custom_lcd_display.h"
+ #include "lcd_display.h"
++#include "lvgl_theme.h"
+ #include "esp_lvgl_port.h"
+ #include "assets/lang_config.h"
+ #include "settings.h"
+@@ -380,3 +381,94 @@ void CustomLcdDisplay::RLCD_Display() {
+ 
+ 	RLCD_Sendbuffera(DispBuffer,DisplayLen);
+ }
++
++// ── RoboDog state-screen integration (robodog_hermes_statescreen.patch) ────
++// Build the stock idle UI via the base SetupUI() (top bar + status bar + emoji
++// idle face), then mount the 3-state conversation canvas below the status bar.
++// The canvas hides during IDLE so the stock UI — and thus hermes-e2e's
++// RECOGNIZABLE — stays legible. Everything renders through the NORMAL LVGL
++// flush path (no bypass), so the RD_SHOT capture hook keeps streaming frames
++// unchanged; the capture hook reads StatescreenActive()/RdShotState() for the
++// RD_SHOT `state=` label and the active-state dump cadence.
++
++void CustomLcdDisplay::SetupUI() {
++    LcdDisplay::SetupUI();  // stock: top bar, status bar, emoji idle face
++    DisplayLockGuard lock(this);
++    auto theme = static_cast<LvglTheme*>(current_theme_);
++    if (theme == nullptr) {
++        return;
++    }
++    if (statescreen_ == nullptr) {
++        statescreen_ = new RoboDogStateScreen(lv_screen_active(), theme);
++    }
++    stock_conversation_hidden_ = false;
++}
++
++void CustomLcdDisplay::SetChatMessage(const char* role, const char* content) {
++    if (statescreen_ == nullptr) {
++        LcdDisplay::SetChatMessage(role, content);
++        return;
++    }
++    DisplayLockGuard lock(this);
++    // Conversation frames drive the 3-state canvas; the stock chat bubbles /
++    // bottom bar are reserved for non-conversation (system) messages.
++    if (strcmp(role, "user") == 0 && content != nullptr && content[0] != '\0') {
++        statescreen_->BeginListening(content);
++        HideStockConversation();
++        return;
++    }
++    if (strcmp(role, "assistant") == 0 && content != nullptr && content[0] != '\0') {
++        statescreen_->BeginResponding(content);
++        HideStockConversation();
++        return;
++    }
++    // role == "system": an empty "" (audio channel closed / wake) returns the
++    // panel to the stock idle UI; non-empty system messages pass to the stock
++    // handler unchanged.
++    if (content == nullptr || content[0] == '\0') {
++        statescreen_->ResetToIdle();
++        ShowStockIdle();
++    }
++    LcdDisplay::SetChatMessage(role, content);
++}
++
++void CustomLcdDisplay::OnTtsStream(bool streaming) {
++    if (statescreen_ != nullptr) {
++        statescreen_->OnTtsStream(streaming);
++    }
++}
++
++// Callers hold the display lock (SetChatMessage above). Hiding the emoji face
++// once per conversation keeps the canvas unobscured; the bottom stock chat bar
++// never appears during a conversation because we intercept the user/assistant
++// frames before they reach the stock bubble renderer.
++void CustomLcdDisplay::HideStockConversation() {
++    if (stock_conversation_hidden_) {
++        return;
++    }
++    stock_conversation_hidden_ = true;
++    if (emoji_box_ != nullptr) {
++        lv_obj_add_flag(emoji_box_, LV_OBJ_FLAG_HIDDEN);
++    }
++    if (bottom_bar_ != nullptr) {
++        lv_obj_add_flag(bottom_bar_, LV_OBJ_FLAG_HIDDEN);
++    }
++}
++
++void CustomLcdDisplay::ShowStockIdle() {
++    if (!stock_conversation_hidden_) {
++        return;
++    }
++    stock_conversation_hidden_ = false;
++    if (emoji_box_ != nullptr) {
++        lv_obj_remove_flag(emoji_box_, LV_OBJ_FLAG_HIDDEN);
++    }
++}
++
++bool CustomLcdDisplay::StatescreenActive() {
++    return statescreen_ != nullptr && statescreen_->Active();
++}
++
++const char* CustomLcdDisplay::RdShotState() {
++    return statescreen_ != nullptr ? statescreen_->StateName() : "IDLE";
++}
+diff --git a/main/boards/waveshare/esp32-s3-rlcd-4.2/custom_lcd_display.h b/main/boards/waveshare/esp32-s3-rlcd-4.2/custom_lcd_display.h
+index 7ca91cc..7a7f7b5 100644
+--- a/main/boards/waveshare/esp32-s3-rlcd-4.2/custom_lcd_display.h
++++ b/main/boards/waveshare/esp32-s3-rlcd-4.2/custom_lcd_display.h
+@@ -3,6 +3,7 @@
+ 
+ #include <driver/gpio.h>
+ #include "lcd_display.h"
++#include "robodog_statescreen.h"
+ 
+ enum ColorSelection {
+     ColorBlack = 0,    
+@@ -52,6 +53,25 @@ public:
+     void RLCD_ColorClear(uint8_t color);
+     void RLCD_Display();
+ 	void RLCD_SetPixel(uint16_t x, uint16_t y, uint8_t color);
++
++    // ── RoboDog state-screen integration (robodog_hermes_statescreen.patch) ─
++    // Overrides that feed the 3-state conversation canvas; stock UI (status bar
++    // + emoji idle face) is preserved for IDLE so panel capture stays legible.
++    void SetupUI() override;
++    void SetChatMessage(const char* role, const char* content) override;
++    void OnTtsStream(bool streaming) override;
++
++    // Classification helpers for the capture hook (robodog_hermes_capture.patch
++    // reads the current conversation state for the RD_SHOT `state=` header and
++    // the active-state dump cadence).
++    bool StatescreenActive();
++    const char* RdShotState();
++
++private:
++    void HideStockConversation();
++    void ShowStockIdle();
++    RoboDogStateScreen* statescreen_ = nullptr;
++    bool stock_conversation_hidden_ = false;
+ };
+ 
+ #endif
+\ No newline at end of file
+diff --git a/main/boards/waveshare/esp32-s3-rlcd-4.2/robodog_statescreen.cc b/main/boards/waveshare/esp32-s3-rlcd-4.2/robodog_statescreen.cc
+new file mode 100644
+index 0000000..672e09e
+--- /dev/null
++++ b/main/boards/waveshare/esp32-s3-rlcd-4.2/robodog_statescreen.cc
+@@ -0,0 +1,419 @@
++#include "robodog_statescreen.h"
++
++#include "lvgl_theme.h"
++
++#include <cstring>
++
++namespace {
++
++// Reveal pace: 250 ms/word (deterministic word-by-word reveal of the received
++// stt/reply text on the canvas — see "Patterns to Mirror" in the plan).
++constexpr uint32_t kRevealPeriodMs = 250;
++// Cursor pulse period: ~600 ms on/off (seeded phase via esp_random()).
++constexpr uint32_t kPulsePeriodMs = 600;
++// One ASCII space of the 30 px basic-Latin font ~ 0.6 * line height.
++constexpr lv_coord_t kCharCellFrac = 3;   // cell_w_ = line_h_ * 3 / 5
++
++}  // namespace
++
++RoboDogStateScreen::RoboDogStateScreen(lv_obj_t* parent, LvglTheme* theme)
++    : theme_(theme) {
++    // Retain the theme's text font so the raw lv_font_t* we hand the labels
++    // stays alive for this screen's whole lifetime. The stock boot flow calls
++    // SetupUI() BEFORE the async assets loader swaps the theme's text_font_
++    // shared_ptr (assets.cc SetTextFont / LcdDisplay::SetTextFont), so caching
++    // the raw pointer alone dangles and the first STT-render measure crashed in
++    // lv_font_get_glyph_width() with a Guru Meditation cache fault (the
++    // robodog-voice-loop E2E regression: every conversation rebooted the board
++    // at the subtitle render). Owning the LvglFont keeps label text measurements
++    // valid; a (rare) theme swap just leaves us on the original font — visually
++    // identical for the RLCD's ASCII text font.
++    std::shared_ptr<LvglFont> font_keep;
++    if (theme_ != nullptr) {
++        font_keep = theme_->text_font();
++    }
++    text_font_ = font_keep;
++    const lv_font_t* font = font_keep ? font_keep->font() : nullptr;
++    if (font != nullptr) {
++        line_h_ = lv_font_get_line_height(font);
++    }
++    if (line_h_ <= 0) {
++        line_h_ = 30;
++    }
++    cell_w_ = (line_h_ * kCharCellFrac) / 5;
++    if (cell_w_ < 8) {
++        cell_w_ = 8;
++    }
++
++    // The 2-line canvas occupies the area under the top/status bars. Rendered
++    // through the normal LVGL flush path (never bypassed).
++    root_ = lv_obj_create(parent);
++    lv_obj_remove_style_all(root_);
++    lv_obj_set_size(root_, LV_HOR_RES - 16, line_h_ * 3);
++    lv_obj_set_pos(root_, root_x_, root_y_);
++    lv_obj_set_style_bg_color(root_, theme ? theme->background_color()
++                                           : lv_color_black(), 0);
++    lv_obj_set_style_bg_opa(root_, LV_OPA_COVER, 0);
++    lv_obj_set_style_border_width(root_, 0, 0);
++    lv_obj_set_style_pad_all(root_, 0, 0);
++
++    line1_ = lv_label_create(root_);
++    lv_obj_set_style_text_font(line1_, font, 0);
++    lv_obj_set_style_text_color(line1_, theme ? theme->text_color()
++                                              : lv_color_white(), 0);
++    lv_obj_set_pos(line1_, line_off_x_, line1_off_y_);
++    lv_label_set_text(line1_, "");
++
++    line2_ = lv_label_create(root_);
++    lv_obj_set_style_text_font(line2_, font, 0);
++    lv_obj_set_style_text_color(line2_, theme ? theme->text_color()
++                                              : lv_color_white(), 0);
++    lv_obj_set_pos(line2_, line_off_x_, line1_off_y_ + line_h_ + 8);
++    lv_label_set_text(line2_, "");
++
++    // Block cursor: an LVGL filled rectangle (no unicode block glyph needed),
++    // locked exactly one character cell ahead of the newest STT word.
++    block_ = lv_obj_create(root_);
++    lv_obj_remove_style_all(block_);
++    lv_obj_set_size(block_, cell_w_, (line_h_ * 3) / 4);
++    lv_obj_set_style_bg_color(block_, theme ? theme->text_color()
++                                            : lv_color_white(), 0);
++    lv_obj_set_style_bg_opa(block_, LV_OPA_COVER, 0);
++    lv_obj_set_style_radius(block_, 0, 0);
++    lv_obj_set_style_border_width(block_, 0, 0);
++    SetBlockVisible(false);
++
++    pulse_timer_ = lv_timer_create(RoboDogStateScreen::OnPulseTimer,
++                                   kPulsePeriodMs, this);
++    reveal_timer_ = lv_timer_create(RoboDogStateScreen::OnRevealTimer,
++                                    kRevealPeriodMs, this);
++    lv_timer_pause(pulse_timer_);
++    lv_timer_pause(reveal_timer_);
++
++    ShowCanvas(false);
++}
++
++RoboDogStateScreen::~RoboDogStateScreen() {
++    if (pulse_timer_ != nullptr) {
++        lv_timer_delete(pulse_timer_);
++        pulse_timer_ = nullptr;
++    }
++    if (reveal_timer_ != nullptr) {
++        lv_timer_delete(reveal_timer_);
++        reveal_timer_ = nullptr;
++    }
++}
++
++void RoboDogStateScreen::ShowCanvas(bool show) {
++    if (root_ == nullptr) {
++        return;
++    }
++    if (show) {
++        lv_obj_remove_flag(root_, LV_OBJ_FLAG_HIDDEN);
++    } else {
++        lv_obj_add_flag(root_, LV_OBJ_FLAG_HIDDEN);
++    }
++}
++
++void RoboDogStateScreen::StartPulse() {
++    if (pulse_timer_ == nullptr) {
++        return;
++    }
++    // Seed the ON/OFF phase per turn so blind 3.2 s dumps see both phases.
++    pulse_on_ = (esp_random() & 1) != 0;
++    lv_timer_set_period(pulse_timer_, kPulsePeriodMs);
++    lv_timer_reset(pulse_timer_);
++}
++
++void RoboDogStateScreen::StopPulse() {
++    if (pulse_timer_ != nullptr) {
++        lv_timer_pause(pulse_timer_);
++    }
++}
++
++void RoboDogStateScreen::StartReveal() {
++    if (reveal_timer_ == nullptr) {
++        return;
++    }
++    lv_timer_set_period(reveal_timer_, kRevealPeriodMs);
++    lv_timer_reset(reveal_timer_);
++}
++
++void RoboDogStateScreen::StopReveal() {
++    if (reveal_timer_ != nullptr) {
++        lv_timer_pause(reveal_timer_);
++    }
++}
++
++std::vector<std::string> RoboDogStateScreen::SplitWords(
++    const std::string& text) const {
++    std::vector<std::string> out;
++    std::string cur;
++    for (char c : text) {
++        if ((c == ' ' || c == '\n' || c == '\t' || c == '\r') && !cur.empty()) {
++            out.push_back(cur);
++            cur.clear();
++        } else if (c != ' ' && c != '\n' && c != '\t' && c != '\r') {
++            cur.push_back(c);
++        }
++    }
++    if (!cur.empty()) {
++        out.push_back(cur);
++    }
++    return out;
++}
++
++std::string RoboDogStateScreen::Joined(size_t count,
++                                       const std::string& suffix) const {
++    std::string s;
++    for (size_t i = 0; i < count && i < words_.size(); i++) {
++        if (!s.empty()) {
++            s.push_back(' ');
++        }
++        s += words_[i];
++    }
++    s += suffix;
++    return s;
++}
++
++void RoboDogStateScreen::UpdateBlock() {
++    if (block_ == nullptr || line1_ == nullptr) {
++        return;
++    }
++    lv_obj_update_layout(line1_);
++    lv_coord_t text_w = lv_obj_get_width(line1_);
++    // One character cell exactly after the newest revealed word.
++    lv_obj_set_pos(block_, line_off_x_ + text_w + cell_w_,
++                   line1_off_y_ + (line_h_ - lv_obj_get_height(block_)) / 2);
++}
++
++void RoboDogStateScreen::SetBlockVisible(bool on) {
++    if (block_ == nullptr) {
++        return;
++    }
++    if (on) {
++        lv_obj_remove_flag(block_, LV_OBJ_FLAG_HIDDEN);
++    } else {
++        lv_obj_add_flag(block_, LV_OBJ_FLAG_HIDDEN);
++    }
++}
++
++void RoboDogStateScreen::RenderLine1() {
++    if (line1_ == nullptr) {
++        return;
++    }
++    lv_label_set_text(line1_, Joined(shown_, "").c_str());
++    lv_obj_update_layout(line1_);
++    // The block tracks the moving text edge only while we are LISTENING; the
++    // pulse timer toggles its visibility independently.
++    UpdateBlock();
++}
++
++void RoboDogStateScreen::RenderLine2() {
++    if (line2_ == nullptr) {
++        return;
++    }
++    if (state_ == RoboDogState::PROCESSING) {
++        lv_label_set_text(line2_, "...");
++    } else if (state_ == RoboDogState::RESPONDING) {
++        // The steady "_" is appended to the label so it rides the text edge for
++        // free, while the audio stream is running (streaming_).
++        lv_label_set_text(line2_,
++                          Joined(shown_, streaming_ ? "_" : "").c_str());
++    } else {
++        lv_label_set_text(line2_, "");
++    }
++    lv_obj_update_layout(line2_);
++}
++
++void RoboDogStateScreen::OnPulseTimer(lv_timer_t* timer) {
++    auto* self =
++        static_cast<RoboDogStateScreen*>(lv_timer_get_user_data(timer));
++    if (self == nullptr) {
++        return;
++    }
++    self->pulse_on_ = !self->pulse_on_;
++    switch (self->state_) {
++        case RoboDogState::LISTENING:
++            self->SetBlockVisible(self->pulse_on_);
++            if (self->reveal_done_for_hold_ && self->pulse_on_) {
++                // One full hold pulse after the STT reveal completed, then the
++                // cursor drops to line 2 as a pulsing "...".
++                self->reveal_done_for_hold_ = false;
++                self->BeginProcessing();
++            }
++            break;
++        case RoboDogState::PROCESSING:
++            if (self->line2_ != nullptr) {
++                if (self->pulse_on_) {
++                    lv_obj_remove_flag(self->line2_, LV_OBJ_FLAG_HIDDEN);
++                } else {
++                    lv_obj_add_flag(self->line2_, LV_OBJ_FLAG_HIDDEN);
++                }
++            }
++            break;
++        default:
++            break;  // RESPONDING/IDLE: no pulsing (the "_" is steady)
++    }
++}
++
++void RoboDogStateScreen::OnRevealTimer(lv_timer_t* timer) {
++    auto* self =
++        static_cast<RoboDogStateScreen*>(lv_timer_get_user_data(timer));
++    if (self == nullptr) {
++        return;
++    }
++    self->StopReveal();
++    if (self->reveal_label_ == self->line1_ && self->shown_ < self->words_.size()) {
++        self->shown_++;
++        self->RenderLine1();
++        if (self->shown_ >= self->words_.size()) {
++            // All STT words shown: hold LISTENING one pulse, then PROCESSING.
++            self->reveal_done_for_hold_ = true;
++        } else {
++            self->StartReveal();
++        }
++    } else if (self->reveal_label_ == self->line2_) {
++        if (self->shown_ < self->words_.size()) {
++            self->shown_++;
++            self->RenderLine2();
++        }
++        if (self->shown_ < self->words_.size()) {
++            self->StartReveal();
++        }
++        // Reply reveal finished: keep the steady "_" until tts-stream end.
++    }
++}
++
++void RoboDogStateScreen::BeginListening(const std::string& text) {
++    StopReveal();
++    words_ = SplitWords(text);
++    if (words_.empty()) {
++        return;  // empty stt: keep the previous presentation
++    }
++    shown_ = 1;  // comprehend the first word immediately
++    reveal_first_ = 0;
++    reveal_label_ = line1_;
++    reveal_role_ = RevealRole::LINE1;
++    reveal_done_for_hold_ = false;
++    state_ = RoboDogState::LISTENING;
++    streaming_ = false;
++    RenderLine1();
++    RenderLine2();  // starts empty
++    SetBlockVisible(pulse_on_);
++    lv_obj_remove_flag(line2_, LV_OBJ_FLAG_HIDDEN);
++    ShowCanvas(true);
++    StartPulse();
++    if (shown_ < words_.size()) {
++        StartReveal();
++    } else {
++        // Single-word utterance: hold LISTENING one pulse before processing.
++        reveal_done_for_hold_ = true;
++    }
++}
++
++void RoboDogStateScreen::BeginProcessing() {
++    StopReveal();
++    reveal_label_ = nullptr;
++    reveal_role_ = RevealRole::NONE;
++    // Keep the STT draft intact on line 1 (reveal already showed every word).
++    if (shown_ < words_.size()) {
++        shown_ = words_.size();  // tts start landed mid-reveal: jump to full draft
++        RenderLine1();
++    }
++    SetBlockVisible(false);
++    state_ = RoboDogState::PROCESSING;
++    RenderLine2();  // "..."
++    // The pulse timer now toggles line-2 visibility (start aligned to seed).
++    if (pulse_on_) {
++        lv_obj_remove_flag(line2_, LV_OBJ_FLAG_HIDDEN);
++    } else {
++        lv_obj_add_flag(line2_, LV_OBJ_FLAG_HIDDEN);
++    }
++    ShowCanvas(true);
++}
++
++void RoboDogStateScreen::BeginResponding(const std::string& text) {
++    StopReveal();
++    words_ = SplitWords(text);
++    reveal_first_ = 0;
++    reveal_label_ = line2_;
++    reveal_role_ = RevealRole::LINE2;
++    state_ = RoboDogState::RESPONDING;
++    streaming_ = true;
++    SetBlockVisible(false);
++    // The "..." is instantly overwritten: line 2 already holds the reply label,
++    // so the first replied word replaces it in-place (this call re-renders).
++    shown_ = 1;
++    lv_obj_remove_flag(line2_, LV_OBJ_FLAG_HIDDEN);
++    RenderLine2();  // first word + "_"
++    ShowCanvas(true);
++    StartPulse();  // keeps running (no-ops in RESPONDING) so a later PROCESSING
++                   // entry re-seeds from a fresh random phase
++    // No hold: the reply streams immediately (fixed word-reveal pace).
++    if (shown_ < words_.size()) {
++        StartReveal();
++    }
++}
++
++void RoboDogStateScreen::OnTtsStream(bool streaming) {
++    if (streaming) {
++        streaming_ = true;
++        if (state_ == RoboDogState::LISTENING ||
++            state_ == RoboDogState::PROCESSING) {
++            // The audio stream started without a caption text (or before it):
++            // still reach RESPONDING so the steady "_" is shown, and re-render
++            // so any mid-reveal STT draft gives way to the reply line.
++            BeginResponding("");
++        }
++        // Already RESPONDING with a caption: nothing to do (underscore shown).
++    } else {
++        EndResponding();
++    }
++}
++
++void RoboDogStateScreen::EndResponding() {
++    StopReveal();
++    StopPulse();
++    streaming_ = false;
++    reveal_label_ = nullptr;
++    reveal_role_ = RevealRole::NONE;
++    SetIdle();
++}
++
++void RoboDogStateScreen::ResetToIdle() { SetIdle(); }
++
++void RoboDogStateScreen::SetIdle() {
++    StopReveal();
++    StopPulse();
++    state_ = RoboDogState::IDLE;
++    streaming_ = false;
++    words_.clear();
++    shown_ = 0;
++    reveal_label_ = nullptr;
++    reveal_role_ = RevealRole::NONE;
++    reveal_done_for_hold_ = false;
++    pulse_on_ = false;
++    SetBlockVisible(false);
++    if (line1_ != nullptr) {
++        lv_label_set_text(line1_, "");
++    }
++    if (line2_ != nullptr) {
++        lv_label_set_text(line2_, "");
++    }
++    ShowCanvas(false);  // stock idle UI (status bar + emoji face) returns
++}
++
++const char* RoboDogStateScreen::StateName() const {
++    switch (state_) {
++        case RoboDogState::IDLE:
++            return "IDLE";
++        case RoboDogState::LISTENING:
++            return "LISTENING";
++        case RoboDogState::PROCESSING:
++            return "PROCESSING";
++        case RoboDogState::RESPONDING:
++            return "RESPONDING";
++    }
++    return "IDLE";
++}
+diff --git a/main/boards/waveshare/esp32-s3-rlcd-4.2/robodog_statescreen.h b/main/boards/waveshare/esp32-s3-rlcd-4.2/robodog_statescreen.h
+new file mode 100644
+index 0000000..defd7c8
+--- /dev/null
++++ b/main/boards/waveshare/esp32-s3-rlcd-4.2/robodog_statescreen.h
+@@ -0,0 +1,109 @@
++#ifndef __ROBODOG_STATESCREEN_H__
++#define __ROBODOG_STATESCREEN_H__
++
++/*
++ * RoboDogStateScreen — the LMAO-injected 3-state conversation canvas for the
++ * hermes (XiaoZhi voice) build of the Waveshare ESP32-S3 RLCD-4.2 board.
++ *
++ * PRD presentation (see README "Voice mode"):
++ *   1. LISTENING   — comprehended STT words append left-to-right; a pulsing
++ *                    block cursor (an LVGL filled rectangle — U+2588 is not in
++ *                    the board font) stays locked exactly ONE character cell
++ *                    ahead of the newest word. No underline, no bold overdraw.
++ *   2. PROCESSING  — the cursor drops to a fresh line and becomes a pulsing
++ *                    "..." (three ASCII dots) on that line.
++ *   3. RESPONDING  — the "..." is instantly overwritten by the first replied
++ *                    word; the reply streams left-to-right; a steady ASCII "_"
++ *                    rides the moving text edge until the tts stream ends
++ *                    (OnTtsStream(false)).
++ *
++ * Everything renders through the NORMAL LVGL flush path (no flush bypass, no
++ * timer-driven RD_SHOT): this class is a plain set of LVGL objects, so the
++ * robodog_hermes_capture.patch RD_SHOT hook keeps streaming frames unchanged.
++ * Pulse phase is seeded from esp_random() on state entry so blind ~3.2 s dumps
++ * sample both pulse phases across E2E loops.
++ *
++ * This file is staged into the ESP-IDF tree by robodog_hermes_statescreen.patch
++ * (applied by build_xiaozhi.sh) — never committed as a vendored source.
++ */
++
++#include <lvgl.h>
++#include <esp_random.h>
++
++#include <cstdint>
++#include <memory>
++#include <string>
++#include <vector>
++
++class LvglTheme;
++class LvglFont;
++
++enum class RoboDogState { IDLE, LISTENING, PROCESSING, RESPONDING };
++
++class RoboDogStateScreen {
++public:
++    RoboDogStateScreen(lv_obj_t* parent, LvglTheme* theme);
++    ~RoboDogStateScreen();
++
++    // Conversation hooks (called under DisplayLockGuard from the display
++    // override; the LVGL timer callbacks below run on the LVGL task).
++    void BeginListening(const std::string& text);   // stt draft -> LISTENING reveal
++    void BeginProcessing();                          // cursor drops -> "..." pulse
++    void BeginResponding(const std::string& text);   // reply -> overwrite "..." + steady "_"
++    void OnTtsStream(bool streaming);                // tts start/stop signal
++    void EndResponding();                            // tts-stream end: remove "_" -> IDLE
++    void ResetToIdle();                              // back to stock idle UI
++
++    RoboDogState state() const { return state_; }
++    bool Active() const { return state_ != RoboDogState::IDLE; }
++    const char* StateName() const;
++
++private:
++    enum class RevealRole { NONE, LINE1, LINE2 };
++
++    void ShowCanvas(bool show);
++    void SetIdle();
++    void StartPulse();
++    void StopPulse();
++    void StartReveal();
++    void StopReveal();
++    void RenderLine1();
++    void RenderLine2();
++    void UpdateBlock();
++    void SetBlockVisible(bool on);
++    std::vector<std::string> SplitWords(const std::string& text) const;
++    std::string Joined(size_t count, const std::string& suffix) const;
++
++    static void OnPulseTimer(lv_timer_t* timer);
++    static void OnRevealTimer(lv_timer_t* timer);
++
++    lv_obj_t* root_ = nullptr;    // the 2-line canvas (hidden when IDLE)
++    lv_obj_t* line1_ = nullptr;   // STT draft (line 1)
++    lv_obj_t* line2_ = nullptr;   // "..." indicator / reply stream (line 2)
++    lv_obj_t* block_ = nullptr;   // LVGL filled rectangle (listening cursor)
++    lv_timer_t* pulse_timer_ = nullptr;
++    lv_timer_t* reveal_timer_ = nullptr;
++
++    RoboDogState state_ = RoboDogState::IDLE;
++    LvglTheme* theme_ = nullptr;
++    std::shared_ptr<LvglFont> text_font_;  // retain the label font (dangle guard)
++
++    std::vector<std::string> words_;
++    size_t shown_ = 0;            // words revealed so far on the current line
++    size_t reveal_first_ = 0;     // index of the first word the reveal drives
++    bool reveal_done_for_hold_ = false;  // LISTENING reveal finished; hold one pulse
++    lv_obj_t* reveal_label_ = nullptr;
++    RevealRole reveal_role_ = RevealRole::NONE;
++
++    bool pulse_on_ = false;       // seeded from esp_random() on state entry
++    bool streaming_ = false;      // tts audio stream in progress -> steady "_"
++
++    lv_coord_t root_x_ = 8;
++    lv_coord_t root_y_ = 54;      // below the stock top/status bar
++    lv_coord_t line_off_x_ = 8;   // label inset inside the canvas
++    lv_coord_t line1_off_y_ = 6;
++    lv_coord_t line_h_ = 0;       // text font line height
++    lv_coord_t cell_w_ = 0;       // glyph advance (one character cell)
++};
++
++#endif  // __ROBODOG_STATESCREEN_H__
+diff --git a/main/display/display.h b/main/display/display.h
+index 63b7aff..2c8c707 100644
+--- a/main/display/display.h
++++ b/main/display/display.h
+@@ -48,6 +48,10 @@ public:
+     virtual void ClearTextGlyphs() {}
+     virtual void SetEmojiCollection(std::shared_ptr<EmojiCollection>) {}
+     virtual void SetupUI() { setup_ui_called_ = true; }
++    // tts stream start/stop signal (robodog_hermes_statescreen.patch): the
++    // default no-op keeps every other display backend untouched; the hermes
++    // RLCD overrides it to hold/remove the steady reply cursor.
++    virtual void OnTtsStream(bool streaming) { (void)streaming; }
+ 
+     inline int width() const { return width_; }
+     inline int height() const { return height_; }

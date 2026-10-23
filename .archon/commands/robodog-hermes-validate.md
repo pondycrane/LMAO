@@ -110,6 +110,12 @@ For every MISSING file: wire it into the appropriate BUILD target (e.g. extend
 clean. (Both `robodog-validate` and `robodog-hermes-validate` share this
 rdeps matching, including `voice/*.py`.)
 
+The state-screen feature adds `//robodog_client:statescreen_check` (a
+pure-stdlib `py_library` mirroring the `e2e_readout` pattern, consumed by
+`//tests:test_statescreen_check` and carried as data by `:hermes_voice_e2e`)
+and extends `:voice_backend` with `voice/hermes-platform/xiaozhi/*` (the
+overridden xiaozhi adapter now ships in the deploy filegroup).
+
 **Record**: ✅ Pass / ❌ Fail (fixed)
 
 ## Phase 3: BAZEL BUILD

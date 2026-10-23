@@ -70,6 +70,7 @@ sys.path.insert(0, str(REPO))
 
 # Components that must live in the same interpreter (faster-whisper etc.).
 import capture  # noqa: E402  (RD_SHOT decode + vision readback)
+import statescreen_check  # noqa: E402  (pure-stdlib cursor pixel geometry)
 from e2e_readout import (  # noqa: E402  (issue #274 read-out metrics, stdlib)
     active_play_span,
     energy_burst_window,
@@ -111,6 +112,12 @@ BETWEEN_LOOP_SETTLE = float(os.environ.get("RD_BETWEEN_LOOP_SETTLE", "3"))
 # BEFORE it, with this fixed window covering a ~6-8 s reply plus tail.
 MIC_INJECT_CAP = float(os.environ.get("RD_INJECT_CAP_SECS", "20"))
 SILENCE = os.environ.get("E2E_AUDIO_SG", "sg audio -c")
+# Cursor pixel bands on the 400x300 canvas (robodog_statescreen.cc root canvas
+# starts at y=54; line 1 ~ 60..100, line 2 ~ 100..170). Generous ranges so the
+# geometry scans are robust to font line-height rounding.
+CURSOR_LINE1_BAND = (46, 120)  # LISTENING: STT draft + block cursor
+CURSOR_LINE2_BAND = (96, 240)  # PROCESSING "..." / RESPONDING reply + "_"
+SHOT_COUNT = int(os.environ.get("RD_SHOT_COUNT", "12"))  # active cadence 3.2 s
 
 
 def log(msg):
@@ -118,8 +125,7 @@ def log(msg):
 
 
 def shell_run(cmd, timeout=120):
-    return subprocess.run(cmd, shell=True, capture_output=True, text=True,
-                         timeout=timeout)
+    return subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
 
 
 # ---------------------------------------------------------------------------
@@ -130,6 +136,7 @@ def detect_board_port():
     if port:
         return port
     import serial.tools.list_ports
+
     for p in serial.tools.list_ports.comports():
         if p.vid == BOARD_VID and p.pid == BOARD_PID:
             return p.device
@@ -163,31 +170,38 @@ def bridge_health():
 #   `sg audio` runs the command with the `audio` group (no re-login needed).
 # ---------------------------------------------------------------------------
 def play_wav(path: Path, volume: float = PLAY_VOL):
-    cmd = (f"{SILENCE} 'ffmpeg -hide_banner -loglevel error -re -i {path} "
-           f"-af volume={volume:.2f} -ac 1 -ar 16000 -f alsa "
-           f"plughw:{SOUND_CARD},0 -y'")
+    cmd = (
+        f"{SILENCE} 'ffmpeg -hide_banner -loglevel error -re -i {path} "
+        f"-af volume={volume:.2f} -ac 1 -ar 16000 -f alsa "
+        f"plughw:{SOUND_CARD},0 -y'"
+    )
     shell_run(cmd, timeout=120)
 
 
 def capture_mic(path: Path, seconds: float):
-    cmd = (f"{SILENCE} 'ffmpeg -hide_banner -loglevel error -f alsa "
-           f"-i plughw:{SOUND_CARD},0 -t {seconds:.1f} -ac 1 -ar 16000 {path} -y'")
+    cmd = (
+        f"{SILENCE} 'ffmpeg -hide_banner -loglevel error -f alsa "
+        f"-i plughw:{SOUND_CARD},0 -t {seconds:.1f} -ac 1 -ar 16000 {path} -y'"
+    )
     shell_run(cmd, timeout=int(seconds) + 20)
     return path
 
 
 def trim_wav(path: Path, start: float, end: float, out: Path):
-    cmd = (f"{SILENCE} 'ffmpeg -hide_banner -loglevel error -i {path} "
-           f"-ss {start:.2f} -t {max(0.1, end - start):.2f} -ac 1 -ar 16000 "
-           f"{out} -y'")
+    cmd = (
+        f"{SILENCE} 'ffmpeg -hide_banner -loglevel error -i {path} "
+        f"-ss {start:.2f} -t {max(0.1, end - start):.2f} -ac 1 -ar 16000 "
+        f"{out} -y'"
+    )
     shell_run(cmd, timeout=30)
 
 
 def send_rd_listen(port: str):
     import serial
+
     s = serial.Serial(port, 115200, timeout=1)
     try:
-        time.sleep(1.0)          # arm USB-Serial/JTAG RX after open
+        time.sleep(1.0)  # arm USB-Serial/JTAG RX after open
         s.reset_input_buffer()
         s.write(b"RD_LISTEN\r\n")
         s.flush()
@@ -206,13 +220,15 @@ def inject_text(text: str, session_id: str | None = None):
         payload["session_id"] = session_id
     body = json.dumps(payload).encode()
     req = urllib.request.Request(
-        f"http://127.0.0.1:{BRIDGE_OTA_PORT}/xiaozhi/inject", data=body,
-        headers={"Content-Type": "application/json"})
+        f"http://127.0.0.1:{BRIDGE_OTA_PORT}/xiaozhi/inject",
+        data=body,
+        headers={"Content-Type": "application/json"},
+    )
     with urllib.request.urlopen(req, timeout=90) as r:
         return json.load(r)
 
 
-def describe_frame(i1_path: Path):
+def describe_frame(i1_path: Path, prompt: str | None = None):
     """Vision readback of a captured hermes panel dump (capture.py path)."""
     data = i1_path.read_bytes()
     if len(data) != capture.HERMES_BUF_SIZE:
@@ -221,7 +237,7 @@ def describe_frame(i1_path: Path):
     png = i1_path.with_suffix(".png")
     img.save(png)
     try:
-        return capture.describe_image(png, prompt=capture.HERMES_VISION_PROMPT)
+        return capture.describe_image(png, prompt=prompt or capture.HERMES_VISION_PROMPT)
     except Exception as e:
         log(f"vision readback failed: {e}")
         return ""
@@ -243,8 +259,10 @@ class JournalTail:
     waiters, never dropped wholesale."""
 
     def __init__(self, path=None):
-        self._path = Path(path or os.environ.get("BRIDGE_LOG_FILE",
-                                                 os.path.expanduser("~/xiaozhi/voice_bridge.log"))).expanduser()
+        self._path = Path(
+            path
+            or os.environ.get("BRIDGE_LOG_FILE", os.path.expanduser("~/xiaozhi/voice_bridge.log"))
+        ).expanduser()
         self._pos = 0
         self._pending = []
         self._loaded = []
@@ -267,10 +285,17 @@ class JournalTail:
         env.setdefault("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
         since = max(30, int(time.time() - self._last) + 2)
         try:
-            cmd = ["journalctl", "--user", "-u", BRIDGE_UNIT, "--no-pager",
-                   "-o", "cat", f"--since=-{since}s"]
-            out = subprocess.run(cmd, capture_output=True, text=True,
-                                 timeout=30, env=env).stdout
+            cmd = [
+                "journalctl",
+                "--user",
+                "-u",
+                BRIDGE_UNIT,
+                "--no-pager",
+                "-o",
+                "cat",
+                f"--since=-{since}s",
+            ]
+            out = subprocess.run(cmd, capture_output=True, text=True, timeout=30, env=env).stdout
             self._last = time.time()
             cur = out.splitlines()
         except Exception:
@@ -298,7 +323,7 @@ class JournalTail:
         """Waiters call this for the line they matched (drop it + anything
         before it; later lines stay for other waiters)."""
         if 0 <= index < len(self._pending):
-            self._pending = self._pending[index + 1:]
+            self._pending = self._pending[index + 1 :]
 
     def clear_pending(self):
         self._pending = []
@@ -329,8 +354,29 @@ def norm(text):
     return re.sub(r"[^a-z0-9 ]+", " ", text.lower()).split()
 
 
+# faster-whisper often spells the count corpus's numbers as digits
+# ("Count slowly from 20 to 30.") while the pinned transcript is word-form
+# ("count slowly from twenty to thirty"). Normalize both sides to a shared
+# digit form so a correct acoustic transcription is not discarded as a
+# mismatch (which forced the documented E2E_STT inject fallback on the
+# real-mic leg).
+_NUMBER_WORDS = {
+    "zero": "0", "one": "1", "two": "2", "three": "3", "four": "4",
+    "five": "5", "six": "6", "seven": "7", "eight": "8", "nine": "9",
+    "ten": "10", "eleven": "11", "twelve": "12", "thirteen": "13",
+    "fourteen": "14", "fifteen": "15", "sixteen": "16", "seventeen": "17",
+    "eighteen": "18", "nineteen": "19", "twenty": "20", "thirty": "30",
+    "forty": "40", "fifty": "50", "sixty": "60", "seventy": "70",
+    "eighty": "80", "ninety": "90", "hundred": "100",
+}
+
+
+def _match_norm(text):
+    return [str(_NUMBER_WORDS.get(w, w)) for w in norm(text)]
+
+
 def match_transcript(asr_text, expected):
-    a, e = norm(asr_text), norm(expected)
+    a, e = _match_norm(asr_text), _match_norm(expected)
     if not e:
         return False
     if a == e or len(set(a) & set(e)) >= len(e) * 0.75:
@@ -352,9 +398,201 @@ def overlap(a, b):
 
 def re_asr_file(path):
     import wave as _w
+
     with _w.open(str(path)) as w:
         pcm = w.readframes(w.getnframes())
     return call_asr(pcm, w.getframerate())
+
+
+# ---------------------------------------------------------------------------
+# 3-state cursor proof (issue #267) — CURSOR_LISTEN / CURSOR_PROCESS /
+# CURSOR_RESPOND, driven by the RD_SHOT state= label (classification ONLY) +
+# the journal-anchored windows + statescreen_check pixel geometry + vision.
+# ---------------------------------------------------------------------------
+
+
+def _log_ts(line: str | None):
+    """Epoch seconds from a BRIDGE_LOG_FILE line's asctime prefix, else None."""
+    m = re.match(r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})[,.]\d*", line or "")
+    if not m:
+        return None
+    try:
+        return time.mktime(time.strptime(m.group(1), "%Y-%m-%d %H:%M:%S"))
+    except ValueError:
+        return None
+
+
+def _frame_meta(shot_dir: Path):
+    """(file, state_label, wall_t) per captured frame, from the sidecars the
+    capture thread wrote next to each frameN.i1 (state + dump-complete time).
+    The sidecars are written as ``frameN.state`` / ``frameN.t`` (the ``.i1``
+    suffix is replaced, not appended) — ``frameN.i1.state`` never exists.
+    """
+    metas = []
+    for fp in sorted(shot_dir.glob("frame*.i1")):
+        st = "UNKNOWN"
+        ft = fp.stat().st_mtime
+        stp = fp.with_suffix(".state")
+        if stp.is_file():
+            st = stp.read_text().strip().upper() or "UNKNOWN"
+        tp = fp.with_suffix(".t")
+        if tp.is_file():
+            try:
+                ft = float(tp.read_text().strip())
+            except ValueError:
+                ft = ft
+        metas.append({"file": fp.name, "path": str(fp), "state": st, "t": ft})
+    return metas
+
+
+def _cursor_asserts(
+    shot_dir: Path, run_dir: Path, stt_at, caption_at, tts_stop_at, journal_tail
+) -> dict:
+    """CURSOR_* verdicts + evidence from the captured frames.
+
+    Frame grouping uses the RD_SHOT ``state=`` label (classification only — never
+    an accept criterion by itself) and is corroborated by the journal-anchored
+    state windows (``stt_at`` / ``caption_at`` / ``tts_stop_at``; a mismatch is a
+    logged note, not a fail). The mechanical accept check is the pixel geometry
+    of the labelled frame's actual pixels + the cursor-region bit-identity; the
+    vision readback carries the text-content check.
+    """
+    import json as _json
+
+    metas = _frame_meta(shot_dir)
+    (run_dir / "frames.json").write_text(_json.dumps(metas, indent=2))
+    if not metas:
+        return {
+            k: "SKIP (no frames captured)"
+            for k in ("CURSOR_LISTEN", "CURSOR_PROCESS", "CURSOR_RESPOND")
+        }
+
+    def geom(fp):
+        with open(fp, "rb") as fh:
+            fr = statescreen_check.decode_frame(fh.read())
+        bbox = statescreen_check.block_signature(fr, *CURSOR_LINE1_BAND)
+        elli = statescreen_check.ellipsis_signature(fr, *CURSOR_LINE2_BAND)
+        und = statescreen_check.underscore_bbox(fr, *CURSOR_LINE2_BAND)
+        return {"block_box": bbox[1] if bbox[0] else None, "ellipsis": elli, "underscore_box": und}
+
+    for m in metas:
+        m["geo"] = geom(Path(m["path"]))
+
+    # Corroboration note: predicted state from the journal windows vs the label.
+    agree = 0
+    for m in metas:
+        pred = "IDLE"
+        if stt_at and caption_at:
+            if m["t"] is not None and m["t"] < stt_at + 4.0:
+                pred = "LISTENING"
+            elif m["t"] < caption_at + 0.6:
+                pred = "PROCESSING"
+            elif tts_stop_at and m["t"] < tts_stop_at + 1.5:
+                pred = "RESPONDING"
+        m["predicted"] = pred
+        agree += int(pred == m["state"])
+    log(
+        f"cursor windows stt_at={stt_at or -1:.1f} caption_at={caption_at or -1:.1f} "
+        f"tts_stop_at={tts_stop_at or -1:.1f}; label/predicted agree "
+        f"{agree}/{len(metas)}"
+    )
+
+    by_state: dict[str, list] = {}
+    for m in metas:
+        by_state.setdefault(m["state"], []).append(m)
+
+    asserts: dict[str, str] = {}
+
+    # CURSOR_LISTEN — STT draft + solid block exactly one cell after the last
+    # word, pulsing (a frame without the block in the same run).
+    lfr = [m for m in by_state.get("LISTENING", []) if m["geo"]["block_box"]]
+    loff = [m for m in by_state.get("LISTENING", []) if not m["geo"]["block_box"]]
+    if not by_state.get("LISTENING"):
+        asserts["CURSOR_LISTEN"] = "SKIP (no LISTENING frame captured; soft)"
+    elif lfr and loff:
+        asserts["CURSOR_LISTEN"] = (
+            f"PASS block@{lfr[0]['file']} box={lfr[0]['geo']['block_box']}; "
+            f"no-block@{loff[0]['file']} -> pulsing"
+        )
+    elif lfr:
+        asserts["CURSOR_LISTEN"] = (
+            f"SOFT-PASS block@{lfr[0]['file']} only (one pulse phase sampled; recorded verbatim)"
+        )
+    else:
+        asserts["CURSOR_LISTEN"] = "FAIL no LISTENING frame shows the block cursor"
+
+    # CURSOR_PROCESS — STT draft intact + "..." on the dropped line, pulsing.
+    pfr = by_state.get("PROCESSING", [])
+    pion = [m for m in pfr if m["geo"]["ellipsis"]]
+    poff = [m for m in pfr if not m["geo"]["ellipsis"]]
+    if not pfr:
+        asserts["CURSOR_PROCESS"] = "SKIP (no PROCESSING frame captured; soft)"
+    elif pion and poff:
+        asserts["CURSOR_PROCESS"] = (
+            f"PASS '...'@{pion[0]['file']}; off@{poff[0]['file']} -> pulsing"
+        )
+    elif pion:
+        asserts["CURSOR_PROCESS"] = f"SOFT-PASS '...'@{pion[0]['file']} only (one phase; verbatim)"
+    else:
+        asserts["CURSOR_PROCESS"] = "FAIL no PROCESSING frame shows the '...'"
+
+    # CURSOR_RESPOND — every RESPONDING frame with streamed text shows the
+    # steady '_' at the moving edge; two frames share a pixel-identical region.
+    rfr = by_state.get("RESPONDING", [])
+    ron = [m for m in rfr if m["geo"]["underscore_box"]]
+    if not rfr:
+        asserts["CURSOR_RESPOND"] = "SKIP (no RESPONDING frame captured; soft)"
+    else:
+        missing = [m for m in rfr if not m["geo"]["underscore_box"]]
+        if missing:
+            asserts["CURSOR_RESPOND"] = (
+                "FAIL underscore missing on RESPONDING frames "
+                f"{', '.join(m['file'] for m in missing)}"
+            )
+        elif len(ron) >= 2:
+            a, b = ron[0], ron[1]
+            ba, bb = a["geo"]["underscore_box"], b["geo"]["underscore_box"]
+            with open(a["path"], "rb") as fh:
+                fa = statescreen_check.decode_frame(fh.read())
+            with open(b["path"], "rb") as fh:
+                fb = statescreen_check.decode_frame(fh.read())
+            x0, y0 = ba[0], ba[1]
+            x1, y1 = ba[2], ba[3]
+            same = statescreen_check.cursor_region_identical(fa, fb, x0 - 4, y0 - 4, x1 + 4, y1 + 4)
+            (run_dir / "cursor_region_diff.txt").write_text(
+                f"{a['file']}: {ba} / {b['file']}: {bb} -> region identical={same}\n"
+                f"(box moved {bb[0] - x0} px while the stream reveals; "
+                "identical only when fully revealed)\n"
+            )
+            if ba[0:2] == bb[0:2] and same:
+                asserts["CURSOR_RESPOND"] = (
+                    f"PASS '_' on every RESPONDING frame; steady (pixel-identical "
+                    f"cursor region {a['file']} vs {b['file']})"
+                )
+            else:
+                asserts["CURSOR_RESPOND"] = (
+                    f"SOFT-PASS '_' on every RESPONDING frame; cursor-region "
+                    f"identical={same} box@{a['file']}:{ba} vs @{b['file']}:{bb} "
+                    "(verbatim)"
+                )
+        else:
+            asserts["CURSOR_RESPOND"] = (
+                "PASS '_' on RESPONDING frame(s); <2 comparable frames "
+                "(region identity soft, verbatim)"
+            )
+
+    # vision readback on one representative frame per sampled state
+    for st in ("LISTENING", "PROCESSING", "RESPONDING"):
+        reps = by_state.get(st)
+        if not reps:
+            continue
+        rep = reps[0]
+        analysis = describe_frame(Path(rep["path"]), prompt=capture.HERMES_CURSOR_PROMPT)
+        (run_dir / f"{Path(rep['file']).stem}_analysis.txt").write_text(
+            f"state={st}\ngeo={rep['geo']}\nreadback:\n{analysis}\n"
+        )
+        log(f"cursor readback {rep['file']} [{st}]: {analysis}")
+    return asserts
 
 
 # ---------------------------------------------------------------------------
@@ -391,7 +629,8 @@ def run_loop(n, instr, artifacts, prev_listen=None):
     if carry.get("ok"):
         ses = carry.get("ses")
         res["asserts"]["OPEN_SESSION"] = (
-            "PASS (re-listen armed at prior tts-stop, session=" + (ses or "?") + ")")
+            "PASS (re-listen armed at prior tts-stop, session=" + (ses or "?") + ")"
+        )
     else:
         send_rd_listen(port)
         got = wait_for(tail, r"listen start", timeout=25)
@@ -451,7 +690,9 @@ def run_loop(n, instr, artifacts, prev_listen=None):
             # (covers brain->TTS->speaker->display; skips the mic leg)
             res["asserts"]["ASR_MATCH"] = (
                 "FAIL (mic ASR) -> E2E_STT inject fallback"
-                if not asr_text else f"FAIL (mic ASR {asr_text!r}) -> E2E_STT inject")
+                if not asr_text
+                else f"FAIL (mic ASR {asr_text!r}) -> E2E_STT inject"
+            )
         else:
             res["asserts"]["ASR_MATCH"] = "SKIP (E2E_STT injection mode)"
 
@@ -463,9 +704,11 @@ def run_loop(n, instr, artifacts, prev_listen=None):
 
     def _capture_shots():
         try:
-            frames = capture.read_frames(port, n=8, timeout=120)
-            for i, (data, _, _, _) in enumerate(frames):
+            frames = capture.read_frames(port, n=SHOT_COUNT, timeout=180)
+            for i, (data, _, _, _, st) in enumerate(frames):
                 (shots / f"frame{i}.i1").write_bytes(data)
+                (shots / f"frame{i}.state").write_text(st)
+                (shots / f"frame{i}.t").write_text(f"{time.time():.3f}")
         except Exception as e:
             log(f"RD_SHOT capture failed: {e}")
 
@@ -473,8 +716,9 @@ def run_loop(n, instr, artifacts, prev_listen=None):
     shot_thread.start()
 
     # 3. BRAIN: Hermes reply non-empty (auto-TTS voice audio or text)
-    got_reply = wait_for(tail, r"Hermes\s+(?:voice\s+|reply\s+)reply:",
-                         session_id=ses, timeout=REPLY_TIMEOUT)
+    got_reply = wait_for(
+        tail, r"Hermes\s+(?:voice\s+|reply\s+)reply:", session_id=ses, timeout=REPLY_TIMEOUT
+    )
     kind, payload = "", ""
     if got_reply:
         m = re.search(r"Hermes\s+voice\s+reply:\s*(\d+)", got_reply)
@@ -534,7 +778,27 @@ def run_loop(n, instr, artifacts, prev_listen=None):
 
     mic_thread.join(timeout=cap_len + 30)
     time.sleep(2.0)  # let the board play the reply / drop a frame
-    shot_thread.join(timeout=120)
+    shot_thread.join(timeout=180)
+
+    # Journal-anchored state windows for the cursor proof (issue #267): the stt
+    # wire time (board began LISTENING) and the caption sentence_start (RESPONDING
+    # began). Both lines stay pending in the tail (no prior waiter consumed them),
+    # so these waits return immediately. ``None`` anchors (inject loops have no
+    # ``turn`` line; text replies log no caption) degrade the window prediction
+    # only — classification comes from the RD_SHOT state= label.
+    stt_line = wait_for(tail, r"turn:.*stt=", session_id=ses, timeout=8)
+    caption_line = wait_for(tail, r"caption -> sentence_start", session_id=ses, timeout=8)
+    stt_at, caption_at, tts_stop_at = (_log_ts(stt_line), _log_ts(caption_line), _log_ts(tts_stop))
+
+    # CURSOR_* asserts on the captured frames (pixel geometry + vision; the
+    # RD_SHOT state= label is classification only). Recorded even when the mic
+    # leg failed — the panel evidence is independent of it.
+    if any((run_dir / "shots").glob("frame*.i1")):
+        cursor = _cursor_asserts(run_dir / "shots", run_dir, stt_at, caption_at, tts_stop_at, tail)
+        for k, v in cursor.items():
+            res["asserts"][k] = v
+        res["artifacts"]["cursor_frames"] = len(cursor)
+
     if not mic_path.exists():
         res["asserts"]["RING"] = "FAIL (no test-mic capture)"
         res["asserts"]["SUBTITLE"] = "FAIL (no test-mic capture)"
@@ -569,7 +833,8 @@ def run_loop(n, instr, artifacts, prev_listen=None):
     audible = peak >= max(120.0, base * 4)
     aligned = bool(ring_txt) and (
         overlap(ring_txt, subtitle_txt) >= 1
-        or (kind == "reply" and overlap(ring_txt, payload) >= 1))
+        or (kind == "reply" and overlap(ring_txt, payload) >= 1)
+    )
     if not ring_txt:
         ring_v = "FAIL (no re-ASR of board speaker)"
     elif aligned:
@@ -581,8 +846,7 @@ def run_loop(n, instr, artifacts, prev_listen=None):
     res["asserts"]["RING"] = f"{ring_v} re-asr={ring_txt!r} rms={int(peak)} floor={int(base)}"
 
     target = E2E_STT_TEXT or instr["transcript"]
-    shown = bool(subtitle_txt) and any(w in norm(subtitle_txt.lower())
-                                       for w in norm(target))
+    shown = bool(subtitle_txt) and any(w in norm(subtitle_txt.lower()) for w in norm(target))
     if shown:
         res["asserts"]["SUBTITLE"] = "PASS " + subtitle_txt.replace("\n", " | ")
     elif subtitle_txt:
@@ -591,7 +855,9 @@ def run_loop(n, instr, artifacts, prev_listen=None):
         # text (face/clock alone = no subtitle proven)
         res["asserts"]["SUBTITLE"] = (
             "PASS-TEXT " + subtitle_txt.replace("\n", " | ")
-            if audible else "FAIL " + subtitle_txt.replace("\n", " | "))
+            if audible
+            else "FAIL " + subtitle_txt.replace("\n", " | ")
+        )
     else:
         res["asserts"]["SUBTITLE"] = "FAIL no-subtitle-readback (panel blank)"
     res["artifacts"]["subtitle"] = subtitle_txt
@@ -613,14 +879,17 @@ def run_loop(n, instr, artifacts, prev_listen=None):
     elif reply_secs < READOUT_MIN_REPLY:
         res["asserts"]["READOUT_COMPLETE"] = (
             f"SKIP (reply {reply_secs:.1f}s < {READOUT_MIN_REPLY:.1f}s — not "
-            "discriminative for the ~0.5 s truncation delta)")
+            "discriminative for the ~0.5 s truncation delta)"
+        )
     elif frac >= 0.85:
         res["asserts"]["READOUT_COMPLETE"] = (
-            f"PASS played={span:.1f}s reply={reply_secs:.1f}s frac={frac:.2f}")
+            f"PASS played={span:.1f}s reply={reply_secs:.1f}s frac={frac:.2f}"
+        )
     else:
         res["asserts"]["READOUT_COMPLETE"] = (
             f"FAIL played={span:.1f}s of reply {reply_secs:.1f}s "
-            f"(frac={frac:.2f} < 0.85) — truncated read-out?")
+            f"(frac={frac:.2f} < 0.85) — truncated read-out?"
+        )
 
     # POST_READOUT_RELISTEN (issue #274): the reachable proxy for the realtime
     # auto-relisten the board does not expose to the E2E — after the reply's
@@ -634,35 +903,41 @@ def run_loop(n, instr, artifacts, prev_listen=None):
             "FAIL (no `tts stop` anchor — deployed bridge predates this PR's "
             "anchor; POST_READOUT cannot be proven). Redeploy "
             "robodog_client/voice/voice_bridge.py and restart "
-            "systemctl --user lmao-robodog-voice")
+            "systemctl --user lmao-robodog-voice"
+        )
         res["next_listen"] = {"ok": False, "ses": None}
     else:
-        time.sleep(RE_LISTEN_GRACE)      # let the board drain the last frames
+        time.sleep(RE_LISTEN_GRACE)  # let the board drain the last frames
         send_rd_listen(port)
         got2 = wait_for(tail, r"listen start", timeout=RE_LISTEN_TIMEOUT)
         m2 = re.search(r"session=([0-9a-f]+)", got2 or "")
         ses2 = m2.group(1) if m2 else None
         if ses2:
-            res["asserts"]["POST_READOUT_RELISTEN"] = ("PASS " +
-                (got2.split(": ", 1)[-1] if got2 else ses2))
+            res["asserts"]["POST_READOUT_RELISTEN"] = "PASS " + (
+                got2.split(": ", 1)[-1] if got2 else ses2
+            )
             res["next_listen"] = {"ok": True, "ses": ses2}
         else:
             res["asserts"]["POST_READOUT_RELISTEN"] = (
-                "FAIL (no `listen start` right after tts stop)")
+                "FAIL (no `listen start` right after tts stop)"
+            )
             res["next_listen"] = {"ok": False, "ses": None}
     return res
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--corpus", default="count",
-                    help="corpus slug to drive (see voice/corpus/corpus.json); "
-                         "'count' ('count slowly from twenty to thirty') is the "
-                         "long-reply corpus: a deterministic 11-number list the "
-                         "brain reads as a reliably ~7-10 s spoken VOICE reply, "
-                         "comfortably above READOUT_MIN_REPLY (3.5 s) and the "
-                         "~0.85 played-fraction floor, and well inside the "
-                         "read-out capture window (~15 s cap)")
+    ap.add_argument(
+        "--corpus",
+        default="count",
+        help="corpus slug to drive (see voice/corpus/corpus.json); "
+        "'count' ('count slowly from twenty to thirty') is the "
+        "long-reply corpus: a deterministic 11-number list the "
+        "brain reads as a reliably ~7-10 s spoken VOICE reply, "
+        "comfortably above READOUT_MIN_REPLY (3.5 s) and the "
+        "~0.85 played-fraction floor, and well inside the "
+        "read-out capture window (~15 s cap)",
+    )
     ap.add_argument("--artifacts", default=str(Path.home() / "artifacts"))
     args = ap.parse_args()
     artifacts = Path(args.artifacts) / "robodog-voice-e2e"
@@ -671,8 +946,10 @@ def main():
     port = detect_board_port()
     card = detect_sound_card()
     healthy = bridge_health()
-    log(f"board={port or 'NONE'} sound='{card}' bridge_health={healthy} "
-        f"runs={N_RUNS} stt_text={'inject:' + E2E_STT_TEXT if E2E_STT_TEXT else 'mic'}")
+    log(
+        f"board={port or 'NONE'} sound='{card}' bridge_health={healthy} "
+        f"runs={N_RUNS} stt_text={'inject:' + E2E_STT_TEXT if E2E_STT_TEXT else 'mic'}"
+    )
     skips = []
     if not port:
         skips.append("ROBODOG BOARD NOT DETECTED (0x303A:0x1001)")
@@ -722,8 +999,9 @@ def main():
     def asr_ok(v):
         # The documented E2E_STT fallback (issue #267) is an acceptable result
         # for the real-mic leg: brain->TTS->speaker->display all still run.
-        return (v.startswith("PASS") or v.startswith("SKIP")
-                or "E2E_STT" in v or "inject fallback" in v)
+        return (
+            v.startswith("PASS") or v.startswith("SKIP") or "E2E_STT" in v or "inject fallback" in v
+        )
 
     def mode_of(r):
         v = r["asserts"].get("ASR_MATCH", "")
@@ -744,11 +1022,13 @@ def main():
         def ok(v):
             return v is not None and (v.startswith("PASS") or v.startswith("SKIP"))
 
-        return (r["asserts"].get("OPEN_SESSION", "FAIL").startswith("PASS")
-                and r["asserts"].get("BRAIN_REPLY", "FAIL").startswith("PASS")
-                and asr_ok(r["asserts"].get("ASR_MATCH", "FAIL"))
-                and ok(r["asserts"].get("READOUT_COMPLETE"))
-                and ok(r["asserts"].get("POST_READOUT_RELISTEN")))
+        return (
+            r["asserts"].get("OPEN_SESSION", "FAIL").startswith("PASS")
+            and r["asserts"].get("BRAIN_REPLY", "FAIL").startswith("PASS")
+            and asr_ok(r["asserts"].get("ASR_MATCH", "FAIL"))
+            and ok(r["asserts"].get("READOUT_COMPLETE"))
+            and ok(r["asserts"].get("POST_READOUT_RELISTEN"))
+        )
 
     for r in results:
         r["artifacts"]["mode"] = mode_of(r)
