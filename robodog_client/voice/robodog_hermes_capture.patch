@@ -1,6 +1,8 @@
+diff --git a/main/boards/waveshare/esp32-s3-rlcd-4.2/custom_lcd_display.cc b/main/boards/waveshare/esp32-s3-rlcd-4.2/custom_lcd_display.cc
+index ee2817c..8d6aa32 100644
 --- a/main/boards/waveshare/esp32-s3-rlcd-4.2/custom_lcd_display.cc
 +++ b/main/boards/waveshare/esp32-s3-rlcd-4.2/custom_lcd_display.cc
-@@ -11,6 +11,31 @@
+@@ -11,6 +11,41 @@
  #include "settings.h"
  #include "config.h"
  #include "board.h"
@@ -14,12 +16,22 @@
 +// pixel (same contract as the calendar firmware's rd_shot_dump).  bit=0 is
 +// black, bit=1 is white paper (RLCD_SetPixel: ColorBlack=0 clears the bit).
 +// The dump interval must exceed the serial transfer time (15000 B -> ~30 KB of
-+// hex @115200 ~= 2.6 s) or successive frames would interleave.
++// hex @115200 ~= 2.6 s) or successive frames would interleave: 4 s while the
++// panel shows the stock idle UI, 3.2 s while a conversation state
++// (LISTENING/PROCESSING/RESPONDING) is active so the voice-loop E2E samples
++// every state.  The RD_SHOT header also carries the state-screen classification
++// (`state=<IDLE|LISTENING|PROCESSING|RESPONDING>`) so host capture.py can
++// group frames by UI state — the label alone never satisfies an accept
++// criterion (the pixel readback does).  CustomLcdDisplay::RdShotState() and
++// StatescreenActive() are declared/defined by robodog_hermes_statescreen.patch;
++// both patches always apply together in build_xiaozhi.sh.
 +static uint64_t s_rd_shot_last_us = 0;
-+static const uint64_t RD_SHOT_INTERVAL_US = 4000000ULL;  // 4 s
-+static void rd_shot_dump(const uint8_t *buf, int len, int w, int h)
++static const uint64_t RD_SHOT_INTERVAL_ACTIVE_US = 3200000ULL;   // 3.2 s
++static const uint64_t RD_SHOT_INTERVAL_IDLE_US   = 4000000ULL;   // 4 s
++static void rd_shot_dump(const uint8_t *buf, int len, int w, int h, const char* state)
 +{
-+    printf("\nRD_SHOT_BEGIN bufsize=%d w=%d h=%d\n", len, w, h);
++    printf("\nRD_SHOT_BEGIN bufsize=%d w=%d h=%d state=%s\n", len, w, h,
++           state != nullptr ? state : "IDLE");
 +    for (int i = 0; i < len; i++) {
 +        printf("%02x", buf[i]);
 +        if ((i & 0x1f) == 0x1f) {
@@ -32,15 +44,18 @@
  
  void CustomLcdDisplay::Lvgl_flush_cb(lv_display_t * disp, const lv_area_t * area, uint8_t * color_p)
  {
-@@ -27,6 +52,12 @@
+@@ -27,6 +62,15 @@ void CustomLcdDisplay::Lvgl_flush_cb(lv_display_t * disp, const lv_area_t * area
    	 	}
    	}
    	Disp->RLCD_Display();
 +	// RoboDog capture hook: full panel memory now holds this flush's pixels.
++	const char* shot_state = Disp->RdShotState();
++	const uint64_t shot_interval = Disp->StatescreenActive()
++	    ? RD_SHOT_INTERVAL_ACTIVE_US : RD_SHOT_INTERVAL_IDLE_US;
 +	const uint64_t now_us = esp_timer_get_time();
-+	if (now_us - s_rd_shot_last_us >= RD_SHOT_INTERVAL_US && Disp->DispBuffer) {
++	if (now_us - s_rd_shot_last_us >= shot_interval && Disp->DispBuffer) {
 +		s_rd_shot_last_us = now_us;
-+		rd_shot_dump(Disp->DispBuffer, Disp->DisplayLen, Disp->width_, Disp->height_);
++		rd_shot_dump(Disp->DispBuffer, Disp->DisplayLen, Disp->width_, Disp->height_, shot_state);
 +	}
  	lv_disp_flush_ready(disp);
  }

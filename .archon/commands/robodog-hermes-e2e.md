@@ -126,6 +126,12 @@ python3 robodog_client/capture.py --port "$PORT" --reset --n 8 --timeout 180 \
   (`capture.py --listen` — the board's wake word is unreliable) to open the
   voice session programmatically, then replay a command into the mic. The
   boot/idle frames alone prove the render path.
+- The RD_SHOT header now also carries ` state=<IDLE|LISTENING|PROCESSING|RESPONDING>`
+  (robodog_hermes_capture.patch): conversation frames are `state=`-tagged, and
+  the dump cadence drops to ~3.2 s while a conversation state is active (idle
+  stays 4 s). The label is classification metadata only — this gate's
+  PANEL_RENDERED/RECOGNIZABLE verdicts come from the pixel readback, never the
+  label alone; the CURSOR_* verdicts live in robodog-voice-e2e.
 
 ## Phase 7: VISION VERIFY — read the render back
 
@@ -135,7 +141,11 @@ evidence; never paraphrase from memory of the code). Assert on the LAST frame:
 1. **PANEL_RENDERED** — readback shows a non-empty screen (text/icons/face).
    A `BLANK` panel = display not driving → FAIL.
 2. **RECOGNIZABLE** — the transcription reflects the XiaoZhi status UI (a
-   character/status line/subtitle), not noise.
+   character/status line/subtitle), not noise. The hermes state-screen canvas
+   only takes over during a conversation (LISTENING/PROCESSING/RESPONDING); the
+   stock idle UI (status bar + emoji face) is preserved, so an idle readback
+   stays RECOGNIZABLE, and a conversation frame must show the two-line
+   transcript (STT draft / reply) if one was captured.
 3. If the bridge (`lmao-robodog-voice.service`) is up and the board connects,
    later frames should show the *connected* state (vs. `no wifi`-type boot
    frames) — record what the panel shows either way.

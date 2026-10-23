@@ -24,12 +24,14 @@ IDF_IMG="${XIAOZHI_IDF_IMG:-espressif/idf:v6.0.2}"
 "$APP/voice/fetch_xiaozhi.sh" "$APP"
 SRC="$APP/.xiaozhi"
 
-# 2. apply the RoboDog patches (capture hook + RD_LISTEN trigger; each is
-#    idempotent via its own marker). Patching the source invalidates a build.
+# 2. apply the RoboDog patches (capture hook + RD_LISTEN trigger + the
+#    3-state conversation canvas; each is idempotent via its own marker).
+#    Patching the source invalidates a build.
 REBUILD_FLAG=""
 for spec in \
     "robodog_hermes_capture.patch:.robodog_capture_patched" \
-    "robodog_listen.patch:.robodog_listen_patched"; do
+    "robodog_listen.patch:.robodog_listen_patched" \
+    "robodog_hermes_statescreen.patch:.robodog_statescreen_patched"; do
     P="$APP/voice/${spec%%:*}"
     MARK="$SRC/${spec##*:}"
     if [ ! -f "$MARK" ]; then

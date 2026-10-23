@@ -119,6 +119,25 @@ $ARTIFACTS_DIR/robodog-voice-loop-e2e.md here — results tables verbatim. If
 either reports SKIPPED (board/test-audio absent), include that warning verbatim
 and prominently; never omit the section.}
 
+## Cursor evidence (state screen — issue #267)
+
+Per-loop bootstrapped from `robodog-voice-e2e`'s artifacts: the CURSOR_LISTEN /
+CURSOR_PROCESS / CURSOR_RESPOND assertion strings from the results table plus,
+verbatim, `loopN/frames.json`, `loopN/frameN_analysis.txt` (LISTENING block /
+PROCESSING `...` / RESPONDING `_` vision readbacks) and
+`loopN/cursor_region_diff.txt` (RESPONDING steadiness). The fresh firmware
+patch is `robodog_hermes_statescreen.patch` (≠ the rejected `robodog_hermes_ui.patch`;
+#276 — underline+block / rotating-slash / flashing-underline / LVGL-bypass — was
+NOT reused; see Implementation Notes).
+
+## Notes
+
+- PR #276 (`feat/robodog-hermes-ui-readability`) was REJECTED/superseded by this
+  PR (fresh 3-state presentation per PRD). When this PR merges, close #276:
+  `gh pr close 276 --comment "REJECTED — screen presentation implemented fresh in #<new> per
+  PRD (pulsing block one cell ahead / pulsing `...` / steady `_`); the #276 canvas
+  (underline+block, rotating slash, flashing underline, LVGL-bypass) was not reused."`
+
 ## Implementation Notes
 {deviations + issues resolved}
 

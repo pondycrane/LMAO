@@ -564,3 +564,14 @@ py_test(
         "@lmao_pip//pytest",
     ],
 )
+
+# Pixel-geometry signatures for the hermes 3-state screen (issue #267): pure
+# stdlib like test_e2e_readout — no ops venv needed.
+py_test(
+    name = "test_statescreen_check",
+    srcs = ["test_statescreen_check.py"],
+    deps = [
+        "//robodog_client:statescreen_check",
+        "@lmao_pip//pytest",
+    ],
+)

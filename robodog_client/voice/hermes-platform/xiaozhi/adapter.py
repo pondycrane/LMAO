@@ -49,6 +49,7 @@ from typing import Any
 
 try:
     import websockets
+
     _HAS_WEBSOCKETS = True
 except Exception:  # pragma: no cover - import-safe when gated by check_fn
     websockets = None  # type: ignore[assignment]
@@ -145,11 +146,18 @@ class XiaoZhiAdapter(BasePlatformAdapter):
             return False
         self._server = await websockets.serve(
             self._handle_bridge_connection,
-            self.brain_host, self.brain_port, ping_interval=30, ping_timeout=60,
+            self.brain_host,
+            self.brain_port,
+            ping_interval=30,
+            ping_timeout=60,
             max_size=4 * 1024 * 1024,
         )
-        logger.info("xiaozhi brain WS listening on ws://%s:%s%s",
-                    self.brain_host, self.brain_port, BRAIN_PATH)
+        logger.info(
+            "xiaozhi brain WS listening on ws://%s:%s%s",
+            self.brain_host,
+            self.brain_port,
+            BRAIN_PATH,
+        )
         return True
 
     async def disconnect(self) -> None:
@@ -179,9 +187,14 @@ class XiaoZhiAdapter(BasePlatformAdapter):
                     _DEVICE_WS[device_id] = ws
                     _LIVE_DEVICES.add(device_id)
                     logger.info("xiaozhi bridge attached device_id=%s", device_id)
-                    await relay_json(device_id, {
-                        "type": "welcome", "device_id": device_id, "ready": True,
-                    })
+                    await relay_json(
+                        device_id,
+                        {
+                            "type": "welcome",
+                            "device_id": device_id,
+                            "ready": True,
+                        },
+                    )
                 elif mtype == "user":
                     if device_id is None:
                         device_id = str(msg.get("device_id") or "").strip() or None
@@ -205,8 +218,9 @@ class XiaoZhiAdapter(BasePlatformAdapter):
     async def _on_user_turn(self, device_id: str, text: str, session_id: Any, ws: Any) -> None:
         """A transcribed utterance from the bridge → a Hermes session turn."""
         chat_id = str(device_id)
-        await relay_json(chat_id, {"type": "typing", "device_id": chat_id,
-                                        "session_id": session_id})
+        await relay_json(
+            chat_id, {"type": "typing", "device_id": chat_id, "session_id": session_id}
+        )
         lock = _make_turn_lock(chat_id)
         async with lock:
             _TURN_VOICE_SENT[chat_id] = False
@@ -216,20 +230,28 @@ class XiaoZhiAdapter(BasePlatformAdapter):
                 user_id=chat_id,
                 user_name=f"RoboDog:{chat_id[:8]}",
                 source=self.build_source(
-                    chat_id=chat_id, chat_name="RoboDog Voice Board", chat_type="dm",
-                    user_id=chat_id, user_name=f"RoboDog:{chat_id[:8]}",
-                    message_id=str(uuid.uuid4())),
+                    chat_id=chat_id,
+                    chat_name="RoboDog Voice Board",
+                    chat_type="dm",
+                    user_id=chat_id,
+                    user_name=f"RoboDog:{chat_id[:8]}",
+                    message_id=str(uuid.uuid4()),
+                ),
                 message_id=str(uuid.uuid4()),
             )
             try:
                 await self.handle_message(event)
             except Exception as e:
-                logger.exception("xiaozhi handle_message failed device=%s: %s",
-                        chat_id, e)
-                await relay_json(chat_id, {
-                    "type": "error", "device_id": chat_id, "session_id": session_id,
-                    "message": f"The voice assistant hit an error: {e}",
-                })
+                logger.exception("xiaozhi handle_message failed device=%s: %s", chat_id, e)
+                await relay_json(
+                    chat_id,
+                    {
+                        "type": "error",
+                        "device_id": chat_id,
+                        "session_id": session_id,
+                        "message": f"The voice assistant hit an error: {e}",
+                    },
+                )
 
     # -- outbound reply delivery to the board ---------------------------------
 
@@ -239,11 +261,17 @@ class XiaoZhiAdapter(BasePlatformAdapter):
         Deliberately NOT driven by the global ``voice.auto_tts`` (which would also
         flip auto-TTS on for telegram/matrix/signal) — this adapter is voice-first.
         """
-        return (chat_id in self._auto_tts_enabled_chats
-                or chat_id not in self._auto_tts_disabled_chats)
+        return (
+            chat_id in self._auto_tts_enabled_chats or chat_id not in self._auto_tts_disabled_chats
+        )
 
-    async def send(self, chat_id: str, content: str, reply_to: str | None = None,
-                   metadata: dict[str, Any] | None = None) -> SendResult:
+    async def send(
+        self,
+        chat_id: str,
+        content: str,
+        reply_to: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> SendResult:
         chat_id = str(chat_id)
         # The board can't render text; if a voice frame already covered this turn,
         # the text relay is a no-op (the gateway's final text still ledgered OK).
@@ -253,23 +281,37 @@ class XiaoZhiAdapter(BasePlatformAdapter):
         if not text:
             return SendResult(success=True, message_id="")
         session_id = (metadata or {}).get("session_id") if isinstance(metadata, dict) else None
-        ok = await relay_json(chat_id, {
-            "type": "reply", "device_id": chat_id, "session_id": session_id, "text": text,
-        })
+        ok = await relay_json(
+            chat_id,
+            {
+                "type": "reply",
+                "device_id": chat_id,
+                "session_id": session_id,
+                "text": text,
+            },
+        )
         mid = str(uuid.uuid4()) if ok else ""
-        return SendResult(success=ok, message_id=mid,
-                          error=None if ok else "no live bridge session")
+        return SendResult(
+            success=ok, message_id=mid, error=None if ok else "no live bridge session"
+        )
 
     async def edit_message(
-        self, chat_id: str, message_id: str, content: str, *, finalize: bool = False) -> SendResult:
+        self, chat_id: str, message_id: str, content: str, *, finalize: bool = False
+    ) -> SendResult:
         # The board has no text preview to edit; declaring this unsupported makes the
         # gateway's stream consumer drop interim deltas and deliver the final only via
         # send(), so the bridge TTS's exactly one reply per turn.
         return SendResult(success=False, error="Not supported")
 
-    async def send_voice(self, chat_id: str, audio_path: str, caption: str | None = None,
-                         reply_to: str | None = None,
-                         metadata: dict[str, Any] | None = None, **kwargs) -> SendResult:
+    async def send_voice(
+        self,
+        chat_id: str,
+        audio_path: str,
+        caption: str | None = None,
+        reply_to: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        **kwargs,
+    ) -> SendResult:
         chat_id = str(chat_id)
         _TURN_VOICE_SENT[chat_id] = True
         try:
@@ -279,12 +321,26 @@ class XiaoZhiAdapter(BasePlatformAdapter):
             logger.warning("xiaozhi send_voice read failed %s: %s", audio_path, e)
             return SendResult(success=False, error=f"could not read audio: {e}")
         session_id = (metadata or {}).get("session_id") if isinstance(metadata, dict) else None
-        ok = await relay_json(chat_id, {
-            "type": "voice", "device_id": chat_id, "session_id": session_id,
-            "audio": audio_b64, "mime": "audio/wav",
-        })
-        return SendResult(success=ok, message_id=str(uuid.uuid4()) if ok else "",
-                          error=None if ok else "no live bridge session")
+        frame = {
+            "type": "voice",
+            "device_id": chat_id,
+            "session_id": session_id,
+            "audio": audio_b64,
+            "mime": "audio/wav",
+        }
+        # The gateway passes the final reply text as ``caption``; carry it
+        # INSIDE the existing voice frame (as ``text``) so the bridge can render
+        # the RESPONDING state on the board's RLCD — no separate caption frame
+        # type, no new relay. The bridge never speaks this text (audio already
+        # present), so there is no double speech.
+        if caption:
+            frame["text"] = str(caption).strip()
+        ok = await relay_json(chat_id, frame)
+        return SendResult(
+            success=ok,
+            message_id=str(uuid.uuid4()) if ok else "",
+            error=None if ok else "no live bridge session",
+        )
 
     async def send_typing(self, chat_id: str, metadata=None) -> None:
         await relay_json(str(chat_id), {"type": "typing", "device_id": str(chat_id)})
@@ -313,4 +369,6 @@ def register(ctx) -> None:
             "conversational and easy to speak (no markdown, no code fences, no "
             "tables); they are read aloud with TTS. The same session continues "
             "across turns and device reconnects, so remember the ongoing "
-            "conversation."))
+            "conversation."
+        ),
+    )

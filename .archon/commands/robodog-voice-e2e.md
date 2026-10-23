@@ -146,6 +146,25 @@ Assertions (each PASS/FAIL/SKIP, logs verbatim):
    closure); loud note when only "audible" (weak placement).
 7. **SUBTITLE** — `capture.py --describe` readback of a panel dump carries the
    STT transcript phrase (RLCD render leg).
+8. **CURSOR_LISTEN** — a LISTENING-window frame (RD_SHOT `state=LISTENING`
+   label, corroborated by the journal stt anchor) shows the STT draft with a
+   solid block-cursor rectangle one cell after the last word
+   (`statescreen_check.block_signature`); the run also holds a LISTENING frame
+   WITHOUT the block ⇒ the ~0.6 s pulse is real. One phase sampled ⇒
+   `SOFT-PASS ... recorded verbatim` — never silent.
+9. **CURSOR_PROCESS** — a PROCESSING-window frame shows the STT draft intact
+   plus `...` on the dropped line (`ellipsis_signature`); on/off pulse across
+   ≥2 PROCESSING frames (soft if one).
+10. **CURSOR_RESPOND** — every RESPONDING frame with streamed reply text
+    shows the ASCII `_` at the moving text edge (`underscore_bbox` — constant,
+    non-flashing); two RESPONDING frames share a **pixel-identical** cursor
+    region (`cursor_region_identical`; the two frames must also sit at the same
+    box position — a still-revealing edge is recorded verbatim). Vision
+    readback (`HERMES_CURSOR_PROMPT`) carries the reply words.
+
+  The `state=` label is classification only — no accept criterion is satisfied
+  by it alone; every CURSOR_* verdict requires the actual pixel geometry /
+  readback of the labelled frame.
 
 Write `$ARTIFACTS_DIR/robodog-voice-loop-e2e.md` (distinct from the calendar
 gate's `hardware-e2e.md` and the capture gate's `hermes-hardware-e2e.md`; this
@@ -167,5 +186,12 @@ gate NEVER writes `.gate-head`):
 | POST_READOUT_RELISTEN | ... | ... | ... |
 | RING | ... | ... | ... |
 | SUBTITLE | ... | ... | ... |
-## Verbatim transcripts + re-ASR + read-out spans per loop (the evidence)
+| CURSOR_LISTEN | ... | ... | ... |
+| CURSOR_PROCESS | ... | ... | ... |
+| CURSOR_RESPOND | ... | ... | ... |
+## Verbatim transcripts + re-ASR + read-out spans + cursor evidence per loop
+Evidence per loop: `loopN/frames.json` (frame → `state=` label + predicted
+state + pixel-geometry), `loopN/frameN_analysis.txt` (vision readback of a
+representative LISTENING/PROCESSING/RESPONDING frame), `loopN/cursor_region_diff.txt`
+(RESPONDING steadiness), and the CURSOR_* assertion strings verbatim.
 ```

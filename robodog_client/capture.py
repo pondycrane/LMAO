@@ -28,6 +28,7 @@ Outputs (into --out, default robodog_client/shots/):
 the same sequence flash.sh uses) so the firmware emits its capture frames
 again.
 """
+
 import argparse
 import base64
 import json
@@ -40,21 +41,23 @@ import urllib.request
 from pathlib import Path
 
 import serial
-
 from PIL import Image
 
-W_TILE = 304     # 38 tiles * 8 px
-ROWS = 50        # full buffer (no paging)
+W_TILE = 304  # 38 tiles * 8 px
+ROWS = 50  # full buffer (no paging)
 PANEL_W, PANEL_H = 300, 400
-BUF_SIZE = W_TILE * ROWS   # 15200
+BUF_SIZE = W_TILE * ROWS  # 15200
 
 # Hermes (XiaoZhi voice) firmware frame: the ST7305 panel memory held in
 # landscape, produced by the upstream custom_lcd_display.cc landscape LUT.
 HERMES_W, HERMES_H = 400, 300
-HERMES_BUF_SIZE = HERMES_W * HERMES_H // 8    # 15000
+HERMES_BUF_SIZE = HERMES_W * HERMES_H // 8  # 15000
 
-SHOT_RE = re.compile(r"RD_SHOT_BEGIN\s+bufsize=(\d+)\s+w=(\d+)\s+h=(\d+)")
+SHOT_RE = re.compile(r"RD_SHOT_BEGIN\s+bufsize=(\d+)\s+w=(\d+)\s+h=(\d+)(?:\s+state=(\w+))?")
 HEX_RE = re.compile(r"^[0-9a-fA-F]+$")
+# Conversation-state label on hermes RD_SHOT frames (robodog_hermes_capture.patch).
+# A missing/legacy header defaults to UNKNOWN so calendar frames decode unchanged.
+UNKNOWN_STATE = "UNKNOWN"
 
 
 def decode_hermes(buf):
@@ -98,7 +101,7 @@ def dihedral(img):
     out = {}
     for m, mir in [(0, img), (1, img.transpose(Image.FLIP_LEFT_RIGHT))]:
         for r in range(4):
-            out[f"mirror{1 if m else 0}_rot{r*90}"] = mir.rotate(r * 90, expand=True)
+            out[f"mirror{1 if m else 0}_rot{r * 90}"] = mir.rotate(r * 90, expand=True)
     return out
 
 
@@ -107,21 +110,35 @@ def dihedral(img):
 # ~/.hermes/config.yaml "vision"). Override via RD_VISION_BASE_URL /
 # RD_VISION_MODEL.
 VISION_BASE = os.environ.get("RD_VISION_BASE_URL", "http://spark-eebf:8000/v1")
-VISION_MODEL = os.environ.get("RD_VISION_MODEL",
-                              "Qwen/Qwen2.5-VL-72B-Instruct")
+VISION_MODEL = os.environ.get("RD_VISION_MODEL", "Qwen/Qwen2.5-VL-72B-Instruct")
 VISION_PROMPT = (
     "This is a monochrome RLCD family-calendar screen. Transcribe exactly:\n"
     "1) the header date/time line (or say BLANK),\n"
     "2) each visible row as 'title HH:MM',\n"
     "3) any status words like 'no wifi'/'stale'/'offline'.\n"
-    "Reply as a short list.")
+    "Reply as a short list."
+)
 
 HERMES_VISION_PROMPT = (
     "This is the monochrome RLCD screen of an AI voice-assistant device "
     "(XiaoZhi). Transcribe exactly any visible text (labels, dates, status or "
     "subtitle lines) and describe what is shown (a face/character, icons, "
     "layout). If the screen is blank, say BLANK.\n"
-    "Reply as a short list.")
+    "Reply as a short list."
+)
+
+# Cursor-aware readback for the 3-state conversation canvas: the E2E needs to
+# know exactly what follows the last word of the transcript so it can prove the
+# LISTENING block cursor / PROCESSING ellipsis / RESPONDING underscore.
+HERMES_CURSOR_PROMPT = (
+    "This is the monochrome RLCD screen of an AI voice-assistant device "
+    "(XiaoZhi) during a conversation.\n"
+    "1) Transcribe every text line exactly (there are at most two).\n"
+    "2) After the last word of the last line, describe exactly what follows: "
+    "a solid block, an ellipsis '...', an underscore '_', or nothing.\n"
+    "3) State whether a solid block appears after the first line's text.\n"
+    "If the screen is blank, say BLANK. Reply as a short list."
+)
 
 
 def describe_image(path, prompt=VISION_PROMPT):
@@ -129,21 +146,25 @@ def describe_image(path, prompt=VISION_PROMPT):
     img = base64.b64encode(Path(path).read_bytes()).decode()
     body = {
         "model": VISION_MODEL,
-        "messages": [{"role": "user", "content": [
-            {"type": "image_url",
-             "image_url": {"url": f"data:image/png;base64,{img}"}},
-            {"type": "text", "text": prompt},
-        ]}],
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img}"}},
+                    {"type": "text", "text": prompt},
+                ],
+            }
+        ],
         "max_tokens": 400,
     }
     req = urllib.request.Request(
         f"{VISION_BASE}/chat/completions",
         data=json.dumps(body).encode(),
-        headers={"Content-Type": "application/json"})
+        headers={"Content-Type": "application/json"},
+    )
     with urllib.request.urlopen(req, timeout=120) as resp:
         out = json.load(resp)
     return out["choices"][0]["message"]["content"]
-
 
 
 HOUR_RE = re.compile(r"\d{1,2}:\d{2}")
@@ -156,18 +177,26 @@ def ocr_score(im):
     im = im.resize((im.width * 3, im.height * 3), Image.Resampling.NEAREST)
     tmp = Path("/tmp/rdshot_ocr.png")
     im.convert("L").save(tmp)
-    txt = subprocess.run(["tesseract", str(tmp), "-", "--psm", "6"],
-                         capture_output=True, text=True).stdout
+    txt = subprocess.run(
+        ["tesseract", str(tmp), "-", "--psm", "6"], capture_output=True, text=True
+    ).stdout
     return (len(HOUR_RE.findall(txt)), len(DATE_RE.findall(txt)), txt)
 
 
 def read_frames(port, n=1, timeout=30):
+    """Capture n RD_SHOT frames from the serial port.
+
+    Each frame is ``(data, expect, w, h, state)`` where ``state`` is the
+    conversation-state label from the RD_SHOT header (``UNKNOWN_STATE`` for
+    calendar/legacy frames — backward compatible; callers may ignore it).
+    """
     frames = []
     s = serial.Serial(port, 115200, timeout=1)
     try:
         deadline = time.time() + timeout
         in_shot = False
         want = 0
+        frame_state = UNKNOWN_STATE
         hex_acc = []
         while len(frames) < n and time.time() < deadline:
             # 16 KiB chunks keep up with the ~11.5 KB/s RD_SHOT dump rate
@@ -185,16 +214,19 @@ def read_frames(port, n=1, timeout=30):
                         want = int(m.group(1))
                         w = int(m.group(2))
                         h = int(m.group(3))
+                        frame_state = (m.group(4) or UNKNOWN_STATE).upper()
                         hex_acc = []
                 else:
                     if "RD_SHOT_END" in ln:
                         body = "".join(hex_acc)
                         data = bytes.fromhex(body)
-                        frames.append((data, want, w, h))
+                        frames.append((data, want, w, h, frame_state))
                         in_shot = False
-                        print(f"captured frame {len(frames)} "
-                              f"({len(data)} bytes, {w}x{h})",
-                              file=sys.stderr)
+                        print(
+                            f"captured frame {len(frames)} "
+                            f"({len(data)} bytes, {w}x{h}, state={frame_state})",
+                            file=sys.stderr,
+                        )
                     elif HEX_RE.match(ln):
                         hex_acc.append(ln)
     finally:
@@ -203,32 +235,50 @@ def read_frames(port, n=1, timeout=30):
 
 
 def reset_board(port):
-    print(f"resetting {port} (esptool default_reset/hard_reset) ...",
-          file=sys.stderr)
+    print(f"resetting {port} (esptool default_reset/hard_reset) ...", file=sys.stderr)
     subprocess.run(
-        ["python3", "-m", "esptool", "--chip", "esp32s3", "-p", port,
-         "--baud", "460800", "--before", "default_reset",
-         "--after", "hard_reset", "flash_id"],
-        check=False)
+        [
+            "python3",
+            "-m",
+            "esptool",
+            "--chip",
+            "esp32s3",
+            "-p",
+            port,
+            "--baud",
+            "460800",
+            "--before",
+            "default_reset",
+            "--after",
+            "hard_reset",
+            "flash_id",
+        ],
+        check=False,
+    )
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", default="/dev/ttyACM0")
-    ap.add_argument("--out", default=None,
-                    help="output dir (default robodog_client/shots)")
+    ap.add_argument("--out", default=None, help="output dir (default robodog_client/shots)")
     ap.add_argument("--n", type=int, default=1, help="frames to capture")
-    ap.add_argument("--reset", action="store_true",
-                    help="reboot the app first (fresh frame dumps)")
-    ap.add_argument("--listen", action="store_true",
-                    help="write the RD_LISTEN software-button trigger over the "
-                         "console before capturing (opens the voice session)")
+    ap.add_argument("--reset", action="store_true", help="reboot the app first (fresh frame dumps)")
+    ap.add_argument(
+        "--listen",
+        action="store_true",
+        help="write the RD_LISTEN software-button trigger over the "
+        "console before capturing (opens the voice session)",
+    )
     ap.add_argument("--timeout", type=int, default=30)
-    ap.add_argument("--i1", metavar="FILE", default=None,
-                    help="decode an already-captured .i1 dump (no device)")
-    ap.add_argument("--describe", action="store_true",
-                    help="vision-model transcription of each captured frame "
-                         "(Qwen2.5-VL via the hermes vision endpoint)")
+    ap.add_argument(
+        "--i1", metavar="FILE", default=None, help="decode an already-captured .i1 dump (no device)"
+    )
+    ap.add_argument(
+        "--describe",
+        action="store_true",
+        help="vision-model transcription of each captured frame "
+        "(Qwen2.5-VL via the hermes vision endpoint)",
+    )
     args = ap.parse_args()
 
     out = Path(args.out or (Path(__file__).resolve().parent / "shots"))
@@ -238,19 +288,20 @@ def main():
         data = Path(args.i1).read_bytes()
         # no RD_SHOT header on an offline dump — pick the decoder by size
         if len(data) == BUF_SIZE:
-            frames = [(data, BUF_SIZE, PANEL_W, PANEL_H)]
+            frames = [(data, BUF_SIZE, PANEL_W, PANEL_H, UNKNOWN_STATE)]
         elif len(data) == HERMES_BUF_SIZE:
-            frames = [(data, HERMES_BUF_SIZE, HERMES_W, HERMES_H)]
+            frames = [(data, HERMES_BUF_SIZE, HERMES_W, HERMES_H, UNKNOWN_STATE)]
         else:
-            sys.exit(f"cannot infer frame type from {len(data)} bytes "
-                     f"(calendar={BUF_SIZE} / hermes={HERMES_BUF_SIZE})")
+            sys.exit(
+                f"cannot infer frame type from {len(data)} bytes "
+                f"(calendar={BUF_SIZE} / hermes={HERMES_BUF_SIZE})"
+            )
     else:
         if args.reset:
             reset_board(args.port)
             time.sleep(1)
         if args.listen:
-            print(f"sending RD_LISTEN to {args.port} (software button) ...",
-                  file=sys.stderr)
+            print(f"sending RD_LISTEN to {args.port} (software button) ...", file=sys.stderr)
             s = serial.Serial(args.port, 115200, timeout=1)
             try:
                 # USB-Serial/JTAG arms RX only after the CDC port is open+settled;
@@ -265,23 +316,20 @@ def main():
             time.sleep(1)
         frames = read_frames(args.port, n=args.n, timeout=args.timeout)
         if not frames:
-            sys.exit("no RD_SHOT frames captured — is robodog/hermes "
-                     "firmware flashed?")
+            sys.exit("no RD_SHOT frames captured — is robodog/hermes firmware flashed?")
 
-    for i, (data, expect, w, h) in enumerate(frames):
+    for i, (data, expect, w, h, frame_state) in enumerate(frames):
         if len(data) != expect:
-            print(f"frame {i}: expected {expect} bytes, got {len(data)}",
-                  file=sys.stderr)
+            print(f"frame {i}: expected {expect} bytes, got {len(data)}", file=sys.stderr)
             continue
         (out / f"frame{i}.i1").write_bytes(data)
 
-        hermes = (expect == HERMES_BUF_SIZE)
+        hermes = expect == HERMES_BUF_SIZE
         if hermes:
             # ST7305 landscape panel memory already reads as the logical screen.
             raw = decode_hermes(data)
             raw.save(out / "panel_landscape.png")
-            print(f"frame {i}: hermes landscape {w}x{h} -> "
-                  f"panel_landscape.png", file=sys.stderr)
+            print(f"frame {i}: hermes landscape {w}x{h} -> panel_landscape.png", file=sys.stderr)
             shot_for_vision = out / "panel_landscape.png"
             prompt = HERMES_VISION_PROMPT
         else:
@@ -294,19 +342,21 @@ def main():
                 if best is None or (hhmm, dates) > best[0]:
                     best = ((hhmm, dates), name, im)
             best[2].save(out / "panel_landscape.png")
-            print(f"frame {i}: landscape view = {best[1]} "
-                  f"(OCR hh:mm={best[0][0]}, dates={best[0][1]}) -> "
-                  f"panel_raw_portrait.png / panel_landscape.png",
-                  file=sys.stderr)
+            print(
+                f"frame {i}: landscape view = {best[1]} "
+                f"(OCR hh:mm={best[0][0]}, dates={best[0][1]}) -> "
+                f"panel_raw_portrait.png / panel_landscape.png",
+                file=sys.stderr,
+            )
             shot_for_vision = out / "panel_landscape.png"
             prompt = VISION_PROMPT
         if args.describe:
-            print(f"frame {i}: vision readback ...", file=sys.stderr)
+            print(f"frame {i}: vision readback (state={frame_state}) ...", file=sys.stderr)
             try:
                 txt = describe_image(shot_for_vision, prompt=prompt)
                 (out / f"frame{i}_analysis.txt").write_text(txt)
                 print(f"--- frame {i} vision readback ---\n{txt}")
-            except Exception as e:   # pragma: no cover — network/model path
+            except Exception as e:  # pragma: no cover — network/model path
                 print(f"frame {i}: vision readback failed: {e}", file=sys.stderr)
 
 
