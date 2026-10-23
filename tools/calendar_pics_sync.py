@@ -66,6 +66,11 @@ SEA_SUBJECTS = [
     "dolphin", "orca", "sea turtle", "octopus", "crab", "jellyfish",
     "whale", "shark", "lobster", "seal", "sea lion", "otter", "penguin",
 ]
+# Wesley's alternate theme (PAW Patrol): proprietary IP, local-only (never
+# source from Wikimedia). Alternates with sea animals, seed-chosen per event.
+PAW_SUBJECTS = [
+    "chase", "marshall", "skye", "rubble", "rocky", "zuma", "everest", "tracker",
+]
 # for Wesley, a "limbed/coherent" pool per action (no legless fish doing tennis)
 SEA_COHERENT: dict[str, list[str]] = {
     "ice skating":   ["seal", "sea lion", "otter", "penguin"],
@@ -127,9 +132,13 @@ def pick_subject(participant: str, action: str, uid: str) -> str:
     """A coherent, seeded per-event subject for the participant's theme."""
     if participant == "juliet":
         return _seeded_choice(POKE_SUBJECTS, uid)
-    # wesley -> sea animal, constrained to ones that can do the action
-    pool = SEA_COHERENT.get(action, SEA_SUBJECTS)
-    return _seeded_choice(pool, uid)
+    # wesley -> alternate sea animal vs PAW Patrol (seeded per event), so the
+    # same recurring title can show either; PAW dogs can do any action.
+    rng = random.Random(hashlib.sha1((uid + ":theme").encode()).hexdigest())
+    if rng.random() < 0.5:
+        pool = SEA_COHERENT.get(action, SEA_SUBJECTS)
+        return _seeded_choice(pool, uid)
+    return _seeded_choice(PAW_SUBJECTS, uid)
 
 
 def build_combo(title: str, participant: str, uid: str) -> list[str]:
