@@ -178,6 +178,33 @@ input + output) rather than the IDF default UART0; that is baked into
 the USB-Serial/JTAG RX is armed (`--listen` already does this). `RD_LISTEN` is
 compiled into every hermes build, like the capture hook.
 
+### Hermes UI — 3-state transcript canvas
+
+`robodog_hermes_ui.patch` (`voice/`) replaces the stock XiaoZhi LVGL
+emoji/status screen with a continuous 1-bit text canvas drawn straight into
+the ST7305 buffer (the same pixel path `capture.py` reads), so the radio state
+is visible while a conversation happens:
+
+| State | Canvas |
+|-------|--------|
+| **Listening** | User words stream left-to-right in the display's regular weight with a crisp 2 px underline under the baseline (a synthetic bold overdraw smeared the 1-bit glyphs, so the split is done with the underline instead); a pulsing solid block cursor follows the last word. A new turn begins at the current cursor coordinates — no screen wipe. |
+| **Processing** | The cursor drops to the next line and becomes the rotating slash `\ \| / -` indicator. |
+| **Responding** | The processing glyph's bounding box is wiped (inline overwrite) and the reply streams in **regular** weight from those exact coordinates; a tracking underline guides the text edge. |
+
+When the next line would cross the bottom threshold (Y=291 on the 400×300
+panel; the blueprint's "Y=380" is the generic spec, scaled because the top bar
+is gone so the whole screen is the canvas) the oldest lines shift up a full
+line height — nothing runs on the audio/parse thread. Rendering is event +
+40 ms-timer driven, and the RD_SHOT panel dumps now run from that timer (the
+LVGL flush callback never fires once the canvas owns the panel).
+
+Persistence: in auto-stop mode the canvas keeps history across turns (only a
+manual stop / `ClearChatMessages` wipes it). The reply **text** reaches the
+board even on the auto-TTS audio path: the `xiaozhi` adapter relays the
+gateway's final text as a display-only `caption` frame and the bridge forwards
+it as `tts/sentence_start` (no audio — the voice is spoken exactly once), so
+the response streams on the RLCD in sync with the read-out.
+
 ### Voice backend (`robodog_client/voice/`)
 
 | File | Purpose |
@@ -185,7 +212,8 @@ compiled into every hermes build, like the capture hook.
 | `fetch_xiaozhi.sh` | Fetch + sha256-verify the pinned upstream xiaozhi-esp32 **source** into the gitignored `.xiaozhi/` (no-vendoring, cache-backed). |
 | `build_xiaozhi.sh` | Build the hermes firmware in the ESP-IDF v6.0 Docker image: board selection + capture hook + `idf.py build`. |
 | `robodog_hermes_capture.patch` | The RD_SHOT capture hook applied to upstream `custom_lcd_display.cc` (compiled into every hermes build). |
-| `voice_bridge.py` | XiaoZhi WebSocket bridge + OTA/`/healthz` server (`:8000` WS, `:8003` OTA). Negotiates the 16 kHz uplink for ASR, sends **24 kHz Opus** downlink (the board codec rate → no 16↔24 resample, no distortion). Server-side energy VAD finalizes a turn ~0.8 s after you stop talking — required because the device streams `realtime` and never sends `listen stop`. The **brain** is the board's Hermes session: each ASR'd utterance is submitted over a loopback brain WebSocket to the `xiaozhi` platform plugin inside the hermes-gateway (falls back to the stateless gx10 call if that's down). |
+| `robodog_hermes_ui.patch` | The 3-state transcript canvas (above), also applied to `custom_lcd_display.cc`/`.h`. |
+| `voice_bridge.py` | XiaoZhi WebSocket bridge + OTA/`/healthz` server (`:8000` WS, `:8003` OTA). Negotiates the 16 kHz uplink for ASR, sends **24 kHz Opus** downlink (the board codec rate → no 16↔24 resample, no distortion). Server-side energy VAD finalizes a turn ~0.8 s after you stop talking — required because the device streams `realtime` and never sends `listen stop`. Forwards the adapter's display-only `caption` frames to the board as `tts/sentence_start` (the RLCD streams the reply text while the auto-TTS audio plays; never double-spoken). The **brain** is the board's Hermes session: each ASR'd utterance is submitted over a loopback brain WebSocket to the `xiaozhi` platform plugin inside the hermes-gateway (falls back to the stateless gx10 call if that's down). |
 | `hermes-platform/xiaozhi/` | **Hermes platform plugin** (plugin.yaml + adapter.py + __init__.py) deployed to `~/.hermes/plugins/platforms/xiaozhi/`. Makes the board a first-class Hermes gateway client (see "Hermes gateway integration" below). |
 | `lmao-robodog-voice.service` | systemd **user** unit for the bridge, run from `~/xiaozhi/` with a Python venv (`fastapi`, `uvicorn`, `websockets`, `opuslib`, `faster-whisper`, `numpy`). |
 | `kokoro_server.py` + `kokoro-tts.service` | **Kokoro-82M** TTS (Apache-2.0, ~82M params, 24 kHz native) exposed as OpenAI `/v1/audio/speech` on the GPU host `spark-5307:8004`, also systemd-user-managed. |

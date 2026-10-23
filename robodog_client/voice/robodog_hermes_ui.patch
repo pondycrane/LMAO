@@ -1,0 +1,721 @@
+--- a/main/boards/waveshare/esp32-s3-rlcd-4.2/custom_lcd_display.cc
++++ b/main/boards/waveshare/esp32-s3-rlcd-4.2/custom_lcd_display.cc
+@@ -1,9 +1,15 @@
+ #include <vector>
++#include <string>
+ #include <cstring>
++#include <ctime>
++#include <time.h>
++#include <mutex>
+ #include <freertos/FreeRTOS.h>
+ #include <esp_lcd_panel_io.h>
+ #include <esp_log.h>
+ #include <esp_err.h>
++#include "lvgl.h"
++#include "src/font/fmt_txt/lv_font_fmt_txt.h"
+ #include "custom_lcd_display.h"
+ #include "lcd_display.h"
+ #include "esp_lvgl_port.h"
+@@ -13,6 +19,8 @@
+ #include "board.h"
+ #include <cstdio>
+ #include "esp_timer.h"
++
++LV_FONT_DECLARE(BUILTIN_TEXT_FONT);
+ 
+ 
+ // ── RoboDog capture hook (LMAO-inserted) ──────────────────────────────────
+@@ -42,6 +50,7 @@
+     assert(disp != NULL);
+     CustomLcdDisplay *Disp = (CustomLcdDisplay *)lv_display_get_user_data(disp);
+     uint16_t *buffer = (uint16_t *)color_p;
++    Disp->RdLock();      // RoboDog: no LVGL screen is built, so this only races our canvas at boot
+   	for(int y = area->y1; y <= area->y2; y++)
+   	{
+   	 	for(int x = area->x1; x <= area->x2; x++) 
+@@ -59,6 +68,7 @@
+ 		rd_shot_dump(Disp->DispBuffer, Disp->DisplayLen, Disp->width_, Disp->height_);
+ 	}
+ 	lv_disp_flush_ready(disp);
++    Disp->RdUnlock();
+ }
+ 
+ CustomLcdDisplay::CustomLcdDisplay(esp_lcd_panel_io_handle_t panel_io,
+@@ -150,6 +160,7 @@
+ 
+     // Note: SetupUI() should be called by Application::Initialize(), not in constructor
+     // to ensure lvgl objects are created after the display is fully initialized.
++    RenderInit();   // RoboDog hermes text-canvas (LMAO-inserted); no LVGL UI is built
+ }
+ 
+ CustomLcdDisplay::~CustomLcdDisplay() {
+@@ -367,3 +378,613 @@
+ 
+ 	RLCD_Sendbuffera(DispBuffer,DisplayLen);
+ }
++
++// ═══════════════════════════════════════════════════════════════════════════
++// RoboDog hermes transcript canvas (LMAO-inserted)
++// ═══════════════════════════════════════════════════════════════════════════
++//
++// Replaces the stock LVGL emoji/status screen with a continuous 1-bit text
++// canvas drawn straight into the ST7305 panel buffer.  The three hermes UI
++// states, per the presentation blueprint:
++//
++//   Listening   user words stream left-to-right in BOLD; a pulsing solid block
++//               cursor follows the last word; the turn begins at the current
++//               cursor coordinates — no screen wipe.
++//   Processing  the cursor drops to the next available line and becomes a
++//               low-impact inline animation (rotating slash `\ | / -`).
++//   Responding  the processing glyph's bounding box is wiped (inline
++//               overwrite) and the reply streams in REGULAR weight from those
++//               exact coordinates; a tracking underline guides the text edge.
++//
++// Scrolling: when the next line would cross the bottom threshold (Y=291) the
++// canvas does a whole-line vertical pixel-shift (oldest line drops).  The
++// blueprint's Y=380 maps to 291 on this 400x300 panel — the top bar is gone,
++// the whole screen is the canvas.  Rendering runs on the event path and a
++// 40 ms animation timer; it never touches the audio-parse thread.
++
++namespace {
++
++uint32_t rd_utf8_next(const char** pp) {
++    const uint8_t* p = (const uint8_t*)*pp;
++    if (*p == 0) {
++        return 0;
++    }
++    uint32_t c;
++    int len;
++    if (*p < 0x80)
++        { c = *p; len = 1; }
++    else if ((*p & 0xE0) == 0xC0)
++        { c = *p & 0x1F; len = 2; }
++    else if ((*p & 0xF0) == 0xE0)
++        { c = *p & 0x0F; len = 3; }
++    else if ((*p & 0xF8) == 0xF0)
++        { c = *p & 0x07; len = 4; }
++    else {
++        *pp += 1;
++        return 0xFFFD;
++    }
++    for (int i = 1; i < len; i++) {
++        if ((p[i] & 0xC0) != 0x80) {
++            *pp += 1;
++            return 0xFFFD;
++        }
++        c = (c << 6) | (p[i] & 0x3F);
++    }
++    *pp += len;
++    return c;
++}
++
++int rd_glyph_adv(const lv_font_t* font, uint32_t ch) {
++    lv_font_glyph_dsc_t g = {};
++    if (!lv_font_get_glyph_dsc(font, &g, ch, 0)) {
++        return font->line_height / 2;  // missing glyph: space-shaped gap
++    }
++    return g.adv_w;
++}
++
++// Decode one packed fmt_txt glyph (any bpp, MSB-first) into 1-bit panel
++// pixels.  `draw=false` only measures.  Weight is NOT overdraw-blended here —
++// user rows are distinguished by a crisp underline (see rd_render_frames).
++void rd_draw_glyph(const lv_font_t* font, uint32_t ch, int x, int row_top, bool bold,
++                   bool draw, CustomLcdDisplay* disp) {
++    lv_font_glyph_dsc_t g = {};
++    if (!lv_font_get_glyph_dsc(font, &g, ch, 0)) {
++        return;  // caller has already accounted a gap advance
++    }
++    if (!draw) {
++        return;
++    }
++    g.req_raw_bitmap = 1;  // raw packed bitmap (not the A8 expansion)
++    const uint8_t* bmp = (const uint8_t*)font->get_glyph_bitmap(&g, nullptr);
++    g.req_raw_bitmap = 0;
++    if (bmp == nullptr) {
++        return;
++    }
++    const lv_font_fmt_txt_dsc_t* ftt = (const lv_font_fmt_txt_dsc_t*)font->dsc;
++    int bpp = ftt != nullptr ? (int)ftt->bpp : 4;
++    if (ftt != nullptr && ftt->bitmap_format != LV_FONT_FMT_TXT_PLAIN) {
++        return;  // compressed glyph storage unsupported
++    }
++    // Raw rows are tightly packed to (box_w * bpp) bits unless the font
++    // declares an explicit byte stride.
++    const int rowbytes =
++        (ftt != nullptr && ftt->stride > 0) ? (int)ftt->stride : (g.box_w * bpp + 7) / 8;
++    const int gx = x + g.ofs_x;
++    const int gy = row_top + font->line_height - font->base_line - g.ofs_y - g.box_h;
++    for (int row = 0; row < g.box_h; row++) {
++        const uint8_t* b = bmp + row * rowbytes;
++        for (int col = 0; col < g.box_w; col++) {
++            uint8_t px = 0;
++            if (bpp == 1) {
++                px = (b[col >> 3] >> (7 - (col & 7))) & 1 ? 0xff : 0x00;
++            } else if (bpp == 2) {
++                uint8_t v = (b[col >> 2] >> (6 - 2 * (col & 3))) & 3;
++                px = v ? (uint8_t)(0x55 * v) : 0;
++            } else if (bpp == 4) {
++                uint8_t v = (b[col >> 1] >> (4 * (1 - (col & 1)))) & 0xF;
++                px = (uint8_t)(v << 4);
++            } else {
++                px = b[col];  // bpp 8
++            }
++            if (px >= 128) {  // ink threshold
++                disp->RLCD_SetPixel(gx + col, gy + row, ColorBlack);
++                // No synthetic-brightening overdraw: doubling every stroke 1 px
++                // right smears the thin 1-bit glyphs into unreadable mud on the
++                // ST7305 (the user/assistant weight split is drawn as a crisp
++                // underline under the user's rows in rd_render_frames instead).
++            }
++        }
++    }
++}
++
++// Whole-string horizontal advance (for centered idle text).
++int rd_text_width(const lv_font_t* font, const std::string& text) {
++    const char* p = text.c_str();
++    int w = 0;
++    while (*p) {
++        const char* q = p;
++        uint32_t ch = rd_utf8_next(&q);
++        if (ch == 0) {
++            break;
++        }
++        w += rd_glyph_adv(font, ch);
++        p = q;
++    }
++    return w;
++}
++
++// Draw `text` at (x, row_top); returns the new cursor x.
++int rd_draw_text(CustomLcdDisplay* disp, const lv_font_t* font, const std::string& text, int x,
++                 int row_top, bool bold) {
++    const char* p = text.c_str();
++    while (*p) {
++        const char* q = p;
++        uint32_t ch = rd_utf8_next(&q);
++        if (ch == 0) {
++            break;
++        }
++        rd_draw_glyph(font, ch, x, row_top, bold, true, disp);
++        x += rd_glyph_adv(font, ch);
++        p = q;
++    }
++    return x;
++}
++
++}  // namespace
++
++struct RdRow {
++    std::string text;
++    bool bold = false;
++};
++
++struct RoboDogUi {
++    enum class St { kIdle, kListening, kProcessing, kResponding };
++
++    static constexpr int x0 = 8;
++    static constexpr int x1 = 391;   // right margin (400 px wide)
++    static constexpr int y0 = 8;     // top margin
++    static constexpr int y1 = 291;   // bottom scroll threshold (300 px tall)
++
++    static constexpr int TICK_MS = 40;
++    static constexpr int BLOCK_PERIOD_TICKS = 14;  // ~0.56 s cursor pulse
++    static constexpr int SPIN_PERIOD_TICKS = 7;    // ~0.28 s indicator cycle
++    static constexpr int LINGER_TICKS = 38;        // ~1.5 s until Processing
++
++    std::vector<RdRow> rows;   // committed rows; row i sits at y0 + i*lh
++    int cur_x = x0;            // cursor x after the tail row's committed text
++    St state = St::kIdle;
++
++    int draft_first = -1;      // row index where the current bold draft begins
++    bool draft_active = false; // a live user-transcription draft is being filled
++
++    std::string pending;       // bytes not yet revealed onto the tail row
++    bool revealing = false;
++
++    bool ind_active = false;   // the (empty) tail row is the processing indicator cell
++    int spin = 0;
++
++    bool block_on = true;
++    bool track_on = true;
++    uint32_t tick = 0;
++
++    bool linger_pending = false;  // draft finished; count down to Processing
++    int linger_ticks = 0;
++
++    std::string idle_status;   // last standby/connecting status (drawn when idle)
++
++    int lh = 40;               // line stride (font line_height)
++    const lv_font_t* font = nullptr;
++};
++
++static const char* const RD_SPIN_CHARS = "\\|/-";
++
++static int rd_row_top(const RoboDogUi* ui, size_t idx) { return ui->y0 + (int)idx * ui->lh; }
++
++// Drop enough oldest rows that a new row fits above the bottom threshold.
++static void rd_ensure_fit(RoboDogUi* ui) {
++    while (!ui->rows.empty() && ui->y0 + (int)ui->rows.size() * ui->lh > ui->y1) {
++        ui->rows.erase(ui->rows.begin());
++        if (ui->draft_first >= 0) {
++            if (--ui->draft_first < 0) {
++                ui->draft_first = -1;      // draft's top row scrolled away: stop revising it
++                ui->draft_active = false;
++            }
++        }
++    }
++    ui->cur_x = ui->x0;
++}
++
++// Append a new (empty) row of the given weight, scrolling if needed.
++static void rd_push_row(RoboDogUi* ui, bool bold) {
++    rd_ensure_fit(ui);
++    ui->rows.push_back(RdRow{std::string(), bold});
++    ui->cur_x = ui->x0;
++}
++
++// ── rendering ─────────────────────────────────────────────────────────────
++
++// Full canvas: every committed row, then the active cursor/indicator.
++static void rd_render_frames(RoboDogUi* ui, CustomLcdDisplay* disp) {
++    disp->RLCD_ColorClear(ColorWhite);
++    for (size_t i = 0; i < ui->rows.size(); i++) {
++        rd_draw_text(disp, ui->font, ui->rows[i].text, ui->x0, rd_row_top(ui, i),
++                     ui->rows[i].bold);
++        if (ui->rows[i].bold && !ui->rows[i].text.empty()) {
++            // Crisp 2-px rule under the user's line: the Listening-vs-Responding
++            // weight split WITHOUT the muddy 1-bit overdraw (readable on ST7305).
++            int base = rd_row_top(ui, i) + ui->lh - ui->font->base_line + 2;
++            int w = rd_text_width(ui->font, ui->rows[i].text);
++            if (ui->x0 + w > ui->x1) {
++                w = ui->x1 - ui->x0;
++            }
++            for (int xx = ui->x0; xx < ui->x0 + w; xx++) {
++                disp->RLCD_SetPixel(xx, base, ColorBlack);
++                disp->RLCD_SetPixel(xx, base + 1, ColorBlack);
++            }
++        }
++    }
++    if (ui->state == RoboDogUi::St::kProcessing && ui->ind_active && !ui->rows.empty()) {
++        rd_draw_glyph(ui->font, (uint32_t)RD_SPIN_CHARS[ui->spin & 3], ui->x0,
++                      rd_row_top(ui, ui->rows.size() - 1), false, true, disp);
++    } else if (ui->state == RoboDogUi::St::kListening && ui->block_on && !ui->rows.empty()) {
++        int top = rd_row_top(ui, ui->rows.size() - 1) + 2;
++        int fw = 14;
++        if (ui->cur_x + fw > ui->x1) fw = ui->x1 - ui->cur_x;
++        for (int yy = top; yy < top + ui->lh - 4; yy++)
++            for (int xx = ui->cur_x; xx < ui->cur_x + fw; xx++)
++                disp->RLCD_SetPixel(xx, yy, ColorBlack);
++    } else if (ui->state == RoboDogUi::St::kResponding && ui->track_on && ui->revealing &&
++               !ui->rows.empty()) {
++        int base = rd_row_top(ui, ui->rows.size() - 1) + ui->lh - ui->font->base_line + 2;
++        for (int xx = ui->cur_x; xx < ui->cur_x + 10 && xx <= ui->x1; xx++) {
++            disp->RLCD_SetPixel(xx, base, ColorBlack);
++            disp->RLCD_SetPixel(xx, base + 1, ColorBlack);
++        }
++    }
++    disp->RLCD_Display();
++}
++
++// Centered idle screen (big clock when synced, else brand) above the standby
++// status — the panel stays recognizably non-blank between conversations.
++static void rd_draw_idle(RoboDogUi* ui, CustomLcdDisplay* disp) {
++    disp->RLCD_ColorClear(ColorWhite);
++    char main[24] = "";
++    bool has_time = false;
++    time_t now = time(nullptr);
++    struct tm tmv;
++    if (localtime_r(&now, &tmv) != nullptr && tmv.tm_year >= 124) {
++        strftime(main, sizeof(main), "%H:%M", &tmv);
++        has_time = true;
++    } else {
++        strncpy(main, "ROBODOG", sizeof(main) - 1);
++    }
++    int top = ui->y0 + 3 * ui->lh / 2;
++    int w = rd_text_width(ui->font, main);
++    rd_draw_text(disp, ui->font, main, ui->x0 + (ui->x1 - ui->x0 - w) / 2, top, false);
++    (void)has_time;
++    if (!ui->idle_status.empty()) {
++        int sw = rd_text_width(ui->font, ui->idle_status);
++        rd_draw_text(disp, ui->font, ui->idle_status,
++                     ui->x0 + (ui->x1 - ui->x0 - sw) / 2, top + ui->lh, false);
++    }
++    disp->RLCD_Display();
++}
++
++// ── state transitions ─────────────────────────────────────────────────────
++
++static void rd_reset_canvas(RoboDogUi* ui) {
++    ui->rows.clear();
++    ui->cur_x = ui->x0;
++    ui->state = RoboDogUi::St::kIdle;
++    ui->draft_first = -1;
++    ui->draft_active = false;
++    ui->pending.clear();
++    ui->revealing = false;
++    ui->ind_active = false;
++    ui->linger_pending = false;
++    ui->linger_ticks = 0;
++    ui->block_on = true;
++    ui->track_on = true;
++}
++
++// Begin a bold draft (user transcription) on its own row at the current
++// cursor — no screen wipe.
++static void rd_begin_draft(RoboDogUi* ui) {
++    if (!ui->rows.empty() && !ui->rows.back().text.empty()) {
++        rd_push_row(ui, true);
++    } else if (ui->rows.empty() || ui->ind_active) {
++        rd_push_row(ui, true);
++    }
++    ui->rows.back().bold = true;
++    ui->rows.back().text.clear();
++    ui->draft_first = (int)ui->rows.size() - 1;
++    ui->draft_active = true;
++    ui->cur_x = ui->x0;
++    ui->ind_active = false;
++}
++
++// Drop wrapped rows of the current draft so a newer stt can revise the same
++// bold line (the server may stream growing partial transcripts).
++static void rd_revise_draft(RoboDogUi* ui) {
++    if (!ui->draft_active || ui->draft_first < 0 ||
++        ui->draft_first >= (int)ui->rows.size()) {
++        return;
++    }
++    ui->rows.resize((size_t)ui->draft_first + 1);
++    ui->rows.back().text.clear();
++    ui->cur_x = ui->x0;
++}
++
++static void rd_enter_listening(RoboDogUi* ui) {
++    ui->state = RoboDogUi::St::kListening;
++    ui->linger_pending = false;
++}
++
++static void rd_enter_processing(RoboDogUi* ui) {
++    ui->state = RoboDogUi::St::kProcessing;
++    ui->draft_active = false;
++    ui->linger_pending = false;
++    ui->pending.clear();
++    ui->revealing = false;
++    if (ui->rows.empty() || !ui->rows.back().text.empty()) {
++        rd_push_row(ui, false);  // cursor drops to the next available line
++    }
++    ui->ind_active = true;  // the empty tail row is the indicator cell
++    ui->spin = 0;
++}
++
++static void rd_enter_responding(RoboDogUi* ui) {
++    ui->state = RoboDogUi::St::kResponding;
++    ui->draft_active = false;
++    ui->linger_pending = false;
++    ui->ind_active = false;   // indicator box wiped; response starts there
++    if (ui->rows.empty()) {
++        rd_push_row(ui, false);
++    } else if (!ui->rows.back().text.empty()) {
++        // No indicator phase skipped to: start a fresh regular row (the draft
++        // just above stays bold).
++        rd_push_row(ui, false);
++    }
++    ui->cur_x = ui->x0;
++}
++
++// Reveal up to `max_chars` codepoints of `pending` onto the tail row,
++// wrapping over new rows of the same weight.  Returns bytes consumed.
++static void rd_reveal(RoboDogUi* ui, int max_chars) {
++    int n = 0;
++    while (n < max_chars && ui->revealing && !ui->pending.empty()) {
++        const char* q = ui->pending.c_str();
++        uint32_t ch = rd_utf8_next(&q);
++        if (ch == 0) {
++            break;
++        }
++        size_t len = (size_t)(q - ui->pending.c_str());
++        bool bold = ui->rows.empty() ? false : ui->rows.back().bold;
++        int adv = rd_glyph_adv(ui->font, ch);
++        if (!ui->rows.empty() && ui->cur_x + adv > ui->x1) {
++            if (ch == ' ') {  // a space lands at the wrap: just skip it
++                ui->pending.erase(0, len);
++                continue;
++            }
++            rd_push_row(ui, bold);
++        }
++        if (ui->rows.empty()) {
++            rd_push_row(ui, bold);
++        }
++        ui->rows.back().text.append(ui->pending, 0, len);
++        ui->pending.erase(0, len);
++        ui->cur_x += adv;
++        n++;
++    }
++    if (ui->pending.empty()) {
++        ui->revealing = false;
++    }
++}
++
++// ── 40 ms animation tick (cursor pulse, indicator cycle, reveal, linger) ──
++static void rd_tick(RoboDogUi* ui, CustomLcdDisplay* disp) {
++    ui->tick++;
++    if (ui->state == RoboDogUi::St::kIdle) {
++        // The canvas owns the panel: re-draw it every ~1 s so any one-off
++        // LVGL flush at boot self-heals and the idle clock stays live.
++        if ((ui->tick % 25) == 0) {
++            rd_draw_idle(ui, disp);
++        }
++        return;
++    }
++    bool content_changed = false;
++    if (ui->revealing) {
++        rd_reveal(ui, ui->state == RoboDogUi::St::kListening ? 2 : 1);
++        content_changed = true;
++        if (!ui->revealing && ui->state == RoboDogUi::St::kListening) {
++            ui->linger_pending = true;
++            ui->linger_ticks = 0;
++        }
++    }
++    if (ui->state == RoboDogUi::St::kListening && ui->linger_pending &&
++        ++ui->linger_ticks >= RoboDogUi::LINGER_TICKS) {
++        rd_enter_processing(ui);
++        content_changed = true;
++    }
++    if (ui->state == RoboDogUi::St::kListening &&
++        (ui->tick % RoboDogUi::BLOCK_PERIOD_TICKS) == 0) {
++        ui->block_on = !ui->block_on;
++        content_changed = true;
++    } else if (ui->state == RoboDogUi::St::kProcessing && ui->ind_active &&
++               (ui->tick % RoboDogUi::SPIN_PERIOD_TICKS) == 0) {
++        ui->spin++;
++        content_changed = true;
++    } else if (ui->state == RoboDogUi::St::kResponding && ui->revealing &&
++               (ui->tick % RoboDogUi::BLOCK_PERIOD_TICKS) == 0) {
++        ui->track_on = !ui->track_on;
++        content_changed = true;
++    }
++    if (content_changed) {
++        rd_render_frames(ui, disp);
++    }
++}
++
++// Throttled RD_SHOT panel-memory dump, owned by the canvas animation timer.
++// LVGL never reflushes after boot (the canvas bypasses it), so the capture
++// hook must run from here — same 15000 B/4 s cadence the host capture.py
++// expects, and it keeps the audio path untouched.
++void CustomLcdDisplay::StaticDump(CustomLcdDisplay* disp) {
++    const uint64_t now_us = esp_timer_get_time();
++    if (now_us - s_rd_shot_last_us >= RD_SHOT_INTERVAL_US) {
++        s_rd_shot_last_us = now_us;
++        if (disp != nullptr && disp->DispBuffer) {
++            rd_shot_dump(disp->DispBuffer, disp->DisplayLen, disp->width_, disp->height_);
++        }
++    }
++}
++
++void CustomLcdDisplay::StaticAnimCb(void* arg) {
++    CustomLcdDisplay* disp = static_cast<CustomLcdDisplay*>(arg);
++    disp->RdLock();
++    if (disp->rd_ui_ != nullptr && disp->rd_ui_->font != nullptr) {
++        rd_tick(disp->rd_ui_, disp);
++    }
++    disp->RdUnlock();
++    // Dump outside the lock: the 2.6 s serial print must not stall the app
++    // task that may be waiting on ui_lock_.
++    StaticDump(disp);
++}
++
++// ── CustomLcdDisplay overrides ────────────────────────────────────────────
++
++void CustomLcdDisplay::RenderInit() {
++    ui_lock_.lock();
++    rd_ui_ = new RoboDogUi();
++    rd_ui_->font = &BUILTIN_TEXT_FONT;
++    rd_ui_->lh = rd_ui_->font->line_height;
++    static esp_timer_handle_t s_anim_timer = nullptr;  // exactly one display
++    if (s_anim_timer == nullptr) {
++        esp_timer_create_args_t args = {
++            .callback = CustomLcdDisplay::StaticAnimCb,
++            .arg = this,
++            .dispatch_method = ESP_TIMER_TASK,
++            .name = "rd_canvas",
++            .skip_unhandled_events = false,
++        };
++        esp_timer_create(&args, &s_anim_timer);
++    }
++    esp_timer_start_periodic(s_anim_timer, RoboDogUi::TICK_MS * 1000);
++    rd_draw_idle(rd_ui_, this);  // never leave the panel blank after boot
++    ui_lock_.unlock();
++}
++
++void CustomLcdDisplay::SetupUI() {
++    Display::SetupUI();  // mark setup_ui_called_; build no LVGL objects
++}
++
++void CustomLcdDisplay::SetStatus(const char* status) {
++    RdLock();
++    if (rd_ui_ == nullptr) {
++        RdUnlock();
++        return;
++    }
++    if (strcmp(status, Lang::Strings::LISTENING) == 0) {
++        if (rd_ui_->state != RoboDogUi::St::kListening) {
++            rd_enter_listening(rd_ui_);
++            // A fresh bold draft row w/ pulsing block signals the mic is live
++            // before the first stt transcription arrives.
++            rd_begin_draft(rd_ui_);
++            rd_render_frames(rd_ui_, this);
++        }
++    } else if (strcmp(status, Lang::Strings::SPEAKING) == 0) {
++        // Voice-path responding onset: the indicator is wiped even before any
++        // reply-text frame arrives (auto-TTS may be audio-only).
++        if (rd_ui_->state == RoboDogUi::St::kProcessing ||
++            rd_ui_->state == RoboDogUi::St::kListening ||
++            rd_ui_->state == RoboDogUi::St::kIdle) {
++            rd_enter_responding(rd_ui_);
++            rd_render_frames(rd_ui_, this);
++        }
++    } else if (strcmp(status, Lang::Strings::STANDBY) == 0 ||
++               strcmp(status, Lang::Strings::CONNECTING) == 0) {
++        rd_ui_->idle_status = status;
++        if (rd_ui_->state == RoboDogUi::St::kIdle) {
++            rd_draw_idle(rd_ui_, this);
++        }
++    }
++    RdUnlock();
++}
++
++void CustomLcdDisplay::ShowNotification(const char* /*notification*/, int /*duration_ms*/) {
++    // The transcript canvas owns the panel; transient popups are not shown.
++}
++
++void CustomLcdDisplay::SetEmotion(const char* /*emotion*/) {
++    // The canvas has no emoji face — emotions are visual no-ops.
++}
++
++void CustomLcdDisplay::SetChatMessage(const char* role, const char* content) {
++    RdLock();
++    if (rd_ui_ == nullptr || content == nullptr || content[0] == '\0') {
++        RdUnlock();
++        return;
++    }
++    std::string text(content);
++
++    if (strcmp(role, "user") == 0) {
++        if (rd_ui_->state != RoboDogUi::St::kListening) {
++            rd_enter_listening(rd_ui_);
++            rd_begin_draft(rd_ui_);
++        } else if (rd_ui_->draft_active) {
++            rd_revise_draft(rd_ui_);
++        } else {
++            rd_begin_draft(rd_ui_);
++        }
++        rd_ui_->pending = std::move(text);
++        rd_ui_->revealing = true;
++        rd_ui_->linger_pending = false;
++        rd_ui_->linger_ticks = 0;
++        rd_render_frames(rd_ui_, this);
++    } else if (strcmp(role, "assistant") == 0) {
++        if (rd_ui_->state == RoboDogUi::St::kProcessing) {
++            rd_enter_responding(rd_ui_);  // inline overwrite: wipe the indicator
++        } else if (rd_ui_->state != RoboDogUi::St::kResponding) {
++            rd_enter_responding(rd_ui_);
++        }
++        rd_ui_->pending = std::move(text);
++        rd_ui_->revealing = true;
++        rd_ui_->linger_pending = false;
++        rd_render_frames(rd_ui_, this);
++    }
++    // "system" (boot banner / alerts) is not part of the conversation canvas;
++    // the status line covers alert text.
++    RdUnlock();
++}
++
++void CustomLcdDisplay::ClearChatMessages() {
++    RdLock();
++    if (rd_ui_ != nullptr) {
++        rd_reset_canvas(rd_ui_);
++        rd_draw_idle(rd_ui_, this);
++    }
++    RdUnlock();
++}
++
++void CustomLcdDisplay::SetTheme(Theme* /*theme*/) {
++    // Canvas colors are fixed 1-bit.
++}
++
++void CustomLcdDisplay::UpdateStatusBar(bool /*update_all*/) {
++    RdLock();
++    if (rd_ui_ != nullptr && rd_ui_->state == RoboDogUi::St::kIdle) {
++        rd_draw_idle(rd_ui_, this);  // keep the idle clock live
++    }
++    RdUnlock();
++}
++
++void CustomLcdDisplay::SetPowerSaveMode(bool /*on*/) {
++    // The display stays on; the panel is reflective (no backlight).
++}
++
++void CustomLcdDisplay::SetPreviewImage(std::unique_ptr<LvglImage> /*image*/) {
++    // No preview-image layer in the canvas.
++}
++
++bool CustomLcdDisplay::SnapshotToJpeg(std::string& /*jpeg_data*/, int /*quality*/) {
++    return false;
++}
+
+--- a/main/boards/waveshare/esp32-s3-rlcd-4.2/custom_lcd_display.h
++++ b/main/boards/waveshare/esp32-s3-rlcd-4.2/custom_lcd_display.h
+@@ -2,7 +2,13 @@
+ #define __CUSTOM_LCD_DISPLAY_H__
+ 
+ #include <driver/gpio.h>
++#include <mutex>
+ #include "lcd_display.h"
++
++// RoboDog hermes text-canvas UI back-end (defined in custom_lcd_display.cc).
++// All LMAO-inserted UI state lives behind this opaque struct so the header
++// stays free of the canvas's internals.
++struct RoboDogUi;
+ 
+ enum ColorSelection {
+     ColorBlack = 0,    
+@@ -43,6 +49,18 @@
+     void RLCD_Reset(void);
+     static void Lvgl_flush_cb(lv_display_t * disp, const lv_area_t * area, uint8_t * color_p);
+ 
++    // ── RoboDog hermes text-canvas back-end (LMAO-inserted) ──────────────
++    // Overrides of the Display interface: the board renders a
++    // talk -> think -> reply transcript directly on the ST7305 instead of the
++    // stock LVGL emoji/status screen (see custom_lcd_display.cc).
++    std::mutex                ui_lock_;
++    RoboDogUi                *rd_ui_ = nullptr;   // canvas state (heap in ctor)
++    void                      RenderInit();
++    void                      RdLock()   { ui_lock_.lock(); }
++    void                      RdUnlock() { ui_lock_.unlock(); }
++    static void               StaticAnimCb(void* arg);
++    static void               StaticDump(CustomLcdDisplay* disp);
++
+ public:
+     CustomLcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_handle_t panel,
+                   int width, int height, int offset_x, int offset_y,
+@@ -52,6 +70,19 @@
+     void RLCD_ColorClear(uint8_t color);
+     void RLCD_Display();
+ 	void RLCD_SetPixel(uint16_t x, uint16_t y, uint8_t color);
++
++    // ── RoboDog hermes canvas — Display interface overrides (LMAO-inserted) ─
++    virtual void SetupUI() override;
++    virtual void SetStatus(const char* status) override;
++    virtual void ShowNotification(const char* notification, int duration_ms = 3000) override;
++    virtual void SetEmotion(const char* emotion) override;
++    virtual void SetChatMessage(const char* role, const char* content) override;
++    virtual void ClearChatMessages() override;
++    virtual void SetTheme(Theme* theme) override;
++    virtual void UpdateStatusBar(bool update_all = false) override;
++    virtual void SetPowerSaveMode(bool on) override;
++    virtual void SetPreviewImage(std::unique_ptr<LvglImage> image) override;
++    virtual bool SnapshotToJpeg(std::string& jpeg_data, int quality = 80) override;
+ };
+ 
+ #endif
