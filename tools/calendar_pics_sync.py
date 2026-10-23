@@ -305,35 +305,36 @@ def build_gen_prompt(subject_word: str, theme_label: str, action: str) -> str:
 def generate_local(prompt: str, width: int, height: int) -> bytes | None:
     """Generate an image on the local ComfyUI node; return PNG bytes or None.
 
-    Uses the MOSS-Image (SFT BF16) checkpoint the node is set up with (falls
-    back to the caller's search path if ComfyUI is down, the checkpoint isn't
-    ready, or generation fails).
+    Uses the FLUX.1-schnell checkpoint the node is set up with (falls back to
+    the caller's search path if ComfyUI is down, the checkpoint isn't ready, or
+    generation fails).
     """
     base = os.environ.get("LMAO_IMAGE_GEN_URL", _GEN_URL_DEFAULT).rstrip("/")
-    # MOSS-Image (SFT, BF16): 5B DiT + Qwen3.5-9B text encoder + flux2 VAE.
-    # Graph verified on the node 2026-10-23. CRITICAL pitfalls on this build:
-    #   - do NOT add SkipLayerGuidanceDiTSimple (official recipe node) -> pure noise
-    #   - do NOT insert ModelSamplingSD3 shift node before the sampler -> also noise
-    # Feed the UNET output STRAIGHT into KSampler; CFG 1, ~30 steps, euler/sgm_uniform.
+    # FLUX.1-schnell: transformer-only checkpoint + separate clip/t5/vae models.
+    # This exact graph is verified on the node (ComfyUI docs FLUX template).
+    # Reverted from MOSS-Image on 2026-10-23: MOSS matched FLUX quality on line
+    # art and photo edits but is ~7-10x slower. Kept MOSS as an opt-in text/layout
+    # generator (worst case for text-in-image; not needed for kid tiles).
     workflow = {
         "1": {"class_type": "UNETLoader",
-              "inputs": {"unet_name": "moss_image_sft_bf16.safetensors", "weight_dtype": "default"}},
-        "2": {"class_type": "CLIPLoader",
-              "inputs": {"clip_name": "qwen3.5_9b_bf16.safetensors",
-                         "type": "moss_image", "device": "default"}},
+              "inputs": {"unet_name": "flux1-schnell.safetensors", "weight_dtype": "default"}},
+        "2": {"class_type": "DualCLIPLoader",
+              "inputs": {"clip_name1": "clip_l.safetensors",
+                         "clip_name2": "t5xxl_fp8_e4m3fn.safetensors",
+                         "type": "flux"}},
         "3": {"class_type": "VAELoader",
-              "inputs": {"vae_name": "flux2-vae.safetensors"}},
+              "inputs": {"vae_name": "ae.safetensors"}},
         "4": {"class_type": "CLIPTextEncode",
               "inputs": {"text": prompt, "clip": ["2", 0]}},
         "5": {"class_type": "CLIPTextEncode",
-              "inputs": {"text": "", "clip": ["2", 0]}},
-        "6": {"class_type": "EmptyFlux2LatentImage",
+              "inputs": {"text": "text, watermark, logo, lowres, blurry, photograph, shading, gray, realistic", "clip": ["2", 0]}},
+        "6": {"class_type": "EmptyLatentImage",
               "inputs": {"width": width, "height": height, "batch_size": 1}},
         "7": {"class_type": "KSampler",
               "inputs": {
                   "model": ["1", 0], "positive": ["4", 0], "negative": ["5", 0],
-                  "latent_image": ["6", 0], "seed": 0, "steps": 30, "cfg": 1.0,
-                  "sampler_name": "euler", "scheduler": "sgm_uniform", "denoise": 1.0}},
+                  "latent_image": ["6", 0], "seed": 0, "steps": 4, "cfg": 1.0,
+                  "sampler_name": "euler", "scheduler": "simple", "denoise": 1.0}},
         "8": {"class_type": "VAEDecode", "inputs": {"samples": ["7", 0], "vae": ["3", 0]}},
         "9": {"class_type": "SaveImage",
               "inputs": {"images": ["8", 0], "filename_prefix": "kids"}},
