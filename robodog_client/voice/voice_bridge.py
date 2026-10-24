@@ -45,6 +45,7 @@ import io
 import json
 import logging
 import os
+import re
 import time
 import urllib.parse
 import urllib.request
@@ -365,6 +366,7 @@ _brain_ws = None
 _brain_connecting = False
 _brain_connected = False
 _brain_queue = None  # asyncio.Queue: frames from the single reader
+_caption_queue = None  # asyncio.Queue: display-only caption frames (relayed live)
 _brain_ever_connected = False  # True once a brain link has come up this run
 
 
@@ -396,7 +398,8 @@ async def _brain_connect_loop():
     ConcurrencyError, so every frame is read here and turns consume the queue.
     Reconnects keep the persisted identity, so the Hermes session survives.
     """
-    global _brain_ws, _brain_connected, _brain_connecting, _brain_queue, _brain_ever_connected
+    global _brain_ws, _brain_connected, _brain_connecting, _brain_queue, \
+        _brain_ever_connected, _caption_queue
     while True:
         try:
             async with websockets.connect(HERMES_BRAIN_URL,
@@ -412,6 +415,7 @@ async def _brain_connect_loop():
                 _brain_connected = True
                 _brain_ever_connected = True
                 _brain_queue = asyncio.Queue()
+                _caption_queue = asyncio.Queue()
                 log.info("Hermes brain connected: %s (device=%s)",
                          HERMES_BRAIN_URL, _load_device_id())
                 await ws.send(json.dumps({
@@ -422,9 +426,19 @@ async def _brain_connect_loop():
                 }))
                 async for raw in ws:
                     try:
-                        await _brain_queue.put(json.loads(raw))
+                        frame = json.loads(raw)
                     except (TypeError, ValueError):
                         continue
+                    if frame.get("type") == "caption":
+                        # Display-only reply text: relay live to the board as it
+                        # arrives (see _caption_forwarder). Routing it out of the
+                        # turn queue stops a caption from bleeding into the NEXT
+                        # turn's _brain_next and showing the PREVIOUS reply while
+                        # the current turn answers.
+                        if _caption_queue is not None:
+                            await _caption_queue.put(frame)
+                    elif _brain_queue is not None:
+                        await _brain_queue.put(frame)
         except Exception as e:
             log.debug("Hermes brain disconnected (%s); reconnecting...", e)
         finally:
@@ -432,6 +446,7 @@ async def _brain_connect_loop():
             _brain_connecting = False
             _brain_ws = None
             _brain_queue = None
+            _caption_queue = None
         await asyncio.sleep(float(os.environ.get("HERMES_BRAIN_RETRY_SECS", "3")))
 
 
@@ -448,11 +463,21 @@ async def brain_send_json(payload: dict) -> bool:
 async def _brain_next(deadline: float, session_id: str, timeout: float):
     """Next frame addressed to ``session_id`` (or with no/session-agnostic id).
 
-    Returns (frame, remaining_deadline) or raises TimeoutError. Drafts the
-    turn's text-vs-voice race by refusing to return a bare text ``reply`` until
-    a short grace window confirms no auto-TTS voice frame follows it.
+    Returns (kind, payload, captions) or raises TimeoutError. ``captions`` are
+    display-only reply texts queued by the adapter (auto-TTS audio covers the
+    speech; the board streams them on its RLCD while the audio plays).
+    Drafts the turn's text-vs-voice race by refusing to return a bare text
+    ``reply`` until a short grace window confirms no auto-TTS voice frame
+    follows it.
     """
     import base64
+    captions = []
+
+    def _absorb_caption(frame: dict) -> None:
+        t = str(frame.get("text") or "").strip()
+        if t:
+            captions.append({"text": t})
+
     while True:
         remain = deadline - time.monotonic()
         if remain <= 0:
@@ -468,12 +493,15 @@ async def _brain_next(deadline: float, session_id: str, timeout: float):
         if sid not in ("", session_id, None):
             continue  # stale turn (barge-in) — skip
         ftype = frame.get("type")
+        if ftype == "caption":
+            _absorb_caption(frame)
+            continue  # not terminal — keep waiting for the voice/reply
         if ftype == "voice":
             try:
                 audio = base64.b64decode(frame["audio"])
             except Exception as e:
                 raise RuntimeError(f"bad voice frame: {e}") from e
-            return ("voice", decode_audio_to_pcm24k(audio))
+            return ("voice", decode_audio_to_pcm24k(audio), captions)
         if ftype == "reply":
             text = str(frame.get("text") or "").strip()
             if not text:
@@ -481,12 +509,13 @@ async def _brain_next(deadline: float, session_id: str, timeout: float):
             # The adapter may emit the final text BEFORE the auto-TTS voice
             # frame; hold the text a beat to prefer voice (no double speech).
             try:
-                late, late_pcm = await _brain_next(deadline, session_id, 0.6)
+                late, late_pcm, late_caps = await _brain_next(deadline, session_id, 0.6)
                 if late == "voice":
-                    return late, late_pcm
+                    captions.extend(late_caps)
+                    return late, late_pcm, captions
             except TimeoutError:
                 pass
-            return ("reply", text)
+            return ("reply", text, captions)
         if ftype == "error":
             raise RuntimeError(str(frame.get("message") or "unknown brain error"))
         # typing / welcome / pong / stale frames: keep waiting.
@@ -522,7 +551,7 @@ async def hermes_turn(session_id: str, device_id: str, text: str):
         raise RuntimeError("failed to send utterance to Hermes brain")
 
     try:
-        kind, payload = await _brain_next(
+        kind, payload, captions = await _brain_next(
             t0 + HERMES_BRAIN_TIMEOUT, session_id, HERMES_BRAIN_TIMEOUT)
     except asyncio.TimeoutError:
         raise TimeoutError(
@@ -530,7 +559,7 @@ async def hermes_turn(session_id: str, device_id: str, text: str):
     log.info("session=%s Hermes %s reply: %s in %.2fs",
              session_id, kind,
              len(payload) if kind == "voice" else repr(payload), time.monotonic() - t0)
-    return (kind, payload)
+    return (kind, payload, captions)
 
 
 async def ws_send(ws: WebSocket, payload: dict) -> bool:
@@ -569,10 +598,87 @@ async def stream_pcm_to(ws: WebSocket, session_id: str, pcm_buf: bytes) -> bool:
     return True
 
 
-async def speak_audio_to(ws: WebSocket, session_id: str, pcm_buf: bytes) -> None:
+_NON_ASCII = re.compile(r"[^\x20-\x7E]")
+
+
+def display_text_ascii(c: dict) -> str:
+    """Printable-ASCII-only reply caption for the RLCD.
+
+    The board's noto-sans-basic font has no CJK/emoji/smart-quote glyphs; a
+    missing glyph draws nothing in the firmware, leaving a gap that garbles the
+    whole line. Voice replies may carry such characters (status emoji the
+    gateway prepends, CJK when the user speaks it), so the DISPLAY text is
+    reduced to printable ASCII - the spoken audio is unaffected.
+    """
+    return _NON_ASCII.sub("", str(c.get("text") or "")).strip()
+
+
+async def relay_captions(ws: WebSocket, session_id: str, captions: list) -> None:
+    """Push display-only reply texts to the board (RLCD subtitle streaming).
+
+    Each caption is sent as a ``tts/sentence_start`` frame WITHOUT a start/stop
+    audio bracket: the firmware draws the regular-weight response text while
+    the (already incoming) auto-TTS audio plays; nothing is ever double-spoken.
+    """
+    for c in captions:
+        text = display_text_ascii(c)
+        if text:
+            await ws_send(ws, {
+                "session_id": session_id, "type": "tts", "state": "sentence_start", "text": text,
+            })
+
+
+async def _caption_forwarder():
+    """Relay display-only caption frames to the board the moment they arrive.
+
+    The adapter only finalizes a reply's text at the END of its turn (the
+    gateway calls ``send()`` after TTS), so a caption always follows its own
+    turn's voice frame in the brain stream. If captions went through the turn
+    queue, the NEXT turn's ``_brain_next`` consumed them and the board showed
+    the PREVIOUS reply while the current turn answered. This live forwarder
+    pushes each caption straight to the board's active session (its own turn),
+    so the display reads current prompt during the turn and the current reply
+    as soon as it finalizes.
+    """
+    while True:
+        if _caption_queue is None:
+            await asyncio.sleep(1.0)
+            continue
+        try:
+            frame = await asyncio.wait_for(_caption_queue.get(), timeout=300)
+        except asyncio.TimeoutError:
+            continue
+        except Exception:
+            await asyncio.sleep(1.0)
+            continue
+        sid = str(frame.get("session_id") or "")
+        dev = str(frame.get("device_id") or "")
+        text = display_text_ascii(frame)
+        if not text:
+            continue
+        # Caption frames only carry the gateway-internal session_id (usually
+        # empty); match on the board's device_id so the text reaches the right
+        # active board WS even after reconnect.
+        entry = ACTIVE_SESSIONS.get(sid)
+        if entry is None and dev:
+            for e in ACTIVE_SESSIONS.values():
+                if e.get("device_id") == dev:
+                    entry = e
+                    break
+        if entry is None:
+            continue  # no matching board session — nothing to render on
+        ok = await ws_send(entry["ws"], {
+            "session_id": sid, "type": "tts", "state": "sentence_start", "text": text,
+        })
+        log.info("session=%s caption fwd ok=%s text=%r", sid, ok, text[:60])
+
+
+async def speak_audio_to(ws: WebSocket, session_id: str, pcm_buf: bytes,
+                         captions: list | None = None) -> None:
     """Stream a spoken reply (Hermes auto-TTS audio) with tts start/stop brackets."""
     if not await ws_send(ws, {"session_id": session_id, "type": "tts", "state": "start"}):
         return
+    await relay_captions(ws, session_id, captions or [])
     await stream_pcm_to(ws, session_id, pcm_buf)
     await ws_send(ws, {"session_id": session_id, "type": "tts", "state": "stop"})
     log.info("session=%s tts stop", session_id)
@@ -583,7 +689,8 @@ async def speak_text_to(ws: WebSocket, session_id: str, reply: str) -> None:
     if not await ws_send(ws, {"session_id": session_id, "type": "tts", "state": "start"}):
         return
     if not await ws_send(ws, {
-        "session_id": session_id, "type": "tts", "state": "sentence_start", "text": reply,
+        "session_id": session_id, "type": "tts", "state": "sentence_start",
+        "text": display_text_ascii({"text": reply}),
     }):
         return
     try:
@@ -615,12 +722,12 @@ async def inject_utterance(payload: dict):
     if not await ws_send(ws, {"session_id": sid, "type": "stt", "text": text}):
         return {"error": "board session ended", "status": 409}
     try:
-        kind, payload = await hermes_turn(sid, entry["device_id"], text)
+        kind, payload, captions = await hermes_turn(sid, entry["device_id"], text)
     except Exception as e:
         log.warning("session=%s inject Hermes brain failed (%s)", sid, e)
         return {"error": "hermes failed", "status": 502}
     if kind == "voice":
-        await speak_audio_to(ws, sid, cast(bytes, payload))
+        await speak_audio_to(ws, sid, cast(bytes, payload), captions)
     else:
         await speak_text_to(ws, sid, cast(str, payload))
     return {"ok": True, "kind": kind}
@@ -670,8 +777,8 @@ async def handle_conversation(ws: WebSocket, session_id: str):
     async def _stream_pcm(pcm_buf: bytes) -> bool:
         return await stream_pcm_to(ws, session_id, pcm_buf)
 
-    async def _speak_audio(pcm_buf: bytes) -> None:
-        await speak_audio_to(ws, session_id, pcm_buf)
+    async def _speak_audio(pcm_buf: bytes, captions: list | None = None) -> None:
+        await speak_audio_to(ws, session_id, pcm_buf, captions)
 
     async def _speak_text(reply: str) -> None:
         await speak_text_to(ws, session_id, reply)
@@ -705,9 +812,9 @@ async def handle_conversation(ws: WebSocket, session_id: str):
                 return
             t0 = time.monotonic()
             try:
-                kind, payload = await hermes_turn(session_id, device_id, text)
+                kind, payload, captions = await hermes_turn(session_id, device_id, text)
                 if kind == "voice":
-                    await _speak_audio(payload)
+                    await _speak_audio(payload, captions)
                 else:
                     await _speak_text(payload)
             except Exception as e:
@@ -863,6 +970,7 @@ async def run_servers():
     log.info("WS   %s", WS_URL)
     if HERMES_BRAIN_URL:
         asyncio.create_task(_brain_connect_loop())
+    asyncio.create_task(_caption_forwarder())
     await asyncio.gather(ota_srv.serve(), ws_srv.serve())
 
 

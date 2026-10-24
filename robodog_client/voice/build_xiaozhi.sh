@@ -24,12 +24,14 @@ IDF_IMG="${XIAOZHI_IDF_IMG:-espressif/idf:v6.0.2}"
 "$APP/voice/fetch_xiaozhi.sh" "$APP"
 SRC="$APP/.xiaozhi"
 
-# 2. apply the RoboDog patches (capture hook + RD_LISTEN trigger; each is
-#    idempotent via its own marker). Patching the source invalidates a build.
+# 2. apply the RoboDog patches (capture hook + RD_LISTEN trigger + hermes
+#    text display; each is idempotent via its own marker). Patching the
+#    source invalidates a build.
 REBUILD_FLAG=""
 for spec in \
     "robodog_hermes_capture.patch:.robodog_capture_patched" \
-    "robodog_listen.patch:.robodog_listen_patched"; do
+    "robodog_listen.patch:.robodog_listen_patched" \
+    "robodog_hermes_display.patch:.robodog_display_patched"; do
     P="$APP/voice/${spec%%:*}"
     MARK="$SRC/${spec##*:}"
     if [ ! -f "$MARK" ]; then
@@ -50,6 +52,9 @@ cat > "$SRC/sdkconfig.defaults.robodog" <<'EOF'
 CONFIG_BOARD_TYPE_WAVESHARE_ESP32_S3_RLCD_4_2=y
 CONFIG_USE_WECHAT_MESSAGE_STYLE=n
 CONFIG_USE_DEVICE_AEC=y
+# RoboDog hermes transcript: multiline wrapped chat (real line breaks) so the
+# full prompt/response shows on the RLCD instead of a scrolling single line.
+CONFIG_USE_MULTILINE_CHAT_MESSAGE=y
 # RD_LISTEN (software button) needs INPUT on the USB-Serial/JTAG console; the
 # IDF "secondary USB-Serial/JTAG" console is output-only, so make it primary.
 CONFIG_ESP_CONSOLE_UART_DEFAULT=n

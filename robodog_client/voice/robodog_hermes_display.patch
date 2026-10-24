@@ -1,0 +1,69 @@
+--- a/main/boards/waveshare/esp32-s3-rlcd-4.2/custom_lcd_display.h
++++ b/main/boards/waveshare/esp32-s3-rlcd-4.2/custom_lcd_display.h
+@@ -52,6 +52,12 @@
+     void RLCD_ColorClear(uint8_t color);
+     void RLCD_Display();
+ 	void RLCD_SetPixel(uint16_t x, uint16_t y, uint8_t color);
++
++    // RoboDog hermes text-only display (LMAO-inserted): the stock XiaoZhi
++    // emoji/character "face" is removed and the chat transcript is shown in a
++    // smaller font with full-screen line-wrapped text (issue hermes voice).
++    virtual void SetupUI() override;
++    virtual void SetEmotion(const char* emotion) override;
+ };
+ 
+ #endif
+\ No newline at end of file
+--- a/main/boards/waveshare/esp32-s3-rlcd-4.2/custom_lcd_display.cc
++++ b/main/boards/waveshare/esp32-s3-rlcd-4.2/custom_lcd_display.cc
+@@ -336,3 +336,50 @@
+ 
+ 	RLCD_Sendbuffera(DispBuffer,DisplayLen);
+ }
++
++// ── RoboDog hermes text display (LMAO-inserted) ───────────────────────────
++// The stock XiaoZhi screen has a centered emoji/character "face" plus a
++// single-line 30 px subtitle that scrolls, so a prompt or response can only be
++// partially shown.  For the hermes voice board we:
++//   1. hide the face entirely (no animated emoji),
++//   2. switch the chat transcript to the smaller 14 px noto font,
++//   3. (with CONFIG_USE_MULTILINE_CHAT_MESSAGE=y from the robodog sdkconfig)
++//      let the subtitle wrap onto many lines with real line breaks, growing
++//      up the freed center of the panel so the full text is readable.
++// All bundled noto sizes are compiled into the xiaozhi-fonts component, so
++// this smaller font is link-safe alongside the board's 30 px default.
++LV_FONT_DECLARE(font_noto_sans_basic_14_1);
++
++void CustomLcdDisplay::SetupUI() {
++    LcdDisplay::SetupUI();                      // build the stock widgets
++    Lock();
++    // Remove the smiling face: the center emoji box (robot/emotion label).
++    if (emoji_box_ != nullptr) {
++        lv_obj_add_flag(emoji_box_, LV_OBJ_FLAG_HIDDEN);
++    }
++    if (emoji_label_ != nullptr) {
++        lv_obj_add_flag(emoji_label_, LV_OBJ_FLAG_HIDDEN);
++    }
++    if (emoji_image_ != nullptr) {
++        lv_obj_add_flag(emoji_image_, LV_OBJ_FLAG_HIDDEN);
++    }
++    // Smaller font so the full prompt/response fits on the panel.
++    if (chat_message_label_ != nullptr) {
++        lv_obj_set_style_text_font(chat_message_label_, &font_noto_sans_basic_14_1, 0);
++        lv_obj_set_style_text_align(chat_message_label_, LV_TEXT_ALIGN_LEFT, 0);
++    }
++    // Give the transcript the whole panel instead of a bottom strip: cover the
++    // face region so wrapped lines fill the screen (transparent background).
++    if (bottom_bar_ != nullptr) {
++        lv_obj_set_size(bottom_bar_, LV_HOR_RES, LV_VER_RES);
++        lv_obj_set_style_bg_opa(bottom_bar_, LV_OPA_TRANSP, 0);
++        lv_obj_set_style_pad_top(bottom_bar_, 4, 0);
++    }
++    Unlock();
++}
++
++// No emoji face on the hermes board — emotion is a visual no-op.
++void CustomLcdDisplay::SetEmotion(const char* /*emotion*/) {
++    // Face already hidden in SetupUI(); nothing to do.
++}
++
