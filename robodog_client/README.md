@@ -244,13 +244,14 @@ verified by feeding its output back through ASR (no human round-trip).
 the bridge auto-processes and speaks. Full-duplex: just talk again for the
 next turn. Logs: `journalctl --user -u lmao-robodog-voice -f`.
 
-## ESP-Claw standalone agent (Phase 0 spike)
+## ESP-Claw standalone agent (Phase 1: text-only UI + deterministic RD_SHOT)
 
 `robodog_client/esp-claw/` stages **esp-claw** (`edge_agent`) for the same
 RLCD-4.2 board — the board calls its own ASR / LLM / TTS endpoints over LAN,
 no bridge, no Hermes. Phase 0 (spike) is implemented and hardware-verified;
-see `robodog_client/esp-claw/DESIGN.md` **Phase 0 — spike results** for the
-full details + fixes. TL;DR:
+Phase 1 adds the PR #278 text-only chat UI and a deterministic RD_SHOT
+capture seam. See `robodog_client/esp-claw/DESIGN.md` for the full details +
+fixes. TL;DR:
 
 ```sh
 # fetch pinned esp-claw -> gitignored robodog_client/.esp-claw/
@@ -268,17 +269,23 @@ CLAW_IDF_IMG=espressif/idf:v5.5.4 bash robodog_client/esp-claw/flash_esp_claw.sh
 ```
 
 Bazel wrappers: `bazel run //robodog_client:build_robodog_claw` and
-`:flash_robodog_claw`. The RLCD board boots esp-claw's LVGL home screen
-(clock + WiFi header) — capturable via `capture.py --describe` (RD_SHOT
-seam: self-ticking rdshot publisher; `rdshot` console command force-
-publishes).
+`:flash_robodog_claw`. The board boots a deterministic **text-only chat UI**
+(PR #278 parity: no face/emote, ~14 px ASCII font, left-aligned full-panel
+wrap, WiFi/agent status bar on top). The UI brings the RLCD panel + LVGL up
+itself (esp-claw's own display_service is gated behind a Kconfig symbol this
+board silently drops), so the RD_SHOT capture seam is **always** live:
+`capture.py --describe` reliably transcribes the rendered frame (no more
+"no panel frame captured yet"). After a text update the UI forces a
+synchronous refresh + immediate RD_SHOT dump, so a capture reads the new
+frame deterministically.
 
 On-device probe console commands (over `/dev/ttyACM0` 115200, `app> ` REPL):
 
 ```sh
 rd_asr                 # device -> Whisper via host-forward, logs text="..."
 rd_tts <text>          # device -> Kokoro via host-forward, logs WAV bytes
-rd_chat <question>     # native agent seam -> LLM, logs rd_chat reply: ...
+rd_chat <question>     # native agent seam -> LLM, renders user + reply to the
+                       #   text UI (e.g. `rd_chat 2+2` -> screen shows "4")
 rdshot                 # force-publish the current screen frame (RD_SHOT)
 ```
 
