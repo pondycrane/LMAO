@@ -141,6 +141,21 @@ def pick_subject(participant: str, action: str, uid: str) -> str:
     return _seeded_choice(PAW_SUBJECTS, uid)
 
 
+def _pool_for(subject: str, action: str) -> tuple[list[str], str]:
+    """Map a picked subject to its (pool, theme_label) for the regen retry.
+
+    Lets the generator retry with an alternate subject from the SAME theme pool
+    when the vision gate false-rejects an obscure character (e.g. goldeen or
+    alakazam), instead of giving up. ``theme_label`` is the truthful label for
+    the vision gate (pokemon / paw patrol / sea animal).
+    """
+    if subject in POKE_SUBJECTS:
+        return POKE_SUBJECTS, "pokemon"
+    if subject in PAW_SUBJECTS:
+        return PAW_SUBJECTS, "paw patrol"
+    return SEA_COHERENT.get(action, SEA_SUBJECTS), "sea animal"
+
+
 def build_combo(title: str, participant: str, uid: str) -> list[str]:
     """Return search queries (primary first) pairing subject + event action.
 
@@ -662,29 +677,46 @@ def main(argv: list[str] | None = None) -> int:
         queries = build_combo(title, participant, uid)
         primary = queries[0]
         kw = "LLM" if os.environ.get("LMAO_IMAGE_LLM_URL") else "reasoned"
-        subject_word = primary.split()[0] if primary.split() else participant
-        theme_label = "pokemon" if participant == "juliet" else "sea animal"
         action = extract_action(title)
+        subject_word = primary.split()[0] if primary.split() else participant
+        pool, theme_label = _pool_for(subject_word, action)
         print(f"== {pic} ({','.join(participants)}): '{title}' "
               f"-> [{kw}] {queries} [local-gen + commons]")
         try:
             stored = False
-            # 1) on-demand local generation first (bespoke themed art)
-            gen = generate_local(build_gen_prompt(subject_word, theme_label, action),
-                                 1024, 1024)
-            if gen:
+            # 1) on-demand local generation first (bespoke themed art). The vision
+            #    content gate can false-negative on obscure subjects (an
+            #    unrecognized pokemon like alakazam/goldeen), so on rejection
+            #    retry with a different subject from the SAME theme pool — a
+            #    fresh generated tile should land rather than leaving the event
+            #    stale/artless.
+            base_seed = int(hashlib.sha1(uid.encode()).hexdigest(), 16)
+            order = [subject_word] + [pool[(base_seed + i) % len(pool)]
+                                      for i in range(1, len(pool))]
+            uniq_order, seen_s = [], set()
+            for s_ in order:
+                if s_ not in seen_s:
+                    seen_s.add(s_)
+                    uniq_order.append(s_)
+            generated_any = False
+            for subj in uniq_order[:4]:
+                gen = generate_local(build_gen_prompt(subj, theme_label, action),
+                                     1024, 1024)
+                if not gen:
+                    break
+                generated_any = True
                 gen = crop_to_subject(gen)  # tighten to the subject (vision)
-                if verify_subject(gen, subject_word, theme_label):
+                if verify_subject(gen, subj, theme_label):
                     png = to_1bit_png(gen, tw, th, args.threshold)
                     rec = pic_store.put(pic, png, tw, th)
-                    print(f"   stored {pic} [generated]: {subject_word} {theme_label}"
+                    print(f"   stored {pic} [generated]: {subj} {theme_label}"
                           f" ({action or 'general'}) -> "
                           f"{rec['width']}x{rec['height']} {len(rec['bytes'])}B")
                     done += 1
                     stored = True
-                else:
-                    print(f"   gate rejected generated art for {primary!r}")
-            else:
+                    break
+                print(f"   gate rejected {subj!r}: trying another {theme_label} subject...")
+            if not stored and not generated_any:
                 print("   (local generation unavailable — falling back to Commons)")
             # 2) fall back to Wikimedia search if generation didn't land
             if not stored:
