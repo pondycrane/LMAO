@@ -76,6 +76,51 @@ sh_binary(
     tags = ["manual"],
 )
 
+# ── ESP-Claw firmware (standalone on-device agent) — DESIGN.md Phase 0 ────
+# The ESP-Claw edge_agent for the same Waveshare RLCD board is built from the
+# PINNED UPSTREAM SOURCE (esp-claw/fetch_esp_claw.sh fetches the immutable
+# espressif/esp-claw commit, sha256-verified, into the gitignored .esp-claw/)
+# with the RoboDog Phase 0 overlay (RD_SHOT capture hook + rdshot/rd_asr/
+# rd_tts/rd_chat console probes) applied. ESP-IDF v5.5.4 is ESP-Claw's
+# recommended IDF (NOT the v6.0.2 XiaoZhi image). See robodog_client/esp-claw/
+# DESIGN.md. Replaces whichever firmware is on the board — reflash the calendar
+# //robodog_client:flash_firmware or //robodog_client:flash_robodog_hermes to
+# restore it.
+sh_binary(
+    name = "build_robodog_claw",
+    srcs = ["esp-claw/build_esp_claw.sh"],
+    data = [
+        "esp-claw/fetch_esp_claw.sh",
+        "esp-claw/patches/0001-rdshot.patch",
+        "esp-claw/patches/0002-init.patch",
+        "esp-claw/overlay/components/robodog_phase0/CMakeLists.txt",
+        "esp-claw/overlay/components/robodog_phase0/Kconfig",
+        "esp-claw/overlay/components/robodog_phase0/idf_component.yml",
+        "esp-claw/overlay/components/robodog_phase0/include/robodog_phase0.h",
+        "esp-claw/overlay/components/robodog_phase0/src/robodog_phase0.c",
+        "voice/corpus/capabilities.wav",
+    ],
+    tags = ["manual"],
+)
+
+sh_binary(
+    name = "flash_robodog_claw",
+    srcs = ["esp-claw/flash_esp_claw.sh"],
+    # .esp-claw/build outputs are generated at build time; glob matches only
+    # existing files so the target builds even before the first build runs.
+    data = glob([
+        ".esp-claw/application/edge_agent/build/flash_args",
+        ".esp-claw/application/edge_agent/build/bootloader/bootloader.bin",
+        ".esp-claw/application/edge_agent/build/partition_table/partition-table.bin",
+        ".esp-claw/application/edge_agent/build/edge_agent.bin",
+        ".esp-claw/application/edge_agent/build/ota_data_initial.bin",
+    ]) + [
+        "esp-claw/build_esp_claw.sh",
+        "esp-claw/fetch_esp_claw.sh",
+    ],
+    tags = ["manual"],
+)
+
 # ── Voice-AI backend glue (host-side services) ────────────────────────────
 # Bridge + TTS server + systemd units that give the XiaoZhi voice firmware a
 # local conversation loop (see README "Voice mode"). Reference/deploy copy —

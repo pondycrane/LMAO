@@ -1,0 +1,70 @@
+menu "RoboDog kconfig-symbol completion"
+
+    # IDF's component-manager kconfig pass (interface v4) counts any symbol
+    # used in an `if:` clause of a DOWNLOADED component manifest but defined in
+    # no loaded Kconfig as a "missed required option"; after the cmake retry it
+    # still resolves to a fatal unless the count is zero.  On the pinned
+    # esp-claw commit the two remaining orphans come from OPTIONAL REGISTRY
+    # components that are always skipped on this board (espressif/knob defines
+    # ESP_BOARD_DEV_KNOB_SUPPORT; espressif/usb_host_uac defines
+    # CODEC_UAC_SUPPORT).  The board manager's own ESP_BOARD_DEV_* symbols are
+    # all defined by espressif/esp_board_manager, so only defining the two
+    # skipped-component symbols here keeps the missed-key set empty.
+    config ESP_BOARD_DEV_KNOB_SUPPORT
+        bool "knob support (defined here for skipped espressif/knob)"
+        default n
+
+    config CODEC_UAC_SUPPORT
+        bool "UAC codec support (defined here for skipped espressif/usb_host_uac)"
+        default n
+
+endmenu
+
+menu "RoboDog Phase 0 probes"
+
+    config ROBODOG_ASR_URL
+        string "Whisper ASR transcription endpoint (device-facing)"
+        default "http://192.168.50.153:11801/v1/audio/transcriptions"
+        help
+            OpenAI-compatible /v1/audio/transcriptions endpoint the device
+            POSTs the embedded corpus WAV to during rd_asr.  The user's own
+            Whisper endpoint; overridden per-build via the robodog sdkconfig
+            fragment (CLAW_ASR_URL env) so LAN IPs never need committing.
+            spark-5307 (Whisper) lives on the livecam 192.168.10.0/24 subnet,
+            which the RLCD board (192.168.50.0/24) has no route to; the
+            workspace host forwards it here (socat 11801 -> :8001).
+
+    config ROBODOG_ASR_MODEL
+        string "ASR model name sent in the multipart form"
+        default "whisper-1"
+
+    config ROBODOG_ASR_MAX_RESPONSE
+        int "Maximum ASR response body to buffer (bytes)"
+        default 4096
+
+    config ROBODOG_TTS_URL
+        string "Kokoro TTS endpoint (device-facing)"
+        default "http://192.168.50.153:11804/v1/audio/speech"
+        help
+            OpenAI-compatible /v1/audio/speech endpoint the device POSTs JSON
+            to during rd_tts.  Overridden per-build via CLAW_TTS_URL env.
+            Kokoro (spark-5307) is on 192.168.10.0/24, unreachable from the
+            board; forwarded on the workspace host (socat 11804 -> :8004).
+
+    config ROBODOG_TTS_MODEL
+        string "TTS model name in the request JSON"
+        default "kokoro-82m"
+
+    config ROBODOG_TTS_VOICE
+        string "TTS voice in the request JSON"
+        default "af_heart"
+
+    config ROBODOG_TTS_MAX_RESPONSE
+        int "Maximum TTS response body to buffer (bytes)"
+        default 16384
+
+    config ROBODOG_LLM_TIMEOUT_MS
+        int "Timeout for the rd_chat agent round-trip (ms)"
+        default 90000
+
+endmenu
