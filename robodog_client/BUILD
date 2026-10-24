@@ -54,6 +54,7 @@ sh_binary(
     data = [
         "voice/fetch_xiaozhi.sh",
         "voice/robodog_hermes_capture.patch",
+        "voice/robodog_hermes_display.patch",
     ],
     tags = ["manual"],
 )
@@ -70,6 +71,7 @@ sh_binary(
         "voice/build_xiaozhi.sh",
         "voice/fetch_xiaozhi.sh",
         "voice/robodog_hermes_capture.patch",
+        "voice/robodog_hermes_display.patch",
     ],
     tags = ["manual"],
 )
