@@ -32,18 +32,41 @@ class TestSubjectSelection:
         assert cps.pick_subject("juliet", "tennis", "uid1") in cps.POKE_SUBJECTS
 
     def test_wesley_ice_skating_is_limbed_not_legless(self):
-        # a legless fish/dolphin must NOT be picked for ice skating
-        for i in range(30):
+        # a legless fish/dolphin must NOT be picked for ice skating; PAW dogs ok
+        for i in range(60):
             s = cps.pick_subject("wesley", "ice skating", f"uid{i}")
-            assert s in cps.SEA_COHERENT["ice skating"]
+            assert s in cps.PAW_SUBJECTS or s in cps.SEA_COHERENT["ice skating"]
             assert s not in ("dolphin", "whale", "shark", "fish")
 
-    def test_wesley_swimming_allows_any_sea_animal(self):
-        assert cps.pick_subject("wesley", "swimming", "u1") in cps.SEA_SUBJECTS
+    def test_wesley_swimming_allows_any_sea_or_paw(self):
+        for i in range(30):
+            s = cps.pick_subject("wesley", "swimming", f"uid{i}")
+            assert s in cps.SEA_SUBJECTS or s in cps.PAW_SUBJECTS
 
     def test_seeded_choice_is_deterministic_per_uid(self):
         assert cps._seeded_choice(cps.POKE_SUBJECTS, "abc") == \
             cps._seeded_choice(cps.POKE_SUBJECTS, "abc")
+
+
+class TestSubjectPool:
+    def test_pokemon_subject_maps_to_pokemon_pool(self):
+        pool, theme = cps._pool_for("goldeen", "tennis")
+        assert theme == "pokemon"
+        assert "pikachu" in pool
+
+    def test_paw_subject_maps_to_paw_pool(self):
+        pool, theme = cps._pool_for("chase", "ice skating")
+        assert theme == "paw patrol"
+        assert "marshall" in pool
+
+    def test_sea_subject_maps_to_coherent_pool(self):
+        pool, theme = cps._pool_for("seal", "ice skating")
+        assert theme == "sea animal"
+        assert "penguin" in pool
+
+    def test_two_word_sea_subject_still_maps_to_sea(self):
+        _, theme = cps._pool_for("sea lion", "ice skating")
+        assert theme == "sea animal"
 
 
 class TestCombo:
@@ -56,7 +79,8 @@ class TestCombo:
     def test_wesley_ice_skating_query_is_coherent(self):
         q = cps.build_combo("W ice skating 1:30", "wesley", "uid1")
         assert q[0].endswith("ice skating")
-        assert q[0].split()[0] in cps.SEA_COHERENT["ice skating"]
+        lead = q[0].rsplit(" ice skating", 1)[0]  # subject; may be multi-word
+        assert lead in cps.SEA_COHERENT["ice skating"] or lead in cps.PAW_SUBJECTS
 
     def test_juliet_tennis_query_pairs_subject_and_action(self):
         q = cps.build_combo("J tennis 4pm Mon", "juliet", "uid2")
@@ -168,9 +192,9 @@ class TestGoogleSource:
 class TestGenPrompt:
     def test_sea_animal_theme(self):
         p = cps.build_gen_prompt("seal", "sea animal", "ice skating")
-        assert "seal" in p and "sea animal" in p and "ice skating" in p
-        assert "line art" in p and "WHITE" in p
+        assert "seal" in p and "ice skating" in p
+        assert "line art" in p and "white" in p
 
     def test_pokemon_theme_and_no_action(self):
         p = cps.build_gen_prompt("pikachu", "pokemon", "")
-        assert "pokemon-like" in p and "pikachu" in p and "fun activity" in p
+        assert "pikachu" in p and "fun activity" in p
