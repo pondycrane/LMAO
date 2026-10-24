@@ -1,6 +1,6 @@
 # RoboDog ESP-Claw — Standalone On-Device Agent (Design)
 
-**Status**: design — not yet implemented.
+**Status**: Phase 0 (spike) complete — see **Phase 0 results** below. Phases 1–3 pending.
 **Goal**: run [ESP-Claw](https://github.com/espressif/esp-claw) (`edge_agent`)
 standalone on the Waveshare ESP32-S3 RLCD-4.2. The board calls **all** model
 endpoints (ASR, LLM, TTS) on its own over LAN WiFi. No `voice_bridge.py`, no
@@ -204,3 +204,124 @@ AGENTS.md workflow table.
 LAN HTTP services. ESP-Claw has no onboard ASR/TTS. A text-only variant
 (web-console/IM chat on the RLCD, no mic) would shrink Phase 2 to nothing —
 rejected for now; the RD_LISTEN/corpus/ring E2E exists to prove voice.
+
+## Phase 0 — spike results (implemented)
+
+Status of the Phase 0 gate: **all four deliverables proven on hardware.**
+
+LMAO-owned tooling in this folder (all in `robodog_client/esp-claw/`):
+
+- `fetch_esp_claw.sh` — sha256-pinned espressif/esp-claw tarball
+  (`9b23c15bc28703369b4b7fad3e810f8cb535fb59`) → gitignored `../.esp-claw/`;
+  stamp-guarded (re-fetch skipped when the pinned commit is already staged).
+- `rewrite_component_paths.py` — rewrites root local-source `path:` deps to
+  absolute container paths (see build fix below).
+- `patches/0001-rdshot.patch` — `setup_device.c` (the Waveshare board's
+  custom ST7305 `esp_lcd_panel`): publishes the 15000 B monochrome
+  framebuffer from `rlcd_flush_frame()` via `robodog_rdshot_publish()` +
+  layout-identical local `robodog_display_lcd_{config,handles}_t` types.
+- `patches/0002-init.patch` — `main.c` calls `robodog_init()`.
+- `overlay/components/robodog_phase0/` — LMAO component: RD_SHOT publisher
+  (self-ticking, 4 s cadence — see capture seam below), console commands
+  `rdshot` / `rd_asr` / `rd_tts` / `rd_chat`, embedded corpus WAV for ASR.
+- `build_esp_claw.sh` — Docker `espressif/idf:v5.5.4`, generates
+  `sdkconfig.defaults.robodog` (model endpoints via `CLAW_*` env),
+  `idf.py bmgr -c ./boards -b waveshare/waveshare_ESP32_S3_RLCD_4_2 && idf.py build`.
+- `flash_esp_claw.sh` — host esptool via the sanctioned `flash.sh` pattern:
+  writes bootloader/app/partition/system/storage **and provisions NVS** at
+  `0xA000` (WiFi `Hankerker`, LLM openai_compatible, `cfg_ver=1`).
+- Bazel: `//robodog_client:build_robodog_claw` + `:flash_robodog_claw`.
+
+Hardware-verified results:
+
+| Deliverable | Result |
+|---|---|
+| ESP-Claw builds for the board | `edge_agent.bin` 3.0 MB builds green with all patches; board flashes + boots, **all 24 capabilities registered, root agent ready**, ES8311+ES7210 audio init |
+| Screen capture shows text | RD_SHOT pixel frame → `capture.py --describe` readback: `WI-FI ON \| AP esp-claw-DD6DF3 / 16:46 / Sat, 24 Oct` — the esp-claw LVGL home screen renders on the ST7305 |
+| Chat-injection API identified | native seam = `claw_agent_mgr_post_session_message` (async) / `claw_agent_mgr_start_root_run_text` + `claw_agent_mgr_receive_root_for` (per-turn); exercised via `rd_chat` |
+| Device→Whisper round-trip | `rd_asr POST http://192.168.50.153:11801/v1/audio/transcriptions → 200, text="What can you do?"` |
+| Device→Kokoro round-trip | `rd_tts POST http://192.168.50.153:11804/v1/audio/speech → 200, 165644 B WAV (RIFF: yes)` |
+| Device→LLM (agent seam) | `rd_chat "7×8?" → reply: 56` |
+
+Upstream/build fixes that were required (documented for Phase 1 reuse):
+
+- **IDF pin = `espressif/idf:v5.5.4`, not 5.5.1.** ESP-IDF 5.5.1's
+  component-manager kconfig pass misses required keys from skipped optional
+  registry components (`espressif/knob` → `ESP_BOARD_DEV_KNOB_SUPPORT`,
+  `espressif/usb_host_uac` → `CODEC_UAC_SUPPORT`) → fatal "Missing required
+  kconfig option after retry"; 5.5.4 resolves the rest, and the two symbols
+  are defined `n` in the overlay Kconfig.
+- **Absolute component paths.** CM 2.x records root local-source requirements
+  by the raw `path:` string, so sibling `../x` deps hash differently than
+  self-root absolute paths → "Already defined root local requirement". The
+  manifest rewrite to `/workspace/...` absolute paths (from the container
+  root) unifies them.
+- **Local struct types for the LCD config.** `CONFIG_ESP_BOARD_DEV_DISPLAY_LCD_SUPPORT`
+  is silently dropped from sdkconfig (board-manager Kconfig unknown at
+  defconfig-merge time), so `dev_display_lcd.h` is unavailable; layout-
+  identical local types (config only feeds `esp_board_device_override_config`,
+  init ignores it) replace it. The `setup_device.c` FRAME-BUFFER writes go to
+  a buffer in **SPIRAM**, keeping the 15000 B out of internal RAM.
+- **NVS schema key is mandatory.** `app_config_init()` requires
+  `cfg_ver` = the app's `APP_CONFIG_SCHEMA_VERSION` ("1"); if missing, it
+  **erases the whole `app` namespace on first boot**, wiping provisioned keys.
+  `flash_esp_claw.sh` writes `cfg_ver=1` first so the schema is accepted.
+
+Model configuration (NVS, namespace `app`):
+
+- `wifi_ssid` / `wifi_password` → Hankerker on the 192.168.50.0/24 LAN.
+- `llm_backend=openai_compatible`, `llm_endpoint=static`,
+  `llm_base_url=http://gx10-f156:8000/v1`, `llm_model=deepseek-ai/DeepSeek-V4-Flash-0731`,
+  `llm_auth_type=none`, `llm_sup_tools=true` (false → the agent refuses with
+  "Selected backend does not support tool calls" even though the backend is
+  OpenAI-compatible), `llm_sup_vis=false`.
+- Whisper/Kokoro are on the **livecam 192.168.10.0/24 subnet**, which the
+  board (192.168.50.0/24) cannot route to. The workspace host forwards them:
+  `socat TCP-LISTEN:11801,TCP:192.168.10.37:8001` and `:11804 → :8004`
+  (Kokoro). Build with `CLAW_ASR_URL=http://192.168.50.153:11801/v1/audio/transcriptions`
+  `CLAW_TTS_URL=http://192.168.50.153:11804/v1/audio/speech` and the overlay
+  POSTs through the forwards. `dev_display_lcd`-independent of the board.
+
+### RD_SHOT capture seam — finding for Phase 1
+
+The RLCD panel (`rlcd_flush_frame`) is **not** flushed on every boot:
+esp-claw's `display_service` renders LVGL into a software **dummy-draw /
+session buffer** (an RGB565 400×300 buffer owned by `display_service.c`,
+`display_service_dummy_draw_blit`) and only pushes to the physical panel
+event-driven — so the board-flush RD_SHOT hook yields nothing when the panel
+is parked in dummy mode. The deterministic Phase-1 capture seam is the LVGL
+output itself:
+
+- Hook `display_service_dummy_draw_blit`'s `frame_buffer` (the rendered
+  RGB565 frame every LVGL pass produces), or the `esp_lvgl_adapter`
+  LVGL-flush bridge (`lvgl_bridge_v9.c`), and binarize RGB565 → 15000 B with
+  the same LUT the panel port uses. Update `capture.py` sampling to expect
+  that seam.
+- `robodog_phase0`'s rdshot task self-ticks every 4 s (not just on flush
+  notification) so a static screen keeps producing frames; the `rdshot`
+  console command force-publishes the retained frame immediately.
+
+### Chat-injection seam (Phase 0 resolution)
+
+Native, no loopback HTTP needed (the seam the web console uses is
+HTTP-to-localhost; the C entry points exist and are the right seam for the
+voice component):
+
+- per-turn: `claw_agent_mgr_start_root_run_text(agent_id, text, flags)` (+
+  `claw_agent_mgr_receive_root_for(...)` to await the reply);
+- queued: `claw_agent_mgr_post_session_message(...)`.
+
+Phase 1's voice component should use the per-turn variant and render
+`receive_root_for`'s reply — identical roles/timing to `SetChatMessage("user"|"assistant")` today. ESP-Claw's own LLM-RUN path does the HTTP round-trip to
+an OpenAI-style endpoint natively (proven: latest frame carries the clock,
+tox-Free fixtures confirm the endpoint shapes).
+
+### Phase 1 notes / deltas from the design above
+
+- `rd_asr`/`rd_tts` prove the endpoint shapes: Whisper takes a multipart
+  `file`+`model=whisper-1` POST to `/v1/audio/transcriptions`; Kokoro takes
+  JSON `{model, voice, input}` to `/v1/audio/speech` and streams WAV.
+- ES8311 + ES7210 audio devices initialize on boot (board port, no
+  extra work) — good groundwork for Phase 2's native voice loop.
+- The board boots esp-claw's own LVGL home screen (clock + WiFi status header)
+  before any Phase-1 UI lands; capture.py's hermes decode path reads it as-is.

@@ -1,0 +1,20 @@
+--- a/application/edge_agent/main/main.c
++++ b/application/edge_agent/main/main.c
+@@ -24,6 +24,7 @@
+ #include "esp_board_manager_includes.h"
+ #include "captive_dns.h"
+ #include "cmd_wifi.h"
++#include "robodog_phase0.h"
+ #include "freertos/FreeRTOS.h"
+ #include "freertos/task.h"
+ #if CONFIG_APP_CLAW_CAP_IM_WECHAT
+@@ -503,6 +504,9 @@
+ #endif
+ 
+     register_wifi_command();
++    /* RoboDog Phase 0 overlay (LMAO-inserted): RD_SHOT capture publishing and
++     * console triggers for the model-endpoint round-trip probes. */
++    ESP_ERROR_CHECK(robodog_init());
+ 
+ #if APP_ENABLE_MEM_LOG
+     xTaskCreate(memory_monitor_task, "mem_mon", 4096, NULL, 1, NULL);
