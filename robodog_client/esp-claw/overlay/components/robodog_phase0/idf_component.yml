@@ -9,3 +9,10 @@ dependencies:
     path: ../../../../components/claw_modules/claw_manager
   claw_core:
     path: ../../../../components/claw_modules/claw_core
+  # Deterministic text-only UI (Phase 1): esp-claw's own display_service is
+  # gated behind a config symbol the board manager drops for this custom panel,
+  # so the LMAO UI drives the LVGL adapter directly.
+  espressif/esp_lvgl_adapter: "*"
+  lvgl/lvgl:
+    version: ^9.5.0,<9.6.0
+    public: true

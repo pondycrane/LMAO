@@ -76,28 +76,30 @@ sh_binary(
     tags = ["manual"],
 )
 
-# ── ESP-Claw firmware (standalone on-device agent) — DESIGN.md Phase 0 ────
+# ── ESP-Claw firmware (standalone on-device agent) — DESIGN.md Phase 1 ────
 # The ESP-Claw edge_agent for the same Waveshare RLCD board is built from the
 # PINNED UPSTREAM SOURCE (esp-claw/fetch_esp_claw.sh fetches the immutable
 # espressif/esp-claw commit, sha256-verified, into the gitignored .esp-claw/)
-# with the RoboDog Phase 0 overlay (RD_SHOT capture hook + rdshot/rd_asr/
-# rd_tts/rd_chat console probes) applied. ESP-IDF v5.5.4 is ESP-Claw's
-# recommended IDF (NOT the v6.0.2 XiaoZhi image). See robodog_client/esp-claw/
-# DESIGN.md. Replaces whichever firmware is on the board — reflash the calendar
-# //robodog_client:flash_firmware or //robodog_client:flash_robodog_hermes to
-# restore it.
+# with the RoboDog Phase 1 overlay (LMAO-owned board setup_device.c + the
+# deterministic text-only UI + rdshot/rd_asr/rd_tts/rd_chat probes) applied.
+# ESP-IDF v5.5.4 is ESP-Claw's recommended IDF (NOT the v6.0.2 XiaoZhi image).
+# See robodog_client/esp-claw/DESIGN.md. Replaces whichever firmware is on the
+# board — reflash the calendar //robodog_client:flash_firmware or
+# //robodog_client:flash_robodog_hermes to restore it.
 sh_binary(
     name = "build_robodog_claw",
     srcs = ["esp-claw/build_esp_claw.sh"],
     data = [
         "esp-claw/fetch_esp_claw.sh",
-        "esp-claw/patches/0001-rdshot.patch",
         "esp-claw/patches/0002-init.patch",
+        "esp-claw/overlay/boards/waveshare_ESP32_S3_RLCD_4_2/setup_device.c",
         "esp-claw/overlay/components/robodog_phase0/CMakeLists.txt",
         "esp-claw/overlay/components/robodog_phase0/Kconfig",
         "esp-claw/overlay/components/robodog_phase0/idf_component.yml",
         "esp-claw/overlay/components/robodog_phase0/include/robodog_phase0.h",
+        "esp-claw/overlay/components/robodog_phase0/include/robodog_ui.h",
         "esp-claw/overlay/components/robodog_phase0/src/robodog_phase0.c",
+        "esp-claw/overlay/components/robodog_phase0/src/robodog_ui.c",
         "voice/corpus/capabilities.wav",
     ],
     tags = ["manual"],

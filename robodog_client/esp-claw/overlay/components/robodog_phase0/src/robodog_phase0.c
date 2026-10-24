@@ -15,6 +15,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 #include "robodog_phase0.h"
+#include "robodog_ui.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -55,6 +56,11 @@ static volatile bool s_rdshot_force;
 static volatile uint64_t s_rdshot_last_pub_us;
 static TaskHandle_t s_rdshot_task;
 
+void robodog_rdshot_capture_now(void);
+/* Declared in the overlay boards/waveshare.../setup_device.c: the custom
+ * panel's live 1-bpp frame memory (deterministic RD_SHOT fallback). */
+uint8_t *robodog_board_display_frame(size_t *out_len, int *out_w, int *out_h);
+
 static void rd_shot_dump(const uint8_t *buf, size_t len, int w, int h)
 {
     char line[65];
@@ -94,13 +100,26 @@ static void rd_shot_task(void *arg)
             continue;
         }
         const uint8_t *frame = s_rdshot_frame;
-        if (frame == NULL || s_rdshot_len == 0) {
-            s_rdshot_force = false;
-            ESP_LOGW(TAG, "rdshot: no panel frame captured yet");
-            continue;
+        size_t len = s_rdshot_len;
+        if (frame == NULL || len == 0) {
+            /* Deterministic fallback: the panel's live 1-bpp frame memory is
+             * always valid (blank white on a fresh boot, current content after
+             * any render), so a capture never has "no frame" even before the
+             * first flush arrives. */
+            size_t plen = 0;
+            int pw = 0, ph = 0;
+            uint8_t *pf = robodog_board_display_frame(&plen, &pw, &ph);
+            if (pf == NULL || plen == 0) {
+                s_rdshot_force = false;
+                ESP_LOGW(TAG, "rdshot: no panel frame captured yet");
+                continue;
+            }
+            frame = pf;
+            len = plen < RD_SHOT_MAX_BUF ? plen : RD_SHOT_MAX_BUF;
         }
-        memcpy(s_rdshot_dump, frame, s_rdshot_len);
-        rd_shot_dump(s_rdshot_dump, s_rdshot_len, s_rdshot_w, s_rdshot_h);
+        memcpy(s_rdshot_dump, frame, len);
+        rd_shot_dump(s_rdshot_dump, len, s_rdshot_w != 0 ? s_rdshot_w : 400,
+                     s_rdshot_h != 0 ? s_rdshot_h : 300);
         s_rdshot_last_pub_us = esp_timer_get_time();
         s_rdshot_force = false;
     }
@@ -114,34 +133,41 @@ void robodog_rdshot_publish(const uint8_t *buf, size_t len, int w, int h)
     if (len > RD_SHOT_MAX_BUF) {
         len = RD_SHOT_MAX_BUF;
     }
-    /* Only copy when a publish is actually due: skips every frame between
-     * the 4 s capture interval (no per-flush 15000 B memcpy churn). */
-    const uint64_t now = esp_timer_get_time();
-    const bool due = s_rdshot_force ||
-                     (now - s_rdshot_last_pub_us >= RD_SHOT_INTERVAL_US);
-    if (!due) {
-        return;
-    }
+    /* Always retain the latest flushed frame (a flush is low-frequency: text /
+     * boot renders only), so a force-publish right after a UI render reads the
+     * NEW frame, never a stale one held inside the 4 s self-tick window. */
     portENTER_CRITICAL(&s_rdshot_mux);
     memcpy(s_rdshot_frame, buf, len);
     s_rdshot_len = len;
     s_rdshot_w = w;
     s_rdshot_h = h;
     portEXIT_CRITICAL(&s_rdshot_mux);
-    xTaskNotifyGive(s_rdshot_task);
+    /* Wake the publisher when forced or when the capture interval elapsed. */
+    const uint64_t now = esp_timer_get_time();
+    if (s_rdshot_force || (now - s_rdshot_last_pub_us >= RD_SHOT_INTERVAL_US)) {
+        xTaskNotifyGive(s_rdshot_task);
+    }
 }
 
 static int cmd_rdshot(int argc, char **argv)
 {
     (void)argc;
     (void)argv;
+    robodog_rdshot_capture_now();
+    return 0;
+}
+
+/* Immediate publish (bypasses the 4 s self-tick): used by the UI after a
+ * forced LVGL refresh so RD_SHOT right now reflects the freshly rendered
+ * frame instead of the retained one. */
+void robodog_rdshot_capture_now(void)
+{
     s_rdshot_force = true;
     if (s_rdshot_task != NULL) {
         xTaskNotifyGive(s_rdshot_task);
     } else {
         ESP_LOGW(TAG, "rdshot: not initialised yet");
     }
-    return 0;
 }
 
 /* ── HTTP probes ─────────────────────────────────────────────────────────── */
@@ -352,12 +378,19 @@ static int cmd_rd_chat(int argc, char **argv)
      * feed ASR text through): a per-turn independent agent run against the
      * NVS-configured LLM endpoint, blocking for the reply.  flags=0 keeps the
      * response queue so receive_root_for() can collect the reply. */
+    /* Render the user transcript first (same role/timing as a user message
+     * finalizing), then mark the agent as reasoning while the run is in
+     * flight; the reply is appended when it finalizes. */
+    robodog_ui_show_user(text);
+    robodog_ui_set_agent_state("thinking");
+
     uint32_t request_id = 0;
     esp_err_t err = claw_agent_mgr_start_root_run_text(
         text, NULL, 0, CONFIG_ROBODOG_LLM_TIMEOUT_MS, &request_id);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "rd_chat: start_root_run_text failed: %s (agent/LLM not ready?)",
                  esp_err_to_name(err));
+        robodog_ui_set_agent_state("error");
         return 1;
     }
     claw_core_response_t resp;
@@ -366,12 +399,15 @@ static int cmd_rd_chat(int argc, char **argv)
                                           CONFIG_ROBODOG_LLM_TIMEOUT_MS + 30000);
     if (err == ESP_OK && resp.text != NULL) {
         ESP_LOGI(TAG, "rd_chat reply: %s", resp.text);
+        robodog_ui_show_assistant(resp.text);
     } else if (resp.error_message != NULL) {
         ESP_LOGE(TAG, "rd_chat: agent error (%s): %s", esp_err_to_name(err),
                  resp.error_message);
+        robodog_ui_set_agent_state("error");
         return 1;
     } else {
         ESP_LOGE(TAG, "rd_chat: receive_root_for failed: %s", esp_err_to_name(err));
+        robodog_ui_set_agent_state("error");
         return 1;
     }
     return 0;
@@ -421,6 +457,8 @@ esp_err_t robodog_init(void)
     }
 
     robodog_register_commands();
-    ESP_LOGI(TAG, "RoboDog Phase 0 overlay ready: rdshot / rd_asr / rd_tts / rd_chat");
+    /* Phase 1: bring up the deterministic text-only UI (panel + LVGL). */
+    (void)robodog_ui_start();
+    ESP_LOGI(TAG, "RoboDog Phase 1 overlay ready: rdshot / rd_asr / rd_tts / rd_chat + text UI");
     return ESP_OK;
 }
