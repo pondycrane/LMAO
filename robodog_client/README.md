@@ -132,6 +132,15 @@ pixel-for-pixel exactly like the calendar app), and builds with the ESP-IDF
 **v6.0.x** Docker image (`XIAOZHI_IDF_IMG` overrides). Nothing vendored — the
 staged source tree is never committed.
 
+For an always-readable transcript the stock XiaoZhi screen (a centered
+emoji/character **face** plus a single-line 30 px scrolling subtitle) is
+replaced by the **RoboDog hermes text display**
+(`voice/robodog_hermes_display.patch`): the face is removed, the chat prompt
+and response use the **smaller 14 px noto font** and the full panel as their
+canvas, and — with `CONFIG_USE_MULTILINE_CHAT_MESSAGE=y` baked into
+`sdkconfig.defaults.robodog` — the text wraps onto many lines with real line
+breaks instead of truncating, so the full prompt/response is visible on screen.
+
 The board provisions itself over WiFi by POSTing the OTA URL configured in its
 NVS by `tools`-style offline provisioning (external `provision_nvs.py`: reads
 the WiFi PSK from netplan via sudo, writes the 16 KB NVS at `0x9000` with
@@ -185,6 +194,7 @@ compiled into every hermes build, like the capture hook.
 | `fetch_xiaozhi.sh` | Fetch + sha256-verify the pinned upstream xiaozhi-esp32 **source** into the gitignored `.xiaozhi/` (no-vendoring, cache-backed). |
 | `build_xiaozhi.sh` | Build the hermes firmware in the ESP-IDF v6.0 Docker image: board selection + capture hook + `idf.py build`. |
 | `robodog_hermes_capture.patch` | The RD_SHOT capture hook applied to upstream `custom_lcd_display.cc` (compiled into every hermes build). |
+| `robodog_hermes_display.patch` | The text-only transcript display: removes the emoji/character face, uses the smaller 14 px noto font, and lets the prompt/response wrap with line breaks over the full panel (with the `CONFIG_USE_MULTILINE_CHAT_MESSAGE=y` sdkconfig). |
 | `voice_bridge.py` | XiaoZhi WebSocket bridge + OTA/`/healthz` server (`:8000` WS, `:8003` OTA). Negotiates the 16 kHz uplink for ASR, sends **24 kHz Opus** downlink (the board codec rate → no 16↔24 resample, no distortion). Server-side energy VAD finalizes a turn ~0.8 s after you stop talking — required because the device streams `realtime` and never sends `listen stop`. The **brain** is the board's Hermes session: each ASR'd utterance is submitted over a loopback brain WebSocket to the `xiaozhi` platform plugin inside the hermes-gateway (falls back to the stateless gx10 call if that's down). |
 | `hermes-platform/xiaozhi/` | **Hermes platform plugin** (plugin.yaml + adapter.py + __init__.py) deployed to `~/.hermes/plugins/platforms/xiaozhi/`. Makes the board a first-class Hermes gateway client (see "Hermes gateway integration" below). |
 | `lmao-robodog-voice.service` | systemd **user** unit for the bridge, run from `~/xiaozhi/` with a Python venv (`fastapi`, `uvicorn`, `websockets`, `opuslib`, `faster-whisper`, `numpy`). |
