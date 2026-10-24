@@ -244,6 +244,47 @@ verified by feeding its output back through ASR (no human round-trip).
 the bridge auto-processes and speaks. Full-duplex: just talk again for the
 next turn. Logs: `journalctl --user -u lmao-robodog-voice -f`.
 
+## ESP-Claw standalone agent (Phase 0 spike)
+
+`robodog_client/esp-claw/` stages **esp-claw** (`edge_agent`) for the same
+RLCD-4.2 board — the board calls its own ASR / LLM / TTS endpoints over LAN,
+no bridge, no Hermes. Phase 0 (spike) is implemented and hardware-verified;
+see `robodog_client/esp-claw/DESIGN.md` **Phase 0 — spike results** for the
+full details + fixes. TL;DR:
+
+```sh
+# fetch pinned esp-claw -> gitignored robodog_client/.esp-claw/
+bash robodog_client/esp-claw/fetch_esp_claw.sh
+
+# build in espressif/idf:v5.5.4 (endpoints overridable per-build)
+CLAW_IDF_IMG=espressif/idf:v5.5.4 \
+CLAW_ASR_URL=http://192.168.50.153:11801/v1/audio/transcriptions \
+CLAW_TTS_URL=http://192.168.50.153:11804/v1/audio/speech \
+bash robodog_client/esp-claw/build_esp_claw.sh
+
+# flash (host esptool — the board's sanctioned path) + provision NVS
+# (WiFi + LLM + cfg_ver schema key) at 0xA000
+CLAW_IDF_IMG=espressif/idf:v5.5.4 bash robodog_client/esp-claw/flash_esp_claw.sh
+```
+
+Bazel wrappers: `bazel run //robodog_client:build_robodog_claw` and
+`:flash_robodog_claw`. The RLCD board boots esp-claw's LVGL home screen
+(clock + WiFi header) — capturable via `capture.py --describe` (RD_SHOT
+seam: self-ticking rdshot publisher; `rdshot` console command force-
+publishes).
+
+On-device probe console commands (over `/dev/ttyACM0` 115200, `app> ` REPL):
+
+```sh
+rd_asr                 # device -> Whisper via host-forward, logs text="..."
+rd_tts <text>          # device -> Kokoro via host-forward, logs WAV bytes
+rd_chat <question>     # native agent seam -> LLM, logs rd_chat reply: ...
+rdshot                 # force-publish the current screen frame (RD_SHOT)
+```
+
+Mutually exclusive with the calendar + hermes voice firmwares — flashing
+esp-claw replaces them on this board.
+
 ## Layout
 
 ```

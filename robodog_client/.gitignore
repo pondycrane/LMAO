@@ -7,6 +7,9 @@
 # XiaoZhi voice-firmware SOURCE is fetched at build time (voice/fetch_xiaozhi.sh
 # -> pinned upstream commit + sha256) and staged here; never committed.
 /.xiaozhi/
+# espressif/esp-claw SOURCE is fetched at build time (esp-claw/fetch_esp_claw.sh
+# -> pinned upstream commit + sha256) and staged here; never committed.
+/.esp-claw/
 # u8g2 is fetched at build time (u8g2_prepare.sh -> @u8g2 http_archive); only
 # our ESP-IDF component wrapper is committed, the upstream csrc never is.
 /components/u8g2/*
