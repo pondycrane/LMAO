@@ -1,6 +1,6 @@
 # RoboDog ESP-Claw — Standalone On-Device Agent (Design)
 
-**Status**: Phase 0 (spike) complete — see **Phase 0 results** below. Phases 1–3 pending.
+**Status**: Phase 0 (spike) + **Phase 1 (board + display)** complete — see Phase 0/1 results below. Phases 2–3 pending.
 **Goal**: run [ESP-Claw](https://github.com/espressif/esp-claw) (`edge_agent`)
 standalone on the Waveshare ESP32-S3 RLCD-4.2. The board calls **all** model
 endpoints (ASR, LLM, TTS) on its own over LAN WiFi. No `voice_bridge.py`, no
@@ -170,7 +170,7 @@ AGENTS.md workflow table.
 | Phase | Deliverable | Gate |
 |---|---|---|
 | 0 — Spike | ESP-Claw builds for the board; ST7305 shows LVGL text; chat-injection API for ASR text identified; device→Whisper and device→Kokoro HTTP round-trips proven | screen capture shows text |
-| 1 — Board + display | Board package, `esp_lcd_st7305`, text-only UI parity, RD_SHOT | `capture.py --describe` readback |
+| 1 — Board + display | Board package, `esp_lcd_st7305`, text-only UI parity, RD_SHOT | `capture.py --describe` readback — **DONE, hardware-verified** (Phase 1) |
 | 2 — Voice loop | RD_LISTEN → ASR → agent → TTS → speaker, all device-initiated | `robodog-claw-e2e` full chain |
 | 3 — Cutover | Bridge/Hermes/patches deleted, docs + workflows updated | green CI + production-health |
 
@@ -282,24 +282,43 @@ Model configuration (NVS, namespace `app`):
   `CLAW_TTS_URL=http://192.168.50.153:11804/v1/audio/speech` and the overlay
   POSTs through the forwards. `dev_display_lcd`-independent of the board.
 
-### RD_SHOT capture seam — finding for Phase 1
+### RD_SHOT capture seam — finding for Phase 1 (root cause + implemented seam)
 
-The RLCD panel (`rlcd_flush_frame`) is **not** flushed on every boot:
-esp-claw's `display_service` renders LVGL into a software **dummy-draw /
-session buffer** (an RGB565 400×300 buffer owned by `display_service.c`,
-`display_service_dummy_draw_blit`) and only pushes to the physical panel
-event-driven — so the board-flush RD_SHOT hook yields nothing when the panel
-is parked in dummy mode. The deterministic Phase-1 capture seam is the LVGL
-output itself:
+Phase-0 observed the board-flush RD_SHOT hook was flaky ("sometimes zero
+frames for a whole boot"). Phase 1 **pinned the root cause**: esp-claw's own
+display_service / system_ui are gated behind `CONFIG_ESP_BOARD_DEV_DISPLAY_LCD_SUPPORT`,
+which the esp_board_manager Kconfig **silently drops for this custom-typed
+panel** (the board declares `display_lcd` as `type: custom`, so only
+`ESP_BOARD_DEV_CUSTOM_SUPPORT` is set; `display_service_load_board_display()`
+therefore compiled out / returns `ESP_ERR_NOT_SUPPORTED`). On a normal boot
+**nothing initialises the RLCD at all** — no LVGL, no flush, no frame. (That is
+why the boot appeared to "park the panel in dummy mode"; it was simply never
+brought up.)
 
-- Hook `display_service_dummy_draw_blit`'s `frame_buffer` (the rendered
-  RGB565 frame every LVGL pass produces), or the `esp_lvgl_adapter`
-  LVGL-flush bridge (`lvgl_bridge_v9.c`), and binarize RGB565 → 15000 B with
-  the same LUT the panel port uses. Update `capture.py` sampling to expect
-  that seam.
-- `robodog_phase0`'s rdshot task self-ticks every 4 s (not just on flush
-  notification) so a static screen keeps producing frames; the `rdshot`
-  console command force-publishes the retained frame immediately.
+Phase 1 therefore does **not** lean on esp-claw's display stack for the UI or
+the capture. The LMAO overlay brings the panel + LVGL up itself and the RD_SHOT
+frame is sourced deterministically:
+
+- **UI owns the display**: `robodog_ui` starts the custom RLCD panel through
+  the board manager (`robodog_board_display_get`, in the LMAO-owned
+  `setup_device.c`), registers an LVGL display via `esp_lv_adapter` directly
+  (no display_service / system_ui), and loads its text-only screen. This is
+  deterministic — it comes up on every boot.
+- **Frame source**: `robodog_phase0`'s rdshot publisher self-ticks every 4 s
+  and force-publishes on the `rdshot` command. Normally it publishes the
+  retained frame from the last panel flush; as a **deterministic fallback it
+  reads the panel's live 1-bpp `frame_buf` directly**
+  (`robodog_board_display_frame`, overlay `setup_device.c`) — which is always
+  valid (blank white on a fresh boot, current content after any render), so a
+  capture at any point always has a 15000 B frame. `capture.py decode_hermes`
+  (400×300 ST7305 landscape) works unmodified.
+- **Capture is still the exact panel LUT**: no RGB565→1bpp re-binarization —
+  the panel's own `rlcd_panel_draw_bitmap` is the single source, so the
+  published frame is bit-for-bit the ST7305 layout (zero duplication).
+- The UI forces a synchronous LVGL refresh + immediate RD_SHOT dump after each
+  text change, so the gate capture (`rd_chat` → reply) reads the fresh frame.
+
+No `capture.py` changes were needed.
 
 ### Chat-injection seam (Phase 0 resolution)
 
@@ -323,5 +342,78 @@ tox-Free fixtures confirm the endpoint shapes).
   JSON `{model, voice, input}` to `/v1/audio/speech` and streams WAV.
 - ES8311 + ES7210 audio devices initialize on boot (board port, no
   extra work) — good groundwork for Phase 2's native voice loop.
-- The board boots esp-claw's own LVGL home screen (clock + WiFi status header)
-  before any Phase-1 UI lands; capture.py's hermes decode path reads it as-is.
+- The board boots the RoboDog **text-only chat UI** (Phase 1) directly —
+  see the Phase 1 results below; capture.py's hermes decode path reads the
+  RD_SHOT frame as-is.
+
+## Phase 1 — results (implemented)
+
+Phase 1 delivers the **core text-only presentation layer + deterministic
+RD_SHOT**, hardware-verified on the board.
+
+### Changes
+
+- **Board file moved to the overlay** (no fragile patch). The whole
+  `setup_device.c` (ST7305 custom panel + the RD_SHOT capture hook + the new
+  `robodog_board_display_get` / `robodog_board_display_frame` helpers) is now
+  an LMAO-owned copy at
+  `boards/waveshare_ESP32_S3_RLCD_4_2/setup_device.c` in the overlay,
+  wholesale-copied over the upstream waveshare copy at build time.
+  `patches/0001-rdshot.patch` is deleted; only `0002-init.patch` (wires
+  `robodog_init()`) remains.
+- **Deterministic text-only UI** (`robodog_ui.c`): no face/emote, ~14 px
+  Montserrat-14 ASCII font (ships with LVGL — no vendoring; noto-sans-basic-14
+  equivalent), left-aligned full-panel wrap, status bar on top
+  (`WIFI ON/OFF | <agent state>`). Registers its own LVGL display via
+  `esp_lv_adapter` (not esp-claw's gated display_service), so it comes up on
+  **every** boot.
+- **Agent rendering (stale-caption-safe)**: `rd_chat` (the per-turn
+  chat-injection seam Phase 2's voice component will also use) renders the
+  user transcript (`Style "> <text>"`) before the run and the assistant reply
+  when it finalizes; the status bar shows `thinking` mid-run and `idle` after.
+  A single local render owner means the transcript only ever accumulates what
+  actually completed — no stale "previous reply" replay.
+- **RD_SHOT now deterministic**: the rdshot publisher self-ticks plus reads
+  the panel's live `frame_buf` as a fallback, so a capture has a frame at any
+  time (not only after a flush / text change). The exact panel 1-bpp layout is
+  preserved (no LUT duplication), so `capture.py --describe` works unmodified.
+
+### Gate (hardware-verified)
+
+`rd_chat 6*7` → the screen renders `> 6*7` then the reply `42`; the captured
+RD_SHOT frame's vision readback transcribes it (`capture.py --describe`):
+
+```
+- WIFI ON | ...
+- 42
+```
+
+Deterministic: the answer is present in every captured frame (the earlier
+`rd_chat 2+2` → `4` also read back), and a fresh-boot capture with **no** text
+change still returns a frame (the direct-frame fallback). A single local
+render owner (text appended only when a turn's reply actually finalizes)
+satisfies the stale-caption rule by construction.
+
+Phase-0 probes re-passed with no regression: `rd_asr`
+(device→Whisper 200, `text="What can you do?"`), `rd_tts`
+(device→Kokoro 200, 165644 B RIFF WAV), `rd_chat` (reply via the native seam,
+rendered to the UI).
+
+**Stable capture invocation**: because the rdshot publisher self-ticks and can
+read the panel frame directly, the no-reset live-listen path always returns a
+frame; the reset path works too (a frame is seeded on every boot). Either works
+
+```sh
+python3 robodog_client/capture.py --port /dev/ttyACM0 --n 1 --timeout 30 --describe
+python3 robodog_client/capture.py --port /dev/ttyACM0 --reset --n 1 --timeout 45 --describe
+```
+
+### Deterministic display bring-up (root cause fix)
+
+esp-claw never inits the RLCD because `APP_CLAW_SYSTEM_UI_ENABLE` depends on
+`ESP_BOARD_DEV_DISPLAY_LCD_SUPPORT`, which the board-manager Kconfig drops for
+this custom-typed panel. The Phase-1 overlay bypasses that entirely:
+`robodog_ui` calls `robodog_board_display_get()` → board manager lazy-inits
+the custom `display_lcd` device → panel ready → LVGL adapter drives it. This is
+the same panel port Phase 0 proved on a "good" boot, now brought up on **every**
+boot deterministically.
