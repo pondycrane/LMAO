@@ -1,0 +1,11 @@
+# IDF Component Manager manifest for robodog_phase0. The claw_* components
+# live outside the edge_agent app tree (repo-root components/claw_modules/).
+# This manifest sits at application/edge_agent/components/robodog_phase0, i.e.
+# FOUR levels below the repo root — the same ../../../../ depth http_server
+# uses. (A shallower ../../../ resolves to <app-parent>/components/... , which
+# the component manager evaluates against a base that does not exist.)
+dependencies:
+  claw_manager:
+    path: ../../../../components/claw_modules/claw_manager
+  claw_core:
+    path: ../../../../components/claw_modules/claw_core
