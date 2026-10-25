@@ -227,6 +227,20 @@ archon workflow run robodog-hermes-dev "description of feature"
 # implement/finalize): the PR must already exist — `gh pr create` first, then:
 archon workflow run robodog-hermes-review "review PR #NNN"
 
+# RoboDog ESP-Claw standalone agent — the SAME board running the esp-claw
+# edge_agent (robodog_client/esp-claw/, self-built from the pinned upstream +
+# the LMAO overlay: text-only UI + RD_SHOT + the Phase 2 native voice loop
+# rd_listen -> ASR -> agent -> TTS -> speaker; the board calls Whisper/LLM/
+# Kokoro on its own, no bridge). Verification is VOICE-LOOP-DRIVEN:
+# robodog-claw-e2e (serial-console asserts + test-mic ring re-ASR + RD_SHOT
+# subtitle readback). Mutually exclusive with the calendar/hermes firmware.
+# Firmware fixes from review MUST re-flash the board before the e2e gate runs
+# (robodog-claw-e2e never reflashes — do it via robodog-claw-implement-review-fixes).
+archon workflow run robodog-claw-dev "description of feature"
+# Review an EXISTING ESP-Claw PR (starts AT the code review, no planning/
+# implement/finalize): the PR must already exist — `gh pr create` first, then:
+archon workflow run robodog-claw-review "review PR #NNN"
+
 # Kid panels (per-kid dedicated boards, one firmware image): the per-board
 # `kid_name` is set at flash time with `flash_firmware --kid-name <kid>` (writes
 # the NVS `kid_name` key at 0x9000, wiping the 24 KB NVS partition — desired for
