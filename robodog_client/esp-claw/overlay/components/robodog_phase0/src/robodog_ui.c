@@ -69,6 +69,7 @@ static lv_display_t *s_disp;
 
 static lv_obj_t *s_status_label;
 static lv_obj_t *s_state_label;
+static lv_obj_t *s_body_scroller;
 static lv_obj_t *s_body_label;
 
 static char s_status_text[96];
@@ -224,11 +225,26 @@ static esp_err_t ui_build_screen(void)
     lv_obj_set_style_border_width(rule, 0, 0);
     lv_obj_clear_flag(rule, LV_OBJ_FLAG_SCROLLABLE);
 
-    /* Conversation body: full-panel width, multiline wrap, left aligned. */
-    s_body_label = lv_label_create(scr);
+    /* Conversation body: a scrollable container clipped to the panel so new
+     * content is pinned to the BOTTOM (scroll-to-bottom on every update) —
+     * otherwise a long reply overflows below the visible fold and the newest
+     * text is cut off.  White paper bg so a scrolled-away region stays white. */
+    s_body_scroller = lv_obj_create(scr);
+    ESP_RETURN_ON_FALSE(s_body_scroller != NULL, ESP_ERR_NO_MEM, TAG,
+                        "create body scroller failed");
+    lv_obj_set_pos(s_body_scroller, UI_PAD, UI_STATUS_H);
+    lv_obj_set_size(s_body_scroller, UI_PANEL_W - 2 * UI_PAD,
+                    UI_PANEL_H - UI_STATUS_H - UI_PAD);
+    lv_obj_set_style_border_width(s_body_scroller, 0, 0);
+    lv_obj_set_style_pad_all(s_body_scroller, 0, 0);
+    lv_obj_set_style_bg_color(s_body_scroller, lv_color_white(), 0);
+    lv_obj_set_style_bg_opa(s_body_scroller, LV_OPA_COVER, 0);
+    lv_obj_set_scrollbar_mode(s_body_scroller, LV_SCROLLBAR_MODE_OFF);
+
+    s_body_label = lv_label_create(s_body_scroller);
     ESP_RETURN_ON_FALSE(s_body_label != NULL, ESP_ERR_NO_MEM, TAG,
                         "create body label failed");
-    lv_obj_set_pos(s_body_label, UI_PAD, UI_STATUS_H);
+    lv_obj_set_pos(s_body_label, 0, 0);
     lv_obj_set_width(s_body_label, UI_PANEL_W - 2 * UI_PAD);
     lv_obj_set_style_text_align(s_body_label, LV_TEXT_ALIGN_LEFT, 0);
     /* White paper + black ink at the label level (see status label note):
@@ -259,6 +275,15 @@ static void ui_flush_locked(void)
      * deterministic RD_SHOT frame, not just text changes. */
     lv_label_set_text(s_body_label, s_transcript);
     lv_obj_invalidate(s_body_label);
+    /* Pin the newest message to the bottom of the visible area: recompute the
+     * label height, then scroll the body scroller to its content bottom so a
+     * long reply ends on-screen instead of being cut off below the fold.
+     * (This LVGL build has no lv_obj_scroll_to_bottom; a huge y is clamped to
+     * the max scroll extent, i.e. the bottom.) */
+    if (s_body_scroller != NULL) {
+        lv_obj_update_layout(s_body_scroller);
+        lv_obj_scroll_to_y(s_body_scroller, 0x7FFFFFFF, LV_ANIM_OFF);
+    }
     if (lv_label_get_text(s_status_label) != s_status_text) {
         lv_label_set_text(s_status_label, s_status_text);
     }
