@@ -47,7 +47,7 @@ static const char *TAG = "robodog_ui";
 #define UI_PAD            10
 
 /* ASCII-only glyph set (parity with the bridge's display_text_ascii()): any
- * non-printable/complex codepoint is replaced so the ~14 px monochrome font
+ * non-printable/complex codepoint is replaced so the ~16 px monochrome font
  * never mis-renders.  Multi-byte UTF-8 sequences are collapsed to '?'. */
 #define UI_ASCII_REPLACE  '?'
 
@@ -177,7 +177,14 @@ static esp_err_t ui_build_screen(void)
     lv_obj_set_pos(s_status_label, UI_PAD, 4);
     lv_obj_set_width(s_status_label, UI_PANEL_W - 2 * UI_PAD);
     lv_obj_set_style_text_align(s_status_label, LV_TEXT_ALIGN_LEFT, 0);
-    lv_obj_set_style_text_font(s_status_label, &lv_font_montserrat_14, 0);
+    /* Force white paper + black ink at the LABEL level, independent of any
+     * theme: an opaque white label background with pure-black text.  (The
+     * themed/default text color is a mid-grey that reads as grey on the
+     * 1-bpp reflective panel; leaving the label bg unset renders it black.) */
+    lv_obj_set_style_bg_color(s_status_label, lv_color_white(), 0);
+    lv_obj_set_style_bg_opa(s_status_label, LV_OPA_COVER, 0);
+    lv_obj_set_style_text_color(s_status_label, lv_color_black(), 0);
+    lv_obj_set_style_text_font(s_status_label, &lv_font_montserrat_16, 0);
     ui_refresh_status_locked();
 
     /* Separator under the status bar. */
@@ -196,7 +203,12 @@ static esp_err_t ui_build_screen(void)
     lv_obj_set_pos(s_body_label, UI_PAD, UI_STATUS_H);
     lv_obj_set_width(s_body_label, UI_PANEL_W - 2 * UI_PAD);
     lv_obj_set_style_text_align(s_body_label, LV_TEXT_ALIGN_LEFT, 0);
-    lv_obj_set_style_text_font(s_body_label, &lv_font_montserrat_14, 0);
+    /* White paper + black ink at the label level (see status label note):
+     * opaque white bg so the conversation area is never a black screen. */
+    lv_obj_set_style_bg_color(s_body_label, lv_color_white(), 0);
+    lv_obj_set_style_bg_opa(s_body_label, LV_OPA_COVER, 0);
+    lv_obj_set_style_text_color(s_body_label, lv_color_black(), 0);
+    lv_obj_set_style_text_font(s_body_label, &lv_font_montserrat_16, 0);
     lv_obj_set_style_text_line_space(s_body_label, 2, 0);
     lv_label_set_long_mode(s_body_label, LV_LABEL_LONG_WRAP);
     lv_label_set_text(s_body_label, s_transcript);

@@ -4,9 +4,10 @@
 **Goal**: run [ESP-Claw](https://github.com/espressif/esp-claw) (`edge_agent`)
 standalone on the Waveshare ESP32-S3 RLCD-4.2. The board calls **all** model
 endpoints (ASR, LLM, TTS) on its own over LAN WiFi. No `voice_bridge.py`, no
-Hermes gateway, no XiaoZhi protocol. The RLCD presentation layer stays exactly
-as PR #278 defined it: text-only, no face/emote, ~14 px font, left-aligned
-multiline wrap filling the 400×300 panel, status line on top.
+Hermes gateway, no XiaoZhi protocol. The RLCD presentation layer stays
+exactly as PR #278 defined it: text-only, no face/emote, ~16 px font,
+left-aligned, multiline wrap filling the 400×300 panel, status line on top
+(the font is pure black on the white reflective panel for max contrast).
 
 ## Problem (current state)
 
@@ -99,10 +100,12 @@ emote-centric, so parity is explicit work, not config:
   agent events (Event Router, verbose `agent_stage`) and rendering: user
   transcript on ASR completion, assistant reply as it finalizes — same
   roles/timing as `SetChatMessage("user"|"assistant", …)` today.
-- Theme: no emote/`emoji_box`, noto-sans-basic-14-equivalent font,
-  left-aligned, full-panel wrap (`CONFIG_USE_MULTILINE_CHAT_MESSAGE`
-  semantics), ASCII-sanitize before render (same glyph constraint as the
-  bridge's `display_text_ascii()`), status bar with WiFi/agent state.
+- Theme: no emote/`emoji_box`, noto-sans-basic-16-equivalent font (Montserrat-16,
+  pure black — the LVGL theme default is a mid-grey that binarizes to thin
+  greys on the 1-bpp panel), left-aligned, full-panel wrap
+  (`CONFIG_USE_MULTILINE_CHAT_MESSAGE` semantics), ASCII-sanitize before render
+  (same glyph constraint as the bridge's `display_text_ascii()`), status bar
+  with WiFi/agent state.
 - **Stale-caption rule preserved**: never show the previous reply during the
   current turn (bridge solved it with the `_caption_queue` split; here the
   single local render owner makes it trivial — E2E assert stays).
@@ -361,9 +364,13 @@ RD_SHOT**, hardware-verified on the board.
   wholesale-copied over the upstream waveshare copy at build time.
   `patches/0001-rdshot.patch` is deleted; only `0002-init.patch` (wires
   `robodog_init()`) remains.
-- **Deterministic text-only UI** (`robodog_ui.c`): no face/emote, ~14 px
-  Montserrat-14 ASCII font (ships with LVGL — no vendoring; noto-sans-basic-14
-  equivalent), left-aligned full-panel wrap, status bar on top
+- **Deterministic text-only UI** (`robodog_ui.c`): no face/emote, ~16 px
+  Montserrat-16 ASCII font (ships with LVGL — no vendoring; noto-sans-basic
+  equivalent), **pure-black text on an opaque white label background**. The
+  LVGL-theme labels otherwise render against a black screen with a mid-grey
+  text that binarizes thin on the 1-bpp panel, so the status + body labels
+  force `bg=white COVER` + `text=black` for crisp black-on-white. Left-aligned
+  full-panel wrap, status bar on top
   (`WIFI ON/OFF | <agent state>`). Registers its own LVGL display via
   `esp_lv_adapter` (not esp-claw's gated display_service), so it comes up on
   **every** boot.
