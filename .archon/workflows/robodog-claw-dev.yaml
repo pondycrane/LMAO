@@ -1,0 +1,263 @@
+name: robodog-claw-dev
+description: |
+  Use when: You have a feature idea or description and want end-to-end development
+  in the LMAO repo for the RoboDog **ESP-Claw standalone agent** — the same
+  Waveshare ESP32-S3 RLCD-4.2 (ST7305) board running the esp-claw edge_agent
+  (robodog_client/esp-claw/, self-built from the pinned upstream + the LMAO
+  overlay: text-only UI + deterministic RD_SHOT + the Phase 2 native voice loop
+  rd_listen -> ASR -> agent -> TTS -> speaker). The board calls ALL model
+  endpoints (Whisper / LLM / Kokoro) on its own over LAN; no voice_bridge, no
+  Hermes. Input: Feature description in natural language, or path to a PRD file.
+  Output: PR ready for merge with comprehensive review + the robodog-claw-e2e
+  voice-loop evidence (device console ASR transcript + agent reply + TTS + RLCD
+  subtitle readback).
+
+  Claw-dev workflow (device-direct voice + pixel verification):
+  1. Create implementation plan (claw rules: architecture in
+     robodog_client/esp-claw/DESIGN.md; DRY: shared protocol in firmware_common/,
+     single corpus copy in voice/corpus/, no vendoring — the esp-claw source is
+     fetched sha256-pinned, never committed)
+  2. Setup branch and extract scope limits
+  3. Verify plan research is still valid
+  4. Implement all tasks with Bazel build-checking + firmware build via
+     CLAW_IDF_IMG=espressif/idf:v5.5.4 bash robodog_client/esp-claw/build_esp_claw.sh
+     (endpoints baked via CLAW_ASR_URL / CLAW_TTS_URL — see DESIGN; the plain
+     `bazel run //robodog_client:build_robodog_claw` bakes dead spark-5307
+     endpoints and only proves the Bazel path)
+  5. lmao-validate gate (BUILD completeness + bazel build + unit tests, firmware
+     compile via build_esp_claw.sh)
+  6. MANDATORY robodog-claw-e2e gate: flash the real board (host esptool via
+     robodog_client/esp-claw/flash_esp_claw.sh — the sanctioned path for
+     0x303A:0x1001) + drive the autonomous device-direct voice loop
+     (robodog_claw_e2e.py: rd_listen -> mic -> ASR -> agent -> TTS -> speaker ->
+     RD_SHOT subtitle readback). Loud skip when the board or the ALSA test card
+     is missing. NEVER flash the Cardputer or RNode.
+  7. robodog-production-health gate (.gate-head owner)
+  8. Create PR with template + the robodog-claw-e2e evidence
+     ($ARTIFACTS_DIR/hardware-e2e.md / robodog-claw-e2e.md verbatim), mark ready
+  9. Comprehensive code review (5 parallel agents with scope limit awareness)
+  10. Synthesize and fix review findings
+  11. RE-RUNS the full gate chain after any fix commits (fast-pass only when
+      HEAD is unchanged — the #87 regression guard)
+  12. Final summary with decision matrix -> GitHub comment
+
+  NOT for: Cardputer/LoRa work (lmao-feature-dev), GitHub-issue fixes
+  (lmao-fix-issue), Smart Irrigation (smart-irrigation-dev), standalone reviews
+  of an EXISTING claw PR (robodog-claw-review), the RoboDog *calendar*
+  firmware (robodog-client-dev) or the hermes voice firmware
+  (robodog-hermes-dev) — the RLCD board hosts only one firmware image at a
+  time; never run two board workflows at once.
+
+  Models: gx10 DeepSeek V4 Flash (gx10/deepseek-ai/DeepSeek-V4-Flash-0731) for
+  the agent. The RD_SHOT vision readback and the ring re-ASR inside
+  robodog-claw-e2e are fixed pipelines, not the agent model. No Claude anywhere.
+
+nodes:
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 0: CREATE PLAN (claw rules baked in via lmao-create-plan + DESIGN)
+  # ═══════════════════════════════════════════════════════════════════
+
+  - id: create-plan
+    command: lmao-create-plan
+    context: fresh
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    effort: high
+
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 1: SETUP
+  # ═══════════════════════════════════════════════════════════════════
+
+  - id: plan-setup
+    command: lmao-plan-setup
+    depends_on: [create-plan]
+    context: fresh
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 2: CONFIRM PLAN
+  # ═══════════════════════════════════════════════════════════════════
+
+  - id: confirm-plan
+    command: lmao-confirm-plan
+    depends_on: [plan-setup]
+    context: fresh
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 3: IMPLEMENT
+  # ═══════════════════════════════════════════════════════════════════
+
+  - id: implement-tasks
+    command: lmao-implement-tasks
+    depends_on: [confirm-plan]
+    context: fresh
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    effort: max
+
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 4: GATE CHAIN — validate -> claw voice-loop E2E -> production
+  # health. Mandatory before PR creation.
+  # ═══════════════════════════════════════════════════════════════════
+
+  - id: validate
+    command: lmao-validate
+    depends_on: [implement-tasks]
+    context: fresh
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+
+  - id: claw-e2e
+    command: robodog-claw-e2e
+    depends_on: [validate]
+    context: fresh
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+
+  - id: production-health
+    command: robodog-production-health
+    depends_on: [claw-e2e]
+    context: fresh
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 5: FINALIZE PR (robodog-claw-e2e writes
+  # $ARTIFACTS_DIR/robodog-claw-e2e/robodog-claw-e2e.md AND a top-level
+  # hardware-e2e.md summary so the generic finalize gate's mandatory
+  # hardware-e2e.md contract is satisfied)
+  # ═══════════════════════════════════════════════════════════════════
+
+  - id: finalize-pr
+    command: lmao-finalize-pr
+    depends_on: [production-health]
+    context: fresh
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 6: CODE REVIEW
+  # ═══════════════════════════════════════════════════════════════════
+
+  - id: verify-pr-base
+    bash: |
+      set -euo pipefail
+      EXPECTED="$BASE_BRANCH"
+      ACTUAL=$(gh pr view --json baseRefName -q '.baseRefName')
+      if [ "$ACTUAL" != "$EXPECTED" ]; then
+        PR_NUMBER=$(gh pr view --json number -q '.number')
+        echo "Base mismatch on PR #$PR_NUMBER: expected=$EXPECTED actual=$ACTUAL — re-targeting" >&2
+        gh pr edit "$PR_NUMBER" --base "$EXPECTED"
+      else
+        echo "PR base verified: $EXPECTED"
+      fi
+    depends_on: [finalize-pr]
+
+  - id: review-scope
+    command: archon-pr-review-scope
+    depends_on: [verify-pr-base]
+    context: fresh
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+
+  - id: sync
+    command: lmao-sync-pr-with-main
+    depends_on: [review-scope]
+    context: fresh
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+
+  - id: code-review
+    command: archon-code-review-agent
+    depends_on: [sync]
+    context: fresh
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+
+  - id: error-handling
+    command: archon-error-handling-agent
+    depends_on: [sync]
+    context: fresh
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+
+  - id: test-coverage
+    command: archon-test-coverage-agent
+    depends_on: [sync]
+    context: fresh
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+
+  - id: comment-quality
+    command: archon-comment-quality-agent
+    depends_on: [sync]
+    context: fresh
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+
+  - id: docs-impact
+    command: archon-docs-impact-agent
+    depends_on: [sync]
+    context: fresh
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+
+  - id: synthesize
+    command: archon-synthesize-review
+    depends_on: [code-review, error-handling, test-coverage, comment-quality, docs-impact]
+    trigger_rule: one_success
+    context: fresh
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 7: FIX REVIEW ISSUES
+  # ═══════════════════════════════════════════════════════════════════
+
+  - id: implement-fixes
+    command: robodog-claw-implement-review-fixes
+    depends_on: [synthesize]
+    context: fresh
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    effort: max
+
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 8: FINAL GATE CHAIN — re-run after review-fix commits.
+  # Fast-pass ONLY when HEAD is unchanged since the first gate chain
+  # (.gate-head marker, written by robodog-production-health). The #87 guard.
+  # ═══════════════════════════════════════════════════════════════════
+
+  - id: final-validate
+    command: lmao-validate
+    depends_on: [implement-fixes]
+    context: fresh
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+
+  - id: final-claw-e2e
+    command: robodog-claw-e2e
+    depends_on: [final-validate]
+    context: fresh
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+
+  - id: final-production-health
+    command: robodog-production-health
+    depends_on: [final-claw-e2e]
+    context: fresh
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 9: FINAL SUMMARY & FOLLOW-UP
+  # ═══════════════════════════════════════════════════════════════════
+
+  - id: workflow-summary
+    command: archon-workflow-summary
+    depends_on: [final-production-health]
+    context: fresh
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+
+  # ─── Push notification via ntfy (bash + curl) ─────────────────
+  - id: ntfy-result
+    bash: |
+      if [ ! -f .archon/mcp/ntfy.json ]; then exit 0; fi
+      NTFY_TOPIC="${NTFY_TOPIC:-$(grep -oP '"NTFY_TOPIC":\s*"\K[^"]+' .archon/mcp/ntfy.json 2>/dev/null)}"
+      [ -z "$NTFY_TOPIC" ] && exit 0
+      if [ -f "$ARTIFACTS_DIR/workflow-summary.md" ]; then
+        TITLE="✅ RoboDog-Claw-Dev Complete"
+        TAGS="white_check_mark"
+        BODY="Workflow completed successfully for: $ARGUMENTS"
+      else
+        TITLE="❌ RoboDog-Claw-Dev Failed"
+        TAGS="x"
+        BODY="Workflow failed for: $ARGUMENTS"
+      fi
+      curl -sf -H "Title: $TITLE" -H "Priority: 4" -H "Tags: $TAGS" \
+        -d "$BODY" "https://ntfy.sh/$NTFY_TOPIC" > /dev/null 2>&1
+    depends_on: [workflow-summary]
+    trigger_rule: all_done

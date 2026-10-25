@@ -244,14 +244,15 @@ verified by feeding its output back through ASR (no human round-trip).
 the bridge auto-processes and speaks. Full-duplex: just talk again for the
 next turn. Logs: `journalctl --user -u lmao-robodog-voice -f`.
 
-## ESP-Claw standalone agent (Phase 1: text-only UI + deterministic RD_SHOT)
+## ESP-Claw standalone agent (Phase 1 text UI + Phase 2 voice loop)
 
 `robodog_client/esp-claw/` stages **esp-claw** (`edge_agent`) for the same
 RLCD-4.2 board — the board calls its own ASR / LLM / TTS endpoints over LAN,
-no bridge, no Hermes. Phase 0 (spike) is implemented and hardware-verified;
-Phase 1 adds the PR #278 text-only chat UI and a deterministic RD_SHOT
-capture seam. See `robodog_client/esp-claw/DESIGN.md` for the full details +
-fixes. TL;DR:
+no bridge, no Hermes. Phase 0 (spike) + Phase 1 (PR #278 text-only chat UI +
+deterministic RD_SHOT) are implemented and hardware-verified; **Phase 2 adds the
+native on-device voice loop** (`rd_listen` → ES7210 mic → energy-VAD → Whisper
+ASR → claw agent LLM → Kokoro TTS → ES8311 speaker → RLCD render). See
+`robodog_client/esp-claw/DESIGN.md` for the full details + fixes. TL;DR:
 
 ```sh
 # fetch pinned esp-claw -> gitignored robodog_client/.esp-claw/
@@ -286,7 +287,21 @@ rd_asr                 # device -> Whisper via host-forward, logs text="..."
 rd_tts <text>          # device -> Kokoro via host-forward, logs WAV bytes
 rd_chat <question>     # native agent seam -> LLM, renders user + reply to the
                        #   text UI (e.g. `rd_chat 2+2` -> screen shows "4")
+rd_listen              # Phase 2 voice loop: mic -> ASR -> agent -> TTS -> speaker
+                       #   (or press the BOOT button — same trigger)
 rdshot                 # force-publish the current screen frame (RD_SHOT)
+```
+
+The RLCD status bar shows WiFi (left) and the live voice state **top-right**:
+`idle` → `listening` → `processing` (ASR+LLM) → `responding` (TTS) → `idle`.
+
+Phase 2 full-loop hardware gate (drives the corpus WAV into the board mic via
+the test rig's ALSA `hw:2` and asserts each leg from the device serial
+console + an RD_SHOT vision readback):
+
+```sh
+python3 robodog_client/esp-claw/robodog_claw_e2e.py --corpus capabilities
+# OPEN_SESSION / ASR_MATCH / REPLY / RING / SUBTITLE -> Overall: PASS
 ```
 
 Mutually exclusive with the calendar + hermes voice firmwares — flashing

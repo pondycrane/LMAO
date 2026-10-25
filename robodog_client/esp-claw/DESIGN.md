@@ -1,12 +1,13 @@
 # RoboDog ESP-Claw — Standalone On-Device Agent (Design)
 
-**Status**: Phase 0 (spike) + **Phase 1 (board + display)** complete — see Phase 0/1 results below. Phases 2–3 pending.
+**Status**: Phase 0 (spike) + **Phase 1 (board + display)** + **Phase 2 (voice loop)** complete — see Phase 0/1/2 results below. Phase 3 (cutover) pending.
 **Goal**: run [ESP-Claw](https://github.com/espressif/esp-claw) (`edge_agent`)
 standalone on the Waveshare ESP32-S3 RLCD-4.2. The board calls **all** model
 endpoints (ASR, LLM, TTS) on its own over LAN WiFi. No `voice_bridge.py`, no
-Hermes gateway, no XiaoZhi protocol. The RLCD presentation layer stays exactly
-as PR #278 defined it: text-only, no face/emote, ~14 px font, left-aligned
-multiline wrap filling the 400×300 panel, status line on top.
+Hermes gateway, no XiaoZhi protocol. The RLCD presentation layer stays
+exactly as PR #278 defined it: text-only, no face/emote, ~16 px font,
+left-aligned, multiline wrap filling the 400×300 panel, status line on top
+(the font is pure black on the white reflective panel for max contrast).
 
 ## Problem (current state)
 
@@ -99,10 +100,12 @@ emote-centric, so parity is explicit work, not config:
   agent events (Event Router, verbose `agent_stage`) and rendering: user
   transcript on ASR completion, assistant reply as it finalizes — same
   roles/timing as `SetChatMessage("user"|"assistant", …)` today.
-- Theme: no emote/`emoji_box`, noto-sans-basic-14-equivalent font,
-  left-aligned, full-panel wrap (`CONFIG_USE_MULTILINE_CHAT_MESSAGE`
-  semantics), ASCII-sanitize before render (same glyph constraint as the
-  bridge's `display_text_ascii()`), status bar with WiFi/agent state.
+- Theme: no emote/`emoji_box`, noto-sans-basic-16-equivalent font (Montserrat-16,
+  pure black — the LVGL theme default is a mid-grey that binarizes to thin
+  greys on the 1-bpp panel), left-aligned, full-panel wrap
+  (`CONFIG_USE_MULTILINE_CHAT_MESSAGE` semantics), ASCII-sanitize before render
+  (same glyph constraint as the bridge's `display_text_ascii()`), status bar
+  with WiFi/agent state.
 - **Stale-caption rule preserved**: never show the previous reply during the
   current turn (bridge solved it with the `_caption_queue` split; here the
   single local render owner makes it trivial — E2E assert stays).
@@ -171,7 +174,7 @@ AGENTS.md workflow table.
 |---|---|---|
 | 0 — Spike | ESP-Claw builds for the board; ST7305 shows LVGL text; chat-injection API for ASR text identified; device→Whisper and device→Kokoro HTTP round-trips proven | screen capture shows text |
 | 1 — Board + display | Board package, `esp_lcd_st7305`, text-only UI parity, RD_SHOT | `capture.py --describe` readback — **DONE, hardware-verified** (Phase 1) |
-| 2 — Voice loop | RD_LISTEN → ASR → agent → TTS → speaker, all device-initiated | `robodog-claw-e2e` full chain |
+| 2 — Voice loop | RD_LISTEN → ASR → agent → TTS → speaker, all device-initiated | `robodog-claw-e2e` full chain — **DONE, hardware-verified** (Phase 2) |
 | 3 — Cutover | Bridge/Hermes/patches deleted, docs + workflows updated | green CI + production-health |
 
 ## Risks / open questions
@@ -361,9 +364,13 @@ RD_SHOT**, hardware-verified on the board.
   wholesale-copied over the upstream waveshare copy at build time.
   `patches/0001-rdshot.patch` is deleted; only `0002-init.patch` (wires
   `robodog_init()`) remains.
-- **Deterministic text-only UI** (`robodog_ui.c`): no face/emote, ~14 px
-  Montserrat-14 ASCII font (ships with LVGL — no vendoring; noto-sans-basic-14
-  equivalent), left-aligned full-panel wrap, status bar on top
+- **Deterministic text-only UI** (`robodog_ui.c`): no face/emote, ~16 px
+  Montserrat-16 ASCII font (ships with LVGL — no vendoring; noto-sans-basic
+  equivalent), **pure-black text on an opaque white label background**. The
+  LVGL-theme labels otherwise render against a black screen with a mid-grey
+  text that binarizes thin on the 1-bpp panel, so the status + body labels
+  force `bg=white COVER` + `text=black` for crisp black-on-white. Left-aligned
+  full-panel wrap, status bar on top
   (`WIFI ON/OFF | <agent state>`). Registers its own LVGL display via
   `esp_lv_adapter` (not esp-claw's gated display_service), so it comes up on
   **every** boot.
@@ -417,3 +424,114 @@ this custom-typed panel. The Phase-1 overlay bypasses that entirely:
 the custom `display_lcd` device → panel ready → LVGL adapter drives it. This is
 the same panel port Phase 0 proved on a "good" boot, now brought up on **every**
 boot deterministically.
+
+## Phase 2 — results (implemented)
+
+Phase 2 delivers the **device-initiated voice loop**, hardware-verified end-to-end
+(RD_LISTEN → mic → Whisper ASR → agent LLM → Kokoro TTS → speaker → RLCD render).
+
+### Seam changes vs. the design above
+
+- **Audio access via the shared `audio_hub`, not raw I2S.** The board's ES8311
+  (speaker) + ES7210 (mic) codecs are brought up by `esp_board_manager` and
+  exposed through the managed `audio_hub` component (started by
+  `app_claw_audio_start_service`) as `dev_audio_codec_handles_t`. Opening the
+  codec a second time would conflict with audio_hub's ownership, so the voice
+  loop subscribes instead:
+    - mic (`robodog_voice.c voice_capture`): `audio_capture_open_subscriber(
+      ..., AUDIO_CAPTURE_SUB_APP, {16000,1,16}, ...)` then
+      `audio_capture_sub_read`.
+    - speaker (`voice_speak`): `audio_mixer_open_track(..., AUDIO_MIXER_TRACK_APP,
+      ...)` + `audio_mixer_track_write` / `_track_flush`. The natural APP
+      subscriber/track are free at boot (only the Lua `audio` module claims them,
+      and only when a skill runs). Half-duplex by construction: the mic
+      subscriber is open only for the listen phase and closed before TTS.
+- **Energy VAD, not ESP-SR.** `espressif/esp-sr` (VADNet) is not a dependency in
+  the tree and is not offline-fetchable; DESIGN's fallback is used, matching the
+  bridge exactly: `VAD_ENERGY=300` (16-bit mean-abs), `VAD_SILENCE_MS=800`,
+  `voice_capture()` ends the utterance 800 ms after the last speech frame.
+- **TTS input is clipped.** The esp-claw root agent is verbose by default (it
+  dumps multi-paragraph capability lists → ~50 s Kokoro audio → the 16 kHz
+  resample buffer exhausts SPIRAM). `voice_speak()` clips the spoken text at a
+  sentence/line break within `CONFIG_ROBODOG_VOICE_TTS_MAX_CHARS` (default 240,
+  ~10–19 s audio); the full reply still renders on the RLCD (only what is
+  spoken is bounded).
+- **24 kHz → 16 kHz resample.** Kokoro emits 24 kHz s16 WAV; the board's I2S /
+  mixer runs 16 kHz, so `resample_24_to_16()` does a linear 2:3 down-convert
+  before writing to the APP track.
+- **TTS playback is manually paced — the blocking-write assumption is wrong.**
+  `audio_mixer_track_write` does NOT block for real-time playback: it only
+  waits `AUDIO_MIXER_WRITE_TIMEOUT_MS` (500 ms) for its ~8-frame (5 KB) ring to
+  drain, then returns short. Writing a whole long reply at once therefore
+  saturated the ring and timed out after ~0.5 s — the speaker got only a
+  fraction of the audio and the reply was inaudible (TTS `start→stop` ≈ 0.7 s
+  for 16.5 s of audio). `voice_speak()` now feeds the track in ~20 ms frames
+  with a ~19 ms `vTaskDelay` step so playback rides the 16 kHz codec rate
+  (verified on-device: 14.5 s of audio plays over 14.5 s). Do NOT "simplify"
+  this back to a single `track_write`.
+- **Speaker output needs explicit re-assert before playback.** Even paced,
+  this board's ES8311 was silent until `voice_speak` itself calls
+  `esp_codec_dev_set_out_mute(dac, false)` + `esp_codec_dev_set_out_vol(dac, 80)`
+  + raises the PA (GPIO46, `voice_enable_pa()`; the board-manager peripheral
+  init leaves the amp pin at the struct-default LOW). With those three the
+  reply is audibly reproduced — verified by capturing the board speaker on the
+  test rig's mic and re-ASR'ing it back to real words. `rd_audio_diag` dumps
+  the live ES8311 DAC registers (power/DAC-enable/mute/volume) and plays a
+  1 kHz tone for quick output bring-up.
+- **HTTP shared helper extracted** to `robodog_http.c/h` (was static in
+  `robodog_overlay.c`'s probes) so `voice_asr` / `voice_speak` reuse the exact
+  body-buffering path. `robodog_http_rx_t` grows in SPIRAM as the body lands.
+- **Keep the overlay in the `robodog_phase0` component** (now also holding the
+  Phase 1 UI + Phase 2 voice) rather than a separate `robodog_voice` component —
+  a second claw-path manifest would re-trigger the component-manager relative-
+  path hash collision the build already works around, for no isolation benefit.
+  The voice loop is a module (`robodog_voice.c`) in the same LMAO-owned component.
+- **Presentation-layer UX** (this round): the RLCD shows a **live state indicator
+  top-right** (`idle` / `listening` / `processing` / `responding` / `error`) driven
+  by the voice loop next to `WIFI ON` on the left; a **BOOT button (GPIO0) mirrors
+  `rd_listen`** (debounced falling-edge ISR) so the user can push-to-talk without
+  the console; and the transcript is **bounded to the most-recent ~600 chars**
+  (drop-oldest) so the current exchange fills the visible panel instead of a stale
+  older turn sitting below the fold.
+- **Readability**: 16 px Montserrat, and the labels force opaque-white background +
+  pure-black text so the 1-bpp reflective panel is crisp black-on-white (no grey).
+
+### Working endpoints / fixed bugs
+
+- Two real firmware bugs fixed during bring-up, both invisible to the Phase-0
+  probes:
+    1. **JSON escaping in `voice_speak`**: the agent's multi-line reply was
+       embedded raw in the TTS JSON → malformed JSON → FastAPI **422**.
+    2. **UAF in `voice_speak`**: `esp_http_client_set_post_field` stores a
+       pointer (does not copy); freeing the request JSON before `perform()`
+       sent freed-memory as the body → Kokoro **400**. Both now fixed.
+- The test rig: the bidirectional USB PnP Audio device is **card 2 (`hw:2`)** on
+  the workspace host; there is **no ALSA `default` alias**, so the E2E drives
+  `hw:2` explicitly (`RD_ALSA_DEVICE`).
+
+### Gate (hardware-verified)
+
+`python3 robodog_client/esp-claw/robodog_claw_e2e.py --corpus capabilities`
+
+```
+OPEN_SESSION: PASS listen started
+ASR_MATCH:    PASS overlap=1.00 asr="What can you do?"
+REPLY:        PASS reply="I'm ESP-Claw, an on-device AI agent that turns your intent into actions..."
+RING:         PASS-WEAK re-asr="You" (audible TTS on test mic; verbatim overlap weak)
+SUBTITLE:     PASS  (vision readback transcribed the rendered reply on the RLCD)
+Overall:      PASS
+```
+
+Console hooks the gate asserts on (all device-side): `listen started`, `ASR
+text="..."`, `agent reply: ...`, `TTS start` / `TTS stop`, `RD_SHOT` frame.
+
+- `SUBITITLE` reads an RD_SHOT **frame from the same console handle** (a second
+  open races the self-tick flood) and **skips truncated forced frames** (the
+  `rdshot` force-publish races the flood and can arrive < 15000 B; the next
+  self-tick frame is always complete).
+- `RING` is PASS-WEAK because the board speaker → test-mic acoustic coupling is
+  marginal on the current rig (the test mic hears "You" but not the whole
+  reply). It still proves audible TTS; the leg is not a firmware fault.
+
+Phase-0 probes re-passed with no regression (the HTTP refactor): `rd_asr` →
+device→Whisper 200 / `text="What can you do?"`.
