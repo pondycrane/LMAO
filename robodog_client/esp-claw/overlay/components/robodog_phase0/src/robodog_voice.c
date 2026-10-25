@@ -29,6 +29,8 @@
 #include "esp_timer.h"
 #include "esp_heap_caps.h"
 #include "esp_http_client.h"
+#include "driver/gpio.h"
+#include "esp_intr_alloc.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/event_groups.h"
@@ -104,6 +106,7 @@ static int16_t *voice_capture(size_t *out_samples)
     }
     ESP_LOGI(TAG, "listen started (16k/1/16, VAD energy=%d silence=%dms)",
              VAD_ENERGY, VAD_SILENCE_MS);
+    robodog_ui_set_agent_state("listening");
 
     int16_t *buf = heap_caps_malloc(VOICE_MAX_SAMPLES * sizeof(int16_t),
                                     MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
@@ -498,6 +501,7 @@ static void voice_speak(const char *reply)
     }
     ESP_LOGI(TAG, "TTS start (%u samples -> %u)", (unsigned)in_samples,
              (unsigned)out_samples);
+    robodog_ui_set_agent_state("responding");
     /* Write blocks on a full ring, draining in real-time at 16 kHz — this is
      * the free downlink pacing (the old Opus DOWNLINK_PACE problem). */
     (void)audio_mixer_track_write(track, out16, out_samples * sizeof(int16_t));
@@ -568,7 +572,7 @@ static void voice_turn(void)
         s_turn_active = false;
         return;
     }
-    robodog_ui_set_agent_state("thinking");
+    robodog_ui_set_agent_state("processing");
 
     claw_core_response_t resp;
     memset(&resp, 0, sizeof(resp));
@@ -588,6 +592,58 @@ static void voice_turn(void)
 }
 
 /* ── Task + trigger ─────────────────────────────────────────────────────── */
+
+/* BOOT button (GPIO0): physical push-to-talk.  Falling-edge ISR with a 300 ms
+ * debounce sets the same EVT_LISTEN bit the `rd_listen` command sets, so the
+ * one voice task wakes for both. */
+#define BOOT_BUTTON_GPIO GPIO_NUM_0
+#define BOOT_BUTTON_DEBOUNCE_US 300000UL
+
+static void IRAM_ATTR boot_button_isr(void *arg)
+{
+    (void)arg;
+    static uint64_t s_last_us;
+    const uint64_t now = esp_timer_get_time();
+    if (now - s_last_us < BOOT_BUTTON_DEBOUNCE_US) {
+        return;
+    }
+    s_last_us = now;
+    BaseType_t hpw = pdFALSE;
+    if (s_voice_evts != NULL) {
+        xEventGroupSetBitsFromISR(s_voice_evts, EVT_LISTEN, &hpw);
+    }
+    if (hpw) {
+        portYIELD_FROM_ISR(hpw);
+    }
+}
+
+static esp_err_t voice_init_boot_button(void)
+{
+#if CONFIG_ROBODOG_VOICE_BOOT_BUTTON
+    const gpio_config_t io = {
+        .pin_bit_mask = BIT64(BOOT_BUTTON_GPIO),
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_NEGEDGE,
+    };
+    gpio_config(&io);
+    esp_err_t err = gpio_install_isr_service(ESP_INTR_FLAG_LOWMED);
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+        ESP_LOGW(TAG, "gpio isr service install: %s", esp_err_to_name(err));
+    }
+    err = gpio_isr_handler_add(BOOT_BUTTON_GPIO, boot_button_isr, NULL);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "BOOT button ISR add failed: %s", esp_err_to_name(err));
+        return err;
+    }
+    ESP_LOGI(TAG, "BOOT button armed on GPIO%d -> rd_listen (push to talk)",
+             BOOT_BUTTON_GPIO);
+#else
+    ESP_LOGI(TAG, "BOOT button disabled (CONFIG_ROBODOG_VOICE_BOOT_BUTTON=n)");
+#endif
+    return ESP_OK;
+}
 
 static void voice_task(void *arg)
 {
@@ -627,6 +683,7 @@ esp_err_t robodog_voice_init(void)
         s_voice_evts = NULL;
         return ESP_ERR_NO_MEM;
     }
+    (void)voice_init_boot_button();
     const esp_console_cmd_t cmd = {
         .command = "rd_listen",
         .help = "voice loop: mic -> ASR -> agent -> TTS -> speaker",

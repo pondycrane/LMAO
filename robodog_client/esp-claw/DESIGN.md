@@ -467,6 +467,15 @@ Phase 2 delivers the **device-initiated voice loop**, hardware-verified end-to-e
   a second claw-path manifest would re-trigger the component-manager relative-
   path hash collision the build already works around, for no isolation benefit.
   The voice loop is a module (`robodog_voice.c`) in the same LMAO-owned component.
+- **Presentation-layer UX** (this round): the RLCD shows a **live state indicator
+  top-right** (`idle` / `listening` / `processing` / `responding` / `error`) driven
+  by the voice loop next to `WIFI ON` on the left; a **BOOT button (GPIO0) mirrors
+  `rd_listen`** (debounced falling-edge ISR) so the user can push-to-talk without
+  the console; and the transcript is **bounded to the most-recent ~600 chars**
+  (drop-oldest) so the current exchange fills the visible panel instead of a stale
+  older turn sitting below the fold.
+- **Readability**: 16 px Montserrat, and the labels force opaque-white background +
+  pure-black text so the 1-bpp reflective panel is crisp black-on-white (no grey).
 
 ### Working endpoints / fixed bugs
 
