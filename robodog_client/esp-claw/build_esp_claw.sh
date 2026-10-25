@@ -6,9 +6,10 @@
 #     wholesale-copied over the upstream board copy (no fragile patch)
 #   - main.c wires robodog_init() (console probes + capture publisher)
 #   - components/robodog_phase0/ LMAO-owned component: rdshot / rd_asr /
-#     rd_tts / rd_chat probes + the deterministic text-only UI
+#     rd_tts / rd_chat probes + the deterministic text-only UI + the Phase 2
+#     voice loop (rd_listen -> mic -> ASR -> agent -> TTS -> speaker)
 #   - sdkconfig.defaults.robodog (model-endpoint URLs from CLAW_* env + the
-#     LVGL ~14 px ASCII text font, so LAN endpoints stay configurable)
+#     LVGL ~16 px pure-black ASCII text font, so LAN endpoints stay configurable)
 # via the ESP-IDF v5.5.4 Docker image (ESP-Claw's recommended IDF, not the
 # v6.0.2 XiaoZhi image).  Nothing vendored: the staged .esp-claw source tree is
 # gitignored, only the sha256-pinned commit + LMAO-owned overlay are committed.
@@ -55,7 +56,9 @@ if [ ! -f "$SRC/.robodog_board_overlaid" ] || \
     REBUILD_FLAG=1
 fi
 
-# 3. stage the LMAO-owned probe component (additive; no upstream files edited)
+# 3. stage the LMAO-owned overlay component (additive; no upstream files
+#    edited): rdshot/rd_asr/rd_tts/rd_chat probes + the deterministic text UI
+#    + the Phase 2 voice loop (robodog_voice.c uses the shared audio_hub)
 rm -rf "$EDGE/components/robodog_phase0"
 cp -r "$APP/esp-claw/overlay/components/robodog_phase0" "$EDGE/components/robodog_phase0"
 
@@ -89,9 +92,9 @@ CONFIG_ROBODOG_TTS_URL="${CLAW_TTS_URL:-http://spark-5307:8004/v1/audio/speech}"
 CONFIG_ROBODOG_TTS_MODEL="${CLAW_TTS_MODEL:-kokoro-82m}"
 CONFIG_ROBODOG_TTS_VOICE="${CLAW_TTS_VOICE:-af_heart}"
 
-# Phase 1 text-only UI: ~14 px ASCII monochrome font (no vendoring - ships
+# Phase 1 text-only UI: ~16 px ASCII monochrome font (no vendoring - ships
 # with LVGL).  ASCII-only glyph set keeps the monochrome panel rendering clean.
-CONFIG_LV_FONT_MONTSERRAT_14=y
+CONFIG_LV_FONT_MONTSERRAT_16=y
 EOF
 
 # 6. build in the ESP-IDF Docker image (bmgr selects the board + its target +

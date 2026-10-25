@@ -210,8 +210,9 @@ archon workflow run lmao-feature-dev "description of feature"
 # RoboDog — Waveshare ESP32-S3 RLCD-4.2 (ST7305) family-calendar display (u8g2
 # native firmware, gRPC GetCalendar from the LMAO server). Verification is
 # PIXEL-DRIVEN: the mandatory robodog-hardware-e2e gate builds + flashes the
-# board (host esptool via robodog_client/flash.sh — the one sanctioned esptool
-# path for the 0x303A:0x1001 board), screen-captures the exact ST7305 pixels
+# board (host esptool via robodog_client/flash.sh — the calendar firmware's
+# sanctioned esptool path for the 0x303A:0x1001 board; the esp-claw firmware
+# has its own at esp-claw/flash_esp_claw.sh), screen-captures the exact ST7305 pixels
 # (capture.py streams the live u8g2 buffer), and reads the render back with the
 # vision model (Qwen2.5-VL via capture.py --describe). Loud skip when no board.
 archon workflow run robodog-client-dev "description of feature"
@@ -226,6 +227,20 @@ archon workflow run robodog-hermes-dev "description of feature"
 # Review an EXISTING hermes-voice PR (starts AT the code review, no planning/
 # implement/finalize): the PR must already exist — `gh pr create` first, then:
 archon workflow run robodog-hermes-review "review PR #NNN"
+
+# RoboDog ESP-Claw standalone agent — the SAME board running the esp-claw
+# edge_agent (robodog_client/esp-claw/, self-built from the pinned upstream +
+# the LMAO overlay: text-only UI + RD_SHOT + the Phase 2 native voice loop
+# rd_listen -> ASR -> agent -> TTS -> speaker; the board calls Whisper/LLM/
+# Kokoro on its own, no bridge). Verification is VOICE-LOOP-DRIVEN:
+# robodog-claw-e2e (serial-console asserts + test-mic ring re-ASR + RD_SHOT
+# subtitle readback). Mutually exclusive with the calendar/hermes firmware.
+# Firmware fixes from review MUST re-flash the board before the e2e gate runs
+# (robodog-claw-e2e never reflashes — do it via robodog-claw-implement-review-fixes).
+archon workflow run robodog-claw-dev "description of feature"
+# Review an EXISTING ESP-Claw PR (starts AT the code review, no planning/
+# implement/finalize): the PR must already exist — `gh pr create` first, then:
+archon workflow run robodog-claw-review "review PR #NNN"
 
 # Kid panels (per-kid dedicated boards, one firmware image): the per-board
 # `kid_name` is set at flash time with `flash_firmware --kid-name <kid>` (writes
@@ -247,11 +262,13 @@ These workflows encode the rules on this page (esptool bans, Bazel BUILD
 completeness, hardware E2E evidence in the PR body, production Cardputer
 left running). See `docs/archon-workflows.md` for the full reference.
 
-**esptool allowance**: the ONLY sanctioned esptool-on-the-robodog-board path is
-`robodog_client/flash.sh` (`bazel run //robodog_client:flash_firmware` — host
-esptool; Docker ttyACM RTS passthrough breaks the button-free reset). The
-Cardputer (`0x303A:0x8120`) and RNode (`/dev/ttyUSB*`) remain esptool-banned
-under every workflow.
+**esptool allowance**: the ONLY sanctioned esptool-on-the-robodog-board paths are
+`robodog_client/flash.sh` for the calendar firmware (`bazel run
+//robodog_client:flash_firmware`) and `robodog_client/esp-claw/flash_esp_claw.sh`
+for the esp-claw edge-agent firmware (`bazel run
+//robodog_client:flash_robodog_claw`) — both host esptool (Docker ttyACM RTS
+passthrough breaks the button-free reset). The Cardputer (`0x303A:0x8120`) and
+RNode (`/dev/ttyUSB*`) remain esptool-banned under every workflow.
 
 **Gate-chain contract**: `$ARTIFACTS_DIR/.gate-head` is written **only** by
 `lmao-production-health` when the full chain completes. No other gate node

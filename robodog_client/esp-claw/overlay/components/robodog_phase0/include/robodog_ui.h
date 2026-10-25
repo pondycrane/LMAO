@@ -5,8 +5,10 @@
  * display_service/system_ui are gated behind a Kconfig symbol the board
  * manager silently drops for this custom-typed panel, so normally nothing
  * initialises the display), then renders PR #278-style text-only parity:
- * no face/emote, ~14 px ASCII font, left-aligned full-panel multiline wrap,
- * status bar (WiFi/agent state) on top.
+ * no face/emote, ~16 px pure-black ASCII font on the white panel (the LVGL
+ * theme default grey binarizes to thin greys on the 1-bpp reflective panel,
+ * so the labels force lv_color_black()), left-aligned full-panel multiline
+ * wrap, status bar (WiFi/agent state) on top.
  *
  * Roles/timing mirror today's SetChatMessage("user"|"assistant", ...):
  *   - robodog_ui_show_user     - render the user transcript (ASR completion)
@@ -47,8 +49,9 @@ void robodog_ui_show_user(const char *text);
 void robodog_ui_show_assistant(const char *text);
 
 /**
- * @brief Set the agent state shown in the status bar without a text render.
- *        state is a short ASCII label ("idle"/"thinking"/"error").
+ * @brief Set the live agent/voice state shown in the top-right status
+ *        indicator without a text render.  state is a short ASCII label:
+ *        "idle" / "listening" / "processing" / "responding" / "error".
  */
 void robodog_ui_set_agent_state(const char *state);
 
