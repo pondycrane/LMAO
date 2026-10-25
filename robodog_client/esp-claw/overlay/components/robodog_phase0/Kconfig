@@ -68,3 +68,40 @@ menu "RoboDog Phase 0 probes"
         default 90000
 
 endmenu
+
+menu "RoboDog Phase 2 voice loop"
+
+    config ROBODOG_VOICE_MAX_SECS
+        int "Max utterance capture length (seconds)"
+        default 45
+        help
+            Hard cap on a single listen phase, so a mic that never VAD-stops
+            (ambient noise) cannot buffer unbounded audio.
+
+    config ROBODOG_VOICE_NO_SPEECH_TIMEOUT_MS
+        int "Bail out of the listen phase if no speech within this many ms"
+        default 12000
+        help
+            If no speech frame is detected within this window the capture is
+            abandoned (nothing to transcribe), instead of blocking the voice
+            task for the full VOICE_MAX_SECS.
+
+    config ROBODOG_VOICE_TTS_MAX_RESPONSE
+        int "Maximum TTS response body to buffer for playback (bytes)"
+        default 524288
+        help
+            Kokoro returns a 24 kHz s16 WAV; a ~10 s reply is ~480 KB.  The
+            buffer is SPIRAM-backed (8 MB OPI PSRAM on this board), so 512 KB
+            comfortably covers multi-second spoken replies.
+
+    config ROBODOG_VOICE_TTS_MAX_CHARS
+        int "Max characters spoken by TTS (reply clipped to this length)"
+        default 240
+        help
+            The esp-claw root agent is verbose by default and will dump
+            multi-paragraph capability lists -> 50+ s of speech that blows up
+            the TTS resample buffer.  The spoken reply is clipped at a
+            sentence/line break within this cap (the full reply still renders
+            on the RLCD); only what is spoken is bounded.
+
+endmenu

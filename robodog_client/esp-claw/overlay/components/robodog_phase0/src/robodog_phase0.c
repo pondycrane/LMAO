@@ -16,6 +16,8 @@
  */
 #include "robodog_phase0.h"
 #include "robodog_ui.h"
+#include "robodog_http.h"
+#include "robodog_voice.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -170,53 +172,6 @@ void robodog_rdshot_capture_now(void)
     }
 }
 
-/* ── HTTP probes ─────────────────────────────────────────────────────────── */
-
-typedef struct {
-    char *buf;
-    size_t len;
-    size_t cap;
-    int status;
-} http_rx_t;
-
-static esp_err_t http_rx_handler(esp_http_client_event_t *evt)
-{
-    http_rx_t *rx = (http_rx_t *)evt->user_data;
-    if (evt->event_id == HTTP_EVENT_ON_DATA && rx != NULL && evt->data_len > 0) {
-        if (rx->len + evt->data_len > rx->cap) {
-            const size_t newcap = rx->len + evt->data_len + 128;
-            char *n = heap_caps_realloc(rx->buf, newcap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-            if (n == NULL) {
-                ESP_LOGE(TAG, "http response buffer grow failed (%u)", (unsigned)newcap);
-                return ESP_ERR_NO_MEM;
-            }
-            rx->buf = n;
-            rx->cap = newcap;
-        }
-        memcpy(rx->buf + rx->len, evt->data, evt->data_len);
-        rx->len += evt->data_len;
-    }
-    return ESP_OK;
-}
-
-static void http_rx_init(http_rx_t *rx, size_t cap)
-{
-    memset(rx, 0, sizeof(*rx));
-    rx->cap = cap;
-    rx->buf = heap_caps_malloc(cap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (rx->buf != NULL) {
-        rx->buf[0] = '\0';
-    }
-}
-
-static void http_rx_free(http_rx_t *rx)
-{
-    if (rx->buf != NULL) {
-        heap_caps_free(rx->buf);
-    }
-    memset(rx, 0, sizeof(*rx));
-}
-
 /* ── rd_asr: device -> Whisper multipart round-trip ─────────────────────── */
 
 static int cmd_rd_asr(int argc, char **argv)
@@ -250,8 +205,8 @@ static int cmd_rd_asr(int argc, char **argv)
     memcpy(body + head_len, robodog_asr_sample_wav, sizeof(robodog_asr_sample_wav));
     memcpy(body + head_len + sizeof(robodog_asr_sample_wav), footer, foot_len);
 
-    http_rx_t rx;
-    http_rx_init(&rx, CONFIG_ROBODOG_ASR_MAX_RESPONSE);
+    robodog_http_rx_t rx;
+    robodog_http_rx_init(&rx, CONFIG_ROBODOG_ASR_MAX_RESPONSE);
     if (rx.buf == NULL) {
         ESP_LOGE(TAG, "rd_asr: no memory for response buffer");
         heap_caps_free(body);
@@ -262,14 +217,14 @@ static int cmd_rd_asr(int argc, char **argv)
         .url = CONFIG_ROBODOG_ASR_URL,
         .method = HTTP_METHOD_POST,
         .timeout_ms = 60000,
-        .event_handler = http_rx_handler,
+        .event_handler = robodog_http_event_handler,
         .user_data = &rx,
         .buffer_size = 512,
     };
     esp_http_client_handle_t client = esp_http_client_init(&cfg);
     if (client == NULL) {
         ESP_LOGE(TAG, "rd_asr: http client init failed");
-        http_rx_free(&rx);
+        robodog_http_rx_free(&rx);
         heap_caps_free(body);
         return 1;
     }
@@ -300,7 +255,7 @@ static int cmd_rd_asr(int argc, char **argv)
         ESP_LOGE(TAG, "rd_asr: round-trip failed: %s", rx.buf[0] ? rx.buf : "(empty body)");
     }
 
-    http_rx_free(&rx);
+    robodog_http_rx_free(&rx);
     heap_caps_free(body);
     return 0;
 }
@@ -316,8 +271,8 @@ static int cmd_rd_tts(int argc, char **argv)
              "{\"model\":\"%s\",\"input\":\"RoboDog claw phase zero TTS round trip.\",\"voice\":\"%s\"}",
              CONFIG_ROBODOG_TTS_MODEL, CONFIG_ROBODOG_TTS_VOICE);
 
-    http_rx_t rx;
-    http_rx_init(&rx, CONFIG_ROBODOG_TTS_MAX_RESPONSE);
+    robodog_http_rx_t rx;
+    robodog_http_rx_init(&rx, CONFIG_ROBODOG_TTS_MAX_RESPONSE);
     if (rx.buf == NULL) {
         ESP_LOGE(TAG, "rd_tts: no memory for response buffer");
         return 1;
@@ -326,14 +281,14 @@ static int cmd_rd_tts(int argc, char **argv)
         .url = CONFIG_ROBODOG_TTS_URL,
         .method = HTTP_METHOD_POST,
         .timeout_ms = 60000,
-        .event_handler = http_rx_handler,
+        .event_handler = robodog_http_event_handler,
         .user_data = &rx,
         .buffer_size = 512,
     };
     esp_http_client_handle_t client = esp_http_client_init(&cfg);
     if (client == NULL) {
         ESP_LOGE(TAG, "rd_tts: http client init failed");
-        http_rx_free(&rx);
+        robodog_http_rx_free(&rx);
         return 1;
     }
     esp_http_client_set_header(client, "Content-Type", "application/json");
@@ -353,7 +308,7 @@ static int cmd_rd_tts(int argc, char **argv)
         ESP_LOGE(TAG, "rd_tts: round-trip failed: http=%d err=%s body='%.160s'",
                  status, esp_err_to_name(err), rx.buf != NULL ? rx.buf : "");
     }
-    http_rx_free(&rx);
+    robodog_http_rx_free(&rx);
     return 0;
 }
 
@@ -459,6 +414,8 @@ esp_err_t robodog_init(void)
     robodog_register_commands();
     /* Phase 1: bring up the deterministic text-only UI (panel + LVGL). */
     (void)robodog_ui_start();
+    /* Phase 2: the device-initiated voice loop (rd_listen trigger). */
+    (void)robodog_voice_init();
     ESP_LOGI(TAG, "RoboDog Phase 1 overlay ready: rdshot / rd_asr / rd_tts / rd_chat + text UI");
     return ESP_OK;
 }

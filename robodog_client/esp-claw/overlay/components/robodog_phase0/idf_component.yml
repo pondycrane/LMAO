@@ -9,6 +9,12 @@ dependencies:
     path: ../../../../components/claw_modules/claw_manager
   claw_core:
     path: ../../../../components/claw_modules/claw_core
+  # Phase 2 voice loop: shared audio hub (mic APP subscriber + speaker APP
+  # track) and the WiFi-ready gate.
+  audio_hub:
+    path: ../../../../components/common/audio_hub
+  wifi_manager:
+    path: ../../../../components/common/wifi_manager
   # Deterministic text-only UI (Phase 1): esp-claw's own display_service is
   # gated behind a config symbol the board manager drops for this custom panel,
   # so the LMAO UI drives the LVGL adapter directly.
