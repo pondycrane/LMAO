@@ -469,6 +469,15 @@ Phase 2 delivers the **device-initiated voice loop**, hardware-verified end-to-e
   with a ~19 ms `vTaskDelay` step so playback rides the 16 kHz codec rate
   (verified on-device: 14.5 s of audio plays over 14.5 s). Do NOT "simplify"
   this back to a single `track_write`.
+- **Speaker output needs explicit re-assert before playback.** Even paced,
+  this board's ES8311 was silent until `voice_speak` itself calls
+  `esp_codec_dev_set_out_mute(dac, false)` + `esp_codec_dev_set_out_vol(dac, 80)`
+  + raises the PA (GPIO46, `voice_enable_pa()`; the board-manager peripheral
+  init leaves the amp pin at the struct-default LOW). With those three the
+  reply is audibly reproduced — verified by capturing the board speaker on the
+  test rig's mic and re-ASR'ing it back to real words. `rd_audio_diag` dumps
+  the live ES8311 DAC registers (power/DAC-enable/mute/volume) and plays a
+  1 kHz tone for quick output bring-up.
 - **HTTP shared helper extracted** to `robodog_http.c/h` (was static in
   `robodog_overlay.c`'s probes) so `voice_asr` / `voice_speak` reuse the exact
   body-buffering path. `robodog_http_rx_t` grows in SPIRAM as the body lands.
