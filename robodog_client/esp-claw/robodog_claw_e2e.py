@@ -52,8 +52,7 @@ CONSOLE_BAUD = 115200
 
 # Whisper endpoint for re-ASR of the board's spoken reply (the host reaches it
 # through the same socat forward the board uses, or an env override).
-ASR_URL = os.environ.get(
-    "RD_ASR_URL", "http://192.168.50.153:11801/v1/audio/transcriptions")
+ASR_URL = os.environ.get("RD_ASR_URL", "http://192.168.50.153:11801/v1/audio/transcriptions")
 ASR_MODEL = os.environ.get("RD_ASR_MODEL", "whisper-1")
 # Playback settle after `listen started` before the test speaker plays the
 # corpus into the board mic (mic/ADC ramp).  Too early -> attenuated below the
@@ -69,8 +68,7 @@ def log(msg):
 
 
 def shell_run(cmd, timeout=120):
-    return subprocess.run(cmd, shell=True, capture_output=True, text=True,
-                         timeout=timeout)
+    return subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
 
 
 # ---------------------------------------------------------------------------
@@ -83,6 +81,7 @@ def detect_board_port():
     if port:
         return port
     import glob
+
     cands = []
     for dev in glob.glob("/dev/serial/by-id/*"):
         if "USB-Serial" in dev or "JTAG" in dev:
@@ -114,19 +113,21 @@ def remote_asr(wav_path):
     """Transcribe a WAV via the OpenAI-compatible Whisper endpoint."""
     boundary = "--lmao-ring-" + os.urandom(8).hex()
     wav = Path(wav_path).read_bytes()
-    fields = [f"--{boundary}\r\n"
-              'Content-Disposition: form-data; name="model"\r\n\r\n'
-              f"{ASR_MODEL}\r\n"
-              f"--{boundary}\r\n"
-              'Content-Disposition: form-data; name="file"; '
-              'filename="ring.wav"\r\n'
-              "Content-Type: audio/wav\r\n\r\n"]
-    body = ("".join(fields)).encode() + wav + \
-        f"\r\n--{boundary}--\r\n".encode()
+    fields = [
+        f"--{boundary}\r\n"
+        'Content-Disposition: form-data; name="model"\r\n\r\n'
+        f"{ASR_MODEL}\r\n"
+        f"--{boundary}\r\n"
+        'Content-Disposition: form-data; name="file"; '
+        'filename="ring.wav"\r\n'
+        "Content-Type: audio/wav\r\n\r\n"
+    ]
+    body = ("".join(fields)).encode() + wav + f"\r\n--{boundary}--\r\n".encode()
     import urllib.request
+
     req = urllib.request.Request(
-        ASR_URL, data=body,
-        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"})
+        ASR_URL, data=body, headers={"Content-Type": f"multipart/form-data; boundary={boundary}"}
+    )
     with urllib.request.urlopen(req, timeout=120) as resp:
         return json.load(resp)["text"]
 
@@ -135,14 +136,18 @@ def remote_asr(wav_path):
 # Host-side audio drive (test speaker -> board mic) + capture (board speaker)
 # ---------------------------------------------------------------------------
 def play_wav(path: Path, volume: float = PLAY_VOL):
-    cmd = (f"{SILENCE} 'ffmpeg -hide_banner -loglevel error -re -i {path} "
-           f"-af volume={volume} -ac 2 -f alsa {ALSA_DEV}'")
+    cmd = (
+        f"{SILENCE} 'ffmpeg -hide_banner -loglevel error -re -i {path} "
+        f"-af volume={volume} -ac 2 -f alsa {ALSA_DEV}'"
+    )
     shell_run(cmd, timeout=120)
 
 
 def capture_mic(path: Path, seconds: float):
-    cmd = (f"{SILENCE} 'ffmpeg -hide_banner -loglevel error -f alsa "
-           f"-i {ALSA_DEV} -t {seconds} -ac 1 -ar 16000 {path}'")
+    cmd = (
+        f"{SILENCE} 'ffmpeg -hide_banner -loglevel error -f alsa "
+        f"-i {ALSA_DEV} -t {seconds} -ac 1 -ar 16000 {path}'"
+    )
     shell_run(cmd, timeout=int(seconds) + 30)
     return path
 
@@ -150,6 +155,7 @@ def capture_mic(path: Path, seconds: float):
 def trim_loudest_window(path: Path, out: Path, seconds: float):
     """Find the loudest ~3 s window (RMS of 0.5 s buckets) of a mic capture."""
     import wave as _w
+
     with _w.open(str(path), "rb") as w:
         n = w.getnframes()
         rate = w.getframerate()
@@ -157,6 +163,7 @@ def trim_loudest_window(path: Path, out: Path, seconds: float):
         sw = w.getsampwidth()
         frames = w.readframes(n)
     import array
+
     if sw != 2:
         return None
     samples = array.array("h", frames)
@@ -166,10 +173,10 @@ def trim_loudest_window(path: Path, out: Path, seconds: float):
     bucket = int(fs // 2)  # 0.5 s
     wins = []
     for i in range(0, max(len(samples) - bucket, 1), bucket):
-        chunk = samples[i:i + bucket]
+        chunk = samples[i : i + bucket]
         if not chunk:
             break
-        rms = (sum(abs(s) for s in chunk) / len(chunk))
+        rms = sum(abs(s) for s in chunk) / len(chunk)
         wins.append((rms, i / fs))
     if not wins:
         return None
@@ -185,7 +192,9 @@ def trim_loudest_window(path: Path, out: Path, seconds: float):
         src = w.readframes(w.getnframes())
     burst = src[start_f:end_f]
     with _w.open(str(out), "wb") as w2:
-        w2.setnchannels(1); w2.setsampwidth(2); w2.setframerate(rate)
+        w2.setnchannels(1)
+        w2.setsampwidth(2)
+        w2.setframerate(rate)
         w2.writeframes(burst)
     return best_start
 
@@ -195,7 +204,7 @@ def trim_loudest_window(path: Path, out: Path, seconds: float):
 # ---------------------------------------------------------------------------
 def open_console(port):
     s = serial.Serial(port, CONSOLE_BAUD, timeout=0.2)
-    time.sleep(1.0)          # let USB-Serial/JTAG enumeration settle
+    time.sleep(1.0)  # let USB-Serial/JTAG enumeration settle
     s.reset_input_buffer()
     return s
 
@@ -321,27 +330,28 @@ def run_loop(n, instr, artifacts):
 
     s = open_console(DETECTED_PORT)
     try:
-        # ---- OPEN_SESSION: trigger + confirm listen -------------------------------------------------
+        # ---- OPEN_SESSION: trigger + confirm listen ------
         write_cmd(s, "rd_listen")
         m, _ = wait_for_log(s, [r"listen started"], timeout=15, label="OPEN")
         res["asserts"]["OPEN_SESSION"] = (
-            "PASS listen started" if m else "FAIL (no 'listen started' after rd_listen)")
+            "PASS listen started" if m else "FAIL (no 'listen started' after rd_listen)"
+        )
 
-        # ---- ASR_MATCH: play the corpus into the mic ------------------------------------------------
+        # ---- ASR_MATCH: play the corpus into the mic ------
         time.sleep(PLAY_SETTLE)
         log(f"playing corpus {target_wav.name} into board mic ...")
         play_wav(target_wav)
 
-        m_asr, _ = wait_for_log(s, [r'ASR text="([^"]*)"'], timeout=ASR_TIMEOUT,
-                                label="ASR")
+        m_asr, _ = wait_for_log(s, [r'ASR text="([^"]*)"'], timeout=ASR_TIMEOUT, label="ASR")
         asr_txt = m_asr.group(1) if m_asr else ""
         res["artifacts"]["asr"] = asr_txt
         frac = token_overlap(asr_txt, target_txt)
         if asr_txt:
             res["asserts"]["ASR_MATCH"] = (
                 f"PASS overlap={frac:.2f} asr={asr_txt!r}"
-                if frac >= 0.75 else
-                f"FAIL overlap={frac:.2f} asr={asr_txt!r} want={target_txt!r}")
+                if frac >= 0.75
+                else f"FAIL overlap={frac:.2f} asr={asr_txt!r} want={target_txt!r}"
+            )
         else:
             res["asserts"]["ASR_MATCH"] = "FAIL (no `ASR text=` on console)"
 
@@ -354,24 +364,30 @@ def run_loop(n, instr, artifacts):
             s.close()
             return res
 
-        # ---- REPLY: native agent LLM -----------------------------------------------------------------
-        m_rep, _ = wait_for_log(s, [r"agent reply: (.+)"], timeout=REPLY_TIMEOUT,
-                                label="REPLY")
+        # ---- REPLY: native agent LLM ------
+        m_rep, _ = wait_for_log(s, [r"agent reply: (.+)"], timeout=REPLY_TIMEOUT, label="REPLY")
         reply = m_rep.group(1).strip() if m_rep else ""
         res["artifacts"]["reply"] = reply
         res["asserts"]["REPLY"] = (
-            f"PASS reply={reply!r}" if reply else
-            "FAIL (no `agent reply:` on console)")
+            f"PASS reply={reply!r}" if reply else "FAIL (no `agent reply:` on console)"
+        )
 
-        # ---- TTS + RING: capture the board speaker while it talks ------------------------------------
-        m_tts, _ = wait_for_log(s, [r"TTS start"], timeout=REPLY_TIMEOUT,
-                                label="TTS")
+        # ---- TTS + RING: capture the board speaker ------
+        m_tts, _ = wait_for_log(s, [r"TTS start"], timeout=REPLY_TIMEOUT, label="TTS")
         mic_path = run_dir / "speaker.wav"
         ring_txt = ""
+        m_tts_stop = None
         if m_tts:
             log("TTS start seen; capturing board speaker on test mic ...")
             try:
                 capture_mic(mic_path, RING_CAP_SECS)
+            except Exception as e:
+                log(f"ring capture failed: {e}")
+            # Board TTS is real-time paced (~16 s for a long reply); wait for
+            # `TTS stop` NOW, before the slow ring re-ASR below scrolls it past
+            # the serial buffer and makes the acceptance leg unobservable.
+            m_tts_stop, _ = wait_for_log(s, [r"TTS stop"], timeout=REPLY_TIMEOUT, label="TTS")
+            try:
                 # The board's reply is faint but spans the whole TTS window; a
                 # single loudest-3s burst is often ambient noise and lets
                 # Whisper under-trigger (re-ASR back to nothing).  Transcribe
@@ -385,20 +401,25 @@ def run_loop(n, instr, artifacts):
                         ring_txt = remote_asr(burst)
                 (run_dir / "ring_reasr.txt").write_text(ring_txt or "")
             except Exception as e:
-                log(f"ring capture/re-ASR failed: {e}")
-        _, _ = wait_for_log(s, [r"TTS stop"], timeout=REPLY_TIMEOUT, label="TTS")
+                log(f"ring re-ASR failed: {e}")
+        res["asserts"]["TTS"] = (
+            "PASS start+stop"
+            if (m_tts is not None and m_tts_stop is not None)
+            else "FAIL (no TTS start/stop on console)"
+        )
         if ring_txt and reply:
             ok = token_overlap(ring_txt, reply) >= 0.3
             res["asserts"]["RING"] = (
                 f"PASS re-asr={ring_txt!r} (overlaps reply)"
-                if ok else
-                f"PASS-WEAK re-asr={ring_txt!r} (audible but no verbatim overlap)")
+                if ok
+                else f"PASS-WEAK re-asr={ring_txt!r} (audible but no verbatim overlap)"
+            )
         elif ring_txt:
             res["asserts"]["RING"] = f"PASS-WEAK re-asr={ring_txt!r} (no reply to compare)"
         else:
             res["asserts"]["RING"] = "FAIL (no re-ASR of board speaker)"
 
-        # ---- SUBTITLE: the reply renders on the RLCD ------------------------------------------------
+        # ---- SUBTITLE: the reply renders on the RLCD ------
         time.sleep(1.0)
         sub_txt, sub_err = capture_subtitle(s, run_dir)
         # The panel readback must carry the ASSISTANT REPLY (Phase 1 gate
@@ -412,8 +433,7 @@ def run_loop(n, instr, artifacts):
         if shown:
             res["asserts"]["SUBTITLE"] = "PASS " + sub_txt.replace("\n", " | ")
         elif sub_txt:
-            res["asserts"]["SUBTITLE"] = (
-                "FAIL-no-reply " + sub_txt.replace("\n", " | "))
+            res["asserts"]["SUBTITLE"] = "FAIL-no-reply " + sub_txt.replace("\n", " | ")
         else:
             res["asserts"]["SUBTITLE"] = "FAIL " + (sub_err or "blank readback")
         res["artifacts"]["subtitle"] = sub_txt
@@ -424,9 +444,11 @@ def run_loop(n, instr, artifacts):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--corpus", default="capabilities",
-                    help="corpus slug to voice-drive (corpus.json); default "
-                         "'capabilities'")
+    ap.add_argument(
+        "--corpus",
+        default="capabilities",
+        help="corpus slug to voice-drive (corpus.json); default 'capabilities'",
+    )
     ap.add_argument("--artifacts", default=str(Path.home() / "artifacts"))
     args = ap.parse_args()
     artifacts = Path(args.artifacts) / "robodog-claw-e2e"
@@ -435,8 +457,7 @@ def main():
     global DETECTED_PORT
     DETECTED_PORT = detect_board_port()
     card = detect_sound_card()
-    log(f"board={DETECTED_PORT or 'NONE'} sound='{card}' runs={N_RUNS} "
-        f"corpus={args.corpus}")
+    log(f"board={DETECTED_PORT or 'NONE'} sound='{card}' runs={N_RUNS} corpus={args.corpus}")
     skips = []
     if not DETECTED_PORT:
         skips.append("ROBODOG BOARD NOT DETECTED")
@@ -473,17 +494,18 @@ def main():
         lines.append(f"## loop {r['loop']}")
         for k, v in r["asserts"].items():
             lines.append(f"- **{k}**: {v}")
-        lines.append(f"- ASR verbatim: {r['artifacts'].get('asr','')!r}")
-        lines.append(f"- REPLY verbatim: {r['artifacts'].get('reply','')!r}")
+        lines.append(f"- ASR verbatim: {r['artifacts'].get('asr', '')!r}")
+        lines.append(f"- REPLY verbatim: {r['artifacts'].get('reply', '')!r}")
         lines.append("")
 
     def ok(v):
         return v is not None and (v.startswith("PASS") or v.startswith("SKIP"))
 
     def passed(r):
-        return all(ok(r["asserts"].get(k, "FAIL"))
-                   for k in ("OPEN_SESSION", "ASR_MATCH", "REPLY",
-                             "RING", "SUBTITLE"))
+        return all(
+            ok(r["asserts"].get(k, "FAIL"))
+            for k in ("OPEN_SESSION", "ASR_MATCH", "REPLY", "TTS", "RING", "SUBTITLE")
+        )
 
     overall = all(passed(r) for r in results)
     lines.append(f"Overall: {'PASS' if overall else 'FAIL'}")
@@ -509,7 +531,6 @@ def main():
     (Path(args.artifacts) / "hardware-e2e.md").write_text("\n".join(brief))
     print("\n".join(lines))
     return 0 if overall else 1
-
 
 
 if __name__ == "__main__":

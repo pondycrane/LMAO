@@ -95,8 +95,10 @@ Assertions (PASS/FAIL/SKIP, verbatim evidence written back to the artifact):
 6. **SUBTITLE** — RD_SHOT frame -> `capture.decode_hermes` -> Qwen2.5-VL
    readback carries >= 2 distinct reply tokens (the reply renders on the RLCD).
 
-Write `$ARTIFACTS_DIR/robodog-claw-e2e.md` (distinct from the calendar gate's
-`hardware-e2e.md`; NEVER writes `.gate-head`):
+Write `$ARTIFACTS_DIR/robodog-claw-e2e/robodog-claw-e2e.md` (under the run
+subdir where the verbatim transcripts also live), plus a top-level
+`$ARTIFACTS_DIR/hardware-e2e.md` summary for the generic gate-chain/finalize
+contract. Never writes `.gate-head`:
 
 ```markdown
 # RoboDog ESP-Claw Voice-Loop E2E Results
