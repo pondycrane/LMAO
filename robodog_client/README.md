@@ -288,8 +288,12 @@ rd_tts <text>          # device -> Kokoro via host-forward, logs WAV bytes
 rd_chat <question>     # native agent seam -> LLM, renders user + reply to the
                        #   text UI (e.g. `rd_chat 2+2` -> screen shows "4")
 rd_listen              # Phase 2 voice loop: mic -> ASR -> agent -> TTS -> speaker
+                       #   (or press the BOOT button — same trigger)
 rdshot                 # force-publish the current screen frame (RD_SHOT)
 ```
+
+The RLCD status bar shows WiFi (left) and the live voice state **top-right**:
+`idle` → `listening` → `processing` (ASR+LLM) → `responding` (TTS) → `idle`.
 
 Phase 2 full-loop hardware gate (drives the corpus WAV into the board mic via
 the test rig's ALSA `hw:2` and asserts each leg from the device serial

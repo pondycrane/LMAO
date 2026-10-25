@@ -68,11 +68,20 @@ static TaskHandle_t s_ui_task;
 static lv_display_t *s_disp;
 
 static lv_obj_t *s_status_label;
+static lv_obj_t *s_state_label;
 static lv_obj_t *s_body_label;
 
 static char s_status_text[96];
 static char s_agent_state[16];
 static char s_transcript[2048];      /* rolling conversation, newest last */
+
+/* Keep only the most-recent ~600 chars of transcript so the newest exchange
+ * (current user prompt + reply) is what occupies the visible panel.  LVGL
+ * draws the label from the top and doesn't expose user scrolling, so an
+ * unbounded rolling buffer leaves recent turns below the visible fold — the
+ * "screen only shows the oldest" complaint.  Drop-oldest keeps the latest
+ * visible; a single long reply is still preserved up to the array size. */
+#define UI_TRANSCRIPT_CAP  600
 
 /* ── ASCII sanitisation ──────────────────────────────────────────────────── */
 
@@ -108,12 +117,17 @@ static void ui_refresh_status_locked(void)
     /* WiFi state read straight from the STA netif (no cap dependency). */
     esp_netif_t *sta = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
     const bool up = sta != NULL && esp_netif_is_netif_up(sta);
-
-    const char *agent = s_agent_state[0] ? s_agent_state : "idle";
-    snprintf(s_status_text, sizeof(s_status_text), "WIFI %s | %s",
-             up ? "ON" : "OFF", agent);
+    snprintf(s_status_text, sizeof(s_status_text), "WIFI %s", up ? "ON" : "OFF");
     if (s_status_label != NULL) {
         lv_label_set_text(s_status_label, s_status_text);
+    }
+    /* Right-aligned live state: idle / listening / processing / responding /
+     * error, driven via robodog_ui_set_agent_state. */
+    if (s_state_label != NULL) {
+        const char *st = s_agent_state[0] ? s_agent_state : "idle";
+        if (strcmp(lv_label_get_text(s_state_label), st) != 0) {
+            lv_label_set_text(s_state_label, st);
+        }
     }
 }
 
@@ -121,7 +135,7 @@ static void ui_refresh_status_locked(void)
 
 static void ui_append_line(const char *prefix, const char *text)
 {
-    const size_t cap = sizeof(s_transcript) - 1; /* keep space for NUL */
+    const size_t cap = UI_TRANSCRIPT_CAP; /* keep only the most-recent window */
     size_t len = strlen(s_transcript);
 
     /* Format "<prefix> <text>\n", ASCII-sanitized on the fly by prefixing. */
@@ -170,12 +184,12 @@ static esp_err_t ui_build_screen(void)
     lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
     lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
 
-    /* Status bar (top): WiFi + agent state. */
+    /* Status bar (top): WiFi (left) + live voice state (right). */
     s_status_label = lv_label_create(scr);
     ESP_RETURN_ON_FALSE(s_status_label != NULL, ESP_ERR_NO_MEM, TAG,
                         "create status label failed");
     lv_obj_set_pos(s_status_label, UI_PAD, 4);
-    lv_obj_set_width(s_status_label, UI_PANEL_W - 2 * UI_PAD);
+    lv_obj_set_width(s_status_label, UI_PANEL_W - 2 * UI_PAD - 130);
     lv_obj_set_style_text_align(s_status_label, LV_TEXT_ALIGN_LEFT, 0);
     /* Force white paper + black ink at the LABEL level, independent of any
      * theme: an opaque white label background with pure-black text.  (The
@@ -186,6 +200,20 @@ static esp_err_t ui_build_screen(void)
     lv_obj_set_style_text_color(s_status_label, lv_color_black(), 0);
     lv_obj_set_style_text_font(s_status_label, &lv_font_montserrat_16, 0);
     ui_refresh_status_locked();
+
+    /* Right-aligned live voice/agent state indicator (idle / listening /
+     * processing / responding / error), black-on-white like the rest. */
+    s_state_label = lv_label_create(scr);
+    ESP_RETURN_ON_FALSE(s_state_label != NULL, ESP_ERR_NO_MEM, TAG,
+                        "create state label failed");
+    lv_obj_set_pos(s_state_label, UI_PANEL_W - UI_PAD - 120, 4);
+    lv_obj_set_width(s_state_label, 120);
+    lv_obj_set_style_text_align(s_state_label, LV_TEXT_ALIGN_RIGHT, 0);
+    lv_obj_set_style_bg_color(s_state_label, lv_color_white(), 0);
+    lv_obj_set_style_bg_opa(s_state_label, LV_OPA_COVER, 0);
+    lv_obj_set_style_text_color(s_state_label, lv_color_black(), 0);
+    lv_obj_set_style_text_font(s_state_label, &lv_font_montserrat_16, 0);
+    lv_label_set_text(s_state_label, "idle");
 
     /* Separator under the status bar. */
     lv_obj_t *rule = lv_obj_create(scr);
@@ -235,6 +263,9 @@ static void ui_flush_locked(void)
         lv_label_set_text(s_status_label, s_status_text);
     }
     lv_obj_invalidate(s_status_label);
+    if (s_state_label != NULL) {
+        lv_obj_invalidate(s_state_label);
+    }
     /* Synchronous full refresh: drives LVGL render -> panel flush ->
      * robodog_rdshot_publish (frame captured every time, never event-flaky),
      * then force the RD_SHOT dump so a capture right now reads the fresh
@@ -252,9 +283,9 @@ static void ui_process_cmd(const ui_cmd_t *cmd)
     switch (cmd->type) {
     case UI_CMD_USER:
         ui_append_line(">", cmd->text);
-        /* A fresh user turn starts: mark the agent as reasoning until the
-         * reply finalizes (this is the "thinking" status-bar state). */
-        strlcpy(s_agent_state, "thinking", sizeof(s_agent_state));
+        /* A fresh user turn starts: ASR done, now the agent is processing
+         * (right-hand state indicator shows "processing"). */
+        strlcpy(s_agent_state, "processing", sizeof(s_agent_state));
         break;
     case UI_CMD_ASSISTANT:
         ui_append_line("", cmd->text);

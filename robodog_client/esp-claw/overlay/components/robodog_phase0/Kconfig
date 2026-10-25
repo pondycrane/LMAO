@@ -86,6 +86,16 @@ menu "RoboDog Phase 2 voice loop"
             abandoned (nothing to transcribe), instead of blocking the voice
             task for the full VOICE_MAX_SECS.
 
+    config ROBODOG_VOICE_BOOT_BUTTON
+        bool "BOOT button (GPIO0) triggers rd_listen"
+        default y
+        help
+            Wire the board's BOOT button (ESP32-S3 GPIO0, pulled-up active-low)
+            to start a voice turn, so the user can push-to-talk without the
+            console.  A 300 ms debounce in the ISR avoids re-triggers.  (GPIO0
+            is a runtime input after boot; holding it during reset still enters
+            ROM download mode, as on any ESP32-S3.)
+
     config ROBODOG_VOICE_TTS_MAX_RESPONSE
         int "Maximum TTS response body to buffer for playback (bytes)"
         default 524288

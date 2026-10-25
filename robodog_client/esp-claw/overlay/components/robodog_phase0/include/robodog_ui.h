@@ -49,8 +49,9 @@ void robodog_ui_show_user(const char *text);
 void robodog_ui_show_assistant(const char *text);
 
 /**
- * @brief Set the agent state shown in the status bar without a text render.
- *        state is a short ASCII label ("idle"/"thinking"/"error").
+ * @brief Set the live agent/voice state shown in the top-right status
+ *        indicator without a text render.  state is a short ASCII label:
+ *        "idle" / "listening" / "processing" / "responding" / "error".
  */
 void robodog_ui_set_agent_state(const char *state);
 
