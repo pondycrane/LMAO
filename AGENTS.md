@@ -210,8 +210,9 @@ archon workflow run lmao-feature-dev "description of feature"
 # RoboDog — Waveshare ESP32-S3 RLCD-4.2 (ST7305) family-calendar display (u8g2
 # native firmware, gRPC GetCalendar from the LMAO server). Verification is
 # PIXEL-DRIVEN: the mandatory robodog-hardware-e2e gate builds + flashes the
-# board (host esptool via robodog_client/flash.sh — the one sanctioned esptool
-# path for the 0x303A:0x1001 board), screen-captures the exact ST7305 pixels
+# board (host esptool via robodog_client/flash.sh — the calendar firmware's
+# sanctioned esptool path for the 0x303A:0x1001 board; the esp-claw firmware
+# has its own at esp-claw/flash_esp_claw.sh), screen-captures the exact ST7305 pixels
 # (capture.py streams the live u8g2 buffer), and reads the render back with the
 # vision model (Qwen2.5-VL via capture.py --describe). Loud skip when no board.
 archon workflow run robodog-client-dev "description of feature"
@@ -261,11 +262,13 @@ These workflows encode the rules on this page (esptool bans, Bazel BUILD
 completeness, hardware E2E evidence in the PR body, production Cardputer
 left running). See `docs/archon-workflows.md` for the full reference.
 
-**esptool allowance**: the ONLY sanctioned esptool-on-the-robodog-board path is
-`robodog_client/flash.sh` (`bazel run //robodog_client:flash_firmware` — host
-esptool; Docker ttyACM RTS passthrough breaks the button-free reset). The
-Cardputer (`0x303A:0x8120`) and RNode (`/dev/ttyUSB*`) remain esptool-banned
-under every workflow.
+**esptool allowance**: the ONLY sanctioned esptool-on-the-robodog-board paths are
+`robodog_client/flash.sh` for the calendar firmware (`bazel run
+//robodog_client:flash_firmware`) and `robodog_client/esp-claw/flash_esp_claw.sh`
+for the esp-claw edge-agent firmware (`bazel run
+//robodog_client:flash_robodog_claw`) — both host esptool (Docker ttyACM RTS
+passthrough breaks the button-free reset). The Cardputer (`0x303A:0x8120`) and
+RNode (`/dev/ttyUSB*`) remain esptool-banned under every workflow.
 
 **Gate-chain contract**: `$ARTIFACTS_DIR/.gate-head` is written **only** by
 `lmao-production-health` when the full chain completes. No other gate node

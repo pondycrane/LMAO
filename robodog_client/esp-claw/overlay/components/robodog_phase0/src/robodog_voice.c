@@ -419,6 +419,10 @@ static char *voice_asr(const int16_t *pcm, size_t samples)
         if (root != NULL) {
             cJSON_Delete(root);
         }
+        if (text == NULL) {
+            ESP_LOGE(TAG, "ASR: no text in 2xx response body='%.160s'",
+                     rx.buf != NULL ? rx.buf : "");
+        }
     } else {
         ESP_LOGE(TAG, "ASR: round-trip failed: http=%d err=%s body='%.160s'",
                  status, esp_err_to_name(err), rx.buf != NULL ? rx.buf : "");
@@ -531,6 +535,10 @@ static void tts_clip(const char *reply, char *out, size_t out_cap)
             break;
         }
     }
+    if (cut > max) {
+        cut = max; /* break char sat exactly at max: keep the cut in-bounds
+                    * so out[cut]='\0' lands inside the caller's [MAX+1] buffer */
+    }
     if (cut == 0) {
         for (size_t i = max; i > 0; i--) {
             if (reply[i] == ' ') {
@@ -546,14 +554,20 @@ static void tts_clip(const char *reply, char *out, size_t out_cap)
     out[cut] = '\0';
 }
 
-static void voice_speak(const char *reply)
+/* Max consecutive no-progress rounds in the paced TTS write loop before the
+ * playback is aborted (each round waits ~500 ms in audio_mixer_track_write,
+ * so the limit bounds a wedged ring to ~10 s instead of hanging the task). */
+#define TTS_WRITE_STALL_LIMIT 20U
+
+static esp_err_t voice_speak(const char *reply)
 {
+    esp_err_t result = ESP_OK;
     char clip[CONFIG_ROBODOG_VOICE_TTS_MAX_CHARS + 1];
     tts_clip(reply, clip, sizeof(clip));
     char *esc = json_escape(clip);
     if (esc == NULL) {
         ESP_LOGE(TAG, "TTS: json_escape failed");
-        return;
+        return ESP_ERR_NO_MEM;
     }
     char *json = NULL;
     const int json_len = snprintf(NULL, 0,
@@ -571,7 +585,7 @@ static void voice_speak(const char *reply)
     free(esc);
     if (json == NULL) {
         ESP_LOGE(TAG, "TTS: no memory for request JSON");
-        return;
+        return ESP_ERR_NO_MEM;
     }
 
     robodog_http_rx_t rx;
@@ -579,7 +593,7 @@ static void voice_speak(const char *reply)
     if (rx.buf == NULL) {
         ESP_LOGE(TAG, "TTS: no memory for response buffer");
         free(json);
-        return;
+        return ESP_ERR_NO_MEM;
     }
     esp_http_client_config_t cfg = {
         .url = CONFIG_ROBODOG_TTS_URL,
@@ -593,6 +607,7 @@ static void voice_speak(const char *reply)
     if (client == NULL) {
         ESP_LOGE(TAG, "TTS: http client init failed");
         free(json);
+        result = ESP_ERR_NO_MEM;
         goto out;
     }
     esp_http_client_set_header(client, "Content-Type", "application/json");
@@ -606,11 +621,13 @@ static void voice_speak(const char *reply)
     if (err != ESP_OK || !(status >= 200 && status < 300)) {
         ESP_LOGE(TAG, "TTS: round-trip failed: http=%d err=%s", status,
                  esp_err_to_name(err));
+        result = (err != ESP_OK) ? err : ESP_FAIL;
         goto out;
     }
     const size_t data_off = wav_data_offset((const uint8_t *)rx.buf, rx.len);
     if (data_off == 0 || data_off == rx.len) {
         ESP_LOGE(TAG, "TTS: response is not a RIFF/WAVE blob (%u B)", (unsigned)rx.len);
+        result = ESP_FAIL;
         goto out;
     }
     const size_t in_samples = (rx.len - data_off) / sizeof(int16_t);
@@ -620,6 +637,7 @@ static void voice_speak(const char *reply)
     if (out16 == NULL) {
         ESP_LOGE(TAG, "TTS: no SPIRAM for %u-sample resample buffer",
                  (unsigned)out_cap);
+        result = ESP_ERR_NO_MEM;
         goto out;
     }
     const size_t out_samples = resample_24_to_16(
@@ -640,6 +658,7 @@ static void voice_speak(const char *reply)
                                &track) != ESP_OK) {
         ESP_LOGE(TAG, "TTS: could not open APP mixer track");
         heap_caps_free(out16);
+        result = ESP_ERR_INVALID_STATE;
         goto out;
     }
     ESP_LOGI(TAG, "TTS start (%u samples -> %u)", (unsigned)in_samples,
@@ -656,12 +675,26 @@ static void voice_speak(const char *reply)
     const uint8_t *src = (const uint8_t *)out16;
     const size_t total = out_samples * sizeof(int16_t);
     size_t off = 0;
+    unsigned stalls = 0;
     while (off < total) {
         size_t chunk = total - off;
         if (chunk > frame_bytes) {
             chunk = frame_bytes;
         }
         const size_t w = audio_mixer_track_write(track, src + off, chunk);
+        if (w == 0) {
+            /* Ring refuses to drain (APP mixer consumer dead/hung).  Bound the
+             * retry so the loop cannot wedge the whole voice task forever:
+             * after TTS_WRITE_STALL_LIMIT no-progress rounds, abort the
+             * playback, surface the error, and let the turn finish. */
+            if (++stalls >= TTS_WRITE_STALL_LIMIT) {
+                ESP_LOGE(TAG, "TTS: playback stalled (mixer ring not draining); aborting");
+                result = ESP_ERR_TIMEOUT;
+                break;
+            }
+        } else {
+            stalls = 0;
+        }
         off += w;
         if (w < chunk) {
             /* Ring momentarily full: let the mixer drain a frame before retry. */
@@ -676,6 +709,7 @@ static void voice_speak(const char *reply)
     heap_caps_free(out16);
 out:
     robodog_http_rx_free(&rx);
+    return result;
 }
 
 /* ── One listen->ASR->agent->TTS turn ───────────────────────────────────── */
@@ -712,11 +746,17 @@ static void voice_turn(void)
 
     char *text = voice_asr(pcm, samples);
     heap_caps_free(pcm);
-    if (text == NULL || text[0] == '\0') {
+    if (text == NULL) {
+        /* ASR round-trip failed (or OOM): a real fault, not "user silent" —
+         * surface it instead of collapsing to the success idle state. */
+        ESP_LOGE(TAG, "ASR failed; ending turn");
+        robodog_ui_set_agent_state("error");
+        s_turn_active = false;
+        return;
+    }
+    if (text[0] == '\0') {
         ESP_LOGW(TAG, "ASR returned no text; ending turn");
-        if (text != NULL) {
-            free(text);
-        }
+        free(text);
         robodog_ui_set_agent_state("idle");
         s_turn_active = false;
         return;
@@ -746,13 +786,18 @@ static void voice_turn(void)
     if (err == ESP_OK && resp.text != NULL) {
         ESP_LOGI(TAG, "agent reply: %s", resp.text);
         robodog_ui_show_assistant(resp.text);
-        voice_speak(resp.text);
+        if (voice_speak(resp.text) == ESP_OK) {
+            robodog_ui_set_agent_state("idle");
+        } else {
+            /* TTS playback failed (silent reply): surface it, don't let the
+             * turn read as a fully successful exchange. */
+            robodog_ui_set_agent_state("error");
+        }
     } else {
         ESP_LOGE(TAG, "agent run failed (%s): %s", esp_err_to_name(err),
                  resp.error_message != NULL ? resp.error_message : "");
         robodog_ui_set_agent_state("error");
     }
-    robodog_ui_set_agent_state("idle");
     s_turn_active = false;
 }
 
