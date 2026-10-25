@@ -502,10 +502,32 @@ static void voice_speak(const char *reply)
     ESP_LOGI(TAG, "TTS start (%u samples -> %u)", (unsigned)in_samples,
              (unsigned)out_samples);
     robodog_ui_set_agent_state("responding");
-    /* Write blocks on a full ring, draining in real-time at 16 kHz — this is
-     * the free downlink pacing (the old Opus DOWNLINK_PACE problem). */
-    (void)audio_mixer_track_write(track, out16, out_samples * sizeof(int16_t));
-    (void)audio_mixer_track_flush(track); /* wait until the panel drains */
+    /* Pace playback to real-time ourselves.  The shared mixer track drains at
+     * the 16 kHz codec rate, but a single audio_mixer_track_write() only waits
+     * AUDIO_MIXER_WRITE_TIMEOUT_MS (500 ms) for its 8-frame (5 KB) ring to
+     * drain — writing a whole long reply at once saturates the ring and the
+     * write times out after ~0.5 s, so almost none of the audio ever plays
+     * (the "responding but silent" failure).  Feed it in 20 ms frames with a
+     * ~19 ms step: the reply plays at real-time and never overruns the ring. */
+    const size_t frame_bytes = VOICE_RATE * 20 / 1000 * sizeof(int16_t); /* 640 */
+    const uint8_t *src = (const uint8_t *)out16;
+    const size_t total = out_samples * sizeof(int16_t);
+    size_t off = 0;
+    while (off < total) {
+        size_t chunk = total - off;
+        if (chunk > frame_bytes) {
+            chunk = frame_bytes;
+        }
+        const size_t w = audio_mixer_track_write(track, src + off, chunk);
+        off += w;
+        if (w < chunk) {
+            /* Ring momentarily full: let the mixer drain a frame before retry. */
+            vTaskDelay(pdMS_TO_TICKS(10));
+            continue;
+        }
+        vTaskDelay(pdMS_TO_TICKS(19)); /* ~real-time step */
+    }
+    (void)audio_mixer_track_flush(track); /* drain the last ~200 ms of ring */
     ESP_LOGI(TAG, "TTS stop");
     audio_mixer_close_track(track);
     heap_caps_free(out16);
