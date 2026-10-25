@@ -22,6 +22,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 
 #include "esp_log.h"
 #include "esp_err.h"
@@ -40,6 +41,9 @@
 #include "claw_core.h"
 #include "audio_hub.h"
 #include "wifi_manager.h"
+#include "esp_codec_dev.h"
+#include "esp_board_manager.h"
+#include "dev_audio_codec.h"
 
 static const char *TAG = "robodog_voice";
 
@@ -62,11 +66,142 @@ static const char *TAG = "robodog_voice";
 #define EVT_LISTEN            BIT0
 #define VOICE_STACK           8192
 
+/* The RLCD's speaker amp enable (same PA the hermes firmware drives on
+ * GPIO46).  esp-board-manager registers gpio_pa_control here (board
+ * peripherals yaml, active_level=1) but the peripheral init applies the
+ * struct-default output level 0, so the amp stays OFF unless we raise it —
+ * the DAC gets real-time audio yet the speaker is silent.  Keep it HIGH for
+ * the whole playback (idempotent, no re-toggle clicks). */
+#define VOICE_PA_GPIO         GPIO_NUM_46
+
 static EventGroupHandle_t s_voice_evts;
 static TaskHandle_t s_voice_task;
 static volatile bool s_turn_active;
 
-/* ── Energy VAD (software; DESIGN's fallback since esp-sr is absent) ────── */
+/* Drive the speaker power-amplifier on (GPIO46 sees the struct-default LOW
+ * from the board manager's peripheral init even though the DAC device hook
+ * declares active_level=1 — see VOICE_PA_GPIO).  Configure as push-pull
+ * output HIGH ourselves so the amp is up regardless of bmgr state. */
+static void voice_enable_pa(void)
+{
+    static bool s_pa_on;
+    if (s_pa_on) {
+        return;
+    }
+    gpio_config_t io = {
+        .pin_bit_mask = 1ULL << VOICE_PA_GPIO,
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    if (gpio_config(&io) == ESP_OK && gpio_set_level(VOICE_PA_GPIO, 1) == ESP_OK) {
+        s_pa_on = true;
+        ESP_LOGI(TAG, "speaker PA enabled (GPIO%d -> high)", VOICE_PA_GPIO);
+    } else {
+        ESP_LOGW(TAG, "failed to enable speaker PA on GPIO%d",
+                 VOICE_PA_GPIO);
+    }
+}
+
+/* ── Audio playback diagnostic (rd_audio_diag) ──────────────────────────── */
+/* The claw audio_hub path delivers real-time data on this board but produced
+ * no audible output even with the PA raised, so dump the live ES8311 DAC
+ * registers (power/DAC-enable/mute/volume), force an unmute + 80% volume,
+ * then play a 1 kHz tone through the same paced APP-track path so the test
+ * rig's microphone can confirm signal spectrally.  Register numbers come from
+ * the esp_codec_dev es8311 driver (es8311_reg.h). */
+static esp_codec_dev_handle_t voice_dac_dev(void)
+{
+    void *dev_handle = NULL;
+    if (esp_board_manager_get_device_handle("audio_dac", &dev_handle) != ESP_OK ||
+        dev_handle == NULL) {
+        return NULL;
+    }
+    return ((dev_audio_codec_handles_t *)dev_handle)->codec_dev;
+}
+
+static void voice_dump_dac_regs(const char *tag)
+{
+    esp_codec_dev_handle_t h = voice_dac_dev();
+    if (h == NULL) {
+        ESP_LOGW(TAG, "audio diag: no audio_dac codec handle");
+        return;
+    }
+    int pwr = -1, dac = -1, mute = -1, vol = -1;
+    (void)esp_codec_dev_read_reg(h, 0x0D, &pwr);  /* SYSTEM_REG0D  power */
+    (void)esp_codec_dev_read_reg(h, 0x12, &dac);  /* SYSTEM_REG12  DAC enable */
+    (void)esp_codec_dev_read_reg(h, 0x31, &mute); /* DAC_REG31     mute */
+    (void)esp_codec_dev_read_reg(h, 0x32, &vol);  /* DAC_REG32     volume */
+    ESP_LOGI(TAG, "audio diag %s: REG0D=%02X REG12=%02X REG31(mute)=%02X REG32(vol)=%02X",
+             tag, pwr, dac, mute, vol);
+}
+
+static void voice_play_tone(unsigned ms, int freq)
+{
+    audio_mixer_handle_t mix = NULL;
+    audio_mixer_track_handle_t track = NULL;
+    if (audio_hub_get_mixer(&mix) != ESP_OK ||
+        audio_mixer_open_track(mix, AUDIO_MIXER_TRACK_APP, "robodog_voice_diag",
+                               &track) != ESP_OK || track == NULL) {
+        ESP_LOGE(TAG, "audio diag: could not open APP mixer track");
+        return;
+    }
+    const unsigned n = (unsigned)((uint64_t)VOICE_RATE * ms / 1000u);
+    int16_t *buf = heap_caps_malloc(n * sizeof(int16_t),
+                                    MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (buf == NULL) {
+        ESP_LOGE(TAG, "audio diag: no SPIRAM for tone buffer");
+        audio_mixer_close_track(track);
+        return;
+    }
+    for (unsigned i = 0; i < n; i++) {
+        float v = sinf(2.0f * 3.14159265f * (float)freq * (float)i /
+                       (float)VOICE_RATE);
+        buf[i] = (int16_t)(v * 10000.0f);
+    }
+    /* Same paced write as voice_speak (see the pacing note there). */
+    const size_t frame_bytes = VOICE_RATE * 20 / 1000 * sizeof(int16_t);
+    const uint8_t *src = (const uint8_t *)buf;
+    const size_t total = n * sizeof(int16_t);
+    size_t off = 0;
+    while (off < total) {
+        size_t chunk = total - off;
+        if (chunk > frame_bytes) {
+            chunk = frame_bytes;
+        }
+        const size_t w = audio_mixer_track_write(track, src + off, chunk);
+        off += w;
+        if (w < chunk) {
+            vTaskDelay(pdMS_TO_TICKS(10));
+            continue;
+        }
+        vTaskDelay(pdMS_TO_TICKS(19));
+    }
+    (void)audio_mixer_track_flush(track);
+    audio_mixer_close_track(track);
+    heap_caps_free(buf);
+}
+
+static int cmd_audio_diag(int argc, char **argv)
+{
+    (void)argc; (void)argv;
+    esp_codec_dev_handle_t h = voice_dac_dev();
+    if (h == NULL) {
+        ESP_LOGE(TAG, "audio diag: no audio_dac codec handle");
+        return 1;
+    }
+    voice_enable_pa();
+    voice_dump_dac_regs("before");
+    (void)esp_codec_dev_set_out_mute(h, false);
+    (void)esp_codec_dev_set_out_vol(h, 80);
+    ESP_LOGI(TAG, "audio diag: forced unmute + out_vol 80");
+    voice_dump_dac_regs("after-unmute");
+    voice_play_tone(2000, 1000);
+    voice_dump_dac_regs("after-tone");
+    return 0;
+}
+
 
 static bool frame_is_speech(const int16_t *pcm, size_t samples)
 {
@@ -490,6 +625,14 @@ static void voice_speak(const char *reply)
     const size_t out_samples = resample_24_to_16(
         (const int16_t *)(rx.buf + data_off), in_samples, out16, out_cap);
 
+    voice_enable_pa(); /* amp off by default (bmgr inits PA pin LOW) — raise it */
+    /* Belt-and-braces: re-assert unmute + 80% volume so a stale mute state can
+     * never leave the DAC silent regardless of the mixer's open-time state. */
+    esp_codec_dev_handle_t dac = voice_dac_dev();
+    if (dac != NULL) {
+        (void)esp_codec_dev_set_out_mute(dac, false);
+        (void)esp_codec_dev_set_out_vol(dac, 80);
+    }
     audio_mixer_handle_t mix = NULL;
     audio_mixer_track_handle_t track = NULL;
     if (audio_hub_get_mixer(&mix) != ESP_OK ||
@@ -713,6 +856,14 @@ esp_err_t robodog_voice_init(void)
     };
     if (esp_console_cmd_register(&cmd) != ESP_OK) {
         ESP_LOGW(TAG, "failed to register 'rd_listen' console command");
+    }
+    const esp_console_cmd_t diag = {
+        .command = "rd_audio_diag",
+        .help = "dump ES8311 regs, unmute/vol, play 1kHz tone, re-dump",
+        .func = &cmd_audio_diag,
+    };
+    if (esp_console_cmd_register(&diag) != ESP_OK) {
+        ESP_LOGW(TAG, "failed to register 'rd_audio_diag' console command");
     }
     ESP_LOGI(TAG, "RoboDog Phase 2 voice loop ready: rd_listen");
     return ESP_OK;

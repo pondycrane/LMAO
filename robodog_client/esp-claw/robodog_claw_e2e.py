@@ -372,11 +372,18 @@ def run_loop(n, instr, artifacts):
             log("TTS start seen; capturing board speaker on test mic ...")
             try:
                 capture_mic(mic_path, RING_CAP_SECS)
-                burst = run_dir / "reply_burst.wav"
-                trim_loudest_window(mic_path, burst, 4.0)
-                if burst.exists():
-                    ring_txt = remote_asr(burst)
-                    (run_dir / "ring_reasr.txt").write_text(ring_txt)
+                # The board's reply is faint but spans the whole TTS window; a
+                # single loudest-3s burst is often ambient noise and lets
+                # Whisper under-trigger (re-ASR back to nothing).  Transcribe
+                # the FULL capture first, and only fall back to the loudest
+                # burst if the full window yields no text.
+                ring_txt = remote_asr(mic_path)
+                if not ring_txt:
+                    burst = run_dir / "reply_burst.wav"
+                    trim_loudest_window(mic_path, burst, 4.0)
+                    if burst.exists():
+                        ring_txt = remote_asr(burst)
+                (run_dir / "ring_reasr.txt").write_text(ring_txt or "")
             except Exception as e:
                 log(f"ring capture/re-ASR failed: {e}")
         _, _ = wait_for_log(s, [r"TTS stop"], timeout=REPLY_TIMEOUT, label="TTS")
