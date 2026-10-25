@@ -459,6 +459,16 @@ Phase 2 delivers the **device-initiated voice loop**, hardware-verified end-to-e
 - **24 kHz → 16 kHz resample.** Kokoro emits 24 kHz s16 WAV; the board's I2S /
   mixer runs 16 kHz, so `resample_24_to_16()` does a linear 2:3 down-convert
   before writing to the APP track.
+- **TTS playback is manually paced — the blocking-write assumption is wrong.**
+  `audio_mixer_track_write` does NOT block for real-time playback: it only
+  waits `AUDIO_MIXER_WRITE_TIMEOUT_MS` (500 ms) for its ~8-frame (5 KB) ring to
+  drain, then returns short. Writing a whole long reply at once therefore
+  saturated the ring and timed out after ~0.5 s — the speaker got only a
+  fraction of the audio and the reply was inaudible (TTS `start→stop` ≈ 0.7 s
+  for 16.5 s of audio). `voice_speak()` now feeds the track in ~20 ms frames
+  with a ~19 ms `vTaskDelay` step so playback rides the 16 kHz codec rate
+  (verified on-device: 14.5 s of audio plays over 14.5 s). Do NOT "simplify"
+  this back to a single `track_write`.
 - **HTTP shared helper extracted** to `robodog_http.c/h` (was static in
   `robodog_overlay.c`'s probes) so `voice_asr` / `voice_speak` reuse the exact
   body-buffering path. `robodog_http_rx_t` grows in SPIRAM as the body lands.
