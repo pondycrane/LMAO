@@ -6,7 +6,8 @@
 #     wholesale-copied over the upstream board copy (no fragile patch)
 #   - main.c wires robodog_init() (console probes + capture publisher)
 #   - components/robodog_phase0/ LMAO-owned component: rdshot / rd_asr /
-#     rd_tts / rd_chat probes + the deterministic text-only UI
+#     rd_tts / rd_chat probes + the deterministic text-only UI + the Phase 2
+#     voice loop (rd_listen -> mic -> ASR -> agent -> TTS -> speaker)
 #   - sdkconfig.defaults.robodog (model-endpoint URLs from CLAW_* env + the
 #     LVGL ~14 px ASCII text font, so LAN endpoints stay configurable)
 # via the ESP-IDF v5.5.4 Docker image (ESP-Claw's recommended IDF, not the
@@ -55,7 +56,9 @@ if [ ! -f "$SRC/.robodog_board_overlaid" ] || \
     REBUILD_FLAG=1
 fi
 
-# 3. stage the LMAO-owned probe component (additive; no upstream files edited)
+# 3. stage the LMAO-owned overlay component (additive; no upstream files
+#    edited): rdshot/rd_asr/rd_tts/rd_chat probes + the deterministic text UI
+#    + the Phase 2 voice loop (robodog_voice.c uses the shared audio_hub)
 rm -rf "$EDGE/components/robodog_phase0"
 cp -r "$APP/esp-claw/overlay/components/robodog_phase0" "$EDGE/components/robodog_phase0"
 
