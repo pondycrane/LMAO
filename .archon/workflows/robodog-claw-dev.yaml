@@ -42,10 +42,11 @@ description: |
   12. Final summary with decision matrix -> GitHub comment
 
   NOT for: Cardputer/LoRa work (lmao-feature-dev), GitHub-issue fixes
-  (lmao-fix-issue), Smart Irrigation (smart-irrigation-dev), standalone reviews,
-  the RoboDog *calendar* firmware (robodog-client-dev) or the hermes voice
-  firmware (robodog-hermes-dev) — the RLCD board hosts only one firmware image
-  at a time; never run two board workflows at once.
+  (lmao-fix-issue), Smart Irrigation (smart-irrigation-dev), standalone reviews
+  of an EXISTING claw PR (robodog-claw-review), the RoboDog *calendar*
+  firmware (robodog-client-dev) or the hermes voice firmware
+  (robodog-hermes-dev) — the RLCD board hosts only one firmware image at a
+  time; never run two board workflows at once.
 
   Models: gx10 DeepSeek V4 Flash (gx10/deepseek-ai/DeepSeek-V4-Flash-0731) for
   the agent. The RD_SHOT vision readback and the ring re-ASR inside
@@ -201,7 +202,7 @@ nodes:
   # ═══════════════════════════════════════════════════════════════════
 
   - id: implement-fixes
-    command: lmao-implement-review-fixes
+    command: robodog-claw-implement-review-fixes
     depends_on: [synthesize]
     context: fresh
     model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
