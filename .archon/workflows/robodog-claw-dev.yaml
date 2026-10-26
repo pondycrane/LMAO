@@ -30,8 +30,11 @@ description: |
      robodog_client/esp-claw/flash_esp_claw.sh — the sanctioned path for
      0x303A:0x1001) + drive the autonomous device-direct voice loop
      (robodog_claw_e2e.py: rd_listen -> mic -> ASR -> agent -> TTS -> speaker ->
-     RD_SHOT subtitle readback). Loud skip when the board or the ALSA test card
-     is missing. NEVER flash the Cardputer or RNode.
+     RD_SHOT subtitle readback) AND the dedicated robodog-claw-voice-verify
+     gate (--voice-verify: the chunked reply is read out to its END — every
+     `voice chunk i/n` TTS-bracketed on the console + the mic capture re-ASRs
+     the reply's tail tokens, catching any truncation). Loud skip when the
+     board or the ALSA test card is missing. NEVER flash the Cardputer or RNode.
   7. robodog-production-health gate (.gate-head owner)
   8. Create PR with template + the robodog-claw-e2e evidence
      ($ARTIFACTS_DIR/hardware-e2e.md / robodog-claw-e2e.md verbatim), mark ready
@@ -111,9 +114,15 @@ nodes:
     context: fresh
     model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
 
+  - id: claw-voice-verify
+    command: robodog-claw-voice-verify
+    depends_on: [claw-e2e]
+    context: fresh
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+
   - id: production-health
     command: robodog-production-health
-    depends_on: [claw-e2e]
+    depends_on: [claw-voice-verify]
     context: fresh
     model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
 
@@ -226,9 +235,15 @@ nodes:
     context: fresh
     model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
 
+  - id: final-claw-voice-verify
+    command: robodog-claw-voice-verify
+    depends_on: [final-claw-e2e]
+    context: fresh
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+
   - id: final-production-health
     command: robodog-production-health
-    depends_on: [final-claw-e2e]
+    depends_on: [final-claw-voice-verify]
     context: fresh
     model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
 

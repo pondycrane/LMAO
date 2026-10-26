@@ -54,6 +54,7 @@ static const char *TAG = "robodog_ui";
 typedef enum {
     UI_CMD_USER = 0,
     UI_CMD_ASSISTANT,
+    UI_CMD_ASSISTANT_APPEND,
     UI_CMD_STATE,
 } ui_cmd_type_t;
 
@@ -76,13 +77,22 @@ static char s_status_text[96];
 static char s_agent_state[16];
 static char s_transcript[2048];      /* current exchange, newest last */
 static char s_last_user[480];        /* latest user prompt (for the exchange reset) */
+static char s_assistant[2048];       /* current turn's assistant reply, accumulated
+                                      * by UI_CMD_ASSISTANT_APPEND so the chunked
+                                      * voice queue grows the full reply on screen
+                                      * instead of showing only the last chunk */
+static bool s_chunked;               /* the current exchange is being accumulated
+                                      * by the chunked voice queue: the panel
+                                      * bottom-snaps and keeps the NEWEST content
+                                      * (the chunk being read); a single-shot
+                                      * rd_chat reply keeps head-pin behaviour */
 
 /* Keep the current exchange (latest user prompt + assistant reply) together
- * so the actual reply script is never truncated off.  The exchange is rebuilt
- * from the reply's HEAD (ui_reset_to_exchange) instead of rolling oldest-out,
- * so a long verbose reply can no longer push its own answer off-screen; the
- * drop-oldest logic below only bounds the accumulated user lines.  Stays well
- * under s_transcript[2048]. */
+ * so the actual reply script is never truncated off.  Single-shot replies are
+ * rebuilt from the reply's HEAD (a long verbose reply must never push its own
+ * answer off-screen); CHUNKED voice replies keep the TAIL + bottom-snap so
+ * the chunk being read is what stays on screen.  The drop-oldest logic below
+ * bounds the accumulated user lines.  Stays well under s_transcript[2048]. */
 #define UI_TRANSCRIPT_CAP  1600
 
 /* ── ASCII sanitisation ──────────────────────────────────────────────────── */
@@ -171,12 +181,11 @@ static void ui_append_line(const char *prefix, const char *text)
 }
 
 /* Rebuild the visible transcript as the CURRENT exchange only: "> <user>" on
- * the first line, then the assistant reply from its HEAD.  The reply head is
- * the script that was (or is being) spoken — a long verbose reply must never
- * let drop-oldest or the panel cut its own beginning away, or the screen
- * shows an unrelated mid-list fragment and reads like "a text transcript of
- * the response audio" instead of the actual answer.  Anything past the cap is
- * trimmed from the tail only. */
+ * the first line, then the assistant reply.  Single-shot replies (rd_chat)
+ * pin from the reply's HEAD — a long verbose reply must never let the panel
+ * cut its own beginning away.  CHUNKED voice replies instead keep the TAIL:
+ * the voice is reading the newest chunk, so that must stay on screen (the
+ * user line scrolls off only for monster replies). */
 static void ui_reset_to_exchange(const char *user, const char *reply)
 {
     if (user != NULL && user[0] != '\0') {
@@ -191,7 +200,13 @@ static void ui_reset_to_exchange(const char *user, const char *reply)
     strlcat(s_transcript, rascii, sizeof(s_transcript));
     const size_t len = strlen(s_transcript);
     if (len > UI_TRANSCRIPT_CAP) {
-        s_transcript[UI_TRANSCRIPT_CAP] = '\0'; /* tail-trim; the head lives */
+        if (s_chunked) {
+            /* keep the newest (the chunk being read), drop the head */
+            memmove(s_transcript, s_transcript + (len - UI_TRANSCRIPT_CAP),
+                    UI_TRANSCRIPT_CAP + 1);
+        } else {
+            s_transcript[UI_TRANSCRIPT_CAP] = '\0'; /* keep the head */
+        }
     }
 }
 
@@ -301,15 +316,25 @@ static void ui_flush_locked(void)
      * deterministic RD_SHOT frame, not just text changes. */
     lv_label_set_text(s_body_label, s_transcript);
     lv_obj_invalidate(s_body_label);
-    /* Pin the body to the TOP of the exchange so the CURRENT reply (the
-     * actual script the assistant is/has spoken) fills the panel from its
-     * beginning.  Bottom-pinning long verbose replies instead showed only
-     * their tail — a mid-capability-list fragment — with the real answer,
-     * "the actual original script used to generate the response audio",
-     * scrolled off above the fold. */
+    /* Pin the body so the text the assistant is CURRENTLY speaking is on
+     * screen: chunked voice replies snap to the BOTTOM (the live chunk —
+     * subtitles), single-shot full replies (rd_chat) snap to the TOP (the
+     * answer head, the Phase-1 rule).  The old universal top-pin made later
+     * chunks accumulate BELOW the visible fold while they were being read —
+     * "read out but never displayed". */
     if (s_body_scroller != NULL) {
         lv_obj_update_layout(s_body_scroller);
-        lv_obj_scroll_to_y(s_body_scroller, 0, LV_ANIM_OFF);
+        if (s_chunked) {
+            /* Snap to the NEWEST chunk (subtitle sync).  The canonical LVGL9
+             * "scroll to bottom" idiom — scroll_to_y(LV_COORD_MAX, …) clamps
+             * to the content's max scroll offset via scroll_by_bounded, so the
+             * panel always lands on the chunk being read.  (A manual
+             * scroll_by(0, lv_obj_get_scroll_bottom(…)) flew the label clear
+             * out of the viewport on this LVGL build.) */
+            lv_obj_scroll_to_y(s_body_scroller, LV_COORD_MAX, LV_ANIM_OFF);
+        } else {
+            lv_obj_scroll_to_y(s_body_scroller, 0, LV_ANIM_OFF);
+        }
     }
     if (lv_label_get_text(s_status_label) != s_status_text) {
         lv_label_set_text(s_status_label, s_status_text);
@@ -335,18 +360,47 @@ static void ui_process_cmd(const ui_cmd_t *cmd)
     switch (cmd->type) {
     case UI_CMD_USER:
         ui_ascii_copy(s_last_user, sizeof(s_last_user), cmd->text);
+        s_assistant[0] = '\0'; /* a fresh turn starts: no reply accumulated yet */
+        s_chunked = false;     /* not chunked until the voice queue appends */
         ui_append_line(">", cmd->text);
         /* A fresh user turn starts: ASR done, now the agent is processing
          * (right-hand state indicator shows "processing"). */
         strlcpy(s_agent_state, "processing", sizeof(s_agent_state));
         break;
     case UI_CMD_ASSISTANT:
-        ui_reset_to_exchange(s_last_user, cmd->text);
+        /* Single-shot full reply (rd_chat): replace the accumulated reply. */
+        s_chunked = false; /* one full reply -> head-pin, not chunk-sync */
+        strlcpy(s_assistant, cmd->text, sizeof(s_assistant));
+        ui_reset_to_exchange(s_last_user, s_assistant);
         /* No state transition here: the reply text finalizes BEFORE the TTS
          * round-trip + playback, so forcing "idle" made the turn read as done
          * while the voice hadn't (or had only just) started speaking — the
          * premature "response done" indicator.  voice_turn / rd_chat set the
          * terminal state explicitly only after playback / rendering. */
+        break;
+    case UI_CMD_ASSISTANT_APPEND:
+        /* Chunked voice queue: append ONE sentence chunk to the growing
+         * reply, then rebuild the exchange.  The panel now SYNCs with the
+         * voice: it snaps to the tail (the chunk currently being read) and
+         * the accumulation rolls drop-oldest, so the current chunk always
+         * stays on screen no matter how long the reply grows.  Join with a
+         * single space only where neither side already provides one — chunks
+         * cut at punctuation don't need it, and a newline keeps its own line. */
+        s_chunked = true;
+        if (s_assistant[0] != '\0' &&
+            cmd->text[0] != '\n' && cmd->text[0] != ' ' &&
+            s_assistant[strlen(s_assistant) - 1] != '\n') {
+            strlcat(s_assistant, " ", sizeof(s_assistant));
+        }
+        /* drop-oldest: keep only the most-recent UI_TRANSCRIPT_CAP chars so a
+         * huge reply can never roll the chunk being read off the buffer. */
+        strlcat(s_assistant, cmd->text, sizeof(s_assistant));
+        size_t rlen = strlen(s_assistant);
+        if (rlen > UI_TRANSCRIPT_CAP) {
+            memmove(s_assistant, s_assistant + (rlen - UI_TRANSCRIPT_CAP),
+                    UI_TRANSCRIPT_CAP + 1);
+        }
+        ui_reset_to_exchange(s_last_user, s_assistant);
         break;
     case UI_CMD_STATE:
         ui_ascii_copy(s_agent_state, sizeof(s_agent_state), cmd->state);
@@ -472,6 +526,11 @@ void robodog_ui_show_user(const char *text)
 void robodog_ui_show_assistant(const char *text)
 {
     ui_enqueue(UI_CMD_ASSISTANT, text, NULL);
+}
+
+void robodog_ui_append_assistant(const char *text)
+{
+    ui_enqueue(UI_CMD_ASSISTANT_APPEND, text, NULL);
 }
 
 void robodog_ui_set_agent_state(const char *state)
