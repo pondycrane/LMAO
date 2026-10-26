@@ -48,7 +48,7 @@ description: |
   or the RoboDog *calendar* firmware (robodog-client-dev — same board, mutually
   exclusive flashes; never run both workflows at once).
 
-  Models: gx10 DeepSeek V4 Flash (gx10/deepseek-ai/DeepSeek-V4-Flash-0731) for
+  Models: archon tiers (large/medium/small) resolved from ~/.archon/config.yaml (today all map to gx10 DeepSeek V4 Flash — edit config.yaml once to reroute when the local model is down) for
   the agent. The screen-capture/vision READBACK inside robodog-hermes-e2e and the
   ASR re-read inside robodog-voice-e2e are fixed pipelines, not the agent model.
   No Claude anywhere.
@@ -61,7 +61,7 @@ nodes:
   - id: create-plan
     command: robodog-hermes-create-plan
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
     effort: high
 
   # ═══════════════════════════════════════════════════════════════════
@@ -72,7 +72,7 @@ nodes:
     command: lmao-plan-setup
     depends_on: [create-plan]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   # ═══════════════════════════════════════════════════════════════════
   # PHASE 2: CONFIRM PLAN
@@ -82,7 +82,7 @@ nodes:
     command: lmao-confirm-plan
     depends_on: [plan-setup]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   # ═══════════════════════════════════════════════════════════════════
   # PHASE 3: IMPLEMENT (hermes voice rules + Bazel + hermes firmware build)
@@ -92,7 +92,7 @@ nodes:
     command: robodog-hermes-implement-tasks
     depends_on: [confirm-plan]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
     effort: max
 
   # ═══════════════════════════════════════════════════════════════════
@@ -104,25 +104,25 @@ nodes:
     command: robodog-hermes-validate
     depends_on: [implement-tasks]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   - id: hermes-hardware-e2e
     command: robodog-hermes-e2e
     depends_on: [validate]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   - id: voice-loop-e2e
     command: robodog-voice-e2e
     depends_on: [hermes-hardware-e2e]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   - id: production-health
     command: robodog-production-health
     depends_on: [voice-loop-e2e]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   # ═══════════════════════════════════════════════════════════════════
   # PHASE 5: FINALIZE PR (robodog-hermes-e2e writes
@@ -135,7 +135,7 @@ nodes:
     command: robodog-hermes-finalize-pr
     depends_on: [production-health]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   # ═══════════════════════════════════════════════════════════════════
   # PHASE 6: CODE REVIEW
@@ -159,50 +159,50 @@ nodes:
     command: archon-pr-review-scope
     depends_on: [verify-pr-base]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   - id: sync
     command: lmao-sync-pr-with-main
     depends_on: [review-scope]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   - id: code-review
     command: archon-code-review-agent
     depends_on: [sync]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   - id: error-handling
     command: archon-error-handling-agent
     depends_on: [sync]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   - id: test-coverage
     command: archon-test-coverage-agent
     depends_on: [sync]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   - id: comment-quality
     command: archon-comment-quality-agent
     depends_on: [sync]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   - id: docs-impact
     command: archon-docs-impact-agent
     depends_on: [sync]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   - id: synthesize
     command: archon-synthesize-review
     depends_on: [code-review, error-handling, test-coverage, comment-quality, docs-impact]
     trigger_rule: one_success
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   # ═══════════════════════════════════════════════════════════════════
   # PHASE 7: FIX REVIEW ISSUES (hermes-adapted)
@@ -212,7 +212,7 @@ nodes:
     command: robodog-hermes-implement-review-fixes
     depends_on: [synthesize]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
     effort: max
 
   # ═══════════════════════════════════════════════════════════════════
@@ -227,25 +227,25 @@ nodes:
     command: robodog-hermes-validate
     depends_on: [implement-fixes]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   - id: final-hermes-hardware-e2e
     command: robodog-hermes-e2e
     depends_on: [final-validate]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   - id: final-voice-loop-e2e
     command: robodog-voice-e2e
     depends_on: [final-hermes-hardware-e2e]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   - id: final-production-health
     command: robodog-production-health
     depends_on: [final-voice-loop-e2e]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   # ═══════════════════════════════════════════════════════════════════
   # PHASE 9: FINAL SUMMARY & FOLLOW-UP
@@ -255,7 +255,7 @@ nodes:
     command: archon-workflow-summary
     depends_on: [final-production-health]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   # ─── Push notification via ntfy (bash + curl) ─────────────────
   # To enable, create .archon/mcp/ntfy.json with {"NTFY_TOPIC": "..."}

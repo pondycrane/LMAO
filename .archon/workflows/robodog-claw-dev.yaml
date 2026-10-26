@@ -51,7 +51,7 @@ description: |
   (robodog-hermes-dev) — the RLCD board hosts only one firmware image at a
   time; never run two board workflows at once.
 
-  Models: gx10 DeepSeek V4 Flash (gx10/deepseek-ai/DeepSeek-V4-Flash-0731) for
+  Models: archon tiers (large/medium/small) resolved from ~/.archon/config.yaml (today all map to gx10 DeepSeek V4 Flash — edit config.yaml once to reroute when the local model is down) for
   the agent. The RD_SHOT vision readback and the ring re-ASR inside
   robodog-claw-e2e are fixed pipelines, not the agent model. No Claude anywhere.
 
@@ -63,7 +63,7 @@ nodes:
   - id: create-plan
     command: lmao-create-plan
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
     effort: high
 
   # ═══════════════════════════════════════════════════════════════════
@@ -74,7 +74,7 @@ nodes:
     command: lmao-plan-setup
     depends_on: [create-plan]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   # ═══════════════════════════════════════════════════════════════════
   # PHASE 2: CONFIRM PLAN
@@ -84,7 +84,7 @@ nodes:
     command: lmao-confirm-plan
     depends_on: [plan-setup]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   # ═══════════════════════════════════════════════════════════════════
   # PHASE 3: IMPLEMENT
@@ -94,7 +94,7 @@ nodes:
     command: lmao-implement-tasks
     depends_on: [confirm-plan]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
     effort: max
 
   # ═══════════════════════════════════════════════════════════════════
@@ -106,25 +106,25 @@ nodes:
     command: lmao-validate
     depends_on: [implement-tasks]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   - id: claw-e2e
     command: robodog-claw-e2e
     depends_on: [validate]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   - id: claw-voice-verify
     command: robodog-claw-voice-verify
     depends_on: [claw-e2e]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   - id: production-health
     command: robodog-production-health
     depends_on: [claw-voice-verify]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   # ═══════════════════════════════════════════════════════════════════
   # PHASE 5: FINALIZE PR (robodog-claw-e2e writes
@@ -137,7 +137,7 @@ nodes:
     command: lmao-finalize-pr
     depends_on: [production-health]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   # ═══════════════════════════════════════════════════════════════════
   # PHASE 6: CODE REVIEW
@@ -161,50 +161,50 @@ nodes:
     command: archon-pr-review-scope
     depends_on: [verify-pr-base]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   - id: sync
     command: lmao-sync-pr-with-main
     depends_on: [review-scope]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   - id: code-review
     command: archon-code-review-agent
     depends_on: [sync]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   - id: error-handling
     command: archon-error-handling-agent
     depends_on: [sync]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   - id: test-coverage
     command: archon-test-coverage-agent
     depends_on: [sync]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   - id: comment-quality
     command: archon-comment-quality-agent
     depends_on: [sync]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   - id: docs-impact
     command: archon-docs-impact-agent
     depends_on: [sync]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   - id: synthesize
     command: archon-synthesize-review
     depends_on: [code-review, error-handling, test-coverage, comment-quality, docs-impact]
     trigger_rule: one_success
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   # ═══════════════════════════════════════════════════════════════════
   # PHASE 7: FIX REVIEW ISSUES
@@ -214,7 +214,7 @@ nodes:
     command: robodog-claw-implement-review-fixes
     depends_on: [synthesize]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
     effort: max
 
   # ═══════════════════════════════════════════════════════════════════
@@ -227,25 +227,25 @@ nodes:
     command: lmao-validate
     depends_on: [implement-fixes]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   - id: final-claw-e2e
     command: robodog-claw-e2e
     depends_on: [final-validate]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   - id: final-claw-voice-verify
     command: robodog-claw-voice-verify
     depends_on: [final-claw-e2e]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   - id: final-production-health
     command: robodog-production-health
     depends_on: [final-claw-voice-verify]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   # ═══════════════════════════════════════════════════════════════════
   # PHASE 9: FINAL SUMMARY & FOLLOW-UP
@@ -255,7 +255,7 @@ nodes:
     command: archon-workflow-summary
     depends_on: [final-production-health]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   # ─── Push notification via ntfy (bash + curl) ─────────────────
   - id: ntfy-result
