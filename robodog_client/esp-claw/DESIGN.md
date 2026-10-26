@@ -450,15 +450,25 @@ Phase 2 delivers the **device-initiated voice loop**, hardware-verified end-to-e
   the tree and is not offline-fetchable; DESIGN's fallback is used, matching the
   bridge exactly: `VAD_ENERGY=300` (16-bit mean-abs), `VAD_SILENCE_MS=800`,
   `voice_capture()` ends the utterance 800 ms after the last speech frame.
-- **TTS input is clipped.** The esp-claw root agent is verbose by default (it
-  dumps multi-paragraph capability lists → ~50 s Kokoro audio → the 16 kHz
-  resample buffer exhausts SPIRAM). `voice_speak()` clips the spoken text at a
-  sentence/line break within `CONFIG_ROBODOG_VOICE_TTS_MAX_CHARS` (default 240,
-  ~10–19 s audio); the full reply still renders on the RLCD (only what is
-  spoken is bounded).
-- **24 kHz → 16 kHz resample.** Kokoro emits 24 kHz s16 WAV; the board's I2S /
-  mixer runs 16 kHz, so `resample_24_to_16()` does a linear 2:3 down-convert
-  before writing to the APP track.
+- **TTS input is clipped AND the screen shows the same script.** The esp-claw
+  root agent is verbose by default (a full "what can you do" dump is 60+ s of
+  speech), so the SPOKEN script is bounded at a sentence/line break within
+  `CONFIG_ROBODOG_VOICE_TTS_MAX_CHARS` (default 500) and the RLCD renders
+  exactly that script (`voice_turn()` clips once, shows the clip, speaks the
+  clip) — the read-out voice always finishes the text on screen, so there is
+  no "voice cut off while the screen shows more" mismatch.  The full reply is
+  still on the console `agent reply:` log.
+- **24 kHz native audio hub (hermes parity) — no software resample.** The
+  shared `audio_hub` (patched via `patches/0003-audio-hub-24k.patch`) runs the
+  ES8311/ES7210 at **24 kHz**, exactly like the hermes stack: Kokoro's native
+  24 kHz WAV is written to the APP mixer track **untouched and zero-copy**
+  (`voice_speak()` detects the mixer rate via `audio_mixer_track_info` and
+  passes the WAV straight through when the rates match).  The mic path stays
+  16 kHz for VAD/ASR via the capture hub's per-subscriber `esp_ae_rate_cvt`.
+  A WAV at any other rate is interpolated to the mixer rate; the old hardcoded
+  "24k assumed everywhere" path silently down-converted a 16 kHz WAV to ~10.7k
+  and played it slow with very low pitch (the "read out too slow / pitch very
+  low" report).
 - **TTS playback is manually paced — the blocking-write assumption is wrong.**
   `audio_mixer_track_write` does NOT block for real-time playback: it only
   waits `AUDIO_MIXER_WRITE_TIMEOUT_MS` (500 ms) for its ~8-frame (5 KB) ring to
@@ -490,9 +500,21 @@ Phase 2 delivers the **device-initiated voice loop**, hardware-verified end-to-e
   top-right** (`idle` / `listening` / `processing` / `responding` / `error`) driven
   by the voice loop next to `WIFI ON` on the left; a **BOOT button (GPIO0) mirrors
   `rd_listen`** (debounced falling-edge ISR) so the user can push-to-talk without
-  the console; and the transcript is **bounded to the most-recent ~600 chars**
-  (drop-oldest) so the current exchange fills the visible panel instead of a stale
-  older turn sitting below the fold.
+  the console; and the transcript is **bounded to the current exchange**
+  (cap 1600 chars, ~drop-oldest for older user lines) so the current exchange
+  fills the visible panel instead of a stale older turn sitting below the fold.
+- **The reply shown is the ACTUAL script.** `UI_CMD_ASSISTANT` rebuilds the
+  panel as the current exchange only (`> <user>` + the reply from its HEAD) and
+  the body scrolls to the TOP, so the words the middleware actually spoke fill
+  the screen. (Previously the panel pinned to the bottom of the rolled
+  transcript: a long verbose reply dropped its own beginning and showed only a
+  mid-capability-list fragment — "a text transcript of the response audio"
+  instead of the original script.)
+- **The state indicator never lies about VOICE progress.** `UI_CMD_ASSISTANT`
+  no longer forces the state to `idle` when the text finalizes (which
+  announced "response done" while the TTS round-trip + playback hadn't even
+  fully started). `voice_turn()` drives `processing -> responding -> idle`
+  and `rd_chat` sets its own terminal `idle`.
 - **Readability**: 16 px Montserrat, and the labels force opaque-white background +
   pure-black text so the 1-bpp reflective panel is crisp black-on-white (no grey).
 
