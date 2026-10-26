@@ -454,15 +454,15 @@ def run_loop(n, instr, artifacts, voice_verify):
             # VAD never heard speech vs Whisper round-trip failure vs silent.
             if asr_spill:
                 board_lines = [
-                    l for l in asr_spill.decode("utf-8", "replace").splitlines()
-                    if any(k in l for k in (
+                    bl for bl in asr_spill.decode("utf-8", "replace").splitlines()
+                    if any(k in bl for k in (
                         "robodog_voice", "ASR", "utterance", "speech", "bail"))
-                    and "RD_SHOT" not in l
+                    and "RD_SHOT" not in bl
                 ]
                 if board_lines:
                     log("board capture/VAD/ASR decisions (no `ASR text=`):")
-                    for l in board_lines[-12:]:
-                        log("   | " + l.strip()[:160])
+                    for bl in board_lines[-12:]:
+                        log("   | " + bl.strip()[:160])
 
         # Fail fast: no ASR means no agent run / TTS / subtitle in this turn —
         # waiting for the reply would just burn the full 180 s REPLY_TIMEOUT.
