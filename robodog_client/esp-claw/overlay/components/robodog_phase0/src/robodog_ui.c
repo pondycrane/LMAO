@@ -74,15 +74,16 @@ static lv_obj_t *s_body_label;
 
 static char s_status_text[96];
 static char s_agent_state[16];
-static char s_transcript[2048];      /* rolling conversation, newest last */
+static char s_transcript[2048];      /* current exchange, newest last */
+static char s_last_user[480];        /* latest user prompt (for the exchange reset) */
 
-/* Keep only the most-recent ~600 chars of transcript so the newest exchange
- * (current user prompt + reply) is what occupies the visible panel.  LVGL
- * draws the label from the top and doesn't expose user scrolling, so an
- * unbounded rolling buffer leaves recent turns below the visible fold — the
- * "screen only shows the oldest" complaint.  Drop-oldest keeps the latest
- * visible; a single long reply is still preserved up to the array size. */
-#define UI_TRANSCRIPT_CAP  600
+/* Keep the current exchange (latest user prompt + assistant reply) together
+ * so the actual reply script is never truncated off.  The exchange is rebuilt
+ * from the reply's HEAD (ui_reset_to_exchange) instead of rolling oldest-out,
+ * so a long verbose reply can no longer push its own answer off-screen; the
+ * drop-oldest logic below only bounds the accumulated user lines.  Stays well
+ * under s_transcript[2048]. */
+#define UI_TRANSCRIPT_CAP  1600
 
 /* ── ASCII sanitisation ──────────────────────────────────────────────────── */
 
@@ -167,6 +168,31 @@ static void ui_append_line(const char *prefix, const char *text)
         }
     }
     strlcat(s_transcript, rendering, sizeof(s_transcript));
+}
+
+/* Rebuild the visible transcript as the CURRENT exchange only: "> <user>" on
+ * the first line, then the assistant reply from its HEAD.  The reply head is
+ * the script that was (or is being) spoken — a long verbose reply must never
+ * let drop-oldest or the panel cut its own beginning away, or the screen
+ * shows an unrelated mid-list fragment and reads like "a text transcript of
+ * the response audio" instead of the actual answer.  Anything past the cap is
+ * trimmed from the tail only. */
+static void ui_reset_to_exchange(const char *user, const char *reply)
+{
+    if (user != NULL && user[0] != '\0') {
+        char uascii[320];
+        ui_ascii_copy(uascii, sizeof(uascii), user);
+        snprintf(s_transcript, sizeof(s_transcript), "> %s\n", uascii);
+    } else {
+        s_transcript[0] = '\0';
+    }
+    char rascii[UI_TRANSCRIPT_CAP];
+    ui_ascii_copy(rascii, sizeof(rascii), reply);
+    strlcat(s_transcript, rascii, sizeof(s_transcript));
+    const size_t len = strlen(s_transcript);
+    if (len > UI_TRANSCRIPT_CAP) {
+        s_transcript[UI_TRANSCRIPT_CAP] = '\0'; /* tail-trim; the head lives */
+    }
 }
 
 /* ── LVGL screen construction ───────────────────────────────────────────── */
@@ -275,14 +301,15 @@ static void ui_flush_locked(void)
      * deterministic RD_SHOT frame, not just text changes. */
     lv_label_set_text(s_body_label, s_transcript);
     lv_obj_invalidate(s_body_label);
-    /* Pin the newest message to the bottom of the visible area: recompute the
-     * label height, then scroll the body scroller to its content bottom so a
-     * long reply ends on-screen instead of being cut off below the fold.
-     * (This LVGL build has no lv_obj_scroll_to_bottom; a huge y is clamped to
-     * the max scroll extent, i.e. the bottom.) */
+    /* Pin the body to the TOP of the exchange so the CURRENT reply (the
+     * actual script the assistant is/has spoken) fills the panel from its
+     * beginning.  Bottom-pinning long verbose replies instead showed only
+     * their tail — a mid-capability-list fragment — with the real answer,
+     * "the actual original script used to generate the response audio",
+     * scrolled off above the fold. */
     if (s_body_scroller != NULL) {
         lv_obj_update_layout(s_body_scroller);
-        lv_obj_scroll_to_y(s_body_scroller, 0x7FFFFFFF, LV_ANIM_OFF);
+        lv_obj_scroll_to_y(s_body_scroller, 0, LV_ANIM_OFF);
     }
     if (lv_label_get_text(s_status_label) != s_status_text) {
         lv_label_set_text(s_status_label, s_status_text);
@@ -307,14 +334,19 @@ static void ui_process_cmd(const ui_cmd_t *cmd)
     }
     switch (cmd->type) {
     case UI_CMD_USER:
+        ui_ascii_copy(s_last_user, sizeof(s_last_user), cmd->text);
         ui_append_line(">", cmd->text);
         /* A fresh user turn starts: ASR done, now the agent is processing
          * (right-hand state indicator shows "processing"). */
         strlcpy(s_agent_state, "processing", sizeof(s_agent_state));
         break;
     case UI_CMD_ASSISTANT:
-        ui_append_line("", cmd->text);
-        strlcpy(s_agent_state, "idle", sizeof(s_agent_state));
+        ui_reset_to_exchange(s_last_user, cmd->text);
+        /* No state transition here: the reply text finalizes BEFORE the TTS
+         * round-trip + playback, so forcing "idle" made the turn read as done
+         * while the voice hadn't (or had only just) started speaking — the
+         * premature "response done" indicator.  voice_turn / rd_chat set the
+         * terminal state explicitly only after playback / rendering. */
         break;
     case UI_CMD_STATE:
         ui_ascii_copy(s_agent_state, sizeof(s_agent_state), cmd->state);

@@ -147,7 +147,11 @@ static void voice_play_tone(unsigned ms, int freq)
         ESP_LOGE(TAG, "audio diag: could not open APP mixer track");
         return;
     }
-    const unsigned n = (unsigned)((uint64_t)VOICE_RATE * ms / 1000u);
+    /* Generate the tone at the MIXER's actual sample rate (24 kHz after the
+     * hermes-parity audio-hub patch) so the heard pitch is exactly `freq`. */
+    uint32_t play_rate = VOICE_RATE;
+    (void)audio_mixer_track_info(track, &play_rate, NULL, NULL);
+    const unsigned n = (unsigned)((uint64_t)play_rate * ms / 1000u);
     int16_t *buf = heap_caps_malloc(n * sizeof(int16_t),
                                     MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (buf == NULL) {
@@ -157,11 +161,11 @@ static void voice_play_tone(unsigned ms, int freq)
     }
     for (unsigned i = 0; i < n; i++) {
         float v = sinf(2.0f * 3.14159265f * (float)freq * (float)i /
-                       (float)VOICE_RATE);
+                       (float)play_rate);
         buf[i] = (int16_t)(v * 10000.0f);
     }
     /* Same paced write as voice_speak (see the pacing note there). */
-    const size_t frame_bytes = VOICE_RATE * 20 / 1000 * sizeof(int16_t);
+    const size_t frame_bytes = play_rate * 20 / 1000 * sizeof(int16_t);
     const uint8_t *src = (const uint8_t *)buf;
     const size_t total = n * sizeof(int16_t);
     size_t off = 0;
@@ -434,7 +438,7 @@ out:
     return text;
 }
 
-/* ── TTS playback: reply text -> 24 kHz WAV -> 16 kHz -> ES8311 ─────────── */
+/* ── TTS playback: reply text -> WAV -> device 16 kHz -> ES8311 ──────────── */
 
 /* Detect the PCM payload offset of an RIFF/WAVE blob (robust to non-44-byte
  * headers). */
@@ -455,13 +459,48 @@ static size_t wav_data_offset(const uint8_t *wav, size_t len)
     return 0;
 }
 
-/* Linear 24 kHz -> 16 kHz resample (ratio 2/3). */
-static size_t resample_24_to_16(const int16_t *in, size_t in_n,
-                                int16_t *out, size_t out_cap)
+/* Parse the source sample rate declared in the WAV fmt chunk.  The device
+ * must resample from the ACTUAL rate: the endpoint speaks 24 kHz today, but
+ * blindly assuming 24k when it returns anything else (e.g. a 16 kHz WAV)
+ * down-converts to ~10.7k and the reply plays slow with very low pitch — the
+ * reported "read out was very slow / pitch very low" regression.  Fall back
+ * to Kokoro's default 24k only when the header is missing/unparseable. */
+static uint32_t wav_source_rate(const uint8_t *wav, size_t len)
 {
+    if (wav == NULL || len < 36 || memcmp(wav, "RIFF", 4) != 0 ||
+        memcmp(wav + 8, "WAVE", 4) != 0) {
+        return 0;
+    }
+    size_t o = 12;
+    while (o + 8 <= len) {
+        const uint32_t chunk_size = (uint32_t)wav[o + 4] | ((uint32_t)wav[o + 5] << 8) |
+                                    ((uint32_t)wav[o + 6] << 16) | ((uint32_t)wav[o + 7] << 24);
+        if (memcmp(wav + o, "fmt ", 4) == 0 && chunk_size >= 16 && o + 24 <= len) {
+            return (uint32_t)wav[o + 12] | ((uint32_t)wav[o + 13] << 8) |
+                   ((uint32_t)wav[o + 14] << 16) | ((uint32_t)wav[o + 15] << 24);
+        }
+        o += 8 + chunk_size + (chunk_size & 1u);
+    }
+    return 0;
+}
+
+/* Linear resample from the WAV's declared rate to the MIXER's sample rate.
+ * A same-rate WAV is taken as-is (no-op copy) — the hermes-parity 24 kHz hub
+ * makes the common Kaspi 24 kHz case a pure passthrough with zero software
+ * processing; any other rate is interpolated at step out_rate/in_rate so
+ * pitch and tempo stay exact. */
+static size_t resample_to_rate(const int16_t *in, size_t in_n,
+                               int16_t *out, size_t out_cap,
+                               uint32_t in_rate, uint32_t out_rate)
+{
+    if (in_rate == 0 || in_rate == out_rate) {
+        const size_t cp = (in_n < out_cap) ? in_n : out_cap;
+        memcpy(out, in, cp * sizeof(int16_t));
+        return cp;
+    }
     size_t o = 0;
     double pos = 0.0;
-    const double step = 16000.0 / 24000.0;
+    const double step = (double)out_rate / (double)in_rate;
     while (o < out_cap && (size_t)pos + 1 < in_n) {
         const size_t i = (size_t)pos;
         const double frac = pos - (double)i;
@@ -472,7 +511,7 @@ static size_t resample_24_to_16(const int16_t *in, size_t in_n,
     return o;
 }
 
-/* ── TTS playback: reply text -> 24 kHz WAV -> 16 kHz -> ES8311 ─────────── */
+/* ── TTS playback: reply text -> WAV -> device 16 kHz -> ES8311 ──────────── */
 
 /* JSON-escape a string for embedding in the TTS `input` field.  Reply text
  * contains newlines/quotes (the agent's multi-line markdown), and an unescaped
@@ -631,17 +670,10 @@ static esp_err_t voice_speak(const char *reply)
         goto out;
     }
     const size_t in_samples = (rx.len - data_off) / sizeof(int16_t);
-    const size_t out_cap = in_samples * 2 / 3 + 4;
-    int16_t *out16 = heap_caps_malloc(out_cap * sizeof(int16_t),
-                                      MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (out16 == NULL) {
-        ESP_LOGE(TAG, "TTS: no SPIRAM for %u-sample resample buffer",
-                 (unsigned)out_cap);
-        result = ESP_ERR_NO_MEM;
-        goto out;
+    uint32_t src_rate = wav_source_rate((const uint8_t *)rx.buf, rx.len);
+    if (src_rate < 8000 || src_rate > 96000) {
+        src_rate = 24000; /* Kokoro default; header absent/garbage */
     }
-    const size_t out_samples = resample_24_to_16(
-        (const int16_t *)(rx.buf + data_off), in_samples, out16, out_cap);
 
     voice_enable_pa(); /* amp off by default (bmgr inits PA pin LOW) — raise it */
     /* Belt-and-braces: re-assert unmute + 80% volume so a stale mute state can
@@ -657,22 +689,60 @@ static esp_err_t voice_speak(const char *reply)
         audio_mixer_open_track(mix, AUDIO_MIXER_TRACK_APP, "robodog_voice",
                                &track) != ESP_OK) {
         ESP_LOGE(TAG, "TTS: could not open APP mixer track");
-        heap_caps_free(out16);
         result = ESP_ERR_INVALID_STATE;
         goto out;
     }
-    ESP_LOGI(TAG, "TTS start (%u samples -> %u)", (unsigned)in_samples,
-             (unsigned)out_samples);
+    /* Play at the MIXER's actual sample rate (24 kHz on the hermes-parity
+     * audio hub).  Kokoro's native 24 kHz WAV is therefore a PURE passthrough
+     * — zero copy, no software conversion, the same data hermes drives the
+     * speaker with (and no double-buffer SPIRAM, which a full verbose reply
+     * would otherwise blow up).  A WAV at any other rate is interpolated. */
+    uint32_t play_rate = VOICE_RATE;
+    (void)audio_mixer_track_info(track, &play_rate, NULL, NULL);
+    if (play_rate < 8000 || play_rate > 96000) {
+        play_rate = VOICE_RATE; /* bogus mixer info; fall back */
+    }
+    const uint8_t *pcm_src;
+    size_t out_samples;
+    int16_t *out16 = NULL;
+    if (src_rate == play_rate) {
+        pcm_src = (const uint8_t *)rx.buf + data_off;   /* passthrough, zero copy */
+        out_samples = in_samples;
+    } else {
+        /* 64-bit multiply: in_samples * play_rate overflows uint32 for long
+         * replies (~456 k * 24 k = 1.1e10 -> wraps to 27 k on 32-bit), which
+         * capped the buffer at ~1.7 s of a 13 s reply — the "response ends
+         * before the voice finishes" regression.  Always compute in 64 bits. */
+        const size_t out_cap = (size_t)(((uint64_t)in_samples * play_rate) /
+                                        src_rate + 4);
+        out16 = heap_caps_malloc(out_cap * sizeof(int16_t),
+                                 MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (out16 == NULL) {
+            ESP_LOGE(TAG, "TTS: no SPIRAM for %u-sample resample buffer",
+                     (unsigned)out_cap);
+            (void)audio_mixer_close_track(track);
+            result = ESP_ERR_NO_MEM;
+            goto out;
+        }
+        out_samples = resample_to_rate(
+            (const int16_t *)(rx.buf + data_off), in_samples, out16, out_cap,
+            src_rate, play_rate);
+        pcm_src = (const uint8_t *)out16;
+    }
+
+    ESP_LOGI(TAG, "TTS start (%u samples @%lu Hz -> %u @%lu Hz %s)",
+             (unsigned)in_samples, (unsigned long)src_rate,
+             (unsigned)out_samples, (unsigned long)play_rate,
+             src_rate == play_rate ? "(passthrough)" : "(resampled)");
     robodog_ui_set_agent_state("responding");
     /* Pace playback to real-time ourselves.  The shared mixer track drains at
-     * the 16 kHz codec rate, but a single audio_mixer_track_write() only waits
-     * AUDIO_MIXER_WRITE_TIMEOUT_MS (500 ms) for its 8-frame (5 KB) ring to
-     * drain — writing a whole long reply at once saturates the ring and the
-     * write times out after ~0.5 s, so almost none of the audio ever plays
-     * (the "responding but silent" failure).  Feed it in 20 ms frames with a
-     * ~19 ms step: the reply plays at real-time and never overruns the ring. */
-    const size_t frame_bytes = VOICE_RATE * 20 / 1000 * sizeof(int16_t); /* 640 */
-    const uint8_t *src = (const uint8_t *)out16;
+     * the codec rate, but a single audio_mixer_track_write() only waits
+     * AUDIO_MIXER_WRITE_TIMEOUT_MS (500 ms) for its 8-frame ring to drain —
+     * writing a whole long reply at once saturates the ring and the write
+     * times out after ~0.5 s, so almost none of the audio ever plays (the
+     * "responding but silent" failure).  Feed it in 20 ms frames with a ~19 ms
+     * step: the reply plays at real-time and never overruns the ring. */
+    const size_t frame_bytes = play_rate * 20 / 1000 * sizeof(int16_t);
     const size_t total = out_samples * sizeof(int16_t);
     size_t off = 0;
     unsigned stalls = 0;
@@ -681,7 +751,7 @@ static esp_err_t voice_speak(const char *reply)
         if (chunk > frame_bytes) {
             chunk = frame_bytes;
         }
-        const size_t w = audio_mixer_track_write(track, src + off, chunk);
+        const size_t w = audio_mixer_track_write(track, pcm_src + off, chunk);
         if (w == 0) {
             /* Ring refuses to drain (APP mixer consumer dead/hung).  Bound the
              * retry so the loop cannot wedge the whole voice task forever:
@@ -785,8 +855,15 @@ static void voice_turn(void)
                                           CONFIG_ROBODOG_LLM_TIMEOUT_MS + 30000);
     if (err == ESP_OK && resp.text != NULL) {
         ESP_LOGI(TAG, "agent reply: %s", resp.text);
-        robodog_ui_show_assistant(resp.text);
-        if (voice_speak(resp.text) == ESP_OK) {
+        /* Speak a bounded script (the esp-claw root agent is verbose by
+         * default — a full "what can you do" dump is ~60 s of speech) and
+         * render EXACTLY that script on the RLCD so the visible text and the
+         * read-out audio match.  Showing the full reply while only a clipped
+         * script is spoken is what read as "voice cut off". */
+        char spoken[CONFIG_ROBODOG_VOICE_TTS_MAX_CHARS + 1];
+        tts_clip(resp.text, spoken, sizeof(spoken));
+        robodog_ui_show_assistant(spoken);
+        if (voice_speak(spoken) == ESP_OK) {
             robodog_ui_set_agent_state("idle");
         } else {
             /* TTS playback failed (silent reply): surface it, don't let the

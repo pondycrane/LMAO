@@ -1,0 +1,25 @@
+--- a/components/common/app_claw/app_claw.c	2026-10-25 20:39:51.423818285 -0400
++++ b/components/common/app_claw/app_claw.c	2026-10-25 20:39:51.454333394 -0400
+@@ -448,14 +448,20 @@
+ 
+ static void app_claw_audio_start_service(void)
+ {
++    /* RoboDog 24 kHz native audio hub (LMAO): play Kokoro's 24 kHz WAV
++     * unchanged (the hermes voice path the user wants) and capture at 24 kHz,
++     * letting the capture hub's per-subscriber esp_ae_rate_cvt downmix to
++     * 16 kHz for the voice loop's VAD/ASR.  The upstream 16 kHz default made
++     * the TTS need a software 24k->16k resample, which audibly degraded the
++     * readout compared to hermes. */
+     static const audio_hub_config_t config = {
+         .mixer = {
+-            .sample_rate = 16000, .channels = 1, .bits = 16, .frame_ms = 20,
++            .sample_rate = 24000, .channels = 1, .bits = 16, .frame_ms = 20,
+             .system_full_gain = 1.0f, .app_full_gain = 1.0f, .app_ducked_gain = 0.3f,
+             .duck_release_ms = 300, .output_volume = 80,
+         },
+         .capture = {
+-            .sample_rate = 16000, .channels = 1, .bits = 16, .frame_ms = 20, .ring_frames = 8,
++            .sample_rate = 24000, .channels = 1, .bits = 16, .frame_ms = 20, .ring_frames = 8,
+         },
+     };
+     esp_err_t err = audio_hub_start(&config);
