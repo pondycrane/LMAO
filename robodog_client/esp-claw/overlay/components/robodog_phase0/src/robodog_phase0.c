@@ -355,6 +355,9 @@ static int cmd_rd_chat(int argc, char **argv)
     if (err == ESP_OK && resp.text != NULL) {
         ESP_LOGI(TAG, "rd_chat reply: %s", resp.text);
         robodog_ui_show_assistant(resp.text);
+        /* Text-only probe (no playback): the assistant render no longer sets
+         * the terminal state itself, so mark the turn done here. */
+        robodog_ui_set_agent_state("idle");
     } else if (resp.error_message != NULL) {
         ESP_LOGE(TAG, "rd_chat: agent error (%s): %s", esp_err_to_name(err),
                  resp.error_message);
