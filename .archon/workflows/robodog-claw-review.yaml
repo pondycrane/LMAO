@@ -42,7 +42,7 @@ description: |
   or the hermes voice firmware (robodog-hermes-review) — same board, mutually
   exclusive flashes; never run two board workflows at once.
 
-  Models: gx10 DeepSeek V4 Flash (gx10/deepseek-ai/DeepSeek-V4-Flash-0731) for
+  Models: archon tiers (large/medium/small) resolved from ~/.archon/config.yaml (today all map to gx10 DeepSeek V4 Flash — edit config.yaml once to reroute when the local model is down) for
   the agent; the RD_SHOT vision readback and the ring re-ASR inside
   robodog-claw-e2e are fixed pipelines, not the agent model. No Claude.
 
@@ -67,14 +67,21 @@ nodes:
         exit 2
       fi
       PR_HEAD=$(gh pr view "$PR_NUMBER" --json headRefName -q '.headRefName')
+      # Persist the PR number for downstream commands (lmao-sync-pr-with-main,
+      # implement-review-fixes) that read the .pr-number registry artifact.
+      echo "$PR_NUMBER" > "$ARTIFACTS_DIR/.pr-number"
       CUR=$(git branch --show-current)
       if [ "$CUR" != "$PR_HEAD" ]; then
         git fetch -q origin "$PR_HEAD"
-        git checkout -B "$PR_HEAD" "origin/$PR_HEAD"
+        # --ignore-other-worktrees: the branch is often checked out in the
+        # main worktree (the one you pushed the PR from) — without this the
+        # checkout dies with "already used by worktree" and the whole review
+        # DAG skips. This worktree is isolated/throwaway, so sharing the
+        # branch name is safe and keeps implicit `gh pr view` resolution.
+        git checkout -q --ignore-other-worktrees -B "$PR_HEAD" "origin/$PR_HEAD"
       fi
       echo "reviewing PR #$PR_NUMBER ($PR_HEAD @ $(git rev-parse --short HEAD))"
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
 
   - id: verify-pr-base
     bash: |
@@ -90,56 +97,55 @@ nodes:
       fi
     depends_on: [checkout-pr]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
 
   - id: review-scope
     command: archon-pr-review-scope
     depends_on: [verify-pr-base]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   - id: sync
     command: lmao-sync-pr-with-main
     depends_on: [review-scope]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   - id: code-review
     command: archon-code-review-agent
     depends_on: [sync]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   - id: error-handling
     command: archon-error-handling-agent
     depends_on: [sync]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   - id: test-coverage
     command: archon-test-coverage-agent
     depends_on: [sync]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   - id: comment-quality
     command: archon-comment-quality-agent
     depends_on: [sync]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   - id: docs-impact
     command: archon-docs-impact-agent
     depends_on: [sync]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   - id: synthesize
     command: archon-synthesize-review
     depends_on: [code-review, error-handling, test-coverage, comment-quality, docs-impact]
     trigger_rule: one_success
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   # ═══════════════════════════════════════════════════════════════════
   # PHASE 7: FIX REVIEW ISSUES (claw-adapted: rebuild + re-flash before
@@ -150,7 +156,7 @@ nodes:
     command: robodog-claw-implement-review-fixes
     depends_on: [synthesize]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
     effort: max
 
   # ═══════════════════════════════════════════════════════════════════
@@ -165,25 +171,25 @@ nodes:
     command: lmao-validate
     depends_on: [implement-fixes]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   - id: final-claw-e2e
     command: robodog-claw-e2e
     depends_on: [final-validate]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   - id: final-claw-voice-verify
     command: robodog-claw-voice-verify
     depends_on: [final-claw-e2e]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   - id: final-production-health
     command: robodog-production-health
     depends_on: [final-claw-voice-verify]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   # ═══════════════════════════════════════════════════════════════════
   # PHASE 9: FINAL SUMMARY & FOLLOW-UP
@@ -193,7 +199,7 @@ nodes:
     command: archon-workflow-summary
     depends_on: [final-production-health]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   # ─── Push notification via ntfy (bash + curl) ─────────────────
   # To enable, create .archon/mcp/ntfy.json with {"NTFY_TOPIC": "..."}
