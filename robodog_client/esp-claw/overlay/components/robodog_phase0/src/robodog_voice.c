@@ -549,48 +549,80 @@ static char *json_escape(const char *s)
     return out;
 }
 
-/* Bound the text spoken by TTS to a length that yields a reasonable audio
- * duration (the esp-claw root agent is verbose by default and will happily
- * dump multi-paragraph capability lists -> 50 s of speech -> the resample
- * buffer blows up).  The full reply still renders on the RLCD; only what is
- * spoken is clipped.  Clips at a sentence/line break within the cap, falling
- * back to the last space, then a hard cutoff. */
-static void tts_clip(const char *reply, char *out, size_t out_cap)
+/* Split `reply` into sentence-bounded chunks the TTS can speak one after
+ * another.  The esp-claw root agent is verbose by default (a full "what can
+ * you do" dump is ~60 s of speech) but unlike the old single tts_clip this
+ * covers the WHOLE reply: each chunk is at most
+ * CONFIG_ROBODOG_VOICE_TTS_MAX_CHARS chars, cut at the first ".!?;"/newline
+ * within the window (else the last space, else a hard cutoff), trailing
+ * whitespace stripped and leading whitespace of the next window skipped.
+ * Chunks are written back-to-back as NUL-terminated strings into `arena`;
+ * offsets[i] holds the byte offset of chunk i.  Returns the chunk count,
+ * bounded by max_chunks (a pathological gigantic reply drops its tail with a
+ * warning — the head still plays and renders in full). */
+static size_t voice_split_reply(const char *reply, char *arena,
+                                size_t arena_cap, size_t *offsets,
+                                size_t max_chunks)
 {
+    const size_t cap = CONFIG_ROBODOG_VOICE_TTS_MAX_CHARS;
     const size_t len = strlen(reply);
-    size_t max = CONFIG_ROBODOG_VOICE_TTS_MAX_CHARS;
-    if (out_cap - 1 < max) {
-        max = out_cap - 1;
-    }
-    if (len <= max) {
-        strlcpy(out, reply, out_cap);
-        return;
-    }
-    size_t cut = 0;
-    for (size_t i = max; i > 0; i--) {
-        const char c = reply[i];
-        if (c == '.' || c == '!' || c == '?' || c == ';' || c == '\n') {
-            cut = i + 1;
-            break;
-        }
-    }
-    if (cut > max) {
-        cut = max; /* break char sat exactly at max: keep the cut in-bounds
-                    * so out[cut]='\0' lands inside the caller's [MAX+1] buffer */
-    }
-    if (cut == 0) {
-        for (size_t i = max; i > 0; i--) {
-            if (reply[i] == ' ') {
-                cut = i;
-                break;
+    size_t pos = 0, n = 0, aoff = 0;
+
+    while (pos < len && n < max_chunks) {
+        const size_t remain = len - pos;
+        const size_t win = remain < cap ? remain : cap;
+
+        /* Preferred: a sentence/line break at or before the window end. */
+        size_t cut = 0;
+        for (size_t i = win; i > 0 && cut == 0; i--) {
+            const char c = reply[pos + i];
+            if (c == '.' || c == '!' || c == '?' || c == ';' || c == '\n') {
+                cut = i + 1; /* include the break char */
             }
         }
+        if (cut > win) {
+            cut = win; /* break char sat exactly at the cap: keep in-bounds */
+        }
+        /* Fall back to the last space in the window. */
+        if (cut == 0) {
+            for (size_t i = win; i > 0 && cut == 0; i--) {
+                if (reply[pos + i] == ' ') {
+                    cut = i;
+                }
+            }
+        }
+        if (cut == 0) {
+            cut = win; /* hard cutoff (no break char/space in the window) */
+        }
+        /* Strip trailing spaces so the queued chunk is clean prose. */
+        while (cut > 0 && (reply[pos + cut - 1] == ' ' ||
+                           reply[pos + cut - 1] == '\t')) {
+            cut--;
+        }
+        /* Skip leading whitespace of the next window so chunks don't start
+         * blank (a chunk cut at '\n' already leaves the newline behind). */
+        size_t next = pos + cut;
+        while (next < len && (reply[next] == ' ' || reply[next] == '\t' ||
+                              reply[next] == '\n')) {
+            next++;
+        }
+
+        if (aoff + cut + 1 > arena_cap) {
+            break; /* arena sized from max_chunks must always fit; guard only */
+        }
+        memcpy(arena + aoff, reply + pos, cut);
+        arena[aoff + cut] = '\0';
+        offsets[n] = aoff;
+        aoff += cut + 1;
+        n++;
+
+        pos = next;
     }
-    if (cut == 0) {
-        cut = max;
+    if (pos < len) {
+        ESP_LOGW(TAG, "reply exceeds %u chunks; dropping the tail (%u chars)",
+                 (unsigned)max_chunks, (unsigned)(len - pos));
     }
-    memcpy(out, reply, cut);
-    out[cut] = '\0';
+    return n;
 }
 
 /* Max consecutive no-progress rounds in the paced TTS write loop before the
@@ -601,9 +633,9 @@ static void tts_clip(const char *reply, char *out, size_t out_cap)
 static esp_err_t voice_speak(const char *reply)
 {
     esp_err_t result = ESP_OK;
-    char clip[CONFIG_ROBODOG_VOICE_TTS_MAX_CHARS + 1];
-    tts_clip(reply, clip, sizeof(clip));
-    char *esc = json_escape(clip);
+    /* Callers always pass a single bounded sentence chunk from the queue
+     * (voice_split_reply), so no clip here. */
+    char *esc = json_escape(reply);
     if (esc == NULL) {
         ESP_LOGE(TAG, "TTS: json_escape failed");
         return ESP_ERR_NO_MEM;
@@ -734,6 +766,12 @@ static esp_err_t voice_speak(const char *reply)
              (unsigned)in_samples, (unsigned long)src_rate,
              (unsigned)out_samples, (unsigned long)play_rate,
              src_rate == play_rate ? "(passthrough)" : "(resampled)");
+    /* Render THIS chunk's text the instant its audio begins: the TTS fetch
+     * above happened "off-screen", so the on-screen sentence is exactly the
+     * one the speaker starts speaking (no queue-time lead).  robodog_ui_append
+     * _assistant's async queue trips while we pace the playback, so the panel
+     * lands on the new text within a few tens of ms of the audio start. */
+    robodog_ui_append_assistant(reply);
     robodog_ui_set_agent_state("responding");
     /* Pace playback to real-time ourselves.  The shared mixer track drains at
      * the codec rate, but a single audio_mixer_track_write() only waits
@@ -855,21 +893,65 @@ static void voice_turn(void)
                                           CONFIG_ROBODOG_LLM_TIMEOUT_MS + 30000);
     if (err == ESP_OK && resp.text != NULL) {
         ESP_LOGI(TAG, "agent reply: %s", resp.text);
-        /* Speak a bounded script (the esp-claw root agent is verbose by
-         * default — a full "what can you do" dump is ~60 s of speech) and
-         * render EXACTLY that script on the RLCD so the visible text and the
-         * read-out audio match.  Showing the full reply while only a clipped
-         * script is spoken is what read as "voice cut off". */
-        char spoken[CONFIG_ROBODOG_VOICE_TTS_MAX_CHARS + 1];
-        tts_clip(resp.text, spoken, sizeof(spoken));
-        robodog_ui_show_assistant(spoken);
-        if (voice_speak(spoken) == ESP_OK) {
-            robodog_ui_set_agent_state("idle");
-        } else {
-            /* TTS playback failed (silent reply): surface it, don't let the
-             * turn read as a fully successful exchange. */
-            robodog_ui_set_agent_state("error");
+        /* Speak the WHOLE reply, not a truncated script.  The esp-claw root
+         * agent is verbose by default (a full "what can you do" dump is ~60 s
+         * of speech), so the reply is split at sentence/line breaks into
+         * chunks of <= TTS_MAX_CHARS (the voice-splitter queue) and each
+         * chunk is rendered on the RLCD (progressively growing the full reply
+         * via robodog_ui_append_assistant) then spoken, in order.  The
+         * read-out voice finishes every word of the reply — the adversarial
+         * "voice cut off" truncation is gone. */
+        esp_err_t rc = ESP_OK;
+        const size_t max_chunks = CONFIG_ROBODOG_VOICE_TTS_MAX_CHUNKS;
+        const size_t cap = CONFIG_ROBODOG_VOICE_TTS_MAX_CHARS;
+        const size_t arena_cap = max_chunks * (cap + 1) + 1;
+        char *arena = heap_caps_malloc(arena_cap,
+                                       MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        size_t *offs = NULL;
+        if (arena != NULL) {
+            offs = heap_caps_malloc(max_chunks * sizeof(size_t),
+                                    MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
         }
+        if (arena == NULL || offs == NULL) {
+            ESP_LOGE(TAG, "no memory for %u-chunk TTS queue",
+                     (unsigned)max_chunks);
+            if (arena != NULL) {
+                free(arena);
+            }
+            if (offs != NULL) {
+                free(offs);
+            }
+            robodog_ui_set_agent_state("error");
+        } else {
+            const size_t n = voice_split_reply(resp.text, arena, arena_cap,
+                                               offs, max_chunks);
+            if (n == 0) {
+                /* Blank reply: nothing speakable; render it, stay idle. */
+                robodog_ui_show_assistant(resp.text);
+            } else {
+                robodog_ui_set_agent_state("responding");
+                for (size_t i = 0; i < n; i++) {
+                    const char *chunk = arena + offs[i];
+                    /* Device-side hook the host voice verification gate
+                     * (robodog-claw-voice-verify) counts: one start/stop per
+                     * chunk proves the whole reply was queued and voiced. */
+                    ESP_LOGI(TAG, "voice chunk %u/%u: %.160s",
+                             (unsigned)(i + 1), (unsigned)n, chunk);
+                    /* The chunk text is rendered INSIDE voice_speak, exactly
+                     * when that chunk's playback starts (not when it is
+                     * queued) — the on-screen sentence and the audible one
+                     * share the same instant, no fetch-latency lead. */
+                    if (voice_speak(chunk) != ESP_OK) {
+                        /* TTS failed mid-queue: surface it, stop the rest. */
+                        rc = ESP_ERR_INVALID_STATE;
+                        break;
+                    }
+                }
+            }
+            free(offs);
+            free(arena);
+        }
+        robodog_ui_set_agent_state(rc == ESP_OK ? "idle" : "error");
     } else {
         ESP_LOGE(TAG, "agent run failed (%s): %s", esp_err_to_name(err),
                  resp.error_message != NULL ? resp.error_message : "");

@@ -29,7 +29,10 @@ description: |
      if firmware changed, commit, push
   6. FINAL gate chain re-run: lmao-validate -> robodog-claw-e2e (voice loop on
      the real board, serial-console asserts + test-mic ring re-ASR + RD_SHOT
-     subtitle readback) -> robodog-production-health (.gate-head owner).
+     subtitle readback) -> robodog-claw-voice-verify (the chunked reply is
+     read out to its END — every `voice chunk i/n` TTS-bracketed on the
+     console + mic-capture re-ASR carries the reply's tail tokens, catching
+     truncation) -> robodog-production-health (.gate-head owner).
      Fast-pass ONLY when HEAD is unchanged since the last full chain.
   7. Final summary with decision matrix -> GitHub comment, ntfy push.
 
@@ -170,9 +173,15 @@ nodes:
     context: fresh
     model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
 
+  - id: final-claw-voice-verify
+    command: robodog-claw-voice-verify
+    depends_on: [final-claw-e2e]
+    context: fresh
+    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+
   - id: final-production-health
     command: robodog-production-health
-    depends_on: [final-claw-e2e]
+    depends_on: [final-claw-voice-verify]
     context: fresh
     model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
 

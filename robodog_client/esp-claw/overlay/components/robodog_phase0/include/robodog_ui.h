@@ -13,6 +13,8 @@
  * Roles/timing mirror today's SetChatMessage("user"|"assistant", ...):
  *   - robodog_ui_show_user     - render the user transcript (ASR completion)
  *   - robodog_ui_show_assistant - render the assistant reply as it finalizes
+ *   - robodog_ui_append_assistant - append one sentence chunk to the growing
+ *                                   assistant reply (chunked voice queue)
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -47,6 +49,17 @@ void robodog_ui_show_user(const char *text);
  *        one) - the response must be passed from the current run.
  */
 void robodog_ui_show_assistant(const char *text);
+
+/**
+ * @brief Append ONE sentence chunk to the current assistant reply (the
+ *        chunked voice queue accumulates the full reply on screen as each
+ *        piece is queued for TTS).  The first chunk after
+ *        robodog_ui_show_user starts the assistant line; subsequent chunks
+ *        grow it in place, so the whole reply ends up visible instead of only
+ *        the last chunk.  Must be preceded by robodog_ui_show_user for the
+ *        exchange to render.
+ */
+void robodog_ui_append_assistant(const char *text);
 
 /**
  * @brief Set the live agent/voice state shown in the top-right status
