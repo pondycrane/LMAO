@@ -98,20 +98,24 @@ menu "RoboDog Phase 2 voice loop"
 
     config ROBODOG_VOICE_TTS_MAX_RESPONSE
         int "Maximum TTS response body to buffer for playback (bytes)"
-        default 524288
+        default 1572864
         help
-            Kokoro returns a 24 kHz s16 WAV; a ~10 s reply is ~480 KB.  The
-            buffer is SPIRAM-backed (8 MB OPI PSRAM on this board), so 512 KB
-            comfortably covers multi-second spoken replies.
+            Kokoro returns a 24 kHz s16 WAV (~48 KB/s).  1.5 MB covers a
+            full ~18 s spoken clip (the 500-char script).  With the
+            passthrough playback path the WAV is written straight to the mixer
+            (no copy), so this is the only TTS-side allocation.
 
     config ROBODOG_VOICE_TTS_MAX_CHARS
-        int "Max characters spoken by TTS (reply clipped to this length)"
+        int "Max characters in the spoken script (and the on-screen reply)"
         default 240
         help
-            The esp-claw root agent is verbose by default and will dump
-            multi-paragraph capability lists -> 50+ s of speech that blows up
-            the TTS resample buffer.  The spoken reply is clipped at a
-            sentence/line break within this cap (the full reply still renders
-            on the RLCD); only what is spoken is bounded.
+            The esp-claw root agent is verbose by default (a full "what can
+            you do" dump is 60+ s of speech), so the SPOKEN script is bounded
+            at a sentence/line break within this cap (240 chars ~ 15-20 s of
+            audio) AND the RLCD shows exactly this same script.  The read-out
+            voice always finishes the text on screen, so there is no "voice
+            cut off" mismatch; a shorter value gives more hermes-style snappy
+            replies.  The full reply still reaches the console `agent reply:`
+            log.
 
 endmenu

@@ -42,6 +42,15 @@ if [ ! -f "$SRC/.robodog_init_patched" ]; then
     touch "$SRC/.robodog_init_patched"
     REBUILD_FLAG=1
 fi
+# 2c. The shared audio hub runs 24 kHz natively (hermes parity: TTS WAV feeds
+#     the codec un-resampled; capture downmixes per-subscriber for 16 kHz
+#     VAD/ASR).  Apply over the upstream app_claw config.
+if [ ! -f "$SRC/.robodog_audio24k_patched" ]; then
+    echo "applying $APP/esp-claw/patches/0003-audio-hub-24k.patch"
+    (cd "$SRC" && patch -p1 < "$APP/esp-claw/patches/0003-audio-hub-24k.patch")
+    touch "$SRC/.robodog_audio24k_patched"
+    REBUILD_FLAG=1
+fi
 # 2b. The board's setup_device.c (ST7305 custom panel + the RoboDog RD_SHOT
 #     capture hook) is owned by LMAO in the overlay and wholesale-copied over
 #     the upstream waveshare board copy each build - drops the fragile
@@ -95,6 +104,17 @@ CONFIG_ROBODOG_TTS_VOICE="${CLAW_TTS_VOICE:-af_heart}"
 # Phase 1 text-only UI: ~16 px ASCII monochrome font (no vendoring - ships
 # with LVGL).  ASCII-only glyph set keeps the monochrome panel rendering clean.
 CONFIG_LV_FONT_MONTSERRAT_16=y
+
+# Keep the RLCD owned by OUR Phase-1 text UI.  The upstream Waveshare board's
+# sdkconfig.defaults.board sets CONFIG_ESP_BOARD_DEV_DISPLAY_LCD_SUPPORT=y (and
+# so APP_CLAW_SYSTEM_UI_ENABLE=y), which compiles IN esp-claw's own
+# display_service / system_ui: that renders the black softAP+clock home screen
+# (with the floating animation) on top of our panel.  Force both back off here
+# (this fragment merges LAST in SDKCONFIG_DEFAULTS) so esp-claw's display stack
+# is gated out regardless of what the board-manager regen decides, and
+# robodog_ui is the sole RLCD owner — matching DESIGN Phase 1.
+CONFIG_ESP_BOARD_DEV_DISPLAY_LCD_SUPPORT=n
+CONFIG_APP_CLAW_SYSTEM_UI_ENABLE=n
 EOF
 
 # 6. build in the ESP-IDF Docker image (bmgr selects the board + its target +
