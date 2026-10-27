@@ -22,16 +22,15 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <stdint.h>
 
 #include "esp_log.h"
 #include "esp_err.h"
 #include "esp_console.h"
 #include "esp_timer.h"
 #include "esp_heap_caps.h"
-#include "esp_http_client.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "cJSON.h"
 
 #include "claw_agent_mgr.h"
 #include "claw_core.h"
@@ -178,85 +177,33 @@ static int cmd_rd_asr(int argc, char **argv)
 {
     (void)argc;
     (void)argv;
-    static const char boundary[] = "----RoboDogClaw";
-    /* Multipart parts are built with snprintf (a C string-literal cannot be
-     * concatenated with a `boundary` variable). */
-    char header[384];
-    const size_t head_len = (size_t)snprintf(
-        header, sizeof(header),
-        "--%s\r\n"
-        "Content-Disposition: form-data; name=\"model\"\r\n\r\n"
-        "%s\r\n"
-        "--%s\r\n"
-        "Content-Disposition: form-data; name=\"file\"; filename=\"asr_sample.wav\"\r\n"
-        "Content-Type: audio/wav\r\n\r\n",
-        boundary, CONFIG_ROBODOG_ASR_MODEL, boundary);
-    char footer[80];
-    const size_t foot_len = (size_t)snprintf(footer, sizeof(footer), "\r\n--%s--\r\n", boundary);
-
-    const size_t body_len = head_len + sizeof(robodog_asr_sample_wav) + foot_len;
-
-    char *body = heap_caps_malloc(body_len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (body == NULL) {
-        ESP_LOGE(TAG, "rd_asr: no memory for %u B multipart body", (unsigned)body_len);
+    /* Reuse the voice loop's Whisper client on the embedded corpus WAV — a
+     * single copy of the multipart/ASR path (DRY).  The .inc holds a full
+     * RIFF/WAVE file (16 kHz s16 mono), so strip the WAV header and hand the
+     * PCM to robodog_voice_asr, which rebuilds its own canonical WAV body. */
+    uint32_t src_rate = 0;
+    const size_t off = robodog_wav_pcm_offset(
+        (const uint8_t *)robodog_asr_sample_wav,
+        sizeof(robodog_asr_sample_wav), &src_rate);
+    if (off == 0 || off >= sizeof(robodog_asr_sample_wav)) {
+        ESP_LOGE(TAG, "rd_asr: embedded corpus is not a RIFF/WAVE blob");
         return 1;
     }
-    memcpy(body, header, head_len);
-    memcpy(body + head_len, robodog_asr_sample_wav, sizeof(robodog_asr_sample_wav));
-    memcpy(body + head_len + sizeof(robodog_asr_sample_wav), footer, foot_len);
-
-    robodog_http_rx_t rx;
-    robodog_http_rx_init(&rx, CONFIG_ROBODOG_ASR_MAX_RESPONSE);
-    if (rx.buf == NULL) {
-        ESP_LOGE(TAG, "rd_asr: no memory for response buffer");
-        heap_caps_free(body);
+    const size_t samples =
+        (sizeof(robodog_asr_sample_wav) - off) / sizeof(int16_t);
+    const int16_t *pcm = (const int16_t *)(robodog_asr_sample_wav + off);
+    ESP_LOGI(TAG, "rd_asr: POST %s (%u samples @%lu Hz) ...",
+             CONFIG_ROBODOG_ASR_URL, (unsigned)samples,
+             (unsigned long)src_rate);
+    char *text = robodog_voice_asr(pcm, samples);
+    if (text == NULL) {
+        ESP_LOGE(TAG, "rd_asr: Whisper round-trip failed");
         return 1;
     }
-
-    esp_http_client_config_t cfg = {
-        .url = CONFIG_ROBODOG_ASR_URL,
-        .method = HTTP_METHOD_POST,
-        .timeout_ms = 60000,
-        .event_handler = robodog_http_event_handler,
-        .user_data = &rx,
-        .buffer_size = 512,
-    };
-    esp_http_client_handle_t client = esp_http_client_init(&cfg);
-    if (client == NULL) {
-        ESP_LOGE(TAG, "rd_asr: http client init failed");
-        robodog_http_rx_free(&rx);
-        heap_caps_free(body);
-        return 1;
-    }
-    char ctype[96];
-    snprintf(ctype, sizeof(ctype), "multipart/form-data; boundary=%s", boundary);
-    esp_http_client_set_header(client, "Content-Type", ctype);
-    esp_http_client_set_post_field(client, body, body_len);
-    const esp_err_t err = esp_http_client_perform(client);
-    const int status = esp_http_client_get_status_code(client);
-    esp_err_t post_err = esp_http_client_cleanup(client);
-    (void)post_err;
-
-    ESP_LOGI(TAG, "rd_asr: POST %s -> http=%d err=%s body=%u B",
-             CONFIG_ROBODOG_ASR_URL, status, esp_err_to_name(err), (unsigned)rx.len);
-    if (err == ESP_OK && status >= 200 && status < 300 && rx.len > 0) {
-        cJSON *root = cJSON_Parse(rx.buf);
-        /* cJSON_GetObjectItemCaseSensitive returns a cJSON item, not a string. */
-        cJSON *text = root != NULL ? cJSON_GetObjectItemCaseSensitive(root, "text") : NULL;
-        if (text != NULL && cJSON_IsString(text)) {
-            ESP_LOGI(TAG, "rd_asr: text=\"%s\"", text->valuestring);
-        } else {
-            ESP_LOGW(TAG, "rd_asr: no text field in response: %s", rx.buf);
-        }
-        if (root != NULL) {
-            cJSON_Delete(root);
-        }
-    } else {
-        ESP_LOGE(TAG, "rd_asr: round-trip failed: %s", rx.buf[0] ? rx.buf : "(empty body)");
-    }
-
-    robodog_http_rx_free(&rx);
-    heap_caps_free(body);
+    /* robodog_voice_asr already logged `ASR text=...` (the E2E hook); keep the
+     * probe's own one-line summary too. */
+    ESP_LOGI(TAG, "rd_asr: round-trip ok: text=\"%.160s\"", text);
+    free(text);
     return 0;
 }
 
@@ -266,48 +213,27 @@ static int cmd_rd_tts(int argc, char **argv)
 {
     (void)argc;
     (void)argv;
-    char json[384];
-    snprintf(json, sizeof(json),
-             "{\"model\":\"%s\",\"input\":\"RoboDog claw phase zero TTS round trip.\",\"voice\":\"%s\"}",
-             CONFIG_ROBODOG_TTS_MODEL, CONFIG_ROBODOG_TTS_VOICE);
-
+    /* Reuse the voice loop's Kokoro client (single copy of the request body +
+     * buffering — DRY) and report the blob WITHOUT playing it, so the probe
+     * isolates the endpoint round-trip from the speaker path. */
     robodog_http_rx_t rx;
-    robodog_http_rx_init(&rx, CONFIG_ROBODOG_TTS_MAX_RESPONSE);
+    robodog_http_rx_init(&rx, CONFIG_ROBODOG_VOICE_TTS_MAX_RESPONSE);
     if (rx.buf == NULL) {
         ESP_LOGE(TAG, "rd_tts: no memory for response buffer");
         return 1;
     }
-    esp_http_client_config_t cfg = {
-        .url = CONFIG_ROBODOG_TTS_URL,
-        .method = HTTP_METHOD_POST,
-        .timeout_ms = 60000,
-        .event_handler = robodog_http_event_handler,
-        .user_data = &rx,
-        .buffer_size = 512,
-    };
-    esp_http_client_handle_t client = esp_http_client_init(&cfg);
-    if (client == NULL) {
-        ESP_LOGE(TAG, "rd_tts: http client init failed");
+    const esp_err_t err = robodog_voice_tts_fetch(
+        "RoboDog claw phase zero TTS round trip.", &rx);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "rd_tts: Kokoro round-trip failed: %s",
+                 esp_err_to_name(err));
         robodog_http_rx_free(&rx);
         return 1;
     }
-    esp_http_client_set_header(client, "Content-Type", "application/json");
-    esp_http_client_set_post_field(client, json, strlen(json));
-    const esp_err_t err = esp_http_client_perform(client);
-    const int status = esp_http_client_get_status_code(client);
-    esp_http_client_cleanup(client);
-
-    ESP_LOGI(TAG, "rd_tts: POST %s -> http=%d err=%s body=%u B",
-             CONFIG_ROBODOG_TTS_URL, status, esp_err_to_name(err), (unsigned)rx.len);
-    if (err == ESP_OK && status >= 200 && status < 300 && rx.len >= 4) {
-        const bool riff = rx.buf[0] == 'R' && rx.buf[1] == 'I' &&
-                          rx.buf[2] == 'F' && rx.buf[3] == 'F';
-        ESP_LOGI(TAG, "rd_tts: got %u WAV bytes (starts RIFF: %s)",
-                 (unsigned)rx.len, riff ? "yes" : "no");
-    } else {
-        ESP_LOGE(TAG, "rd_tts: round-trip failed: http=%d err=%s body='%.160s'",
-                 status, esp_err_to_name(err), rx.buf != NULL ? rx.buf : "");
-    }
+    const bool riff = rx.len >= 4 && rx.buf[0] == 'R' && rx.buf[1] == 'I' &&
+                      rx.buf[2] == 'F' && rx.buf[3] == 'F';
+    ESP_LOGI(TAG, "rd_tts: POST %s -> got %u WAV bytes (starts RIFF: %s)",
+             CONFIG_ROBODOG_TTS_URL, (unsigned)rx.len, riff ? "yes" : "no");
     robodog_http_rx_free(&rx);
     return 0;
 }
@@ -335,9 +261,11 @@ static int cmd_rd_chat(int argc, char **argv)
      * response queue so receive_root_for() can collect the reply. */
     /* Render the user transcript first (same role/timing as a user message
      * finalizing), then mark the agent as reasoning while the run is in
-     * flight; the reply is appended when it finalizes. */
+     * flight; the reply is appended when it finalizes.  Same state vocabulary
+     * as the voice loop ("processing" — the UI states are idle / listening /
+     * processing / responding / error / truncated). */
     robodog_ui_show_user(text);
-    robodog_ui_set_agent_state("thinking");
+    robodog_ui_set_agent_state("processing");
 
     uint32_t request_id = 0;
     esp_err_t err = claw_agent_mgr_start_root_run_text(
@@ -353,7 +281,13 @@ static int cmd_rd_chat(int argc, char **argv)
     err = claw_agent_mgr_receive_root_for(request_id, &resp,
                                           CONFIG_ROBODOG_LLM_TIMEOUT_MS + 30000);
     if (err == ESP_OK && resp.text != NULL) {
-        ESP_LOGI(TAG, "rd_chat reply: %s", resp.text);
+        /* Line-safe reply log: a raw "%s" would truncate at the first newline
+         * of the agent's multi-line markdown reply; JSON-escape like the voice
+         * turn so the console carries the FULL reply on one line. */
+        char *reply_esc = robodog_json_escape(resp.text);
+        ESP_LOGI(TAG, "rd_chat reply: %s",
+                 reply_esc != NULL ? reply_esc : resp.text);
+        free(reply_esc);
         robodog_ui_show_assistant(resp.text);
         /* Text-only probe (no playback): the assistant render no longer sets
          * the terminal state itself, so mark the turn done here. */
