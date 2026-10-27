@@ -221,44 +221,71 @@ static bool frame_is_speech(const int16_t *pcm, size_t samples)
 /* ── Capture one utterance (16 kHz s16 mono) ────────────────────────────── */
 /* Opens the shared audio_hub APP subscriber, energy-VADs to the end of the
  * utterance (800 ms trailing silence after the first speech frame), caps at
- * CONFIG_ROBODOG_VOICE_MAX_SECS, and bails early if no speech is detected at
- * all.  Returns the captured SAMPLES via *out_samples and a SPIRAM buffer the
- * caller owns. */
+ * CONFIG_ROBODOG_VOICE_MAX_SECS, bails early if no speech is detected at
+ * all, and (F2) caps the continuous-speech phase at
+ * CONFIG_ROBODOG_VOICE_SPEECH_MAX_SECS so a noise-saturated mic cannot burn
+ * the whole window.  The SPIRAM capture buffer is allocated lazily on the
+ * first speech frame (F1) and the caller frees it.  A no-speech bail returns
+ * NULL with zero samples — no allocation, no free, nothing to corrupt.
+ * Returns the captured SAMPLES via *out_samples and a SPIRAM buffer the
+ * caller owns (or NULL when no usable utterance was captured). */
+/* The APP capture subscriber is opened ONCE and kept across turns (F3, stress
+ * round R7): voice_capture no longer re-opens/closes it per listen.  Closing
+ * per turn meant tearing down the subscriber's 5 KB ring + rate-conversion
+ * buffers on every turn — and the ring free there is the tlsf panic site
+ * ("block already marked as free", `assert failed: tlsf_free tlsf.c:630`,
+ * rst:0xc) reached when the shared PSRAM heap metadata is already corrupted
+ * under sustained voice-loop load.  Keeping the subscriber (ring + converters)
+ * alive removes that per-turn free entirely; each new listen just FLUSHES the
+ * ring for a clean VAD window (also discards post-TTS echo that previously
+ * kept the energy-VAD "busy" — the F2 stuck-listen).  Trade-off: the APP
+ * capture role stays claimed by the voice loop (Lua `audio` capture not
+ * available) — correct for this standalone-agent board. */
+static audio_capture_sub_handle_t s_cap_sub = NULL;
+
 static int16_t *voice_capture(size_t *out_samples)
 {
     *out_samples = 0;
-    audio_capture_handle_t cap = NULL;
-    if (audio_hub_get_capture(&cap) != ESP_OK) {
-        ESP_LOGE(TAG, "capture hub unavailable (audio_hub not started?)");
-        return NULL;
+    if (s_cap_sub == NULL) {
+        audio_capture_handle_t cap = NULL;
+        if (audio_hub_get_capture(&cap) != ESP_OK) {
+            ESP_LOGE(TAG, "capture hub unavailable (audio_hub not started?)");
+            return NULL;
+        }
+        const audio_capture_sub_format_t fmt = {
+            .sample_rate = VOICE_RATE,
+            .channels = VOICE_CH,
+            .bits = VOICE_BITS,
+        };
+        esp_err_t err = audio_capture_open_subscriber(cap, AUDIO_CAPTURE_SUB_APP,
+                                                      &fmt, "robodog_voice",
+                                                      &s_cap_sub);
+        if (err != ESP_OK || s_cap_sub == NULL) {
+            ESP_LOGE(TAG, "open APP capture subscriber failed: %s",
+                     esp_err_to_name(err));
+            s_cap_sub = NULL;
+            return NULL;
+        }
     }
-    const audio_capture_sub_format_t fmt = {
-        .sample_rate = VOICE_RATE,
-        .channels = VOICE_CH,
-        .bits = VOICE_BITS,
-    };
-    audio_capture_sub_handle_t sub = NULL;
-    esp_err_t err = audio_capture_open_subscriber(cap, AUDIO_CAPTURE_SUB_APP,
-                                                  &fmt, "robodog_voice", &sub);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "open APP capture subscriber failed: %s", esp_err_to_name(err));
-        return NULL;
-    }
+    /* Fresh VAD window: drop whatever the ring holds from the previous turn
+     * (post-TTS echo / stale frames) before this listen starts. */
+    (void)audio_capture_sub_flush(s_cap_sub);
     ESP_LOGI(TAG, "listen started (16k/1/16, VAD energy=%d silence=%dms)",
              VAD_ENERGY, VAD_SILENCE_MS);
     robodog_ui_set_agent_state("listening");
 
-    int16_t *buf = heap_caps_malloc(VOICE_MAX_SAMPLES * sizeof(int16_t),
-                                    MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (buf == NULL) {
-        ESP_LOGE(TAG, "no SPIRAM for %u-sample capture buffer",
-                 (unsigned)VOICE_MAX_SAMPLES);
-        audio_capture_close_subscriber(sub);
-        return NULL;
-    }
-
+    /* F1: the capture buffer is allocated lazily on the FIRST speech frame,
+     * NOT for the whole listen phase.  A no-speech bail can therefore never
+     * allocate-and-then-free a ~1.4 MB SPIRAM block — the exact path that
+     * tripped `tlsf_free: block already marked as free` under sustained
+     * voice-loop load and panicked the board (unplanned reboot, rst:0xc).
+     * Pre-speech silence is dropped; from the first speech frame everything
+     * (trailing silence included) is buffered exactly as before. */
+    int16_t *buf = NULL;
     const int64_t t0 = esp_timer_get_time();
     const int64_t no_speech_us = (int64_t)CONFIG_ROBODOG_VOICE_NO_SPEECH_TIMEOUT_MS * 1000LL;
+    const int64_t speech_cap_us = (int64_t)CONFIG_ROBODOG_VOICE_SPEECH_MAX_SECS * 1000000LL;
+    int64_t speech_t0 = -1; /* uptime of the first detected speech frame */
     int16_t frame[VOICE_FRAME_SAMPLES];
     size_t fi = 0;      /* samples buffered in frame */
     size_t got = 0;     /* total samples committed to buf */
@@ -275,8 +302,17 @@ static int16_t *voice_capture(size_t *out_samples)
                      CONFIG_ROBODOG_VOICE_NO_SPEECH_TIMEOUT_MS);
             break;
         }
+        /* F2: a saturated/echoing mic can keep this energy-VAD "speaking"
+         * indefinitely; cap the continuous-speech phase so a noise listen
+         * cannot burn the whole window (and transcribe half a minute of
+         * noise).  The utterance still goes to ASR; this only bounds it. */
+        if (ever_speech && now - speech_t0 >= speech_cap_us) {
+            ESP_LOGW(TAG, "continuous speech > %d s, capping the utterance",
+                     CONFIG_ROBODOG_VOICE_SPEECH_MAX_SECS);
+            break;
+        }
         size_t want = (size_t)(VOICE_FRAME_SAMPLES - fi);
-        size_t n = audio_capture_sub_read(sub, (uint8_t *)(frame + fi),
+        size_t n = audio_capture_sub_read(s_cap_sub, (uint8_t *)(frame + fi),
                                           want * (VOICE_BITS / 8), 150);
         if (n == 0) {
             if (ever_speech && silence_ms >= VAD_SILENCE_MS) {
@@ -290,22 +326,45 @@ static int16_t *voice_capture(size_t *out_samples)
         }
         const bool speech = frame_is_speech(frame, VOICE_FRAME_SAMPLES);
         if (speech) {
+            if (!ever_speech) {
+                /* First speech frame: allocate the utterance buffer now and
+                 * seed it with this frame (F1 — no big alloc for silence). */
+                buf = heap_caps_malloc(VOICE_MAX_SAMPLES * sizeof(int16_t),
+                                       MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+                if (buf == NULL) {
+                    ESP_LOGE(TAG, "no SPIRAM for %u-sample capture buffer",
+                             (unsigned)VOICE_MAX_SAMPLES);
+                    break;
+                }
+                got = 0;
+                memcpy(buf, frame, VOICE_FRAME_SAMPLES * sizeof(int16_t));
+                got += VOICE_FRAME_SAMPLES;
+                speech_t0 = now;
+            } else {
+                size_t space = VOICE_MAX_SAMPLES - got;
+                size_t cp = (space < VOICE_FRAME_SAMPLES) ? space : VOICE_FRAME_SAMPLES;
+                memcpy(buf + got, frame, cp * sizeof(int16_t));
+                got += cp;
+            }
             ever_speech = true;
             silence_ms = 0;
         } else if (ever_speech) {
+            /* Buffer trailing / inter-phrase audio too (word tails). */
+            size_t space = VOICE_MAX_SAMPLES - got;
+            size_t cp = (space < VOICE_FRAME_SAMPLES) ? space : VOICE_FRAME_SAMPLES;
+            memcpy(buf + got, frame, cp * sizeof(int16_t));
+            got += cp;
             silence_ms += VOICE_FRAME_MS;
         }
-        size_t space = VOICE_MAX_SAMPLES - got;
-        size_t cp = (space < VOICE_FRAME_SAMPLES) ? space : VOICE_FRAME_SAMPLES;
-        memcpy(buf + got, frame, cp * sizeof(int16_t));
-        got += cp;
         fi = 0;
         if (ever_speech && silence_ms >= VAD_SILENCE_MS) {
             break;
         }
     }
 
-    audio_capture_close_subscriber(sub);
+    /* The capture subscriber is deliberately NOT closed here (F3): keeping
+     * the APP ring + converters alive across turns removes the per-turn ring
+     * teardown free — the `tlsf_free` panic site under heap corruption. */
     *out_samples = got;
     return buf;
 }

@@ -78,6 +78,19 @@ menu "RoboDog Phase 2 voice loop"
             Hard cap on a single listen phase, so a mic that never VAD-stops
             (ambient noise) cannot buffer unbounded audio.
 
+    config ROBODOG_VOICE_SPEECH_MAX_SECS
+        int "Max continuous-speech length before the utterance is capped (seconds)"
+        default 30
+        range 1 60
+        help
+            Bounds the energy-VAD "speech" phase: if the mic stays above the
+            VAD threshold without 800 ms of silence for this long (a
+            saturated/echoing mic, or a user speaking non-stop), the capture
+            is ended anyway and sent to ASR.  Prevents a noise listen from
+            burning the whole VOICE_MAX_SECS window and transcribing half a
+            minute of noise.  A normal push-to-talk utterance is far below
+            this (the corpus scripts are ~3-10 s).
+
     config ROBODOG_VOICE_NO_SPEECH_TIMEOUT_MS
         int "Bail out of the listen phase if no speech within this many ms"
         default 12000
