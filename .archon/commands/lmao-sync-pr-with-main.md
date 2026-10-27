@@ -46,10 +46,24 @@ git fetch origin $PR_BASE
 git fetch origin $PR_HEAD
 \`\`\`
 
-Confirm you are on the PR's branch (\`$PR_HEAD\`). If not, checkout it:
+Confirm you are on the branch to sync. Review-entry workflows isolate the
+PR branch behind a per-run branch (\`$ARTIFACTS_DIR/.review-branch\`, written
+by the review checkout-pr node) so the review's rebase/force-push never
+mutates the shared PR branch the developer has checked out in the main
+worktree — git's per-branch ownership stays intact and any genuine conflict
+fails loudly. Resolve the checkout target from the run registry (falling back
+to the scope-derived \`$PR_HEAD\`), and never force a checkout of a branch
+that may be checked out elsewhere:
 
 \`\`\`bash
-git checkout $PR_HEAD
+REVIEW_BRANCH=$(cat $ARTIFACTS_DIR/.review-branch 2>/dev/null || true)
+PR_HEAD=$(cat $ARTIFACTS_DIR/.pr-head 2>/dev/null || true)   # if absent, use the scope-derived name
+CUR=$(git branch --show-current)
+if [ -n "$REVIEW_BRANCH" ] && [ "$CUR" != "$REVIEW_BRANCH" ]; then
+    git checkout "$REVIEW_BRANCH"
+elif [ -z "$REVIEW_BRANCH" ] && [ -n "$PR_HEAD" ] && [ "$CUR" != "$PR_HEAD" ]; then
+    git checkout "$PR_HEAD"
+fi
 \`\`\`
 
 ### 1.4 Check if Behind
@@ -220,10 +234,20 @@ mypy <changed-files>
 
 ### 5.1 Confirm Branch and Push
 
-Confirm you're on \`$PR_HEAD\`, then push:
+Confirm the checked-out branch is the one to sync, then push. The remote PR
+head is always the only thing that moves; in a review workflow the per-run
+branch's head is pushed to the PR head ref (the developer's LOCAL PR branch is
+never rewritten underneath them — R10):
 
 \`\`\`bash
-git push --force-with-lease origin $PR_HEAD
+REVIEW_BRANCH=$(cat $ARTIFACTS_DIR/.review-branch 2>/dev/null || true)
+PR_HEAD=$(cat $ARTIFACTS_DIR/.pr-head 2>/dev/null || true)
+if [ -z "$PR_HEAD" ]; then PR_HEAD=<PR_HEAD-from-scope>; fi
+if [ -n "$REVIEW_BRANCH" ]; then
+    git push --force-with-lease origin HEAD:"$PR_HEAD"
+else
+    git push --force-with-lease origin "$PR_HEAD"
+fi
 \`\`\`
 
 **Note**: \`--force-with-lease\` is safer - fails if someone else pushed.

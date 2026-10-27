@@ -61,6 +61,14 @@ worktree). For each CRITICAL/HIGH finding:
 Stage only the touched implementation files (never scratch/artifacts); commit
 with a message naming the findings; push to the PR branch.
 
+When this reviewer was started on an existing PR, checkout-pr isolated the
+review on a per-run branch and registered it at `$ARTIFACTS_DIR/.review-branch`
+(head ref at `$ARTIFACTS_DIR/.pr-head`) — the PR branch itself is checked out
+in the DEVELOPER's main worktree, so never `--ignore-other-worktrees` it here.
+Commit on the current branch and push its head to the PR head ref:
+`git push --force-with-lease origin HEAD:$(cat $ARTIFACTS_DIR/.pr-head)` (fall
+back to pushing the ordinary PR branch only when `.review-branch` is absent).
+
 ## Phase 4: WRAP UP
 
 Summarize: findings fixed (CRITICAL n/HIGH m), verification evidence, and the

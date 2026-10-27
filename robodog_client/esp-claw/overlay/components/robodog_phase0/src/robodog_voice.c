@@ -18,6 +18,7 @@
 #include "robodog_voice.h"
 #include "robodog_ui.h"
 #include "robodog_http.h"
+#include "voice_split.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -549,82 +550,6 @@ static char *json_escape(const char *s)
     return out;
 }
 
-/* Split `reply` into sentence-bounded chunks the TTS can speak one after
- * another.  The esp-claw root agent is verbose by default (a full "what can
- * you do" dump is ~60 s of speech) but unlike the old single tts_clip this
- * covers the WHOLE reply: each chunk is at most
- * CONFIG_ROBODOG_VOICE_TTS_MAX_CHARS chars, cut at the first ".!?;"/newline
- * within the window (else the last space, else a hard cutoff), trailing
- * whitespace stripped and leading whitespace of the next window skipped.
- * Chunks are written back-to-back as NUL-terminated strings into `arena`;
- * offsets[i] holds the byte offset of chunk i.  Returns the chunk count,
- * bounded by max_chunks (a pathological gigantic reply drops its tail with a
- * warning — the head still plays and renders in full). */
-static size_t voice_split_reply(const char *reply, char *arena,
-                                size_t arena_cap, size_t *offsets,
-                                size_t max_chunks)
-{
-    const size_t cap = CONFIG_ROBODOG_VOICE_TTS_MAX_CHARS;
-    const size_t len = strlen(reply);
-    size_t pos = 0, n = 0, aoff = 0;
-
-    while (pos < len && n < max_chunks) {
-        const size_t remain = len - pos;
-        const size_t win = remain < cap ? remain : cap;
-
-        /* Preferred: a sentence/line break at or before the window end. */
-        size_t cut = 0;
-        for (size_t i = win; i > 0 && cut == 0; i--) {
-            const char c = reply[pos + i];
-            if (c == '.' || c == '!' || c == '?' || c == ';' || c == '\n') {
-                cut = i + 1; /* include the break char */
-            }
-        }
-        if (cut > win) {
-            cut = win; /* break char sat exactly at the cap: keep in-bounds */
-        }
-        /* Fall back to the last space in the window. */
-        if (cut == 0) {
-            for (size_t i = win; i > 0 && cut == 0; i--) {
-                if (reply[pos + i] == ' ') {
-                    cut = i;
-                }
-            }
-        }
-        if (cut == 0) {
-            cut = win; /* hard cutoff (no break char/space in the window) */
-        }
-        /* Strip trailing spaces so the queued chunk is clean prose. */
-        while (cut > 0 && (reply[pos + cut - 1] == ' ' ||
-                           reply[pos + cut - 1] == '\t')) {
-            cut--;
-        }
-        /* Skip leading whitespace of the next window so chunks don't start
-         * blank (a chunk cut at '\n' already leaves the newline behind). */
-        size_t next = pos + cut;
-        while (next < len && (reply[next] == ' ' || reply[next] == '\t' ||
-                              reply[next] == '\n')) {
-            next++;
-        }
-
-        if (aoff + cut + 1 > arena_cap) {
-            break; /* arena sized from max_chunks must always fit; guard only */
-        }
-        memcpy(arena + aoff, reply + pos, cut);
-        arena[aoff + cut] = '\0';
-        offsets[n] = aoff;
-        aoff += cut + 1;
-        n++;
-
-        pos = next;
-    }
-    if (pos < len) {
-        ESP_LOGW(TAG, "reply exceeds %u chunks; dropping the tail (%u chars)",
-                 (unsigned)max_chunks, (unsigned)(len - pos));
-    }
-    return n;
-}
-
 /* Max consecutive no-progress rounds in the paced TTS write loop before the
  * playback is aborted (each round waits ~500 ms in audio_mixer_track_write,
  * so the limit bounds a wedged ring to ~10 s instead of hanging the task). */
@@ -634,7 +559,7 @@ static esp_err_t voice_speak(const char *reply)
 {
     esp_err_t result = ESP_OK;
     /* Callers always pass a single bounded sentence chunk from the queue
-     * (voice_split_reply), so no clip here. */
+     * (robodog_voice_split_reply), so no clip here. */
     char *esc = json_escape(reply);
     if (esc == NULL) {
         ESP_LOGE(TAG, "TTS: json_escape failed");
@@ -892,7 +817,17 @@ static void voice_turn(void)
     err = claw_agent_mgr_receive_root_for(request_id, &resp,
                                           CONFIG_ROBODOG_LLM_TIMEOUT_MS + 30000);
     if (err == ESP_OK && resp.text != NULL) {
-        ESP_LOGI(TAG, "agent reply: %s", resp.text);
+        /* Line-safe reply log: a raw "%s" here truncates at the first
+         * newline (the agent replies in multi-line markdown), so the host
+         * voice-verify gate's `agent reply: (.+)` capture would only ever see
+         * the reply's FIRST line and its FULL_READOUT anti-truncation target
+         * would be the head, not the true tail (R1).  JSON-escape instead:
+         * every newline/quote/control char becomes a backslash escape, the
+         * log is one console line, and the gate recovers the full text. */
+        char *reply_esc = json_escape(resp.text);
+        ESP_LOGI(TAG, "agent reply: %s",
+                 reply_esc != NULL ? reply_esc : resp.text);
+        free(reply_esc);
         /* Speak the WHOLE reply, not a truncated script.  The esp-claw root
          * agent is verbose by default (a full "what can you do" dump is ~60 s
          * of speech), so the reply is split at sentence/line breaks into
@@ -900,8 +835,12 @@ static void voice_turn(void)
          * chunk is rendered on the RLCD (progressively growing the full reply
          * via robodog_ui_append_assistant) then spoken, in order.  The
          * read-out voice finishes every word of the reply — the adversarial
-         * "voice cut off" truncation is gone. */
+         * "voice cut off" truncation is gone (unless the queue exceeds
+         * CONFIG_ROBODOG_VOICE_TTS_MAX_CHUNKS: that tail-drop is then
+         * reported honestly, see `voice truncated` below — never a
+         * false-complete idle). */
         esp_err_t rc = ESP_OK;
+        bool truncated = false;
         const size_t max_chunks = CONFIG_ROBODOG_VOICE_TTS_MAX_CHUNKS;
         const size_t cap = CONFIG_ROBODOG_VOICE_TTS_MAX_CHARS;
         const size_t arena_cap = max_chunks * (cap + 1) + 1;
@@ -921,14 +860,31 @@ static void voice_turn(void)
             if (offs != NULL) {
                 free(offs);
             }
+            /* R4: keep the explicit error terminal — rc MUST be non-OK or the
+             * terminal-state line below would clobber this "error" with
+             * "idle" and the OOM turn would read as a clean success. */
+            rc = ESP_ERR_NO_MEM;
             robodog_ui_set_agent_state("error");
         } else {
-            const size_t n = voice_split_reply(resp.text, arena, arena_cap,
-                                               offs, max_chunks);
+            const size_t n = robodog_voice_split_reply(
+                resp.text, cap, arena, arena_cap, offs, max_chunks,
+                &truncated);
             if (n == 0) {
                 /* Blank reply: nothing speakable; render it, stay idle. */
                 robodog_ui_show_assistant(resp.text);
             } else {
+                if (truncated) {
+                    /* R3: the reply needed more than max_chunks chunks, so
+                     * the tail was dropped — the read-out voice did NOT
+                     * finish every word.  Log a distinct marker the host
+                     * voice-verify gate FAILs on (it must never pass a
+                     * half-read reply), and end the turn in a visibly
+                     * "truncated" state below, never a false-complete idle. */
+                    ESP_LOGW(TAG,
+                             "voice truncated: reply exceeds %u chunks; the "
+                             "tail was NOT read out",
+                             (unsigned)max_chunks);
+                }
                 robodog_ui_set_agent_state("responding");
                 for (size_t i = 0; i < n; i++) {
                     const char *chunk = arena + offs[i];
@@ -951,7 +907,17 @@ static void voice_turn(void)
             free(offs);
             free(arena);
         }
-        robodog_ui_set_agent_state(rc == ESP_OK ? "idle" : "error");
+        /* Terminal state: idle on a complete readout, error on a real fault
+         * (OOM / TTS stall), and — R3 — a distinct "truncated" when the chunk
+         * queue cap dropped the reply tail, so the panel never lies about
+         * read-out completion. */
+        const char *terminal = "idle";
+        if (rc != ESP_OK) {
+            terminal = "error";
+        } else if (truncated) {
+            terminal = "truncated";
+        }
+        robodog_ui_set_agent_state(terminal);
     } else {
         ESP_LOGE(TAG, "agent run failed (%s): %s", esp_err_to_name(err),
                  resp.error_message != NULL ? resp.error_message : "");

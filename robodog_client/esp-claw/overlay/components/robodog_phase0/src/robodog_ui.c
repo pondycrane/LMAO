@@ -18,6 +18,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 #include "robodog_ui.h"
+#include "voice_transcript.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -63,6 +64,16 @@ typedef struct {
     char text[480];
     char state[16];
 } ui_cmd_t;
+
+/* R5: the UI command text field is the display-side sink for every spoken
+ * sentence chunk, so a chunk must ALWAYS fit it or the panel shows a shorter
+ * "sentence" than the one the voice is reading (on-screen != spoken).  The
+ * knob's Kconfig `range 1 479` is the single owner of that bound; this
+ * compile-time guard makes the coupling un-skippable in the firmware build. */
+_Static_assert(
+    CONFIG_ROBODOG_VOICE_TTS_MAX_CHARS < (int)sizeof(((ui_cmd_t *)0)->text),
+    "CONFIG_ROBODOG_VOICE_TTS_MAX_CHARS must fit the UI command text field "
+    "(Kconfig range is 1..479)");
 
 static QueueHandle_t s_ui_queue;
 static TaskHandle_t s_ui_task;
@@ -383,23 +394,13 @@ static void ui_process_cmd(const ui_cmd_t *cmd)
          * reply, then rebuild the exchange.  The panel now SYNCs with the
          * voice: it snaps to the tail (the chunk currently being read) and
          * the accumulation rolls drop-oldest, so the current chunk always
-         * stays on screen no matter how long the reply grows.  Join with a
-         * single space only where neither side already provides one — chunks
-         * cut at punctuation don't need it, and a newline keeps its own line. */
+         * stays on screen no matter how long the reply grows.  The join +
+         * cap-keep rules live in the pure, host-tested helper
+         * (robodog_transcript_append_chunk, R7) so the display/audio sync can
+         * never silently regress between hardware E2E runs. */
         s_chunked = true;
-        if (s_assistant[0] != '\0' &&
-            cmd->text[0] != '\n' && cmd->text[0] != ' ' &&
-            s_assistant[strlen(s_assistant) - 1] != '\n') {
-            strlcat(s_assistant, " ", sizeof(s_assistant));
-        }
-        /* drop-oldest: keep only the most-recent UI_TRANSCRIPT_CAP chars so a
-         * huge reply can never roll the chunk being read off the buffer. */
-        strlcat(s_assistant, cmd->text, sizeof(s_assistant));
-        size_t rlen = strlen(s_assistant);
-        if (rlen > UI_TRANSCRIPT_CAP) {
-            memmove(s_assistant, s_assistant + (rlen - UI_TRANSCRIPT_CAP),
-                    UI_TRANSCRIPT_CAP + 1);
-        }
+        robodog_transcript_append_chunk(s_assistant, sizeof(s_assistant),
+                                        UI_TRANSCRIPT_CAP, cmd->text);
         ui_reset_to_exchange(s_last_user, s_assistant);
         break;
     case UI_CMD_STATE:
