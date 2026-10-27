@@ -58,20 +58,29 @@ nodes:
         exit 2
       fi
       PR_HEAD=$(gh pr view "$PR_NUMBER" --json headRefName -q '.headRefName')
-      # Persist the PR number for downstream commands (lmao-sync-pr-with-main,
-      # implement-review-fixes) that read the .pr-number registry artifact.
+      PR_BASE=$(gh pr view "$PR_NUMBER" --json baseRefName -q '.baseRefName')
+      # Persist the PR target for downstream commands (lmao-sync-pr-with-main,
+      # implement-review-fixes) that read these registry artifacts.
       echo "$PR_NUMBER" > "$ARTIFACTS_DIR/.pr-number"
-      CUR=$(git branch --show-current)
-      if [ "$CUR" != "$PR_HEAD" ]; then
-        git fetch -q origin "$PR_HEAD"
-        # --ignore-other-worktrees: the branch is often checked out in the
-        # main worktree (the one you pushed the PR from) — without this the
-        # checkout dies with "already used by worktree" and the whole review
-        # DAG skips. This worktree is isolated/throwaway, so sharing the
-        # branch name is safe and keeps implicit `gh pr view` resolution.
-        git checkout -q --ignore-other-worktrees -B "$PR_HEAD" "origin/$PR_HEAD"
+      echo "$PR_HEAD" > "$ARTIFACTS_DIR/.pr-head"
+      echo "$PR_BASE" > "$ARTIFACTS_DIR/.pr-base"
+      # Git isolation (R10): NEVER force the shared PR branch into this
+      # throwaway worktree via --ignore-other-worktrees — git's per-branch
+      # worktree ownership is what keeps the developer's main worktree (which
+      # legitimately owns the branch it pushed from) safe from a review that
+      # rebases and force-pushes under it with a stale index.  Check out a
+      # PER-RUN branch pinned to the PR head instead; the shared PR branch is
+      # never touched locally, and a genuine ownership conflict still fails
+      # loudly.  Downstream sync/implement-fixes read .pr-head/.review-branch
+      # and push via `HEAD:$PR_HEAD`, so the remote PR head — the only thing
+      # that matters to gh — moves exactly as before.
+      RUN_BRANCH="${PR_HEAD}__review_$(basename "$ARTIFACTS_DIR")"
+      git fetch -q origin "$PR_HEAD"
+      if [ "$(git branch --show-current)" != "$RUN_BRANCH" ]; then
+        git checkout -q -B "$RUN_BRANCH" "origin/$PR_HEAD"
       fi
-      echo "reviewing PR #$PR_NUMBER ($PR_HEAD @ $(git rev-parse --short HEAD))"
+      echo "$RUN_BRANCH" > "$ARTIFACTS_DIR/.review-branch"
+      echo "reviewing PR #$PR_NUMBER (head=$PR_HEAD run-branch=$RUN_BRANCH @ $(git rev-parse --short HEAD))"
     context: fresh
 
   - id: verify-pr-base

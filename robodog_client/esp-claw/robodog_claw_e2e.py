@@ -155,8 +155,7 @@ def _audio_cmd(core):
 def shell_ok(cmd, timeout):
     r = shell_run(cmd, timeout=timeout)
     if r.returncode != 0:
-        log(f"audio cmd failed rc={r.returncode}: {cmd[:120]}… "
-            f"{r.stderr[-200:].strip()}")
+        log(f"audio cmd failed rc={r.returncode}: {cmd[:120]}… {r.stderr[-200:].strip()}")
         return False
     return True
 
@@ -298,14 +297,28 @@ def wait_for_log(s, patterns, timeout, label="", spill=None):
 CHUNK_RE = re.compile(r"voice chunk (\d+)/(\d+):\s*(.*)")
 TTS_START_RE = re.compile(r"TTS start")
 TTS_STOP_RE = re.compile(r"TTS stop")
+# R3: the device logs `voice truncated: ...` (robodog_voice.c) when a reply
+# exceeds CONFIG_ROBODOG_VOICE_TTS_MAX_CHUNKS and its tail is dropped — the
+# turn is NOT a complete readout and the gate MUST fail on this marker.
+TRUNCATED_RE = re.compile(r"voice truncated")
 
 
 def collect_voice_chunks(s, timeout, seed=b""):
     """Scan the console while the chunk queue plays back.  Returns
-    (chunks, starts, stops): chunks maps chunk index i (1-based) to
-    (n_total, text); starts/stops count the `TTS start`/`TTS stop` brackets.
-    Ends as soon as every advertised chunk has its own start AND stop — i.e.
-    the last `TTS stop` of the queue — or when `timeout` runs out.
+    (chunks, starts, stops, max_n, truncated):
+      chunks    maps chunk index i (1-based) to (n_total, text)
+      starts/stops  count the `TTS start`/`TTS stop` brackets
+      max_n     the ADVERTISED chunk total — the `voice chunk i/n` denominator
+                (every line carries it), NOT the last index seen.  This is the
+                authoritative "whole queue" target: a mid-queue stop (TTS
+                stall abort or a dropped tail) leaves max_n > the highest seen
+                index and the completeness check FAILs (R2).
+      truncated True when the device logged the `voice truncated:` marker —
+                the reply was too long for the queue cap and its tail was NOT
+                read out (R3).
+    Ends when EVERY advertised chunk 1..max_n is seen with its own start AND
+    stop — i.e. the last `TTS stop` of a COMPLETE queue — or when `timeout`
+    runs out (a truncated queue runs to timeout so the leg reports FAIL).
 
     `seed` replays bytes that wait_for_log already consumed past its match
     (see its `spill` param) so the `voice chunk 1/n` line that lands right
@@ -315,6 +328,7 @@ def collect_voice_chunks(s, timeout, seed=b""):
     chunks = {}
     starts = stops = 0
     max_n = 0
+    truncated = False
     while time.time() < deadline:
         data = s.read(8192)
         if data:
@@ -328,15 +342,37 @@ def collect_voice_chunks(s, timeout, seed=b""):
                     chunks[i] = (n, m.group(3).strip())
                     max_n = max(max_n, n)
                     log(f"chunk {i}/{n} seen")
+                if TRUNCATED_RE.search(ln):
+                    truncated = True
+                    log("voice truncated marker seen (reply exceeds max chunks)")
                 if TTS_START_RE.search(ln):
                     starts += 1
                 if TTS_STOP_RE.search(ln):
                     stops += 1
             if len(acc) > 65536:
                 acc = acc[-65536:]
-        if max_n and starts >= max_n and stops >= max_n:
+        if (
+            max_n
+            and all(i in chunks for i in range(1, max_n + 1))
+            and starts >= max_n
+            and stops >= max_n
+        ):
             break
-    return chunks, starts, stops
+    return chunks, starts, stops, max_n, truncated
+
+
+def unescape_reply(escaped):
+    """Recover the full agent reply from the device's line-safe JSON-escaped
+    `agent reply:` log (robodog_voice.c json_escape — every newline/quote/
+    control char becomes a backslash escape so the whole reply is ONE console
+    line, R1).  Returns the raw string on any decode failure (OOM fallback of
+    the device, or non-UTF-8 text)."""
+    if not escaped:
+        return escaped
+    try:
+        return json.loads('"' + escaped + '"')
+    except Exception:  # noqa: BLE001
+        return escaped
 
 
 def tail_tokens(text, k=12):
@@ -436,8 +472,9 @@ def run_loop(n, instr, artifacts, voice_verify):
         play_wav(target_wav)
 
         asr_spill = bytearray()
-        m_asr, _ = wait_for_log(s, [r'ASR text="([^"]*)"'], timeout=ASR_TIMEOUT,
-                                label="ASR", spill=asr_spill)
+        m_asr, _ = wait_for_log(
+            s, [r'ASR text="([^"]*)"'], timeout=ASR_TIMEOUT, label="ASR", spill=asr_spill
+        )
         asr_txt = m_asr.group(1) if m_asr else ""
         res["artifacts"]["asr"] = asr_txt
         frac = token_overlap(asr_txt, target_txt)
@@ -454,9 +491,9 @@ def run_loop(n, instr, artifacts, voice_verify):
             # VAD never heard speech vs Whisper round-trip failure vs silent.
             if asr_spill:
                 board_lines = [
-                    bl for bl in asr_spill.decode("utf-8", "replace").splitlines()
-                    if any(k in bl for k in (
-                        "robodog_voice", "ASR", "utterance", "speech", "bail"))
+                    bl
+                    for bl in asr_spill.decode("utf-8", "replace").splitlines()
+                    if any(k in bl for k in ("robodog_voice", "ASR", "utterance", "speech", "bail"))
                     and "RD_SHOT" not in bl
                 ]
                 if board_lines:
@@ -483,9 +520,15 @@ def run_loop(n, instr, artifacts, voice_verify):
         # unprocessed remainder past the match — exactly where the first
         # `voice chunk 1/n` lands — so hand it to the voice-verify collector.
         leftover = bytearray()
-        m_rep, _ = wait_for_log(s, [r"agent reply: (.+)"], timeout=REPLY_TIMEOUT,
-                                label="REPLY", spill=leftover)
+        m_rep, _ = wait_for_log(
+            s, [r"agent reply: (.+)"], timeout=REPLY_TIMEOUT, label="REPLY", spill=leftover
+        )
         reply = m_rep.group(1).strip() if m_rep else ""
+        # R1: the device logs the reply JSON-escaped (line-safe, one console
+        # line), so recover the real text here — FULL_READOUT / SUBTITLE /
+        # RING must compare against the reply's TRUE end, never a partial
+        # first-line capture.
+        reply = unescape_reply(reply)
         res["artifacts"]["reply"] = reply
         res["asserts"]["REPLY"] = (
             f"PASS reply={reply!r}" if reply else "FAIL (no `agent reply:` on console)"
@@ -497,6 +540,7 @@ def run_loop(n, instr, artifacts, voice_verify):
         mic_path = run_dir / "speaker.wav"
         ring_txt = ""
         chunks, starts, stops = {}, 0, 0
+        max_n, truncated = 0, False
         if voice_verify:
             # No separate `TTS start` wait: wait_for_log would CONSUME the
             # `voice chunk i/n` line that precedes each `TTS start`, making
@@ -521,8 +565,9 @@ def run_loop(n, instr, artifacts, voice_verify):
                     cap_done.set()
 
             threading.Thread(target=_cap, daemon=True).start()
-            chunks, starts, stops = collect_voice_chunks(s, REPLY_TIMEOUT,
-                                                         seed=leftover)
+            chunks, starts, stops, max_n, truncated = collect_voice_chunks(
+                s, REPLY_TIMEOUT, seed=leftover
+            )
             # The re-ASR below reads the WHOLE captured WAV, so wait for the
             # background capture to actually finish (bounded by
             # VOICE_CAP_SECS) — reading a half-written RIFF yields nothing.
@@ -568,24 +613,36 @@ def run_loop(n, instr, artifacts, voice_verify):
         )
         if voice_verify:
             # The authoritative anti-truncation evidence is deterministic and
-            # console-side: every queued chunk MUST have its own TTS bracket.
-            if chunks:
-                ordered = sorted(chunks) == list(range(1, max(chunks) + 1))
-                bracketed = starts >= max(chunks) and stops >= max(chunks)
+            # console-side: EVERY advertised chunk 1..max_n MUST have its own
+            # TTS bracket (R2 validates against the advertised total, not the
+            # last seen index, so a mid-queue stop FAILs) and the device must
+            # NOT have reported a dropped tail (R3).
+            if truncated:
                 res["asserts"]["CHUNKED_QUEUE"] = (
-                    f"PASS {max(chunks)} chunk(s), all TTS-bracketed "
-                    f"(start={starts} stop={stops})"
+                    "FAIL `voice truncated` marker on console — the reply "
+                    f"exceeds CONFIG_ROBODOG_VOICE_TTS_MAX_CHUNKS "
+                    f"(advertised n={max_n}); the tail was NOT read out"
+                )
+            elif chunks:
+                ordered = sorted(chunks) == list(range(1, max_n + 1))
+                bracketed = starts >= max_n and stops >= max_n
+                res["asserts"]["CHUNKED_QUEUE"] = (
+                    f"PASS {max_n} chunk(s), ALL TTS-bracketed (start={starts} stop={stops})"
                     if ordered and bracketed
-                    else f"FAIL chunks={sorted(chunks)} starts={starts} stops={stops}"
+                    else f"FAIL chunks={sorted(chunks)} of advertised {max_n} "
+                    f"starts={starts} stops={stops}"
                 )
             else:
                 res["asserts"]["CHUNKED_QUEUE"] = (
                     "FAIL (no `voice chunk i/n` logs — the queue did not run)"
                 )
-            # FULL_READOUT: the LAST chunk's words must appear in the mic
+            # FULL_READOUT: the reply's LAST words must appear in the mic
             # capture — the read-out reached the reply's end, nothing was cut
-            # off.  Console queue evidence above is authoritative; this is the
-            # acoustic corroboration (PASS-WEAK tolerated for marginal
+            # off.  `reply` is the line-safe full text (R1), so tail_tokens
+            # targets the reply's TRUE end — never the head as an unescaped
+            # first-line `agent reply:` capture would.  Console queue evidence
+            # above (CHUNKED_QUEUE, advertised max_n) is authoritative; this
+            # is the acoustic corroboration (PASS-WEAK tolerated for marginal
             # speaker->mic coupling).
             tail = tail_tokens(reply)
             got = set(norm(ring_txt)) if ring_txt else set()
@@ -602,8 +659,7 @@ def run_loop(n, instr, artifacts, voice_verify):
                 )
             elif ring_txt:
                 res["asserts"]["FULL_READOUT"] = (
-                    "PASS-WEAK audible "
-                    f"(reply too short / noisy re-ASR={ring_txt!r})"
+                    f"PASS-WEAK audible (reply too short / noisy re-ASR={ring_txt!r})"
                 )
             else:
                 res["asserts"]["FULL_READOUT"] = "FAIL (no re-ASR of board speaker)"

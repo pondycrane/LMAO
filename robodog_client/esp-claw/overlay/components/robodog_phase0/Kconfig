@@ -110,6 +110,7 @@ menu "RoboDog Phase 2 voice loop"
     config ROBODOG_VOICE_TTS_MAX_CHARS
         int "Max characters per spoken sentence chunk"
         default 240
+        range 1 479
         help
             The esp-claw root agent is verbose by default (a full "what can
             you do" dump is 60+ s of speech), so the FULL reply is split into
@@ -120,6 +121,13 @@ menu "RoboDog Phase 2 voice loop"
             first ".!?;"-or-newline break within the cap, else the last space,
             else a hard cutoff.  A shorter value gives snappier hermes-style
             per-sentence pacing.
+            Range 1..479: a chunk is rendered on the RLCD THROUGH the same
+            UI command field that carries every on-screen line (robodog_ui
+            text[480]), so a spoken chunk must ALWAYS fit that field or the
+            panel would show a shorter "sentence" than the one the voice is
+            reading (on-screen != spoken).  robodog_ui._Static_assert enforces
+            this pairing at build time; keep the two bound definitions in
+            sync.
 
     config ROBODOG_VOICE_TTS_MAX_CHUNKS
         int "Maximum number of spoken sentence chunks per turn"
@@ -128,7 +136,11 @@ menu "RoboDog Phase 2 voice loop"
             Hard cap on the chunk queue so one pathological gigantic reply
             cannot exhaust memory; 64 x 240 chars bounds ~15 KB of chunk text
             (several minutes of speech).  If a reply needs more chunks the
-            tail is dropped with a warning — the head still plays and renders
-            in full.
+            tail is dropped — but this is never silent: the turn logs
+            `voice truncated: reply exceeds <n> chunks; the tail was NOT read
+            out` and ends in a visible "truncated" state (never the
+            false-complete idle), and the robodog-claw-voice-verify gate
+            FAILs on the marker so a half-read reply can never pass as a full
+            readout.  Prefer a shorter reply over raising this cap.
 
 endmenu

@@ -100,10 +100,15 @@ sh_binary(
         "esp-claw/overlay/components/robodog_phase0/include/robodog_ui.h",
         "esp-claw/overlay/components/robodog_phase0/include/robodog_http.h",
         "esp-claw/overlay/components/robodog_phase0/include/robodog_voice.h",
+        "esp-claw/overlay/components/robodog_phase0/include/voice_split.h",
+        "esp-claw/overlay/components/robodog_phase0/include/voice_transcript.h",
         "esp-claw/overlay/components/robodog_phase0/src/robodog_phase0.c",
         "esp-claw/overlay/components/robodog_phase0/src/robodog_ui.c",
         "esp-claw/overlay/components/robodog_phase0/src/robodog_http.c",
         "esp-claw/overlay/components/robodog_phase0/src/robodog_voice.c",
+        "esp-claw/overlay/components/robodog_phase0/src/voice_split.c",
+        "esp-claw/overlay/components/robodog_phase0/src/voice_transcript.c",
+        "esp-claw/test_voice_split.c",
         "esp-claw/robodog_claw_e2e.py",
         "voice/corpus/capabilities.wav",
     ],
@@ -126,6 +131,34 @@ sh_binary(
         "esp-claw/fetch_esp_claw.sh",
     ],
     tags = ["manual"],
+)
+
+# ── Host-testable pure-C voice units (R6/R7) ───────────────────────────────
+# The whole-reply chunk splitter (voice_split.c) and the transcript
+# join+cap-keep helper (voice_transcript.c) are PURE C (no ESP-IDF deps) and
+# are compiled by BOTH the device firmware (robodog_phase0 component, src/ +
+# include/) and this host cc_test — so the lossless/ordered/<=cap readout
+# invariants and the display/audio accumulation rules are proven under Bazel
+# against the exact source that runs on the board (DRY, same pattern as
+# //firmware_common:lma_encoder).
+cc_library(
+    name = "esp_claw_voice_pure",
+    srcs = [
+        "esp-claw/overlay/components/robodog_phase0/src/voice_split.c",
+        "esp-claw/overlay/components/robodog_phase0/src/voice_transcript.c",
+    ],
+    hdrs = [
+        "esp-claw/overlay/components/robodog_phase0/include/voice_split.h",
+        "esp-claw/overlay/components/robodog_phase0/include/voice_transcript.h",
+    ],
+    strip_include_prefix = "esp-claw/overlay/components/robodog_phase0/include",
+    visibility = ["//visibility:public"],
+)
+
+cc_test(
+    name = "test_voice_split",
+    srcs = ["esp-claw/test_voice_split.c"],
+    deps = [":esp_claw_voice_pure"],
 )
 
 # ── Voice-AI backend glue (host-side services) ────────────────────────────

@@ -34,7 +34,8 @@ FULL_READOUT  : the test mic, recording across ALL chunk brackets, captured
    same USB-JTAG console the capture hook uses. The board (Waveshare
    ESP32-S3 RLCD-4.2, `0x303A:0x1001`) must already be flashed with the
    self-built esp-claw image (`build_esp_claw.sh` + `flash_esp_claw.sh` — this
-   gate does not reflash; the claw-e2e node flashes when needed).
+   gate does not reflash, nor does `robodog-claw-e2e`; re-flash via
+   `flash_esp_claw.sh` when the firmware changed).
 2. **NEVER run esptool on the Cardputer** (`0x303A:0x8120`) or flash the RNode
    (`/dev/ttyUSB*`). This board is the ONLY esptool-allowed target, and only
    via `flash_esp_claw.sh` / `flash.sh`.

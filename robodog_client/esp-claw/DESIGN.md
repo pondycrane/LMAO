@@ -463,7 +463,9 @@ Phase 2 delivers the **device-initiated voice loop**, hardware-verified end-to-e
   esp-claw root agent is verbose by default (a full "what can you do" dump is
   60+ s of speech), so `voice_turn()` splits the FULL reply via
   `voice_split_reply()` into sentence-bounded chunks of at most
-  `CONFIG_ROBODOG_VOICE_TTS_MAX_CHARS` (default 240) — cut at the first
+  `CONFIG_ROBODOG_VOICE_TTS_MAX_CHARS` (default 240, `range 1 479` so a
+  spoken chunk always fits the RLCD command field — the on-screen sentence is
+  the same text the voice reads, R5) — cut at the first
   `.!?;`/newline break within the window, else the last space, else a hard
   cutoff — and each chunk is queued in order: appended to the on-screen reply
   (`robodog_ui_append_assistant`, so the whole reply accumulates on the RLCD)
@@ -472,6 +474,15 @@ Phase 2 delivers the **device-initiated voice loop**, hardware-verified end-to-e
   reply — the old "response always truncated to the first ~240 chars" failure
   is gone.  Every chunk logs `voice chunk i/n: ...` on the console so the host
   voice-verification gate can count that the full queue was voiced.
+  The one reachable exception is honest: when a reply exceeds
+  `CONFIG_ROBODOG_VOICE_TTS_MAX_CHUNKS`, the tail is dropped but never
+  silently — the device logs `voice truncated: ...` and the turn ends in a
+  distinct **`truncated`** terminal state (not the false-complete `idle`), and
+  the `robodog-claw-voice-verify` gate FAILs on that marker, so a truncated
+  readout can never pass as a full one.  The splitter itself lives in the
+  pure, host-tested module `voice_split.c` (R6) — lossless / ordered / ≤cap
+  invariants are proven under Bazel against the exact source the firmware
+  compiles.
 - **24 kHz native audio hub (hermes parity) — no software resample.** The
   shared `audio_hub` (patched via `patches/0003-audio-hub-24k.patch`) runs the
   ES8311/ES7210 at **24 kHz**, exactly like the hermes stack: Kokoro's native
