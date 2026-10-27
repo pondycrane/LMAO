@@ -16,7 +16,17 @@ description: |
 
   NOT for: Creating plans from scratch (use archon-idea-to-pr), quick fixes, standalone reviews.
 
-  Models: gx10 DeepSeek V4 Flash (gx10/deepseek-ai/DeepSeek-V4-Flash-0731) for everything.
+  Models: archon tiers (large/medium/small) resolved from ~/.archon/config.yaml (today all map to gx10 DeepSeek V4 Flash — edit config.yaml once to reroute when the local model is down) for everything.
+
+inputs:
+  # Declared so the review-chain commands' $INPUTS.* references resolve
+  # (archon >=0.12 strict-fails undeclared inputs). All optional; empty means
+  # "standalone full review, first round".
+  scope: { default: "", description: "Requested review scope (may be empty)" }
+  prior_report: { default: "", description: "Path to previous round's report (empty = first round)" }
+  work_order: { default: "", description: "Accepted work order (empty for standalone review)" }
+  part: { default: "", description: "Part assignment (empty = whole contract)" }
+  policy_defaults: { default: "", description: "Policy overrides (empty = defaults)" }
 
 nodes:
   # ═══════════════════════════════════════════════════════════════════
@@ -26,7 +36,7 @@ nodes:
   - id: plan-setup
     command: archon-plan-setup
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   # ═══════════════════════════════════════════════════════════════════
   # PHASE 2: CONFIRM PLAN
@@ -36,7 +46,7 @@ nodes:
     command: archon-confirm-plan
     depends_on: [plan-setup]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   # ═══════════════════════════════════════════════════════════════════
   # PHASE 3: IMPLEMENT
@@ -46,7 +56,7 @@ nodes:
     command: archon-implement-tasks
     depends_on: [confirm-plan]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
     effort: max
 
   # ═══════════════════════════════════════════════════════════════════
@@ -57,7 +67,7 @@ nodes:
     command: archon-validate
     depends_on: [implement-tasks]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   # ═══════════════════════════════════════════════════════════════════
   # PHASE 5: FINALIZE PR
@@ -67,7 +77,7 @@ nodes:
     command: archon-finalize-pr
     depends_on: [validate]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   # ═══════════════════════════════════════════════════════════════════
   # PHASE 6: CODE REVIEW
@@ -91,50 +101,50 @@ nodes:
     command: archon-pr-review-scope
     depends_on: [verify-pr-base]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   - id: sync
     command: archon-sync-pr-with-main
     depends_on: [review-scope]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   - id: code-review
     command: archon-code-review-agent
     depends_on: [sync]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   - id: error-handling
     command: archon-error-handling-agent
     depends_on: [sync]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   - id: test-coverage
     command: archon-test-coverage-agent
     depends_on: [sync]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   - id: comment-quality
     command: archon-comment-quality-agent
     depends_on: [sync]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   - id: docs-impact
     command: archon-docs-impact-agent
     depends_on: [sync]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   - id: synthesize
     command: archon-synthesize-review
     depends_on: [code-review, error-handling, test-coverage, comment-quality, docs-impact]
     trigger_rule: one_success
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   # ═══════════════════════════════════════════════════════════════════
   # PHASE 7: FIX REVIEW ISSUES
@@ -144,7 +154,7 @@ nodes:
     command: archon-implement-review-fixes
     depends_on: [synthesize]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
     effort: max
 
   # ═══════════════════════════════════════════════════════════════════
@@ -155,7 +165,7 @@ nodes:
     command: archon-workflow-summary
     depends_on: [implement-fixes]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   # ─── Push notification via ntfy (if configured) ──────────────
   # To enable, create .archon/mcp/ntfy.json in the project root

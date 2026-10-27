@@ -22,7 +22,17 @@ description: |
 
   NOT for: Executing existing plans (use archon-plan-to-pr), quick fixes, standalone reviews.
 
-  Models: gx10 DeepSeek V4 Flash (gx10/deepseek-ai/DeepSeek-V4-Flash-0731) for everything. No Claude anywhere.
+  Models: archon tiers (large/medium/small) resolved from ~/.archon/config.yaml (today all map to gx10 DeepSeek V4 Flash — edit config.yaml once to reroute when the local model is down) for everything. No Claude anywhere.
+
+inputs:
+  # Declared so the review-chain commands' $INPUTS.* references resolve
+  # (archon >=0.12 strict-fails undeclared inputs). All optional; empty means
+  # "standalone full review, first round".
+  scope: { default: "", description: "Requested review scope (may be empty)" }
+  prior_report: { default: "", description: "Path to previous round's report (empty = first round)" }
+  work_order: { default: "", description: "Accepted work order (empty for standalone review)" }
+  part: { default: "", description: "Part assignment (empty = whole contract)" }
+  policy_defaults: { default: "", description: "Policy overrides (empty = defaults)" }
 
 nodes:
   # ═══════════════════════════════════════════════════════════════════
@@ -32,7 +42,7 @@ nodes:
   - id: create-plan
     command: lmao-create-plan
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
     effort: high
 
   # ═══════════════════════════════════════════════════════════════════
@@ -43,7 +53,7 @@ nodes:
     command: lmao-plan-setup
     depends_on: [create-plan]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   # ═══════════════════════════════════════════════════════════════════
   # PHASE 2: CONFIRM PLAN
@@ -53,7 +63,7 @@ nodes:
     command: lmao-confirm-plan
     depends_on: [plan-setup]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   # ═══════════════════════════════════════════════════════════════════
   # PHASE 3: IMPLEMENT (LMAO safety rules + Bazel)
@@ -63,7 +73,7 @@ nodes:
     command: lmao-implement-tasks
     depends_on: [confirm-plan]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
     effort: max
 
   # ═══════════════════════════════════════════════════════════════════
@@ -75,19 +85,19 @@ nodes:
     command: lmao-validate
     depends_on: [implement-tasks]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   - id: hardware-e2e
     command: lmao-hardware-e2e
     depends_on: [validate]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   - id: production-health
     command: lmao-production-health
     depends_on: [hardware-e2e]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   # ═══════════════════════════════════════════════════════════════════
   # PHASE 5: FINALIZE PR (includes hardware E2E evidence)
@@ -97,7 +107,7 @@ nodes:
     command: lmao-finalize-pr
     depends_on: [production-health]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   # ═══════════════════════════════════════════════════════════════════
   # PHASE 6: CODE REVIEW
@@ -121,50 +131,50 @@ nodes:
     command: archon-pr-review-scope
     depends_on: [verify-pr-base]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   - id: sync
     command: lmao-sync-pr-with-main
     depends_on: [review-scope]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   - id: code-review
     command: archon-code-review-agent
     depends_on: [sync]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   - id: error-handling
     command: archon-error-handling-agent
     depends_on: [sync]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   - id: test-coverage
     command: archon-test-coverage-agent
     depends_on: [sync]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   - id: comment-quality
     command: archon-comment-quality-agent
     depends_on: [sync]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   - id: docs-impact
     command: archon-docs-impact-agent
     depends_on: [sync]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   - id: synthesize
     command: archon-synthesize-review
     depends_on: [code-review, error-handling, test-coverage, comment-quality, docs-impact]
     trigger_rule: one_success
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   # ═══════════════════════════════════════════════════════════════════
   # PHASE 7: FIX REVIEW ISSUES (LMAO-adapted)
@@ -174,7 +184,7 @@ nodes:
     command: lmao-implement-review-fixes
     depends_on: [synthesize]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
     effort: max
 
   # ═══════════════════════════════════════════════════════════════════
@@ -189,19 +199,19 @@ nodes:
     command: lmao-validate
     depends_on: [implement-fixes]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   - id: final-hardware-e2e
     command: lmao-hardware-e2e
     depends_on: [final-validate]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   - id: final-production-health
     command: lmao-production-health
     depends_on: [final-hardware-e2e]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   # ═══════════════════════════════════════════════════════════════════
   # PHASE 9: FINAL SUMMARY & FOLLOW-UP
@@ -211,7 +221,7 @@ nodes:
     command: archon-workflow-summary
     depends_on: [final-production-health]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   # ─── Push notification via ntfy (bash + curl) ─────────────────
   # To enable, create .archon/mcp/ntfy.json with {"NTFY_TOPIC": "..."}

@@ -16,8 +16,8 @@ rescue (see issue #89 for the full post-mortem of the #87 run).
 | `robodog-client-dev` | Feature idea → plan → implement → **gates** → PR → 5-agent review → fixes → **gates re-run** → summary, for the **RoboDog** device (Waveshare ESP32-S3 RLCD-4.2 / ST7305 family-calendar display). Verification is **pixel-driven**: the mandatory hardware gate builds + flashes the real board and **screen-captures the exact ST7305 pixels** (`capture.py` streams the live u8g2 buffer over USB-JTAG), then reads the render back with the **vision model** (Qwen2.5-VL via `capture.py --describe`) — the PR carries the captured frames + verbatim transcription, not a re-render. Loud skip when the board (VID `0x303A` PID `0x1001`) is not attached. |
 | `robodog-hermes-review` | Review-entry twin of `robodog-hermes-dev` for an **existing** PR on the hermes voice device. The PR must exist first (create it manually via `gh pr create` from the feature branch). Flow: `checkout-pr` (resolves "review PR #N" from ARGUMENTS, checks the PR head out in the isolated worktree) → verify-pr-base → review-scope → sync → 5 parallel review agents → synthesize → implement-fixes → full gate chain re-run (validate → hermes screen-capture e2e → voice-loop e2e → production-health) → summary. Run: `archon workflow run robodog-hermes-review "review PR #N"`. Same board/board-rules as `robodog-hermes-dev`. |
 | `robodog-hermes-dev` | Feature idea → plan → implement → **gates** → PR → 5-agent review → fixes → **gates re-run** → summary, for the **RoboDog hermes voice device** — the SAME Waveshare board running the XiaoZhi voice firmware (`robodog_client/voice`, self-built; RD_SHOT capture hook + **RD_LISTEN software button**) + the voice bridge (ASR → Hermes brain → Kokoro TTS) + the acoustic **voice-loop E2E** ([#267](https://github.com/pondycrane/LMAO/issues/267), `robodog-voice-e2e`). Verification is **voice-loop-driven**: the mandatory gates flash the hermes image and drive RD_LISTEN → WS session → test-speaker command → board-mic ASR → Hermes reply → test-mic **ring closure** → RLCD **subtitle readback**, plus the hermes screen capture. **Same board, mutually exclusive with the calendar firmware** — never run both workflows at once, and never the calendar gates during hermes work. |
-| `robodog-claw-review` | Review-entry twin of `robodog-claw-dev` for an **existing** PR on the RoboDog **ESP-Claw standalone agent** (the same `0x303A:0x1001` board, `robodog_client/esp-claw/`, self-built pinned upstream + LMAO overlay). The PR must exist first (`gh pr create`). Flow: `checkout-pr` → verify-pr-base → review-scope → sync → 5 parallel review agents → synthesize → implement-fixes (rebuild + **re-flash via `flash_esp_claw.sh`** when firmware changed — the claw e2e gate never reflashes) → full gate chain re-run → summary. Run: `archon workflow run robodog-claw-review "review PR #N"`. |
-| `robodog-claw-dev` | Feature idea → plan → implement → **gates** → PR → 5-agent review → fixes → **gates re-run** → summary, for the **RoboDog ESP-Claw standalone agent** — the SAME Waveshare board running the esp-claw edge_agent (`robodog_client/esp-claw/`, self-built pinned upstream + LMAO overlay: text-only UI + RD_SHOT + the **Phase 2 native voice loop** `rd_listen → ES7210 mic → energy-VAD → Whisper ASR → claw_agent_mgr → Kokoro TTS → ES8311 speaker → RLCD render`; the board calls Whisper/LLM/Kokoro on its own, no bridge). Verification is **voice-loop-driven**: `robodog-claw-e2e` does serial-console asserts (OPEN_SESSION / ASR_MATCH / REPLY / TTS / RING / SUBTITLE) + test-mic ring re-ASR + RD_SHOT subtitle readback. Mutually exclusive with the calendar/hermes firmware. |
+| `robodog-claw-review` | Review-entry twin of `robodog-claw-dev` for an **existing** PR on the RoboDog **ESP-Claw standalone agent** (the same `0x303A:0x1001` board, `robodog_client/esp-claw/`, self-built pinned upstream + LMAO overlay). The PR must exist first (`gh pr create`). Flow: `checkout-pr` → verify-pr-base → review-scope → sync → 5 parallel review agents → synthesize → implement-fixes (rebuild + **re-flash via `flash_esp_claw.sh`** when firmware changed — the claw gates never reflash) → full gate chain re-run (`lmao-validate` → `robodog-claw-e2e` → **`robodog-claw-voice-verify`** → `robodog-production-health`) → summary. Run: `archon workflow run robodog-claw-review "review PR #N"`. |
+| `robodog-claw-dev` | Feature idea → plan → implement → **gates** → PR → 5-agent review → fixes → **gates re-run** → summary, for the **RoboDog ESP-Claw standalone agent** — the SAME Waveshare board running the esp-claw edge_agent (`robodog_client/esp-claw/`, self-built pinned upstream + LMAO overlay: text-only UI + RD_SHOT + the **Phase 2 native voice loop** `rd_listen → ES7210 mic → energy-VAD → Whisper ASR → claw_agent_mgr → Kokoro TTS → ES8311 speaker → RLCD render`; the board calls Whisper/LLM/Kokoro on its own, no bridge). Verification is **voice-loop-driven**, two mandatory gates: `robodog-claw-e2e` does serial-console asserts (OPEN_SESSION / ASR_MATCH / REPLY / TTS / RING / SUBTITLE) + test-mic ring re-ASR + RD_SHOT subtitle readback, then `robodog-claw-voice-verify` proves the chunked reply was read out to its END (every `voice chunk i/n` TTS-bracketed on the console + mic re-ASR of the reply's tail tokens; FAILs on a `voice truncated:` dropped tail). Mutually exclusive with the calendar/hermes firmware. |
 
 Both run entirely on pi routing to the in-house GX10 box — every node uses
 the local DeepSeek V4 Flash model (`gx10/deepseek-ai/DeepSeek-V4-Flash-0731`,
@@ -168,7 +168,7 @@ so the claw chain runs its OWN gates (never `robodog-hardware-e2e` / the hermes
 gates) and is mutually exclusive with the calendar and hermes flashes:
 
 ```
-lmao-validate  →  robodog-claw-e2e  →  robodog-production-health
+lmao-validate  →  robodog-claw-e2e  →  robodog-claw-voice-verify  →  robodog-production-health
 ```
 
 - **`lmao-validate`** — the LMAO host gate
@@ -185,6 +185,21 @@ lmao-validate  →  robodog-claw-e2e  →  robodog-production-health
   `flash_esp_claw.sh`; loud skip when the board or the ALSA test card is
   absent. Writes `$ARTIFACTS_DIR/robodog-claw-e2e/robodog-claw-e2e.md` plus a
   top-level `hardware-e2e.md` summary.
+- **`robodog-claw-voice-verify`** — the **chunked read-out completeness** gate
+  (both claw workflows, between claw-e2e and production-health): the device
+  logs one `voice chunk i/n` line per queued sentence chunk, and this gate
+  asserts from the **device serial console** that EVERY advertised chunk
+  `1..n` got its own `TTS start`…`TTS stop` bracket (CHUNKED_QUEUE — the
+  authoritative proof the full reply was queued and voiced, validated against
+  the advertised total), then re-ASRs the mic capture of the whole playback
+  for the reply's **true tail tokens** (FULL_READOUT). It FAILs when the
+  device reports a dropped tail (`voice truncated:` — the reply exceeded
+  `CONFIG_ROBODOG_VOICE_TTS_MAX_CHUNKS`) so a cut-off readout can never pass.
+  It **never reflashes** (nor does claw-e2e; re-flash via `flash_esp_claw.sh`
+  when firmware changed), never writes `.gate-head` or `hardware-e2e.md`
+  (production-health owns the former; claw-e2e owns the latter). Writes
+  `$ARTIFACTS_DIR/robodog-claw-voice-verify/robodog-claw-voice-verify.md`, and
+  loud-skips when the board or the ALSA test card is absent.
 - **`robodog-production-health`** — owns `.gate-head`, shared across the
   calendar/hermes/claw chains (never written by any gate before it).
 

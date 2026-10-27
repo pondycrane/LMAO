@@ -26,6 +26,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -60,6 +61,10 @@ ASR_MODEL = os.environ.get("RD_ASR_MODEL", "whisper-1")
 PLAY_SETTLE = float(os.environ.get("RD_PLAY_SETTLE", "3.0"))
 # Window for the test mic to capture the board's spoken TTS reply.
 RING_CAP_SECS = float(os.environ.get("RD_RING_CAP_SECS", "15"))
+# --voice-verify: capture the WHOLE chunked reply (multiple chunks back-to-back
+# can total 60+ s of speech from the verbose es-claw root agent), so the mic
+# must stay recording from the first `TTS start` until the last `TTS stop`.
+VOICE_CAP_SECS = float(os.environ.get("RD_VOICE_CAP_SECS", "240"))
 SILENCE = os.environ.get("E2E_AUDIO_SG", "sg audio -c")
 
 
@@ -135,20 +140,43 @@ def remote_asr(wav_path):
 # ---------------------------------------------------------------------------
 # Host-side audio drive (test speaker -> board mic) + capture (board speaker)
 # ---------------------------------------------------------------------------
+def _audio_cmd(core):
+    """Wrap a raw ffmpeg command for the test-rig audio device.  Normally the
+    rig runs behind `sg audio -c '<cmd>'` (the ALSA nodes are audio-group).
+    When E2E_AUDIO_SG is empty the operator runs as root / a group member
+    directly — then emit the BARE command: prefixing an empty string would
+    leave ` 'ffmpeg ...' `, which the shell reads as a single space-containing
+    COMMAND NAME and fails with 127, silently killing playback/capture."""
+    if SILENCE:
+        return f"{SILENCE} '{core}'"
+    return core
+
+
+def shell_ok(cmd, timeout):
+    r = shell_run(cmd, timeout=timeout)
+    if r.returncode != 0:
+        log(f"audio cmd failed rc={r.returncode}: {cmd[:120]}… {r.stderr[-200:].strip()}")
+        return False
+    return True
+
+
 def play_wav(path: Path, volume: float = PLAY_VOL):
-    cmd = (
-        f"{SILENCE} 'ffmpeg -hide_banner -loglevel error -re -i {path} "
-        f"-af volume={volume} -ac 2 -f alsa {ALSA_DEV}'"
+    # The board's mic sits far from the test speaker (marginal coupling, the
+    # documented RING PASS-WEAK rig): stream the corpus TWICE back-to-back at
+    # realtime so the energy-VAD and Whisper get a clear, repeatable signal.
+    core = (
+        f"ffmpeg -hide_banner -loglevel error -re -stream_loop 2 -i {path} "
+        f"-af volume={volume} -ac 2 -f alsa {ALSA_DEV}"
     )
-    shell_run(cmd, timeout=120)
+    shell_ok(_audio_cmd(core), 120)
 
 
 def capture_mic(path: Path, seconds: float):
-    cmd = (
-        f"{SILENCE} 'ffmpeg -hide_banner -loglevel error -f alsa "
-        f"-i {ALSA_DEV} -t {seconds} -ac 1 -ar 16000 {path}'"
+    core = (
+        f"ffmpeg -hide_banner -loglevel error -f alsa "
+        f"-i {ALSA_DEV} -t {seconds} -ac 1 -ar 16000 {path}"
     )
-    shell_run(cmd, timeout=int(seconds) + 30)
+    shell_ok(_audio_cmd(core), int(seconds) + 30)
     return path
 
 
@@ -229,9 +257,15 @@ def token_overlap(a, b):
     return inter / max(len(an), len(bn))
 
 
-def wait_for_log(s, patterns, timeout, label=""):
+def wait_for_log(s, patterns, timeout, label="", spill=None):
     """Scan the serial console for any line matching one of `patterns`.
-    Returns the regex Match, or None on timeout."""
+    Returns the regex Match, or None on timeout.
+
+    With `spill` (bytearray/bytes), every already-read byte BEYOND the matched
+    line is appended to it before returning: wait_for_log buffers up to 8 KB of
+    console per read and DISCARDS the unprocessed remainder on return, which
+    otherwise swallows lines that arrive right behind the match (e.g. the
+    `voice chunk 1/n` line immediately after `agent reply:`)."""
     deadline = time.time() + timeout
     acc = b""
     while time.time() < deadline:
@@ -247,10 +281,105 @@ def wait_for_log(s, patterns, timeout, label=""):
                     if m:
                         if label:
                             log(f"{label}: {ln[:160]}")
+                        if spill is not None:
+                            spill.extend(acc)
                         return m, ln
             if len(acc) > 65536:
                 acc = acc[-65536:]
+    if spill is not None:
+        spill.extend(acc)
     return None, ""
+
+
+# --voice-verify console collectors: the device logs one `voice chunk i/n`
+# line per queued sentence chunk before its TTS bracket, so the host can prove
+# the FULL reply was queued and voiced without any acoustic ambiguity.
+CHUNK_RE = re.compile(r"voice chunk (\d+)/(\d+):\s*(.*)")
+TTS_START_RE = re.compile(r"TTS start")
+TTS_STOP_RE = re.compile(r"TTS stop")
+# R3: the device logs `voice truncated: ...` (robodog_voice.c) when a reply
+# exceeds CONFIG_ROBODOG_VOICE_TTS_MAX_CHUNKS and its tail is dropped — the
+# turn is NOT a complete readout and the gate MUST fail on this marker.
+TRUNCATED_RE = re.compile(r"voice truncated")
+
+
+def collect_voice_chunks(s, timeout, seed=b""):
+    """Scan the console while the chunk queue plays back.  Returns
+    (chunks, starts, stops, max_n, truncated):
+      chunks    maps chunk index i (1-based) to (n_total, text)
+      starts/stops  count the `TTS start`/`TTS stop` brackets
+      max_n     the ADVERTISED chunk total — the `voice chunk i/n` denominator
+                (every line carries it), NOT the last index seen.  This is the
+                authoritative "whole queue" target: a mid-queue stop (TTS
+                stall abort or a dropped tail) leaves max_n > the highest seen
+                index and the completeness check FAILs (R2).
+      truncated True when the device logged the `voice truncated:` marker —
+                the reply was too long for the queue cap and its tail was NOT
+                read out (R3).
+    Ends when EVERY advertised chunk 1..max_n is seen with its own start AND
+    stop — i.e. the last `TTS stop` of a COMPLETE queue — or when `timeout`
+    runs out (a truncated queue runs to timeout so the leg reports FAIL).
+
+    `seed` replays bytes that wait_for_log already consumed past its match
+    (see its `spill` param) so the `voice chunk 1/n` line that lands right
+    behind `agent reply:` is not lost."""
+    deadline = time.time() + timeout
+    acc = seed if isinstance(seed, bytes) else bytes(seed)  # may be bytearray
+    chunks = {}
+    starts = stops = 0
+    max_n = 0
+    truncated = False
+    while time.time() < deadline:
+        data = s.read(8192)
+        if data:
+            acc += data
+            while b"\n" in acc:
+                line, acc = acc.split(b"\n", 1)
+                ln = line.decode("utf-8", "replace").strip()
+                m = CHUNK_RE.search(ln)
+                if m:
+                    i, n = int(m.group(1)), int(m.group(2))
+                    chunks[i] = (n, m.group(3).strip())
+                    max_n = max(max_n, n)
+                    log(f"chunk {i}/{n} seen")
+                if TRUNCATED_RE.search(ln):
+                    truncated = True
+                    log("voice truncated marker seen (reply exceeds max chunks)")
+                if TTS_START_RE.search(ln):
+                    starts += 1
+                if TTS_STOP_RE.search(ln):
+                    stops += 1
+            if len(acc) > 65536:
+                acc = acc[-65536:]
+        if (
+            max_n
+            and all(i in chunks for i in range(1, max_n + 1))
+            and starts >= max_n
+            and stops >= max_n
+        ):
+            break
+    return chunks, starts, stops, max_n, truncated
+
+
+def unescape_reply(escaped):
+    """Recover the full agent reply from the device's line-safe JSON-escaped
+    `agent reply:` log (robodog_voice.c json_escape — every newline/quote/
+    control char becomes a backslash escape so the whole reply is ONE console
+    line, R1).  Returns the raw string on any decode failure (OOM fallback of
+    the device, or non-UTF-8 text)."""
+    if not escaped:
+        return escaped
+    try:
+        return json.loads('"' + escaped + '"')
+    except Exception:  # noqa: BLE001
+        return escaped
+
+
+def tail_tokens(text, k=12):
+    """The LAST k normalized tokens of a reply — the anti-truncation target:
+    if the read-out reached the reply's end, the mic capture must carry them."""
+    toks = norm(text)
+    return set(toks[-k:]) if toks else set()
 
 
 def read_shot_frame(s, timeout=30, validate=True):
@@ -321,7 +450,7 @@ def capture_subtitle(s, artifacts):
 # ---------------------------------------------------------------------------
 # One voice loop
 # ---------------------------------------------------------------------------
-def run_loop(n, instr, artifacts):
+def run_loop(n, instr, artifacts, voice_verify):
     res = {"loop": n + 1, "asserts": {}, "artifacts": {"asr": "", "reply": ""}}
     run_dir = artifacts / f"loop{n + 1}"
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -342,7 +471,10 @@ def run_loop(n, instr, artifacts):
         log(f"playing corpus {target_wav.name} into board mic ...")
         play_wav(target_wav)
 
-        m_asr, _ = wait_for_log(s, [r'ASR text="([^"]*)"'], timeout=ASR_TIMEOUT, label="ASR")
+        asr_spill = bytearray()
+        m_asr, _ = wait_for_log(
+            s, [r'ASR text="([^"]*)"'], timeout=ASR_TIMEOUT, label="ASR", spill=asr_spill
+        )
         asr_txt = m_asr.group(1) if m_asr else ""
         res["artifacts"]["asr"] = asr_txt
         frac = token_overlap(asr_txt, target_txt)
@@ -354,89 +486,215 @@ def run_loop(n, instr, artifacts):
             )
         else:
             res["asserts"]["ASR_MATCH"] = "FAIL (no `ASR text=` on console)"
+            # Diagnose: surface the board's OWN capture/VAD/Whisper decisions
+            # (spilled beyond the ASR wait) so a failed acoustic leg says why —
+            # VAD never heard speech vs Whisper round-trip failure vs silent.
+            if asr_spill:
+                board_lines = [
+                    bl
+                    for bl in asr_spill.decode("utf-8", "replace").splitlines()
+                    if any(k in bl for k in ("robodog_voice", "ASR", "utterance", "speech", "bail"))
+                    and "RD_SHOT" not in bl
+                ]
+                if board_lines:
+                    log("board capture/VAD/ASR decisions (no `ASR text=`):")
+                    for bl in board_lines[-12:]:
+                        log("   | " + bl.strip()[:160])
 
         # Fail fast: no ASR means no agent run / TTS / subtitle in this turn —
         # waiting for the reply would just burn the full 180 s REPLY_TIMEOUT.
         if not asr_txt:
-            for k in ("REPLY", "TTS", "RING", "SUBTITLE"):
+            skip = (
+                ("REPLY", "TTS", "CHUNKED_QUEUE", "FULL_READOUT")
+                if voice_verify
+                else ("REPLY", "TTS", "RING", "SUBTITLE")
+            )
+            for k in skip:
                 res["asserts"][k] = "SKIP (no ASR -> no turn)"
             res["artifacts"]["reply"] = ""
             s.close()
             return res
 
         # ---- REPLY: native agent LLM ------
-        m_rep, _ = wait_for_log(s, [r"agent reply: (.+)"], timeout=REPLY_TIMEOUT, label="REPLY")
+        # spill: wait_for_log buffers up to 8 KB of console and discards the
+        # unprocessed remainder past the match — exactly where the first
+        # `voice chunk 1/n` lands — so hand it to the voice-verify collector.
+        leftover = bytearray()
+        m_rep, _ = wait_for_log(
+            s, [r"agent reply: (.+)"], timeout=REPLY_TIMEOUT, label="REPLY", spill=leftover
+        )
         reply = m_rep.group(1).strip() if m_rep else ""
+        # R1: the device logs the reply JSON-escaped (line-safe, one console
+        # line), so recover the real text here — FULL_READOUT / SUBTITLE /
+        # RING must compare against the reply's TRUE end, never a partial
+        # first-line capture.
+        reply = unescape_reply(reply)
         res["artifacts"]["reply"] = reply
         res["asserts"]["REPLY"] = (
             f"PASS reply={reply!r}" if reply else "FAIL (no `agent reply:` on console)"
         )
 
         # ---- TTS + RING: capture the board speaker ------
-        m_tts, _ = wait_for_log(s, [r"TTS start"], timeout=REPLY_TIMEOUT, label="TTS")
+        m_tts = None
+        m_tts_stop = None
         mic_path = run_dir / "speaker.wav"
         ring_txt = ""
-        m_tts_stop = None
-        if m_tts:
-            log("TTS start seen; capturing board speaker on test mic ...")
-            try:
-                capture_mic(mic_path, RING_CAP_SECS)
-            except Exception as e:
-                log(f"ring capture failed: {e}")
-            # Board TTS is real-time paced (~16 s for a long reply); wait for
-            # `TTS stop` NOW, before the slow ring re-ASR below scrolls it past
-            # the serial buffer and makes the acceptance leg unobservable.
-            m_tts_stop, _ = wait_for_log(s, [r"TTS stop"], timeout=REPLY_TIMEOUT, label="TTS")
-            try:
-                # The board's reply is faint but spans the whole TTS window; a
-                # single loudest-3s burst is often ambient noise and lets
-                # Whisper under-trigger (re-ASR back to nothing).  Transcribe
-                # the FULL capture first, and only fall back to the loudest
-                # burst if the full window yields no text.
-                ring_txt = remote_asr(mic_path)
-                if not ring_txt:
-                    burst = run_dir / "reply_burst.wav"
-                    trim_loudest_window(mic_path, burst, 4.0)
-                    if burst.exists():
-                        ring_txt = remote_asr(burst)
-                (run_dir / "ring_reasr.txt").write_text(ring_txt or "")
-            except Exception as e:
-                log(f"ring re-ASR failed: {e}")
+        chunks, starts, stops = {}, 0, 0
+        max_n, truncated = 0, False
+        if voice_verify:
+            # No separate `TTS start` wait: wait_for_log would CONSUME the
+            # `voice chunk i/n` line that precedes each `TTS start`, making
+            # CHUNKED_QUEUE unobservable.  collect_voice_chunks scans for the
+            # chunk logs AND their start/stop brackets together, from right
+            # after `agent reply:`.
+            log("TTS phase; capturing board speaker on test mic ...")
+            # The chunk queue plays the WHOLE reply as back-to-back chunks;
+            # keep the test mic recording in the BACKGROUND for the full
+            # reply window while the console scanner below collects every
+            # `voice chunk i/n` + start/stop bracket live.  Blocking on the
+            # long capture first would scroll `TTS stop` / chunk logs past
+            # the serial buffer and make the acceptance leg unobservable.
+            cap_done = threading.Event()
+
+            def _cap():
+                try:
+                    capture_mic(mic_path, VOICE_CAP_SECS)
+                except Exception as e:  # noqa: BLE001
+                    log(f"voice capture failed: {e}")
+                finally:
+                    cap_done.set()
+
+            threading.Thread(target=_cap, daemon=True).start()
+            chunks, starts, stops, max_n, truncated = collect_voice_chunks(
+                s, REPLY_TIMEOUT, seed=leftover
+            )
+            # The re-ASR below reads the WHOLE captured WAV, so wait for the
+            # background capture to actually finish (bounded by
+            # VOICE_CAP_SECS) — reading a half-written RIFF yields nothing.
+            cap_done.wait()
+        else:
+            m_tts, _ = wait_for_log(s, [r"TTS start"], timeout=REPLY_TIMEOUT, label="TTS")
+            if m_tts:
+                log("TTS start seen; capturing board speaker on test mic ...")
+                try:
+                    capture_mic(mic_path, RING_CAP_SECS)
+                except Exception as e:
+                    log(f"ring capture failed: {e}")
+                # Board TTS is real-time paced (~16 s for a long reply); wait for
+                # `TTS stop` NOW, before the slow ring re-ASR below scrolls it past
+                # the serial buffer and makes the acceptance leg unobservable.
+                m_tts_stop, _ = wait_for_log(s, [r"TTS stop"], timeout=REPLY_TIMEOUT, label="TTS")
+        try:
+            # The board's reply is faint but spans the whole TTS window; a
+            # single loudest-3s burst is often ambient noise and lets
+            # Whisper under-trigger (re-ASR back to nothing).  Transcribe
+            # the FULL capture first, and only fall back to the loudest
+            # burst if the full window yields no text.
+            ring_txt = remote_asr(mic_path)
+            if not ring_txt:
+                burst = run_dir / "reply_burst.wav"
+                trim_loudest_window(mic_path, burst, 4.0)
+                if burst.exists():
+                    ring_txt = remote_asr(burst)
+            (run_dir / "ring_reasr.txt").write_text(ring_txt or "")
+        except Exception as e:
+            log(f"ring re-ASR failed: {e}")
+        # TTS acceptance: the regular gate wants a single start+stop; in
+        # --voice-verify the per-chunk start/stop brackets are counted by
+        # collect_voice_chunks (starts/stops), so a full queue is the evidence.
         res["asserts"]["TTS"] = (
             "PASS start+stop"
-            if (m_tts is not None and m_tts_stop is not None)
+            if (
+                (starts >= 1 and stops >= 1)
+                if voice_verify
+                else (m_tts is not None and m_tts_stop is not None)
+            )
             else "FAIL (no TTS start/stop on console)"
         )
-        if ring_txt and reply:
-            ok = token_overlap(ring_txt, reply) >= 0.3
-            res["asserts"]["RING"] = (
-                f"PASS re-asr={ring_txt!r} (overlaps reply)"
-                if ok
-                else f"PASS-WEAK re-asr={ring_txt!r} (audible but no verbatim overlap)"
-            )
-        elif ring_txt:
-            res["asserts"]["RING"] = f"PASS-WEAK re-asr={ring_txt!r} (no reply to compare)"
+        if voice_verify:
+            # The authoritative anti-truncation evidence is deterministic and
+            # console-side: EVERY advertised chunk 1..max_n MUST have its own
+            # TTS bracket (R2 validates against the advertised total, not the
+            # last seen index, so a mid-queue stop FAILs) and the device must
+            # NOT have reported a dropped tail (R3).
+            if truncated:
+                res["asserts"]["CHUNKED_QUEUE"] = (
+                    "FAIL `voice truncated` marker on console — the reply "
+                    f"exceeds CONFIG_ROBODOG_VOICE_TTS_MAX_CHUNKS "
+                    f"(advertised n={max_n}); the tail was NOT read out"
+                )
+            elif chunks:
+                ordered = sorted(chunks) == list(range(1, max_n + 1))
+                bracketed = starts >= max_n and stops >= max_n
+                res["asserts"]["CHUNKED_QUEUE"] = (
+                    f"PASS {max_n} chunk(s), ALL TTS-bracketed (start={starts} stop={stops})"
+                    if ordered and bracketed
+                    else f"FAIL chunks={sorted(chunks)} of advertised {max_n} "
+                    f"starts={starts} stops={stops}"
+                )
+            else:
+                res["asserts"]["CHUNKED_QUEUE"] = (
+                    "FAIL (no `voice chunk i/n` logs — the queue did not run)"
+                )
+            # FULL_READOUT: the reply's LAST words must appear in the mic
+            # capture — the read-out reached the reply's end, nothing was cut
+            # off.  `reply` is the line-safe full text (R1), so tail_tokens
+            # targets the reply's TRUE end — never the head as an unescaped
+            # first-line `agent reply:` capture would.  Console queue evidence
+            # above (CHUNKED_QUEUE, advertised max_n) is authoritative; this
+            # is the acoustic corroboration (PASS-WEAK tolerated for marginal
+            # speaker->mic coupling).
+            tail = tail_tokens(reply)
+            got = set(norm(ring_txt)) if ring_txt else set()
+            overlap = token_overlap(ring_txt, reply)
+            if ring_txt and tail and len(tail & got) >= 2:
+                res["asserts"]["FULL_READOUT"] = (
+                    f"PASS tail tokens read out (overlap={overlap:.2f})"
+                )
+            elif ring_txt and overlap >= 0.3:
+                res["asserts"]["FULL_READOUT"] = (
+                    "PASS-WEAK audible but tail tokens not in re-ASR "
+                    f"(overlap={overlap:.2f}, marginal coupling); "
+                    "CHUNKED_QUEUE is the authoritative readout evidence"
+                )
+            elif ring_txt:
+                res["asserts"]["FULL_READOUT"] = (
+                    f"PASS-WEAK audible (reply too short / noisy re-ASR={ring_txt!r})"
+                )
+            else:
+                res["asserts"]["FULL_READOUT"] = "FAIL (no re-ASR of board speaker)"
         else:
-            res["asserts"]["RING"] = "FAIL (no re-ASR of board speaker)"
+            if ring_txt and reply:
+                ok = token_overlap(ring_txt, reply) >= 0.3
+                res["asserts"]["RING"] = (
+                    f"PASS re-asr={ring_txt!r} (overlaps reply)"
+                    if ok
+                    else f"PASS-WEAK re-asr={ring_txt!r} (audible but no verbatim overlap)"
+                )
+            elif ring_txt:
+                res["asserts"]["RING"] = f"PASS-WEAK re-asr={ring_txt!r} (no reply to compare)"
+            else:
+                res["asserts"]["RING"] = "FAIL (no re-ASR of board speaker)"
 
-        # ---- SUBTITLE: the reply renders on the RLCD ------
-        time.sleep(1.0)
-        sub_txt, sub_err = capture_subtitle(s, run_dir)
-        # The panel readback must carry the ASSISTANT REPLY (Phase 1 gate
-        # contract: "rd_chat N*N -> the reply renders on screen").  The readback
-        # is OCR-noisy (whole-screen transcript), so require >= 2 distinct reply
-        # tokens to appear in it — a set-overlap ratio is diluted by the screen's
-        # long text.  The user transcript in the readback is pass-through.
-        read_tok = set(norm(sub_txt)) if sub_txt else set()
-        shared = len(set(norm(reply)) & read_tok) if reply else 0
-        shown = bool(sub_txt) and len(read_tok) >= 3 and shared >= 2
-        if shown:
-            res["asserts"]["SUBTITLE"] = "PASS " + sub_txt.replace("\n", " | ")
-        elif sub_txt:
-            res["asserts"]["SUBTITLE"] = "FAIL-no-reply " + sub_txt.replace("\n", " | ")
-        else:
-            res["asserts"]["SUBTITLE"] = "FAIL " + (sub_err or "blank readback")
-        res["artifacts"]["subtitle"] = sub_txt
+            # ---- SUBTITLE: the reply renders on the RLCD ------
+            time.sleep(1.0)
+            sub_txt, sub_err = capture_subtitle(s, run_dir)
+            # The panel readback must carry the ASSISTANT REPLY (Phase 1 gate
+            # contract: "rd_chat N*N -> the reply renders on screen").  The
+            # readback is OCR-noisy (whole-screen transcript), so require >= 2
+            # distinct reply tokens to appear in it — a set-overlap ratio is
+            # diluted by the screen's long text.  The user transcript in the
+            # readback is pass-through.
+            read_tok = set(norm(sub_txt)) if sub_txt else set()
+            shared = len(set(norm(reply)) & read_tok) if reply else 0
+            shown = bool(sub_txt) and len(read_tok) >= 3 and shared >= 2
+            if shown:
+                res["asserts"]["SUBTITLE"] = "PASS " + sub_txt.replace("\n", " | ")
+            elif sub_txt:
+                res["asserts"]["SUBTITLE"] = "FAIL-no-reply " + sub_txt.replace("\n", " | ")
+            else:
+                res["asserts"]["SUBTITLE"] = "FAIL " + (sub_err or "blank readback")
+            res["artifacts"]["subtitle"] = sub_txt
     finally:
         s.close()
     return res
@@ -450,8 +708,19 @@ def main():
         help="corpus slug to voice-drive (corpus.json); default 'capabilities'",
     )
     ap.add_argument("--artifacts", default=str(Path.home() / "artifacts"))
+    ap.add_argument(
+        "--voice-verify",
+        action="store_true",
+        help="dedicated acoustic voice verification mode: asserts the FULL"
+        " chunked reply was queued AND read out to its end (CHUNKED_QUEUE +"
+        " FULL_READOUT legs instead of RING/SUBTITLE). Writes"
+        " robodog-claw-voice-verify.md; never writes hardware-e2e.md or"
+        " .gate-head.",
+    )
     args = ap.parse_args()
-    artifacts = Path(args.artifacts) / "robodog-claw-e2e"
+    voice_verify = args.voice_verify
+    tag = "robodog-claw-voice-verify" if voice_verify else "robodog-claw-e2e"
+    artifacts = Path(args.artifacts) / tag
     artifacts.mkdir(parents=True, exist_ok=True)
 
     global DETECTED_PORT
@@ -475,7 +744,7 @@ def main():
 
     results = []
     for i in range(N_RUNS):
-        r = run_loop(i, instr, artifacts)
+        r = run_loop(i, instr, artifacts, voice_verify)
         results.append(r)
         for k, v in r["asserts"].items():
             log(f"{k}: {v}")
@@ -483,8 +752,13 @@ def main():
             log("settling between loops ...")
             time.sleep(3)
 
+    title = (
+        "RoboDog ESP-Claw Voice Verification Results"
+        if voice_verify
+        else "RoboDog ESP-Claw Voice-Loop E2E Results"
+    )
     lines = [
-        "# RoboDog ESP-Claw Voice-Loop E2E Results\n",
+        f"# {title}\n",
         f"Generated: {time.strftime('%Y-%m-%d %H:%M')}",
         f"Board: {DETECTED_PORT}",
         f"Corpus: {args.corpus} ({instr['transcript']!r})",
@@ -501,15 +775,25 @@ def main():
     def ok(v):
         return v is not None and (v.startswith("PASS") or v.startswith("SKIP"))
 
+    keys = (
+        ("OPEN_SESSION", "ASR_MATCH", "REPLY", "TTS", "CHUNKED_QUEUE", "FULL_READOUT")
+        if voice_verify
+        else ("OPEN_SESSION", "ASR_MATCH", "REPLY", "TTS", "RING", "SUBTITLE")
+    )
+
     def passed(r):
-        return all(
-            ok(r["asserts"].get(k, "FAIL"))
-            for k in ("OPEN_SESSION", "ASR_MATCH", "REPLY", "TTS", "RING", "SUBTITLE")
-        )
+        return all(ok(r["asserts"].get(k, "FAIL")) for k in keys)
 
     overall = all(passed(r) for r in results)
     lines.append(f"Overall: {'PASS' if overall else 'FAIL'}")
-    (artifacts / "robodog-claw-e2e.md").write_text("\n".join(lines))
+    (artifacts / f"{tag}.md").write_text("\n".join(lines))
+    # Only the regular voice-loop E2E is the author of the top-level
+    # hardware-e2e.md contract; the dedicated voice-verification gate is
+    # acoustic evidence only and must never claim that slot.
+    if voice_verify:
+        print("\n".join(lines))
+        return 0 if overall else 1
+
     # Top-level hardware-e2e.md: the generic gate-chain/finalize contract keys
     # on `$ARTIFACTS_DIR/hardware-e2e.md` existing (the mandatory hardware-E2E
     # evidence for PR creation).  This board workflow is the author of it here
