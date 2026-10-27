@@ -91,7 +91,9 @@ sh_binary(
     srcs = ["esp-claw/build_esp_claw.sh"],
     data = [
         "esp-claw/fetch_esp_claw.sh",
+        "esp-claw/rewrite_component_paths.py",
         "esp-claw/patches/0002-init.patch",
+        "esp-claw/patches/0003-audio-hub-24k.patch",
         "esp-claw/overlay/boards/waveshare_ESP32_S3_RLCD_4_2/setup_device.c",
         "esp-claw/overlay/components/robodog_phase0/CMakeLists.txt",
         "esp-claw/overlay/components/robodog_phase0/Kconfig",

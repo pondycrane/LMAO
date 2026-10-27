@@ -19,10 +19,14 @@ argument-hint: (no arguments - detects the board + test audio, drives the autono
    (`/dev/ttyUSB*`). This board (`0x303A:0x1001`) is the ONLY esptool-allowed
    target, and only via `flash_esp_claw.sh` / `flash.sh`.
 3. The test speaker/mic is the bidirectional USB "PnP Audio Device" = ALSA
-   **card 2 (`hw:2`)** on the workspace host; there is **no `default` alias**.
-   Node needs the `audio` group; `robodog_claw_e2e.py` runs audio ops through
-   `sg audio`. Override with `RD_ALSA_DEVICE`. A `default`-named card appears
-   where a real ALSA default exists — the script parametrizes either way.
+   **card 2** on the workspace host; there is **no `default` alias**.  On the
+   current kernel the raw node **`hw:2` fails with EIO on both directions** —
+   the working device is **`RD_ALSA_DEVICE=plughw:2`** (verified 2026-10-27:
+   play + capture OK, full voice loop ran through it).  Node needs the `audio`
+   group; `robodog_claw_e2e.py` runs audio ops through `sg audio` (or set
+   `E2E_AUDIO_SG=""` when ALSA perms are granted).  A `default`-named card
+   appears where a real ALSA default exists — the script parametrizes either
+   way.
 4. **Never write `$ARTIFACTS_DIR/.gate-head`** — only `robodog-production-health`
    owns that marker (issue #100 guard).
 
