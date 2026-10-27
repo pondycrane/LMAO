@@ -41,6 +41,16 @@ description: |
   agent. The screen-capture vision READBACK inside robodog-hardware-e2e is a fixed
   pipeline (Qwen2.5-VL via capture.py --describe), not the agent model. No Claude anywhere.
 
+inputs:
+  # Declared so the review-chain commands' $INPUTS.* references resolve
+  # (archon >=0.12 strict-fails undeclared inputs). All optional; empty means
+  # "standalone full review, first round".
+  scope: { default: "", description: "Requested review scope (may be empty)" }
+  prior_report: { default: "", description: "Path to previous round's report (empty = first round)" }
+  work_order: { default: "", description: "Accepted work order (empty for standalone review)" }
+  part: { default: "", description: "Part assignment (empty = whole contract)" }
+  policy_defaults: { default: "", description: "Policy overrides (empty = defaults)" }
+
 nodes:
   # ═══════════════════════════════════════════════════════════════════
   # PHASE 0: CREATE PLAN (robodog rules baked in)
