@@ -459,6 +459,41 @@ Phase 2 delivers the **device-initiated voice loop**, hardware-verified end-to-e
   the tree and is not offline-fetchable; DESIGN's fallback is used, matching the
   bridge exactly: `VAD_ENERGY=300` (16-bit mean-abs), `VAD_SILENCE_MS=800`,
   `voice_capture()` ends the utterance 800 ms after the last speech frame.
+- **Capture-buffer hardening (stress round R7).** Under sustained voice-loop
+  load the voice-loop teardown panicked the board on
+  `assert failed: tlsf_free tlsf.c:630 ("block already marked as free")` →
+  `Rebooting… rst:0xc`.  The 9-turn claw stress soak reproduced it repeatedly
+  (3 of 9 turns failed with no `ASR text=`; the same crash was forced
+  standalone).  Backtraces fixed the fault at the capture teardown free, but
+  the assert tripped on DIFFERENT blocks run-to-run (`heap_caps_free(pcm)` on
+  the old all-at-once 1.4 MB buffer; the audio_hub subscriber's 5 KB ring free
+  after the lazy-alloc change) — the signature of shared-PSRAM TLSF metadata
+  corruption whose *writer* lives outside the LMAO-owned paths (all overlay
+  buffers/frees verified in range; comprehensive heap poisoning changes the
+  assert, not the failure).  The in-repo hardening removes every per-turn
+  capture teardown free so the confirmed panic site cannot execute:
+  1. **F1 — the capture buffer is allocated lazily on the FIRST speech frame**
+     (grow-on-speech): a no-speech bail returns `NULL` with zero samples,
+     having allocated and freed nothing.  Pre-speech silence is dropped; from
+     the first speech frame everything (trailing silence included) is buffered
+     as before.
+  2. **F2 — continuous-speech cap**: `CONFIG_ROBODOG_VOICE_SPEECH_MAX_SECS`
+     (default 30) bounds the "speech" phase so a saturated/echoing mic that
+     never goes 800 ms quiet cannot burn the whole `VOICE_MAX_SECS` window and
+     transcribe half a minute of noise.
+  3. **F3 — persistent capture subscriber.** `voice_capture` opens the APP
+     capture subscriber ONCE and keeps the ring + rate-conversion buffers
+     across turns (no per-turn open/close), flushing the ring at each listen
+     start.  The per-listen teardown free (the ring-delete panic site) is gone,
+     and a fresh flush also discards post-TTS echo that previously kept the
+     energy-VAD "busy" (the stuck-listen).  Trade-off: the APP capture role is
+     claimed by the voice loop for the board's lifetime (Lua `audio` capture is
+     not available) — correct for this standalone-agent board.
+  The remaining open item is the original external PSRAM corruptor; next step
+  if it ever resurfaces is a heap-trace/poison build run to name the writer
+  (likely the esp_ae 24k→16k converter or an LWIP/LVGL buffer) or a PSRAM
+  speed check — tracked pending longer soak.
+
 - **The reply is CHUNKED at sentence breaks and queued, not truncated.** The
   esp-claw root agent is verbose by default (a full "what can you do" dump is
   60+ s of speech), so `voice_turn()` splits the FULL reply via
