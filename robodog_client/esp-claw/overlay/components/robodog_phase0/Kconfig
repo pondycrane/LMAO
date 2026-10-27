@@ -59,10 +59,6 @@ menu "RoboDog Phase 0 probes"
         string "TTS voice in the request JSON"
         default "af_heart"
 
-    config ROBODOG_TTS_MAX_RESPONSE
-        int "Maximum TTS response body to buffer (bytes)"
-        default 16384
-
     config ROBODOG_LLM_TIMEOUT_MS
         int "Timeout for the rd_chat agent round-trip (ms)"
         default 90000

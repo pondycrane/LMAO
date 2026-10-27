@@ -64,6 +64,11 @@ static const char *TAG = "robodog_voice";
 
 #define VOICE_MAX_SAMPLES     (CONFIG_ROBODOG_VOICE_MAX_SECS * VOICE_RATE)
 
+/* Max consecutive no-progress rounds in the paced write loop before the
+ * playback is aborted (each round waits ~500 ms in audio_mixer_track_write,
+ * so the limit bounds a wedged ring to ~10 s instead of hanging the task). */
+#define TTS_WRITE_STALL_LIMIT 20U
+
 #define EVT_LISTEN            BIT0
 #define VOICE_STACK           8192
 
@@ -138,6 +143,49 @@ static void voice_dump_dac_regs(const char *tag)
              tag, pwr, dac, mute, vol);
 }
 
+/* ── Paced mixer playback (single copy: tone diag + TTS) ────────────────── */
+
+/* Feed a PCM buffer to the APP mixer track in ~20 ms frames with a ~19 ms
+ * step so playback rides the codec rate in real time.  A single
+ * audio_mixer_track_write() only waits AUDIO_MIXER_WRITE_TIMEOUT_MS (500 ms)
+ * for its ~8-frame ring to drain — writing a whole buffer at once saturates
+ * the ring and times out after ~0.5 s, so almost none of the audio ever
+ * plays ("responding but silent").  Generates the tone at the MIXER's actual
+ * sample rate (the shared audio hub runs 24 kHz after the hermes-parity
+ * patch), so the heard pitch is exactly `freq`.  The stall limit bounds a
+ * wedged ring so neither the diag nor the voice task can hang forever. */
+static esp_err_t mixer_write_paced(audio_mixer_track_handle_t track,
+                                   const uint8_t *src, size_t total,
+                                   uint32_t play_rate)
+{
+    const size_t frame_bytes = play_rate * 20 / 1000 * sizeof(int16_t);
+    size_t off = 0;
+    unsigned stalls = 0;
+    while (off < total) {
+        size_t chunk = total - off;
+        if (chunk > frame_bytes) {
+            chunk = frame_bytes;
+        }
+        const size_t w = audio_mixer_track_write(track, src + off, chunk);
+        if (w == 0) {
+            if (++stalls >= TTS_WRITE_STALL_LIMIT) {
+                ESP_LOGE(TAG, "playback stalled (mixer ring not draining); aborting");
+                return ESP_ERR_TIMEOUT;
+            }
+        } else {
+            stalls = 0;
+        }
+        off += w;
+        if (w < chunk) {
+            /* Ring momentarily full: let the mixer drain a frame before retry. */
+            vTaskDelay(pdMS_TO_TICKS(10));
+            continue;
+        }
+        vTaskDelay(pdMS_TO_TICKS(19)); /* ~real-time step */
+    }
+    return ESP_OK;
+}
+
 static void voice_play_tone(unsigned ms, int freq)
 {
     audio_mixer_handle_t mix = NULL;
@@ -165,23 +213,13 @@ static void voice_play_tone(unsigned ms, int freq)
                        (float)play_rate);
         buf[i] = (int16_t)(v * 10000.0f);
     }
-    /* Same paced write as voice_speak (see the pacing note there). */
-    const size_t frame_bytes = play_rate * 20 / 1000 * sizeof(int16_t);
+    /* Shared paced write (see mixer_write_paced); the stall limit makes the
+     * diag tone bounded where the old inline loop could spin forever on a
+     * wedged ring. */
     const uint8_t *src = (const uint8_t *)buf;
     const size_t total = n * sizeof(int16_t);
-    size_t off = 0;
-    while (off < total) {
-        size_t chunk = total - off;
-        if (chunk > frame_bytes) {
-            chunk = frame_bytes;
-        }
-        const size_t w = audio_mixer_track_write(track, src + off, chunk);
-        off += w;
-        if (w < chunk) {
-            vTaskDelay(pdMS_TO_TICKS(10));
-            continue;
-        }
-        vTaskDelay(pdMS_TO_TICKS(19));
+    if (mixer_write_paced(track, src, total, play_rate) != ESP_OK) {
+        ESP_LOGW(TAG, "audio diag: tone playback stalled/short");
     }
     (void)audio_mixer_track_flush(track);
     audio_mixer_close_track(track);
@@ -412,8 +450,9 @@ static size_t build_wav_header(uint8_t *dst, size_t dst_cap, size_t data_bytes)
     return hdr;
 }
 
-/* POST captured PCM to Whisper; returns heap text (caller frees) or NULL. */
-static char *voice_asr(const int16_t *pcm, size_t samples)
+/* POST captured PCM to Whisper; returns heap text (caller frees) or NULL.
+ * Non-static: the `rd_asr` probe reuses this exact path (DRY). */
+char *robodog_voice_asr(const int16_t *pcm, size_t samples)
 {
     const size_t pcm_bytes = samples * sizeof(int16_t);
     static const char boundary[] = "----RoboDogClawVoice";
@@ -500,49 +539,14 @@ out:
 
 /* ── TTS playback: reply text -> WAV -> device 16 kHz -> ES8311 ──────────── */
 
-/* Detect the PCM payload offset of an RIFF/WAVE blob (robust to non-44-byte
- * headers). */
-static size_t wav_data_offset(const uint8_t *wav, size_t len)
-{
-    if (len < 12 || memcmp(wav, "RIFF", 4) != 0 || memcmp(wav + 8, "WAVE", 4) != 0) {
-        return 0;
-    }
-    size_t o = 12;
-    while (o + 8 <= len) {
-        const uint32_t chunk_size = (uint32_t)wav[o + 4] | ((uint32_t)wav[o + 5] << 8) |
-                                    ((uint32_t)wav[o + 6] << 16) | ((uint32_t)wav[o + 7] << 24);
-        if (memcmp(wav + o, "data", 4) == 0) {
-            return o + 8;
-        }
-        o += 8 + chunk_size + (chunk_size & 1u);
-    }
-    return 0;
-}
-
-/* Parse the source sample rate declared in the WAV fmt chunk.  The device
- * must resample from the ACTUAL rate: the endpoint speaks 24 kHz today, but
- * blindly assuming 24k when it returns anything else (e.g. a 16 kHz WAV)
- * down-converts to ~10.7k and the reply plays slow with very low pitch — the
- * reported "read out was very slow / pitch very low" regression.  Fall back
- * to Kokoro's default 24k only when the header is missing/unparseable. */
-static uint32_t wav_source_rate(const uint8_t *wav, size_t len)
-{
-    if (wav == NULL || len < 36 || memcmp(wav, "RIFF", 4) != 0 ||
-        memcmp(wav + 8, "WAVE", 4) != 0) {
-        return 0;
-    }
-    size_t o = 12;
-    while (o + 8 <= len) {
-        const uint32_t chunk_size = (uint32_t)wav[o + 4] | ((uint32_t)wav[o + 5] << 8) |
-                                    ((uint32_t)wav[o + 6] << 16) | ((uint32_t)wav[o + 7] << 24);
-        if (memcmp(wav + o, "fmt ", 4) == 0 && chunk_size >= 16 && o + 24 <= len) {
-            return (uint32_t)wav[o + 12] | ((uint32_t)wav[o + 13] << 8) |
-                   ((uint32_t)wav[o + 14] << 16) | ((uint32_t)wav[o + 15] << 24);
-        }
-        o += 8 + chunk_size + (chunk_size & 1u);
-    }
-    return 0;
-}
+/* WAV payload offset + declared sample rate come from the single shared
+ * robodog_wav_pcm_offset() in robodog_http.c (used by the ASR probe too) —
+ * no per-caller chunk walking.  The device must resample from the ACTUAL
+ * WAV rate: the endpoint speaks 24 kHz today, but blindly assuming 24k when
+ * it returns anything else (e.g. a 16 kHz WAV) down-converts to ~10.7k and
+ * the reply plays slow with very low pitch — the reported "read out was very
+ * slow / pitch very low" regression.  Fall back to Kokoro's default 24k only
+ * when the header is missing/unparseable. */
 
 /* Linear resample from the WAV's declared rate to the MIXER's sample rate.
  * A same-rate WAV is taken as-is (no-op copy) — the hermes-parity 24 kHz hub
@@ -573,53 +577,18 @@ static size_t resample_to_rate(const int16_t *in, size_t in_n,
 
 /* ── TTS playback: reply text -> WAV -> device 16 kHz -> ES8311 ──────────── */
 
-/* JSON-escape a string for embedding in the TTS `input` field.  Reply text
- * contains newlines/quotes (the agent's multi-line markdown), and an unescaped
- * control char makes the JSON invalid -> FastAPI 422.  Caller frees. */
-static char *json_escape(const char *s)
+/* POST `reply` to the Kokoro endpoint and buffer the returned WAV in `rx`
+ * WITHOUT playing it.  The single copy of the TTS request (JSON-escape body,
+ * the set_post_field-pointer-alive UAF fix, error mapping) shared by
+ * voice_speak and the `rd_tts` probe.  `rx` MUST already be initialised and
+ * stays owned by the caller on every return. */
+esp_err_t robodog_voice_tts_fetch(const char *reply, robodog_http_rx_t *rx)
 {
-    size_t cap = strlen(s) * 6 + 8;
-    char *out = malloc(cap);
-    if (out == NULL) {
-        return NULL;
+    if (rx == NULL || rx->buf == NULL) {
+        ESP_LOGE(TAG, "TTS: no response buffer");
+        return ESP_ERR_NO_MEM;
     }
-    size_t o = 0;
-    for (const char *p = s; *p != '\0'; p++) {
-        unsigned char c = (unsigned char)*p;
-        const char *esc = NULL;
-        switch (c) {
-        case '"':  esc = "\\\""; break;
-        case '\\': esc = "\\\\"; break;
-        case '\n': esc = "\\n";  break;
-        case '\r': esc = "\\r";  break;
-        case '\t': esc = "\\t";  break;
-        default:   break;
-        }
-        if (esc != NULL) {
-            size_t l = strlen(esc);
-            memcpy(out + o, esc, l);
-            o += l;
-        } else if (c < 0x20) {
-            o += (size_t)snprintf(out + o, cap - o, "\\u%04x", c);
-        } else {
-            out[o++] = (char)c;
-        }
-    }
-    out[o] = '\0';
-    return out;
-}
-
-/* Max consecutive no-progress rounds in the paced TTS write loop before the
- * playback is aborted (each round waits ~500 ms in audio_mixer_track_write,
- * so the limit bounds a wedged ring to ~10 s instead of hanging the task). */
-#define TTS_WRITE_STALL_LIMIT 20U
-
-static esp_err_t voice_speak(const char *reply)
-{
-    esp_err_t result = ESP_OK;
-    /* Callers always pass a single bounded sentence chunk from the queue
-     * (robodog_voice_split_reply), so no clip here. */
-    char *esc = json_escape(reply);
+    char *esc = robodog_json_escape(reply);
     if (esc == NULL) {
         ESP_LOGE(TAG, "TTS: json_escape failed");
         return ESP_ERR_NO_MEM;
@@ -642,28 +611,19 @@ static esp_err_t voice_speak(const char *reply)
         ESP_LOGE(TAG, "TTS: no memory for request JSON");
         return ESP_ERR_NO_MEM;
     }
-
-    robodog_http_rx_t rx;
-    robodog_http_rx_init(&rx, CONFIG_ROBODOG_VOICE_TTS_MAX_RESPONSE);
-    if (rx.buf == NULL) {
-        ESP_LOGE(TAG, "TTS: no memory for response buffer");
-        free(json);
-        return ESP_ERR_NO_MEM;
-    }
     esp_http_client_config_t cfg = {
         .url = CONFIG_ROBODOG_TTS_URL,
         .method = HTTP_METHOD_POST,
         .timeout_ms = 60000,
         .event_handler = robodog_http_event_handler,
-        .user_data = &rx,
+        .user_data = rx,
         .buffer_size = 512,
     };
     esp_http_client_handle_t client = esp_http_client_init(&cfg);
     if (client == NULL) {
         ESP_LOGE(TAG, "TTS: http client init failed");
         free(json);
-        result = ESP_ERR_NO_MEM;
-        goto out;
+        return ESP_ERR_NO_MEM;
     }
     esp_http_client_set_header(client, "Content-Type", "application/json");
     /* Keep `json` alive across perform(): set_post_field stores the pointer,
@@ -676,17 +636,40 @@ static esp_err_t voice_speak(const char *reply)
     if (err != ESP_OK || !(status >= 200 && status < 300)) {
         ESP_LOGE(TAG, "TTS: round-trip failed: http=%d err=%s", status,
                  esp_err_to_name(err));
-        result = (err != ESP_OK) ? err : ESP_FAIL;
-        goto out;
+        return (err != ESP_OK) ? err : ESP_FAIL;
     }
-    const size_t data_off = wav_data_offset((const uint8_t *)rx.buf, rx.len);
+    return ESP_OK;
+}
+
+esp_err_t robodog_voice_speak(const char *reply)
+{
+    esp_err_t result = ESP_OK;
+    /* Callers always pass a single bounded sentence chunk from the queue
+     * (robodog_voice_split_reply), so no clip here. */
+
+    /* Fetch the WAV through the shared TTS client (single copy of the escaped
+     * request body + the set_post_field UAF fix), then parse + play it. */
+    robodog_http_rx_t rx;
+    robodog_http_rx_init(&rx, CONFIG_ROBODOG_VOICE_TTS_MAX_RESPONSE);
+    if (rx.buf == NULL) {
+        ESP_LOGE(TAG, "TTS: no memory for response buffer");
+        return ESP_ERR_NO_MEM;
+    }
+    result = robodog_voice_tts_fetch(reply, &rx);
+    if (result != ESP_OK) {
+        goto out; /* rx freed below; nothing played */
+    }
+
+    uint32_t src_rate = 0;
+    const size_t data_off = robodog_wav_pcm_offset((const uint8_t *)rx.buf,
+                                                   rx.len, &src_rate);
     if (data_off == 0 || data_off == rx.len) {
-        ESP_LOGE(TAG, "TTS: response is not a RIFF/WAVE blob (%u B)", (unsigned)rx.len);
+        ESP_LOGE(TAG, "TTS: response is not a RIFF/WAVE blob (%u B)",
+                 (unsigned)rx.len);
         result = ESP_FAIL;
         goto out;
     }
     const size_t in_samples = (rx.len - data_off) / sizeof(int16_t);
-    uint32_t src_rate = wav_source_rate((const uint8_t *)rx.buf, rx.len);
     if (src_rate < 8000 || src_rate > 96000) {
         src_rate = 24000; /* Kokoro default; header absent/garbage */
     }
@@ -757,43 +740,17 @@ static esp_err_t voice_speak(const char *reply)
      * lands on the new text within a few tens of ms of the audio start. */
     robodog_ui_append_assistant(reply);
     robodog_ui_set_agent_state("responding");
-    /* Pace playback to real-time ourselves.  The shared mixer track drains at
-     * the codec rate, but a single audio_mixer_track_write() only waits
-     * AUDIO_MIXER_WRITE_TIMEOUT_MS (500 ms) for its 8-frame ring to drain —
-     * writing a whole long reply at once saturates the ring and the write
-     * times out after ~0.5 s, so almost none of the audio ever plays (the
-     * "responding but silent" failure).  Feed it in 20 ms frames with a ~19 ms
-     * step: the reply plays at real-time and never overruns the ring. */
-    const size_t frame_bytes = play_rate * 20 / 1000 * sizeof(int16_t);
+    /* Shared paced write (mixer_write_paced): feed the ring in ~20 ms frames
+     * with a ~19 ms step so playback rides the codec rate in real time.  A
+     * single audio_mixer_track_write() only waits AUDIO_MIXER_WRITE_TIMEOUT_MS
+     * (500 ms) for its 8-frame ring to drain — writing the whole reply at once
+     * saturates the ring and times out after ~0.5 s (the "responding but
+     * silent" failure).  The helper's stall limit also bounds a wedged ring
+     * and surfaces ESP_ERR_TIMEOUT instead of a silent clip. */
     const size_t total = out_samples * sizeof(int16_t);
-    size_t off = 0;
-    unsigned stalls = 0;
-    while (off < total) {
-        size_t chunk = total - off;
-        if (chunk > frame_bytes) {
-            chunk = frame_bytes;
-        }
-        const size_t w = audio_mixer_track_write(track, pcm_src + off, chunk);
-        if (w == 0) {
-            /* Ring refuses to drain (APP mixer consumer dead/hung).  Bound the
-             * retry so the loop cannot wedge the whole voice task forever:
-             * after TTS_WRITE_STALL_LIMIT no-progress rounds, abort the
-             * playback, surface the error, and let the turn finish. */
-            if (++stalls >= TTS_WRITE_STALL_LIMIT) {
-                ESP_LOGE(TAG, "TTS: playback stalled (mixer ring not draining); aborting");
-                result = ESP_ERR_TIMEOUT;
-                break;
-            }
-        } else {
-            stalls = 0;
-        }
-        off += w;
-        if (w < chunk) {
-            /* Ring momentarily full: let the mixer drain a frame before retry. */
-            vTaskDelay(pdMS_TO_TICKS(10));
-            continue;
-        }
-        vTaskDelay(pdMS_TO_TICKS(19)); /* ~real-time step */
+    const esp_err_t perr = mixer_write_paced(track, pcm_src, total, play_rate);
+    if (perr != ESP_OK && result == ESP_OK) {
+        result = perr;
     }
     (void)audio_mixer_track_flush(track); /* drain the last ~200 ms of ring */
     ESP_LOGI(TAG, "TTS stop");
@@ -836,7 +793,7 @@ static void voice_turn(void)
         return;
     }
 
-    char *text = voice_asr(pcm, samples);
+    char *text = robodog_voice_asr(pcm, samples);
     heap_caps_free(pcm);
     if (text == NULL) {
         /* ASR round-trip failed (or OOM): a real fault, not "user silent" —
@@ -883,7 +840,7 @@ static void voice_turn(void)
          * would be the head, not the true tail (R1).  JSON-escape instead:
          * every newline/quote/control char becomes a backslash escape, the
          * log is one console line, and the gate recovers the full text. */
-        char *reply_esc = json_escape(resp.text);
+        char *reply_esc = robodog_json_escape(resp.text);
         ESP_LOGI(TAG, "agent reply: %s",
                  reply_esc != NULL ? reply_esc : resp.text);
         free(reply_esc);
@@ -956,7 +913,7 @@ static void voice_turn(void)
                      * when that chunk's playback starts (not when it is
                      * queued) — the on-screen sentence and the audible one
                      * share the same instant, no fetch-latency lead. */
-                    if (voice_speak(chunk) != ESP_OK) {
+                    if (robodog_voice_speak(chunk) != ESP_OK) {
                         /* TTS failed mid-queue: surface it, stop the rest. */
                         rc = ESP_ERR_INVALID_STATE;
                         break;
