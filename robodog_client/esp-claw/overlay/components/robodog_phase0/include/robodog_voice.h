@@ -17,7 +17,11 @@
  */
 #pragma once
 
+#include <stddef.h>
+#include <stdint.h>
+
 #include "esp_err.h"
+#include "robodog_http.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -35,6 +39,33 @@ esp_err_t robodog_voice_init(void);
  *        `rd_listen` console command; a no-op while a turn is already running.
  */
 void robodog_voice_listen_start(void);
+
+/**
+ * @brief POST captured 16 kHz s16 mono PCM to the Whisper endpoint and return
+ *        the transcript (heap-allocated, caller frees) or NULL on failure /
+ *        OOM.  The single copy of the device->ASR path — the `rd_asr` probe
+ *        and the voice turn both call this.
+ */
+char *robodog_voice_asr(const int16_t *pcm, size_t samples);
+
+/**
+ * @brief Fetch a TTS WAV for `reply` from the Kokoro endpoint and play it
+ *        through the ES8311 (speaker PA + APP mixer track, paced real-time
+ *        via mixer_write_paced).  The single copy of the device->TTS->speaker
+ *        path; voice_turn calls this once per queued sentence chunk.
+ * @return ESP_OK on a fully-played reply; an esp_err otherwise.
+ */
+esp_err_t robodog_voice_speak(const char *reply);
+
+/**
+ * @brief POST `reply` to the Kokoro endpoint and buffer the returned WAV in
+ *        `rx` WITHOUT playing it (the `rd_tts` probe's endpoint round-trip,
+ *        no speaker needed — isolates ASR/TTS HTTP from the audio path).
+ *        Single copy of the Kokoro request body + retry/error handling shared
+ *        with robodog_voice_speak.  `rx` MUST already be initialised; the
+ *        caller owns it on every return.
+ */
+esp_err_t robodog_voice_tts_fetch(const char *reply, robodog_http_rx_t *rx);
 
 #ifdef __cplusplus
 }

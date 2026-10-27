@@ -374,9 +374,9 @@ static void ui_process_cmd(const ui_cmd_t *cmd)
         s_assistant[0] = '\0'; /* a fresh turn starts: no reply accumulated yet */
         s_chunked = false;     /* not chunked until the voice queue appends */
         ui_append_line(">", cmd->text);
-        /* A fresh user turn starts: ASR done, now the agent is processing
-         * (right-hand state indicator shows "processing"). */
-        strlcpy(s_agent_state, "processing", sizeof(s_agent_state));
+        /* The state is owned by the turn drivers (voice_turn / rd_chat set it
+         * explicitly right after show_user), so no implicit transition here —
+         * one source of truth for the status vocabulary. */
         break;
     case UI_CMD_ASSISTANT:
         /* Single-shot full reply (rd_chat): replace the accumulated reply. */

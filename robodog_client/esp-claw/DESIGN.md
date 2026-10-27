@@ -39,15 +39,22 @@ mic/speaker is off-device, and the board is a dumb audio terminal.
        ▼               │ /v1/chat/completions    ▼
  Whisper endpoint  OpenAI-style LLM       Kokoro TTS endpoint
  (user's own,      endpoint (gx10 vLLM    (user's own,
-  LAN, URL NVS-cfg) or cloud key, NVS-cfg) spark-5307:8004, af_heart)
+  LAN, URL build-  or cloud key,          spark-5307:8004, af_heart;
+  time Kconfig)    NVS-cfg)               URL build-time Kconfig)
 ```
 
 Survives unchanged: the acoustic test rig + corpus, `capture.py` (RD_SHOT
 format), the calendar firmware, and the user's own LAN model services —
 **Kokoro TTS** (`kokoro_server.py` / `kokoro-tts.service`, `spark-5307:8004`,
 `af_heart`) and a **Whisper ASR** endpoint — which the board calls directly.
-Exact endpoint URLs/model names are NVS-configured, not baked in (user's
-deployment; names TBD).
+Endpoint configuration (not hardcoded): the **LLM** base URL/model are
+NVS-provisioned (`flash_esp_claw.sh` writes the `app` namespace — WiFi +
+`llm_base_url` / `llm_model`); the **ASR/TTS** endpoint URLs/model/voice are
+build-time Kconfig, baked per-flash from `CLAW_ASR_URL` / `CLAW_TTS_URL` /
+`CLAW_*_MODEL` / `CLAW_TTS_VOICE` env in `build_esp_claw.sh` (so LAN IPs are
+never committed; changing them requires a rebuild, not a runtime edit).
+Defaults documented in `Kconfig` match the user's current LAN deployment
+(names TBD elsewhere).
 
 Deleted at cutover: XiaoZhi firmware + 3 patches, `voice_bridge.py` (including
 its in-process faster-whisper — replaced by the standalone Whisper endpoint),
