@@ -155,6 +155,15 @@ Whisper/Kokoro endpoint logs):
 - SUBTITLE: RD_SHOT → `capture.decode_hermes` → Qwen2.5-VL readback must
   transcribe the reply
 
+**Complementary voice-verification gate** (`robodog-claw-voice-verify`,
+`robodog_claw_e2e.py --voice-verify`): acoustic completeness of the CHUNKED
+reply — asserts the FULL reply was queued AND read out to its end:
+- CHUNKED_QUEUE: every console `voice chunk i/n` has its own `TTS start`…
+  `TTS stop` bracket (deterministic console evidence; the queue ran 1..n)
+- FULL_READOUT: whole-reply test-mic capture re-ASRs ≥2 of the reply's LAST
+  12 tokens — nothing was cut off at the end (PASS-WEAK tolerated for marginal
+  speaker→mic coupling; CHUNKED_QUEUE is the authoritative leg)
+
 New `.archon` workflow `robodog-claw-dev` (clone of the hermes gates, minus
 bridge health checks); `robodog-hermes-*` workflows stay until cutover.
 
@@ -450,14 +459,30 @@ Phase 2 delivers the **device-initiated voice loop**, hardware-verified end-to-e
   the tree and is not offline-fetchable; DESIGN's fallback is used, matching the
   bridge exactly: `VAD_ENERGY=300` (16-bit mean-abs), `VAD_SILENCE_MS=800`,
   `voice_capture()` ends the utterance 800 ms after the last speech frame.
-- **TTS input is clipped AND the screen shows the same script.** The esp-claw
-  root agent is verbose by default (a full "what can you do" dump is 60+ s of
-  speech), so the SPOKEN script is bounded at a sentence/line break within
-  `CONFIG_ROBODOG_VOICE_TTS_MAX_CHARS` (default 500) and the RLCD renders
-  exactly that script (`voice_turn()` clips once, shows the clip, speaks the
-  clip) — the read-out voice always finishes the text on screen, so there is
-  no "voice cut off while the screen shows more" mismatch.  The full reply is
-  still on the console `agent reply:` log.
+- **The reply is CHUNKED at sentence breaks and queued, not truncated.** The
+  esp-claw root agent is verbose by default (a full "what can you do" dump is
+  60+ s of speech), so `voice_turn()` splits the FULL reply via
+  `voice_split_reply()` into sentence-bounded chunks of at most
+  `CONFIG_ROBODOG_VOICE_TTS_MAX_CHARS` (default 240, `range 1 479` so a
+  spoken chunk always fits the RLCD command field — the on-screen sentence is
+  the same text the voice reads, R5) — cut at the first
+  `.!?;`/newline break within the window, else the last space, else a hard
+  cutoff — and each chunk is queued in order: appended to the on-screen reply
+  (`robodog_ui_append_assistant`, so the whole reply accumulates on the RLCD)
+  then spoken (`voice_speak` per chunk; `CONFIG_ROBODOG_VOICE_TTS_MAX_CHUNKS`
+  bounds the queue).  The read-out voice therefore finishes EVERY word of the
+  reply — the old "response always truncated to the first ~240 chars" failure
+  is gone.  Every chunk logs `voice chunk i/n: ...` on the console so the host
+  voice-verification gate can count that the full queue was voiced.
+  The one reachable exception is honest: when a reply exceeds
+  `CONFIG_ROBODOG_VOICE_TTS_MAX_CHUNKS`, the tail is dropped but never
+  silently — the device logs `voice truncated: ...` and the turn ends in a
+  distinct **`truncated`** terminal state (not the false-complete `idle`), and
+  the `robodog-claw-voice-verify` gate FAILs on that marker, so a truncated
+  readout can never pass as a full one.  The splitter itself lives in the
+  pure, host-tested module `voice_split.c` (R6) — lossless / ordered / ≤cap
+  invariants are proven under Bazel against the exact source the firmware
+  compiles.
 - **24 kHz native audio hub (hermes parity) — no software resample.** The
   shared `audio_hub` (patched via `patches/0003-audio-hub-24k.patch`) runs the
   ES8311/ES7210 at **24 kHz**, exactly like the hermes stack: Kokoro's native
@@ -503,13 +528,19 @@ Phase 2 delivers the **device-initiated voice loop**, hardware-verified end-to-e
   the console; and the transcript is **bounded to the current exchange**
   (cap 1600 chars, ~drop-oldest for older user lines) so the current exchange
   fills the visible panel instead of a stale older turn sitting below the fold.
-- **The reply shown is the ACTUAL script.** `UI_CMD_ASSISTANT` rebuilds the
-  panel as the current exchange only (`> <user>` + the reply from its HEAD) and
-  the body scrolls to the TOP, so the words the middleware actually spoke fill
-  the screen. (Previously the panel pinned to the bottom of the rolled
-  transcript: a long verbose reply dropped its own beginning and showed only a
-  mid-capability-list fragment — "a text transcript of the response audio"
-  instead of the original script.)
+- **The reply shown syncs with what the voice is reading.** Each sentence
+  chunk is rendered (`robodog_ui_append_assistant`) **at the instant its TTS
+  playback starts** — `voice_speak()` appends the chunk right after the
+  TTS fetch, immediately before the paced speaker write, so the on-screen
+  sentence is exactly the one being spoken (no queue-time lead). The panel
+  SNAPS TO THE BOTTOM as each chunk lands (`s_chunked` mode, canonical
+  `lv_obj_scroll_to_y(..., LV_COORD_MAX, ...)` bottom idiom) and keeps the
+  NEWEST content when the transcript overflows — subtitles. Single-shot
+  replies (`rd_chat`, `UI_CMD_ASSISTANT`) keep the Phase-1 head-pin: the full
+  answer's beginning fills the screen. (The old universal top-pin appended
+  later chunks below the visible fold, and a first attempt that scrolled by
+  `lv_obj_get_scroll_bottom()` blanked the whole body on this LVGL build —
+  both "read out but never displayed".)
 - **The state indicator never lies about VOICE progress.** `UI_CMD_ASSISTANT`
   no longer forces the state to `idle` when the text finalizes (which
   announced "response done" while the TTS round-trip + playback hadn't even
@@ -545,7 +576,9 @@ Overall:      PASS
 ```
 
 Console hooks the gate asserts on (all device-side): `listen started`, `ASR
-text="..."`, `agent reply: ...`, `TTS start` / `TTS stop`, `RD_SHOT` frame.
+text="..."`, `agent reply: ...`, `voice chunk i/n: ...` (one per queued
+sentence chunk, before its TTS bracket), `TTS start` / `TTS stop`, `RD_SHOT`
+frame.
 
 - `SUBITITLE` reads an RD_SHOT **frame from the same console handle** (a second
   open races the self-tick flood) and **skips truncated forced frames** (the

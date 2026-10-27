@@ -234,7 +234,10 @@ archon workflow run robodog-hermes-review "review PR #NNN"
 # rd_listen -> ASR -> agent -> TTS -> speaker; the board calls Whisper/LLM/
 # Kokoro on its own, no bridge). Verification is VOICE-LOOP-DRIVEN:
 # robodog-claw-e2e (serial-console asserts + test-mic ring re-ASR + RD_SHOT
-# subtitle readback). Mutually exclusive with the calendar/hermes firmware.
+# subtitle readback) + robodog-claw-voice-verify (the CHUNKED reply is read out
+# to its END — every `voice chunk i/n` TTS-bracketed on the console + mic
+# capture re-ASRs the reply's tail tokens). Mutually exclusive with the
+# calendar/hermes firmware.
 # Firmware fixes from review MUST re-flash the board before the e2e gate runs
 # (robodog-claw-e2e never reflashes — do it via robodog-claw-implement-review-fixes).
 archon workflow run robodog-claw-dev "description of feature"

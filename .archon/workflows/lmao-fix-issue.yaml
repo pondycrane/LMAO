@@ -22,7 +22,17 @@ description: |
       (fast-pass only when HEAD is unchanged — the #87 regression guard)
   11. Reports results back to the GitHub issue with follow-up suggestions
 
-  Models: gx10 DeepSeek V4 Flash (gx10/deepseek-ai/DeepSeek-V4-Flash-0731) for everything. No Claude anywhere.
+  Models: archon tiers (large/medium/small) resolved from ~/.archon/config.yaml (today all map to gx10 DeepSeek V4 Flash — edit config.yaml once to reroute when the local model is down) for everything. No Claude anywhere.
+
+inputs:
+  # Declared so the review-chain commands' $INPUTS.* references resolve
+  # (archon >=0.12 strict-fails undeclared inputs). All optional; empty means
+  # "standalone full review, first round".
+  scope: { default: "", description: "Requested review scope (may be empty)" }
+  prior_report: { default: "", description: "Path to previous round's report (empty = first round)" }
+  work_order: { default: "", description: "Accepted work order (empty for standalone review)" }
+  part: { default: "", description: "Part assignment (empty = whole contract)" }
+  policy_defaults: { default: "", description: "Policy overrides (empty = defaults)" }
 
 nodes:
   # ═══════════════════════════════════════════════════════════════════
@@ -30,7 +40,7 @@ nodes:
   # ═══════════════════════════════════════════════════════════════════
 
   - id: extract-issue-number
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
     prompt: |
       Find the GitHub issue number for this request.
 
@@ -49,7 +59,7 @@ nodes:
   # number out of messy text reliably; bash cannot. Every node that consumes
   # AI output in this workflow is a prompt node for the same reason.
   - id: fetch-issue
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
     prompt: |
       Fetch the GitHub issue for this request.
 
@@ -65,7 +75,7 @@ nodes:
     depends_on: [extract-issue-number]
 
   - id: classify
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
     prompt: |
       You are an issue classifier. Analyze the GitHub issue below and determine its type.
 
@@ -107,7 +117,7 @@ nodes:
     command: archon-web-research
     depends_on: [classify]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   # ═══════════════════════════════════════════════════════════════════
   # PHASE 3: INVESTIGATE (bugs) / PLAN (features)
@@ -118,14 +128,14 @@ nodes:
     depends_on: [classify, web-research]
     when: "$classify.output.issue_type == 'bug'"
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   - id: plan
     command: lmao-create-plan
     depends_on: [classify, web-research]
     when: "$classify.output.issue_type != 'bug'"
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
     effort: high
 
   # Bridge: ensure investigation.md exists for the implement step.
@@ -151,7 +161,7 @@ nodes:
     command: lmao-fix-issue
     depends_on: [bridge-artifacts]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
     effort: max
 
   # ═══════════════════════════════════════════════════════════════════
@@ -163,26 +173,26 @@ nodes:
     command: lmao-validate
     depends_on: [implement]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   - id: hardware-e2e
     command: lmao-hardware-e2e
     depends_on: [validate]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   - id: production-health
     command: lmao-production-health
     depends_on: [hardware-e2e]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   # ═══════════════════════════════════════════════════════════════════
   # PHASE 6: CREATE DRAFT PR (with hardware E2E evidence)
   # ═══════════════════════════════════════════════════════════════════
 
   - id: create-pr
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
     prompt: |
       Create a draft pull request for the current branch.
 
@@ -273,10 +283,10 @@ nodes:
     command: archon-pr-review-scope
     depends_on: [verify-pr-base]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   - id: review-classify
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
     prompt: |
       You are a PR review classifier. Analyze the PR scope and determine
       which review agents should run.
@@ -335,35 +345,35 @@ nodes:
     command: archon-code-review-agent
     depends_on: [review-classify]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   - id: error-handling
     command: archon-error-handling-agent
     depends_on: [review-classify]
     when: "$review-classify.output.run_error_handling == 'true'"
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   - id: test-coverage
     command: archon-test-coverage-agent
     depends_on: [review-classify]
     when: "$review-classify.output.run_test_coverage == 'true'"
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   - id: comment-quality
     command: archon-comment-quality-agent
     depends_on: [review-classify]
     when: "$review-classify.output.run_comment_quality == 'true'"
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   - id: docs-impact
     command: archon-docs-impact-agent
     depends_on: [review-classify]
     when: "$review-classify.output.run_docs_impact == 'true'"
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   # ═══════════════════════════════════════════════════════════════════
   # PHASE 8: SYNTHESIZE + SELF-FIX + SIMPLIFY (all LMAO-adapted)
@@ -374,20 +384,20 @@ nodes:
     depends_on: [code-review, error-handling, test-coverage, comment-quality, docs-impact]
     trigger_rule: one_success
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   - id: self-fix
     command: lmao-self-fix-all
     depends_on: [synthesize]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
     effort: max
 
   - id: simplify
     command: lmao-simplify-changes
     depends_on: [self-fix]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   # ═══════════════════════════════════════════════════════════════════
   # PHASE 9: FINAL GATE CHAIN — re-run after review/simplify commits.
@@ -402,19 +412,19 @@ nodes:
     command: lmao-validate
     depends_on: [simplify]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   - id: final-hardware-e2e
     command: lmao-hardware-e2e
     depends_on: [final-validate]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   - id: final-production-health
     command: lmao-production-health
     depends_on: [final-hardware-e2e]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   # ═══════════════════════════════════════════════════════════════════
   # PHASE 10: REPORT
@@ -424,7 +434,7 @@ nodes:
     command: archon-issue-completion-report
     depends_on: [final-production-health]
     context: fresh
-    model: gx10/deepseek-ai/DeepSeek-V4-Flash-0731
+    model: large
 
   # ─── Push notification via ntfy (bash + curl) ─────────────────
   # Sends notifications on start, success, and failure.
