@@ -53,6 +53,16 @@ description: |
   ASR re-read inside robodog-voice-e2e are fixed pipelines, not the agent model.
   No Claude anywhere.
 
+inputs:
+  # Declared so the review-chain commands' $INPUTS.* references resolve
+  # (archon >=0.12 strict-fails undeclared inputs). All optional; empty means
+  # "standalone full review, first round".
+  scope: { default: "", description: "Requested review scope (may be empty)" }
+  prior_report: { default: "", description: "Path to previous round's report (empty = first round)" }
+  work_order: { default: "", description: "Accepted work order (empty for standalone review)" }
+  part: { default: "", description: "Part assignment (empty = whole contract)" }
+  policy_defaults: { default: "", description: "Policy overrides (empty = defaults)" }
+
 nodes:
   # ═══════════════════════════════════════════════════════════════════
   # PHASE 0: CREATE PLAN (hermes voice rules baked in)
