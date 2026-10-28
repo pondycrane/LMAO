@@ -167,6 +167,11 @@ Whisper/Kokoro endpoint logs):
 reply — asserts the FULL reply was queued AND read out to its end:
 - CHUNKED_QUEUE: every console `voice chunk i/n` has its own `TTS start`…
   `TTS stop` bracket (deterministic console evidence; the queue ran 1..n)
+- GAP_VERIFY: the feature's actual effect — each inter-chunk gap
+  `TTS stop(i) → TTS start(i+1)` measured from the console's ms timestamps
+  must be < 250 ms.  Pre-fix that gap was the ~1-3 s blocking Kokoro fetch on
+  the critical path; prefetch collapses it to a few ms (next chunk buffered).
+  Emits the measured per-gap ms values into the gate artifact.
 - FULL_READOUT: whole-reply test-mic capture re-ASRs ≥2 of the reply's LAST
   12 tokens — nothing was cut off at the end (PASS-WEAK tolerated for marginal
   speaker→mic coupling; CHUNKED_QUEUE is the authoritative leg)
@@ -588,6 +593,18 @@ Phase 2 delivers the **device-initiated voice loop**, hardware-verified end-to-e
   failure the chunk falls back to the synchronous fetch-then-play path — it
   never pre-fails, skips or reorders; if the prefetch machinery is
   unavailable the whole turn degrades to the sequential single-buffer path.
+
+  ⚠️ **Slot bookkeeping is TURN-LOCAL — commit on observe.** The prefetch task
+  reports only `s_pf_result`; the `slot_ix` table that `prefetched()` scans
+  lives in `robodog_voice_speak`'s stack `la` and the task cannot reach it.
+  The array loop MUST call `robodog_voice_lookahead_commit(&la)`/`fail(&la)`
+  right after the DONE wait — the missing commit silently sent EVERY chunk
+  through the redundant synchronous re-fetch (the exact ~1-3 s gap the feature
+  removes) while the queue still played 1..n correct. The host
+  `GAP_VERIFY` leg is the regression guard: it asserts every
+  `TTS stop(i) → TTS start(i+1)` gap is < 250 ms and reports which path the
+  console markers show (`prefetch chunk i/1 ready` = gapless swap,
+  `prefetch ... failed` = sync fallback).
 - **Multi-session gapless-prefetch stress.** The mandatory gate runs ≥ 5
   consecutive voice sessions (`E2E_RUNS ≥ 5`), each asking a DIFFERENT
   question (corpus slugs time/joke/greeting/capabilities/count cycled so no

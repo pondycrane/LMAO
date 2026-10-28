@@ -1177,8 +1177,27 @@ static void voice_turn(void)
                                         xEventGroupWaitBits(
                                             s_pf_evts, EVT_PF_DONE, pdTRUE,
                                             pdFALSE, pdMS_TO_TICKS(PF_WAIT_MS));
+                                        /* The prefetch TASK only reports
+                                         * s_pf_result; the slot bookkeeping
+                                         * that prefetched() scans lives in the
+                                         * TURN-LOCAL `la` (robodog_voice_speak's
+                                         * stack), which the task cannot reach.
+                                         * So commit/fail MUST be called HERE,
+                                         * on the observing side, right after
+                                         * DONE — otherwise slot_ix is never
+                                         * populated and prefetched() returns
+                                         * -1 on every boundary, forcing each
+                                         * chunk through a redundant synchronous
+                                         * re-fetch: the exact ~1-3 s inter-
+                                         * chunk gap the prefetch exists to
+                                         * remove (GAP_VERIFY caught this). */
+                                        if (s_pf_result == ESP_OK) {
+                                            robodog_voice_lookahead_commit(&la);
+                                        } else {
+                                            robodog_voice_lookahead_fail(&la);
+                                        }
+                                        armed = false;
                                     }
-                                    armed = false;
                                     const int pslot =
                                         robodog_voice_lookahead_prefetched(
                                             &la, i + 1);
