@@ -127,3 +127,17 @@ void robodog_http_rx_free(robodog_http_rx_t *rx)
     }
     memset(rx, 0, sizeof(*rx));
 }
+
+void robodog_http_rx_reset(robodog_http_rx_t *rx)
+{
+    if (rx == NULL) {
+        return;
+    }
+    rx->len = 0;
+    rx->status = 0;
+    if (rx->buf != NULL) {
+        rx->buf[0] = '\0';
+    }
+    /* buf/cap are intentionally NOT touched: the double-buffer reuses the
+     * same 1.5 MB SPIRAM slot across chunks (no per-chunk alloc/free). */
+}
