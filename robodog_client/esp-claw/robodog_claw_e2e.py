@@ -133,7 +133,7 @@ def remote_asr(wav_path):
     req = urllib.request.Request(
         ASR_URL, data=body, headers={"Content-Type": f"multipart/form-data; boundary={boundary}"}
     )
-    with urllib.request.urlopen(req, timeout=120) as resp:
+    with urllib.request.urlopen(req, timeout=300) as resp:
         return json.load(resp)["text"]
 
 
@@ -548,6 +548,13 @@ def run_loop(n, instr, artifacts, voice_verify):
             # chunk logs AND their start/stop brackets together, from right
             # after `agent reply:`.
             log("TTS phase; capturing board speaker on test mic ...")
+            # A fresh mic capture every turn: delete any previous speaker.wav
+            # first so a capture_mic failure can never silently re-ASR a stale
+            # capture from an earlier run (which produced a bogus FULL_READOUT).
+            try:
+                mic_path.unlink(missing_ok=True)
+            except Exception:
+                pass
             # The chunk queue plays the WHOLE reply as back-to-back chunks;
             # keep the test mic recording in the BACKGROUND for the full
             # reply window while the console scanner below collects every
@@ -589,13 +596,30 @@ def run_loop(n, instr, artifacts, voice_verify):
             # single loudest-3s burst is often ambient noise and lets
             # Whisper under-trigger (re-ASR back to nothing).  Transcribe
             # the FULL capture first, and only fall back to the loudest
-            # burst if the full window yields no text.
-            ring_txt = remote_asr(mic_path)
+            # burst if the full window yields no text.  The burst must be a
+            # whole ~sentence (~15 s), not 4 s: at this rig's marginal
+            # speaker->mic coupling a 4 s window lysses into a partial
+            # syllable and re-ASRs empty (measured: 15 s window transcribes
+            # "I'm ESP Claw, an on-device AI agent..." on the same capture).
+            try:
+                ring_txt = remote_asr(mic_path)
+            except Exception as e:
+                # A slow remote Whisper on the long full-reply capture is NOT
+                # "the mic heard nothing": a timeout must fall through to the
+                # loudest-burst re-ASR below instead of hard-FAILing the
+                # acoustic corroboration leg.  The design tolerates PASS-WEAK
+                # for marginal speaker->mic coupling (CHUNKED_QUEUE is the
+                # authoritative readout evidence), so an ASR hiccup should
+                # never fake a "silent" readout.
+                log(f"full-reply re-ASR failed ({e}); falling back to loudest burst")
             if not ring_txt:
                 burst = run_dir / "reply_burst.wav"
-                trim_loudest_window(mic_path, burst, 4.0)
+                trim_loudest_window(mic_path, burst, 15.0)
                 if burst.exists():
-                    ring_txt = remote_asr(burst)
+                    try:
+                        ring_txt = remote_asr(burst)
+                    except Exception as e:
+                        log(f"burst re-ASR failed: {e}")
             (run_dir / "ring_reasr.txt").write_text(ring_txt or "")
         except Exception as e:
             log(f"ring re-ASR failed: {e}")
