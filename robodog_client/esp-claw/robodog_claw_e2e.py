@@ -331,15 +331,37 @@ def wait_for_log(s, patterns, timeout, label="", spill=None):
 CHUNK_RE = re.compile(r"voice chunk (\d+)/(\d+):\s*(.*)")
 TTS_START_RE = re.compile(r"TTS start")
 TTS_STOP_RE = re.compile(r"TTS stop")
+# ESP log timestamp prefix `I (123456)` where 123456 is MILLISECONDS of
+# uptime (measured on this device: a board 23 min from boot reads ~1,404,000).
+# Used to measure the inter-chunk gap (TTS stop(i) -> TTS start(i+1)): the
+# prefetch feature overlaps the next WAV fetch with the current playback, so
+# that gap collapses from the ~1-3 s Kokoro HTTP round-trip (fetch was on the
+# critical path BEFORE the fix) to a few ms (next WAV already buffered).
+ESP_TS_RE = re.compile(r"^[IWED] \((\d+)\)")
+# A prefetched chunk begins playback within ~a mixer-open of the previous stop
+# (<50 ms observed); anything past this means a synchronous fetch-then-play is
+# happening (prefetch NOT effective). Generous headroom above the observed ~ms
+# to stay robust against log-timestamp jitter.
+GAP_THRESHOLD_MS = 250
 # R3: the device logs `voice truncated: ...` (robodog_voice.c) when a reply
 # exceeds CONFIG_ROBODOG_VOICE_TTS_MAX_CHUNKS and its tail is dropped — the
 # turn is NOT a complete readout and the gate MUST fail on this marker.
 TRUNCATED_RE = re.compile(r"voice truncated")
+# Which TTS path the firmware actually took (diagnoses GAP_VERIFY): the
+# voice-split queue can run either through the lookahead prefetch (gapless
+# `prefetch chunk i+1 ready` swaps + few-ms gaps), or its per-chunk sync
+# fallback (`prefetch chunk i+1 failed ...; sync fallback` — the ~1-3 s fetch
+# still lands in the gap), or the whole turn on the sequential single-buffer
+# path (`double-buffer unavailable` at turn start).
+PF_READY_RE = re.compile(r"prefetch chunk \d+/\d+ ready")
+PF_FAIL_RE = re.compile(r"prefetch chunk \d+/\d+ failed")
+DBUFF_UNAVAIL_RE = re.compile(r"double-buffer unavailable")
 
 
 def collect_voice_chunks(s, timeout, seed=b""):
     """Scan the console while the chunk queue plays back.  Returns
-    (chunks, starts, stops, max_n, truncated):
+    (chunks, starts, stops, max_n, truncated, gaps, pf_ready, pf_fail,
+    dbl_unavail):
       chunks    maps chunk index i (1-based) to (n_total, text)
       starts/stops  count the `TTS start`/`TTS stop` brackets
       max_n     the ADVERTISED chunk total — the `voice chunk i/n` denominator
@@ -350,6 +372,16 @@ def collect_voice_chunks(s, timeout, seed=b""):
       truncated True when the device logged the `voice truncated:` marker —
                 the reply was too long for the queue cap and its tail was NOT
                 read out (R3).
+      gaps      list of inter-chunk playback gaps in MILLISECONDS:
+                TTS start(i+1) - TTS stop(i) from the ESP log timestamps (which
+                tick in ms).  Empty when no pair completed (or the first chunk
+                only).  With the lookahead prefetch active each gap is a few
+                ms; without it each gap is the ~1-3 s Kokoro fetch that ran on
+                the critical path between chunks.
+      pf_ready/pf_fail/dbl_unavail  counts of the console markers that say
+                which TTS path ran (`prefetch chunk i+1 ready` = gapless swap,
+                `prefetch chunk i+1 failed` = sync fallback per chunk,
+                `double-buffer unavailable` = whole turn on sequential path).
     Ends when EVERY advertised chunk 1..max_n is seen with its own start AND
     stop — i.e. the last `TTS stop` of a COMPLETE queue — or when `timeout`
     runs out (a truncated queue runs to timeout so the leg reports FAIL).
@@ -363,6 +395,9 @@ def collect_voice_chunks(s, timeout, seed=b""):
     starts = stops = 0
     max_n = 0
     truncated = False
+    gaps = []
+    last_stop_ms = None
+    pf_ready = pf_fail = dbl_unavail = 0
     while time.time() < deadline:
         data = s.read(8192)
         if data:
@@ -380,10 +415,28 @@ def collect_voice_chunks(s, timeout, seed=b""):
                 if TRUNCATED_RE.search(ln):
                     truncated = True
                     log("voice truncated marker seen (reply exceeds max chunks)")
-                if TTS_START_RE.search(ln):
+                if PF_READY_RE.search(ln):
+                    pf_ready += 1
+                if PF_FAIL_RE.search(ln):
+                    pf_fail += 1
+                if DBUFF_UNAVAIL_RE.search(ln):
+                    dbl_unavail += 1
+                ts = ESP_TS_RE.match(ln)
+                t_ms = int(ts.group(1)) if ts else None
+                if t_ms is not None and TTS_START_RE.search(ln):
+                    if last_stop_ms is not None:
+                        gaps.append(t_ms - last_stop_ms)
                     starts += 1
-                if TTS_STOP_RE.search(ln):
+                if t_ms is not None and TTS_STOP_RE.search(ln):
+                    last_stop_ms = t_ms
                     stops += 1
+                elif t_ms is None:
+                    # no timestamp parsed (e.g. app> prompt echo): still count
+                    # brackets so completeness checks stay robust
+                    if TTS_START_RE.search(ln):
+                        starts += 1
+                    if TTS_STOP_RE.search(ln):
+                        stops += 1
             if len(acc) > 65536:
                 acc = acc[-65536:]
         if (
@@ -393,7 +446,7 @@ def collect_voice_chunks(s, timeout, seed=b""):
             and stops >= max_n
         ):
             break
-    return chunks, starts, stops, max_n, truncated
+    return chunks, starts, stops, max_n, truncated, gaps, pf_ready, pf_fail, dbl_unavail
 
 
 def unescape_reply(escaped):
@@ -581,6 +634,7 @@ def run_loop(n, instr, artifacts, voice_verify):
         ring_txt = ""
         chunks, starts, stops = {}, 0, 0
         max_n, truncated = 0, False
+        gaps, pf_ready, pf_fail, dbl_unavail = [], 0, 0, 0
         if voice_verify:
             # No separate `TTS start` wait: wait_for_log would CONSUME the
             # `voice chunk i/n` line that precedes each `TTS start`, making
@@ -612,7 +666,7 @@ def run_loop(n, instr, artifacts, voice_verify):
                     cap_done.set()
 
             threading.Thread(target=_cap, daemon=True).start()
-            chunks, starts, stops, max_n, truncated = collect_voice_chunks(
+            chunks, starts, stops, max_n, truncated, gaps, pf_ready, pf_fail, dbl_unavail = collect_voice_chunks(
                 s, REPLY_TIMEOUT, seed=leftover
             )
             # The re-ASR below reads the WHOLE captured WAV, so wait for the
@@ -699,6 +753,43 @@ def run_loop(n, instr, artifacts, voice_verify):
             else:
                 res["asserts"]["CHUNKED_QUEUE"] = (
                     "FAIL (no `voice chunk i/n` logs — the queue did not run)"
+                )
+            # GAP_VERIFY: the feature's actual effect is the COLLAPSED gap
+            # between chunks.  On the pre-fix code each TTS stop(i) was
+            # followed by the blocking Kokoro fetch of chunk(i+1), so the
+            # stop->start gap was ~1-3 s; with the lookahead prefetch the next
+            # WAV is already buffered and the gap is a few ms.  Measured from
+            # the ESP log timestamps.
+            if gaps:
+                gap_ms = [round(g, 1) for g in gaps]
+                res["artifacts"]["chunk_gaps_ms"] = gap_ms
+                gstr = " ".join(f"{g:.1f}ms" for g in gap_ms)
+                # Which TTS path actually ran — from the console markers — so
+                # a FAIL pinpoints WHY the gap is large instead of guessing.
+                if dbl_unavail:
+                    path = f"sequential single-buffer path (double-buffer unavailable)"
+                elif pf_fail:
+                    path = f"{pf_fail} sync-fallback fetch(es) in the play gap"
+                elif pf_ready:
+                    path = f"{pf_ready} gapless prefetch swap(s)"
+                else:
+                    path = "no path markers on console"
+                if all(0 <= g < GAP_THRESHOLD_MS for g in gap_ms):
+                    res["asserts"]["GAP_VERIFY"] = (
+                        f"PASS inter-chunk stop->start gaps {gstr} "
+                        f"(all < {GAP_THRESHOLD_MS}ms = prefetch active; "
+                        f"pre-fix these were the ~1-3 s fetch on the critical path; {path})"
+                    )
+                else:
+                    res["asserts"]["GAP_VERIFY"] = (
+                        f"FAIL inter-chunk stop->start gaps {gstr} — "
+                        f"gap(s) >= {GAP_THRESHOLD_MS}ms mean a synchronous "
+                        f"fetch ran between chunks (lookahead prefetch NOT "
+                        f"taking effect; {path})"
+                    )
+            else:
+                res["asserts"]["GAP_VERIFY"] = (
+                    "SKIP (no inter-chunk stop->start pair captured)"
                 )
             # FULL_READOUT: the reply's LAST words must appear in the mic
             # capture — the read-out reached the reply's end, nothing was cut
