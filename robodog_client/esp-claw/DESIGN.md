@@ -525,6 +525,29 @@ Phase 2 delivers the **device-initiated voice loop**, hardware-verified end-to-e
   pure, host-tested module `voice_split.c` (R6) — lossless / ordered / ≤cap
   invariants are proven under Bazel against the exact source the firmware
   compiles.
+- **Markdown is handled at BOTH ends of the turn — no "asterisk asterisk".**
+  The agent replies in multi-line markdown (`**` headers, bullets, inline-code
+  spans, tables, links) that Kokoro would voice literally and the text-only
+  panel would show as glyph noise.  Two complementary layers:
+  - **Source (per-turn directive, not a global base-prompt rewrite):** the
+    voice turn prefixes the agent input with a terse "reply in plain spoken
+    prose, no markdown" instruction (applied after the transcript render, so
+    it never appears on the RLCD).  This is scoped to the voice seam rather
+    than the upstream-owned IM-oriented base prompt — a global override via
+    `claw_agent_mgr_update_core_config` would force re-embedding the whole
+    upstream `APP_SYSTEM_PROMPT` string into the overlay (the fragile
+    hardcode we avoid) and would change other surfaces.
+  - **Deterministic backstop (output normalizer):** `robodog_voice_md_strip()`
+    (pure C, host-tested `voice_md.c`, R8) runs over the reply BEFORE the
+    TTS queue.  The source directive is probabilistic — the model can still
+    emit markers (and tool/web results pasted into the reply carry their own),
+    so the strip is the guarantee that no `*`/`#` reaches the speaker.  It
+    keeps every word and natural punctuation (incl. ordered-list `1.` and a
+    leading `-5`), drops emphasis/code/strike markers, link URLs, table
+    pipes, and whole-line noise (HR / table separators / fence delimiters),
+    and collapses whitespace — so the chunks that feed BOTH the speaker and
+    the RLCD are clean prose.  The raw reply is still logged in
+    `agent reply: ...` for the host gates.
 - **24 kHz native audio hub (hermes parity) — no software resample.** The
   shared `audio_hub` (patched via `patches/0003-audio-hub-24k.patch`) runs the
   ES8311/ES7210 at **24 kHz**, exactly like the hermes stack: Kokoro's native
