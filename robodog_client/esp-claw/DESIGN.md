@@ -569,6 +569,34 @@ Phase 2 delivers the **device-initiated voice loop**, hardware-verified end-to-e
   with a ~19 ms `vTaskDelay` step so playback rides the 16 kHz codec rate
   (verified on-device: 14.5 s of audio plays over 14.5 s). Do NOT "simplify"
   this back to a single `track_write`.
+- **Inter-chunk TTS fetch latency is hidden by a ONE-STEP LOOKAHEAD
+  PREFETCH.** The chunk queue used to block on the Kokoro HTTP round-trip
+  (~1-3 s) BEFORE each sentence's paced playback, so every inter-sentence
+  boundary had dead air. `robodog_voice_speak` is now split into a fetch
+  phase and a play phase, and while chunk i plays a small background prefetch
+  task fetches chunk i+1's WAV into the free slot of a TWO-SLOT double-buffer
+  (exactly one fetch in flight; at most two
+  `CONFIG_ROBODOG_VOICE_TTS_MAX_RESPONSE` slots ≈ 3 MB SPIRAM, allocated once
+  per turn and reset in place via `robodog_http_rx_reset` — no per-chunk
+  alloc/free, so the R7 free-churn panic site cannot re-run; no deeper
+  pipeline). The play/fetch split keeps the console contract byte-identical
+  (`voice chunk i/n` + per-chunk `TTS start/stop` in order), the R5 render
+  fires at each chunk's playback START (never at prefetch-commit — the
+  prefetch task never touches the UI), fail-stop error semantics and the
+  truncated/error terminals are unchanged, and the slot-exchange bookkeeping
+  is pure C + host-tested (`voice_lookahead.c`, R9). On a lookahead-fetch
+  failure the chunk falls back to the synchronous fetch-then-play path — it
+  never pre-fails, skips or reorders; if the prefetch machinery is
+  unavailable the whole turn degrades to the sequential single-buffer path.
+- **Multi-session gapless-prefetch stress.** The mandatory gate runs ≥ 5
+  consecutive voice sessions (`E2E_RUNS ≥ 5`), each asking a DIFFERENT
+  question (corpus slugs time/joke/greeting/capabilities/count cycled so no
+  two consecutive sessions match), every session must reach `TTS stop` with a
+  complete readout (CHUNKED_QUEUE + FULL_READOUT PASS, no `voice truncated`),
+  and the whole run must show NO board reset/panic (watchdog scans for
+  `rst:*` / tlsf / heap-corruption — the R7 soak regression the prefetch's
+  new sustained-load path must not re-trigger; `robodog_claw_stress.py`
+  drives it, additive, and never writes `hardware-e2e.md`/`.gate-head`).
 - **Speaker output needs explicit re-assert before playback.** Even paced,
   this board's ES8311 was silent until `voice_speak` itself calls
   `esp_codec_dev_set_out_mute(dac, false)` + `esp_codec_dev_set_out_vol(dac, 80)`

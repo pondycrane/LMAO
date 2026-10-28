@@ -21,6 +21,7 @@ used the bridge journal.  Same loud-skip convention as the hermes gate.
 """
 
 import argparse
+import contextlib
 import json
 import os
 import re
@@ -70,6 +71,38 @@ SILENCE = os.environ.get("E2E_AUDIO_SG", "sg audio -c")
 
 def log(msg):
     print(f"[e2e] {time.strftime('%H:%M:%S')} {msg}", flush=True)
+
+
+# ---------------------------------------------------------------------------
+# Board reset/panic sentinels (NO_RESET leg)
+# ---------------------------------------------------------------------------
+# Any console line matching these marks a board reset or heap/panic fault.  The
+# two console decoders (wait_for_log + collect_voice_chunks) feed every line
+# through note_panic(), so a mid-run reboot (rst:0x / Guru Meditation / the
+# DESIGN.md R7 tlsf heap corruption) is NAMED by the NO_RESET leg instead of
+# only failing whichever leg was mid-wait.
+PANIC_RE = re.compile(
+    r"rst:0x|Guru Meditation|assert failed|Backtrace|abort\\(\\)|tlsf|"
+    r"heap.corr|CORRUPT|StoreProhibited|LoadProhibited|Rebooting"
+)
+
+# Per-run accumulator: run_loop clears it at the start of every session and
+# converts it into the NO_RESET assert at the end.
+RUN_RESET_LINES = []
+
+
+def note_panic(ln):
+    if PANIC_RE.search(ln):
+        RUN_RESET_LINES.append(ln)
+        log(f"PANIC SENTINEL: {ln[:160]}")
+
+
+def set_no_reset(res):
+    if RUN_RESET_LINES:
+        res["asserts"]["NO_RESET"] = "FAIL " + RUN_RESET_LINES[0]
+    else:
+        res["asserts"]["NO_RESET"] = "PASS (no reset/panic markers)"
+    return res
 
 
 def shell_run(cmd, timeout=120):
@@ -276,6 +309,7 @@ def wait_for_log(s, patterns, timeout, label="", spill=None):
             while b"\n" in acc:
                 line, acc = acc.split(b"\n", 1)
                 ln = line.decode("utf-8", "replace").strip()
+                note_panic(ln)  # NO_RESET: reset/panic sentinel scan
                 for pat in patterns:
                     m = re.search(pat, ln)
                     if m:
@@ -336,6 +370,7 @@ def collect_voice_chunks(s, timeout, seed=b""):
             while b"\n" in acc:
                 line, acc = acc.split(b"\n", 1)
                 ln = line.decode("utf-8", "replace").strip()
+                note_panic(ln)  # NO_RESET: reset/panic sentinel scan
                 m = CHUNK_RE.search(ln)
                 if m:
                     i, n = int(m.group(1)), int(m.group(2))
@@ -451,7 +486,11 @@ def capture_subtitle(s, artifacts):
 # One voice loop
 # ---------------------------------------------------------------------------
 def run_loop(n, instr, artifacts, voice_verify):
+    # Per-run console scan accumulator for the NO_RESET leg; cleared so a
+    # reset/panic seen in an earlier session cannot leak into this one.
+    RUN_RESET_LINES.clear()
     res = {"loop": n + 1, "asserts": {}, "artifacts": {"asr": "", "reply": ""}}
+    res["corpus"] = instr.get("transcript", instr.get("wav", ""))
     run_dir = artifacts / f"loop{n + 1}"
     run_dir.mkdir(parents=True, exist_ok=True)
     target_txt = instr["transcript"]
@@ -512,6 +551,7 @@ def run_loop(n, instr, artifacts, voice_verify):
             for k in skip:
                 res["asserts"][k] = "SKIP (no ASR -> no turn)"
             res["artifacts"]["reply"] = ""
+            set_no_reset(res)  # the scan may still have seen a reset/panic
             s.close()
             return res
 
@@ -551,10 +591,10 @@ def run_loop(n, instr, artifacts, voice_verify):
             # A fresh mic capture every turn: delete any previous speaker.wav
             # first so a capture_mic failure can never silently re-ASR a stale
             # capture from an earlier run (which produced a bogus FULL_READOUT).
-            try:
+            # SIM105: blank-except -> contextlib.suppress (a fresh mic capture
+            # every turn must never re-ASR a stale earlier capture).
+            with contextlib.suppress(Exception):
                 mic_path.unlink(missing_ok=True)
-            except Exception:
-                pass
             # The chunk queue plays the WHOLE reply as back-to-back chunks;
             # keep the test mic recording in the BACKGROUND for the full
             # reply window while the console scanner below collects every
@@ -720,6 +760,7 @@ def run_loop(n, instr, artifacts, voice_verify):
                 res["asserts"]["SUBTITLE"] = "FAIL " + (sub_err or "blank readback")
             res["artifacts"]["subtitle"] = sub_txt
     finally:
+        set_no_reset(res)
         s.close()
     return res
 
@@ -730,6 +771,16 @@ def main():
         "--corpus",
         default="capabilities",
         help="corpus slug to voice-drive (corpus.json); default 'capabilities'",
+    )
+    ap.add_argument(
+        "--corpus-cycle",
+        metavar="SLUGS",
+        default=None,
+        help="cycle the voice-driven question per loop so no two consecutive "
+        "sessions ask the same question: 'auto' = "
+        "time,joke,greeting,capabilities,count, or an explicit comma-"
+        "separated slug list.  Default (unset) = today's single-corpus "
+        "behavior (--corpus) so the regular gate invocations are unchanged.",
     )
     ap.add_argument("--artifacts", default=str(Path.home() / "artifacts"))
     ap.add_argument(
@@ -766,8 +817,27 @@ def main():
         sys.exit(f"unknown corpus slug '{args.corpus}': {sorted(man)}")
     instr = man[args.corpus]
 
+    # --corpus-cycle: consecutive sessions ask DIFFERENT questions (cycle
+    # length 5 > 1).  Unset -> single-corpus behavior (gates unchanged).
+    cyc = None
+    if args.corpus_cycle:
+        raw = args.corpus_cycle
+        slugs = (
+            ["time", "joke", "greeting", "capabilities", "count"]
+            if raw.strip().lower() == "auto"
+            else [s.strip() for s in raw.split(",") if s.strip()]
+        )
+        if not slugs:
+            sys.exit("--corpus-cycle: empty slug list")
+        unknown = [s for s in slugs if s not in man]
+        if unknown:
+            sys.exit(f"unknown --corpus-cycle slugs {unknown}: {sorted(man)}")
+        cyc = slugs
+        log(f"corpus cycle: {', '.join(cyc)} across {N_RUNS} runs")
+
     results = []
     for i in range(N_RUNS):
+        instr = man[cyc[i % len(cyc)]] if cyc else man[args.corpus]
         r = run_loop(i, instr, artifacts, voice_verify)
         results.append(r)
         for k, v in r["asserts"].items():
@@ -785,11 +855,16 @@ def main():
         f"# {title}\n",
         f"Generated: {time.strftime('%Y-%m-%d %H:%M')}",
         f"Board: {DETECTED_PORT}",
-        f"Corpus: {args.corpus} ({instr['transcript']!r})",
-        f"Runs: {N_RUNS}\n",
     ]
+    lines.append(
+        f"Corpus: CYCLE[{', '.join(cyc)}] pooled across {N_RUNS} runs"
+        if cyc
+        else f"Corpus: {args.corpus} ({instr['transcript']!r})"
+    )
+    lines.append(f"Runs: {N_RUNS}\n")
     for r in results:
         lines.append(f"## loop {r['loop']}")
+        lines.append(f"- Corpus: {r.get('corpus', '')!r}")
         for k, v in r["asserts"].items():
             lines.append(f"- **{k}**: {v}")
         lines.append(f"- ASR verbatim: {r['artifacts'].get('asr', '')!r}")
@@ -800,9 +875,9 @@ def main():
         return v is not None and (v.startswith("PASS") or v.startswith("SKIP"))
 
     keys = (
-        ("OPEN_SESSION", "ASR_MATCH", "REPLY", "TTS", "CHUNKED_QUEUE", "FULL_READOUT")
+        ("OPEN_SESSION", "ASR_MATCH", "REPLY", "TTS", "CHUNKED_QUEUE", "FULL_READOUT", "NO_RESET")
         if voice_verify
-        else ("OPEN_SESSION", "ASR_MATCH", "REPLY", "TTS", "RING", "SUBTITLE")
+        else ("OPEN_SESSION", "ASR_MATCH", "REPLY", "TTS", "RING", "SUBTITLE", "NO_RESET")
     )
 
     def passed(r):
@@ -826,9 +901,13 @@ def main():
         "# RoboDog ESP-Claw Voice-Loop E2E — Hardware Evidence\n",
         f"Generated: {time.strftime('%Y-%m-%d %H:%M')}",
         f"Board: {DETECTED_PORT}  (Waveshare ESP32-S3 RLCD-4.2, 0x303A:0x1001)",
-        f"Corpus: {args.corpus} ({instr['transcript']!r})",
-        f"Runs: {N_RUNS}\n",
     ]
+    brief.append(
+        f"Corpus: CYCLE[{', '.join(cyc)}] pooled across {N_RUNS} runs"
+        if cyc
+        else f"Corpus: {args.corpus} ({instr['transcript']!r})"
+    )
+    brief.append(f"Runs: {N_RUNS}\n")
     for r in results:
         for k, v in r["asserts"].items():
             brief.append(f"- **{k}**: {v}")

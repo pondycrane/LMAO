@@ -51,8 +51,13 @@ char *robodog_voice_asr(const int16_t *pcm, size_t samples);
 /**
  * @brief Fetch a TTS WAV for `reply` from the Kokoro endpoint and play it
  *        through the ES8311 (speaker PA + APP mixer track, paced real-time
- *        via mixer_write_paced).  The single copy of the device->TTS->speaker
- *        path; voice_turn calls this once per queued sentence chunk.
+ *        via mixer_write_paced).  THE PUBLIC SINGLE-BUFFER WRAPPER: fetch
+ *        + play in one blocking call, byte-for-byte the legacy behavior
+ *        (announce-only flash path / sequential degradation).  The voice
+ *        turn itself does NOT go through this wrapper — it drives the
+ *        internal fetch/play split through the one-step lookahead prefetch
+ *        (voice_lookahead.[ch]) so inter-sentence gaps disappear while
+ *        keeping this exact console contract.  No new public API beyond this.
  * @return ESP_OK on a fully-played reply; an esp_err otherwise.
  */
 esp_err_t robodog_voice_speak(const char *reply);
