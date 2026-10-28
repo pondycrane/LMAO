@@ -21,6 +21,7 @@
 
 #include "voice_split.h"
 #include "voice_transcript.h"
+#include "voice_md.h"
 
 /* ── tiny harness ───────────────────────────────────────────────────────── */
 static int s_failures = 0;
@@ -252,6 +253,60 @@ static void test_transcript_cap_keep(void)
           "oldest head must be trimmed away");
 }
 
+/* ── R8: robodog_voice_md_strip (markdown -> speech-friendly) ──────────── */
+
+static void prepare_strip(const char *in, const char *want)
+{
+    char out[256];
+    robodog_voice_md_strip(in, out, sizeof(out));
+    CHECK(strcmp(out, want) == 0, "md <<%s>> -> got <<%s>> want <<%s>>",
+          in, out, want);
+}
+
+static void test_md_strip(void)
+{
+    char out[256];
+    size_t n;
+
+    /* The user-reported case: bold-marked headers must not read as
+     * "asterisk asterisk". */
+    n = robodog_voice_md_strip("**What can you do?**", out, sizeof(out));
+    CHECK(strcmp(out, "What can you do?") == 0,
+          "bold markers stripped: '%s'", out);
+    CHECK(n == strlen(out), "returned len %zu == strlen %zu", n, strlen(out));
+
+    /* Headings, bullets, blockquotes, code spans, links. */
+    prepare_strip("## Setup", "Setup");
+    prepare_strip("- item one", "item one");
+    prepare_strip("> note text", "note text");
+    prepare_strip("Go to [docs](http://x/y).", "Go to docs.");
+    prepare_strip("`inline` code", "inline code");
+    prepare_strip("*em* and _em2_", "em and em2");
+    prepare_strip("~~gone~~ still here", "gone still here");
+
+    /* Multi-line markdown: whole-line noise (HR / table separator / fence)
+     * is dropped, paragraph breaks survive. */
+    prepare_strip("rule above\n---\nrule below", "rule above\nrule below");
+    prepare_strip("```\ncode line\n```", "code line");
+    prepare_strip("| Name | Value |\n|---|---|\n| A | 1 |",
+                  "Name Value\nA 1");
+
+    /* Words that LOOK like markdown but are prose stay intact. */
+    prepare_strip("1. first\n2. second", "1. first\n2. second");
+    prepare_strip("the temp is -5 degrees", "the temp is -5 degrees");
+
+    /* Whitespace: collapse runs, no leading space after a table pipe or a
+     * newline, no trailing space. */
+    prepare_strip("Hi!  How are  you?", "Hi! How are you?");
+    prepare_strip("a | b", "a b");
+
+    /* Truncation: small buffer still NUL-terminates at cap - 1. */
+    n = robodog_voice_md_strip("1234567890**x**", out, 8);
+    out[7] = '\0';
+    CHECK(strcmp(out, "1234567") == 0 && n == 7,
+          "truncated to cap-1: '%s' (n=%zu)", out, n);
+}
+
 /* ── main ───────────────────────────────────────────────────────────────── */
 
 int main(void)
@@ -261,6 +316,7 @@ int main(void)
     test_splitter_truncation_flag();
     test_transcript_join();
     test_transcript_cap_keep();
+    test_md_strip();
 
     if (s_failures != 0) {
         fprintf(stderr, "test_voice_split: %d FAILURE(S)\n", s_failures);
