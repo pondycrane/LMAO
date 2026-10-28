@@ -19,6 +19,7 @@
 #include "robodog_ui.h"
 #include "robodog_http.h"
 #include "voice_split.h"
+#include "voice_md.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -817,9 +818,35 @@ static void voice_turn(void)
     robodog_ui_show_user(text);
 
     uint32_t request_id = 0;
-    esp_err_t err = claw_agent_mgr_start_root_run_text(
-        text, NULL, 0, CONFIG_ROBODOG_LLM_TIMEOUT_MS, &request_id);
+    /* Voice-scoped format directive at the ONE seam we control.  The shared
+     * base prompt is upstream-owned and IM-oriented (it nudges the model
+     * toward structured, scannable markdown), so rather than rewrite that
+     * global prompt (claw_agent_mgr_update_core_config would require
+     * re-embedding the whole upstream string — the fragile kind of hardcode
+     * we avoid), ask for plain prose THIS turn: fewer `**`/bullets generated
+     * at the source = cleaner, shorter TTS audio even before the
+     * robodog_voice_md_strip() guarantee below.  The directive is applied
+     * AFTER the transcript render so it never appears on the RLCD. */
+    static const char *const VOICE_MODE_STYLE =
+        "[This is a spoken voice conversation. Reply in plain prose with no "
+        "markdown formatting: no asterisks, no # headings, no bullet lists, "
+        "no code blocks.] ";
+    const size_t vlen = strlen(VOICE_MODE_STYLE);
+    const size_t tlen = strlen(text);
+    char *agent_input = malloc(vlen + tlen + 1);
+    if (agent_input == NULL) {
+        ESP_LOGE(TAG, "no memory for voice-style agent input");
+        free(text);
+        robodog_ui_set_agent_state("error");
+        s_turn_active = false;
+        return;
+    }
+    memcpy(agent_input, VOICE_MODE_STYLE, vlen);
+    memcpy(agent_input + vlen, text, tlen + 1);
     free(text);
+    esp_err_t err = claw_agent_mgr_start_root_run_text(
+        agent_input, NULL, 0, CONFIG_ROBODOG_LLM_TIMEOUT_MS, &request_id);
+    free(agent_input);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "start_root_run_text failed: %s", esp_err_to_name(err));
         robodog_ui_set_agent_state("error");
@@ -844,84 +871,103 @@ static void voice_turn(void)
         ESP_LOGI(TAG, "agent reply: %s",
                  reply_esc != NULL ? reply_esc : resp.text);
         free(reply_esc);
-        /* Speak the WHOLE reply, not a truncated script.  The esp-claw root
-         * agent is verbose by default (a full "what can you do" dump is ~60 s
-         * of speech), so the reply is split at sentence/line breaks into
-         * chunks of <= TTS_MAX_CHARS (the voice-splitter queue) and each
-         * chunk is rendered on the RLCD (progressively growing the full reply
-         * via robodog_ui_append_assistant) then spoken, in order.  The
-         * read-out voice finishes every word of the reply — the adversarial
-         * "voice cut off" truncation is gone (unless the queue exceeds
-         * CONFIG_ROBODOG_VOICE_TTS_MAX_CHUNKS: that tail-drop is then
-         * reported honestly, see `voice truncated` below — never a
-         * false-complete idle). */
+        /* Markdown -> speech-friendly text BEFORE the TTS queue.  The agent
+         * replies in multi-line markdown (headers `**`, bullets, inline-code
+         * spans, tables); read raw, Kokoro voices the syntax literally
+         * ("asterisk asterisk bold") and the text-only panel shows the same
+         * glyph noise.  Strip it once here so BOTH the speaker and the RLCD
+         * get clean prose from the same chunks (the full raw reply is still
+         * in the `agent reply:` log above for the host gates). */
+        const size_t reply_len = strlen(resp.text);
+        char *speech = heap_caps_malloc(reply_len + 1,
+                                        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
         esp_err_t rc = ESP_OK;
         bool truncated = false;
-        const size_t max_chunks = CONFIG_ROBODOG_VOICE_TTS_MAX_CHUNKS;
-        const size_t cap = CONFIG_ROBODOG_VOICE_TTS_MAX_CHARS;
-        const size_t arena_cap = max_chunks * (cap + 1) + 1;
-        char *arena = heap_caps_malloc(arena_cap,
-                                       MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-        size_t *offs = NULL;
-        if (arena != NULL) {
-            offs = heap_caps_malloc(max_chunks * sizeof(size_t),
-                                    MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-        }
-        if (arena == NULL || offs == NULL) {
-            ESP_LOGE(TAG, "no memory for %u-chunk TTS queue",
-                     (unsigned)max_chunks);
-            if (arena != NULL) {
-                free(arena);
-            }
-            if (offs != NULL) {
-                free(offs);
-            }
-            /* R4: keep the explicit error terminal — rc MUST be non-OK or the
-             * terminal-state line below would clobber this "error" with
-             * "idle" and the OOM turn would read as a clean success. */
+        if (speech == NULL) {
+            ESP_LOGE(TAG, "no memory for markdown-cleaned reply (%u B)",
+                     (unsigned)(reply_len + 1));
             rc = ESP_ERR_NO_MEM;
             robodog_ui_set_agent_state("error");
         } else {
-            const size_t n = robodog_voice_split_reply(
-                resp.text, cap, arena, arena_cap, offs, max_chunks,
-                &truncated);
-            if (n == 0) {
-                /* Blank reply: nothing speakable; render it, stay idle. */
-                robodog_ui_show_assistant(resp.text);
-            } else {
-                if (truncated) {
-                    /* R3: the reply needed more than max_chunks chunks, so
-                     * the tail was dropped — the read-out voice did NOT
-                     * finish every word.  Log a distinct marker the host
-                     * voice-verify gate FAILs on (it must never pass a
-                     * half-read reply), and end the turn in a visibly
-                     * "truncated" state below, never a false-complete idle. */
-                    ESP_LOGW(TAG,
-                             "voice truncated: reply exceeds %u chunks; the "
-                             "tail was NOT read out",
-                             (unsigned)max_chunks);
+            (void)robodog_voice_md_strip(resp.text, speech, reply_len + 1);
+            /* Speak the WHOLE reply, not a truncated script.  The esp-claw root
+             * agent is verbose by default (a full "what can you do" dump is ~60 s
+             * of speech), so the reply is split at sentence/line breaks into
+             * chunks of <= TTS_MAX_CHARS (the voice-splitter queue) and each
+             * chunk is rendered on the RLCD (progressively growing the full reply
+             * via robodog_ui_append_assistant) then spoken, in order.  The
+             * read-out voice finishes every word of the reply — the adversarial
+             * "voice cut off" truncation is gone (unless the queue exceeds
+             * CONFIG_ROBODOG_VOICE_TTS_MAX_CHUNKS: that tail-drop is then
+             * reported honestly, see `voice truncated` below — never a
+             * false-complete idle). */
+            const size_t max_chunks = CONFIG_ROBODOG_VOICE_TTS_MAX_CHUNKS;
+            const size_t cap = CONFIG_ROBODOG_VOICE_TTS_MAX_CHARS;
+            const size_t arena_cap = max_chunks * (cap + 1) + 1;
+            char *arena = heap_caps_malloc(arena_cap,
+                                           MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+            size_t *offs = NULL;
+            if (arena != NULL) {
+                offs = heap_caps_malloc(max_chunks * sizeof(size_t),
+                                        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+            }
+            if (arena == NULL || offs == NULL) {
+                ESP_LOGE(TAG, "no memory for %u-chunk TTS queue",
+                         (unsigned)max_chunks);
+                if (arena != NULL) {
+                    free(arena);
                 }
-                robodog_ui_set_agent_state("responding");
-                for (size_t i = 0; i < n; i++) {
-                    const char *chunk = arena + offs[i];
-                    /* Device-side hook the host voice verification gate
-                     * (robodog-claw-voice-verify) counts: one start/stop per
-                     * chunk proves the whole reply was queued and voiced. */
-                    ESP_LOGI(TAG, "voice chunk %u/%u: %.160s",
-                             (unsigned)(i + 1), (unsigned)n, chunk);
-                    /* The chunk text is rendered INSIDE voice_speak, exactly
-                     * when that chunk's playback starts (not when it is
-                     * queued) — the on-screen sentence and the audible one
-                     * share the same instant, no fetch-latency lead. */
-                    if (robodog_voice_speak(chunk) != ESP_OK) {
-                        /* TTS failed mid-queue: surface it, stop the rest. */
-                        rc = ESP_ERR_INVALID_STATE;
-                        break;
+                if (offs != NULL) {
+                    free(offs);
+                }
+                /* R4: keep the explicit error terminal — rc MUST be non-OK or the
+                 * terminal-state line below would clobber this "error" with
+                 * "idle" and the OOM turn would read as a clean success. */
+                rc = ESP_ERR_NO_MEM;
+                robodog_ui_set_agent_state("error");
+            } else {
+                const size_t n = robodog_voice_split_reply(
+                    speech, cap, arena, arena_cap, offs, max_chunks,
+                    &truncated);
+                if (n == 0) {
+                    /* Blank reply: nothing speakable; render it, stay idle. */
+                    robodog_ui_show_assistant(speech);
+                } else {
+                    if (truncated) {
+                        /* R3: the reply needed more than max_chunks chunks, so
+                         * the tail was dropped — the read-out voice did NOT
+                         * finish every word.  Log a distinct marker the host
+                         * voice-verify gate FAILs on (it must never pass a
+                         * half-read reply), and end the turn in a visibly
+                         * "truncated" state below, never a false-complete idle. */
+                        ESP_LOGW(TAG,
+                                 "voice truncated: reply exceeds %u chunks; the "
+                                 "tail was NOT read out",
+                                 (unsigned)max_chunks);
+                    }
+                    robodog_ui_set_agent_state("responding");
+                    for (size_t i = 0; i < n; i++) {
+                        const char *chunk = arena + offs[i];
+                        /* Device-side hook the host voice verification gate
+                         * (robodog-claw-voice-verify) counts: one start/stop per
+                         * chunk proves the whole reply was queued and voiced. */
+                        ESP_LOGI(TAG, "voice chunk %u/%u: %.160s",
+                                 (unsigned)(i + 1), (unsigned)n, chunk);
+                        /* The chunk text is rendered INSIDE voice_speak, exactly
+                         * when that chunk's playback starts (not when it is
+                         * queued) — the on-screen sentence and the audible one
+                         * share the same instant, no fetch-latency lead. */
+                        if (robodog_voice_speak(chunk) != ESP_OK) {
+                            /* TTS failed mid-queue: surface it, stop the rest. */
+                            rc = ESP_ERR_INVALID_STATE;
+                            break;
+                        }
                     }
                 }
+                free(offs);
+                free(arena);
             }
-            free(offs);
-            free(arena);
+            free(speech);
         }
         /* Terminal state: idle on a complete readout, error on a real fault
          * (OOM / TTS stall), and — R3 — a distinct "truncated" when the chunk
