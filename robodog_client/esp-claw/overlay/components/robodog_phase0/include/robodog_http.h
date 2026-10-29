@@ -47,6 +47,16 @@ void robodog_http_rx_init(robodog_http_rx_t *rx, size_t cap);
 void robodog_http_rx_free(robodog_http_rx_t *rx);
 
 /**
+ * @brief Reset an accumulator for reuse WITHOUT freeing/reallocating: keeps
+ *        buf/cap, resets len/status and NUL-terminates.  The double-buffer
+ *        slot reuse path (one-step TTS lookahead prefetch, robodog_voice.c)
+ *        calls this between chunks so a 1.5 MB SPIRAM slot is reused in
+ *        place — never freed/allocated per chunk (the DESIGN.md R7 tlsf
+ *        panic site stays untouched).
+ */
+void robodog_http_rx_reset(robodog_http_rx_t *rx);
+
+/**
  * @brief JSON-escape a NUL-terminated string for embedding inside a JSON
  *        string value (quotes, backslashes, newlines and control chars become
  *        backslash escapes).  Returns a heap-allocated escaped copy the caller
