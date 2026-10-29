@@ -105,6 +105,7 @@ sh_binary(
         "esp-claw/overlay/components/robodog_phase0/include/voice_split.h",
         "esp-claw/overlay/components/robodog_phase0/include/voice_transcript.h",
         "esp-claw/overlay/components/robodog_phase0/include/voice_md.h",
+        "esp-claw/overlay/components/robodog_phase0/include/voice_lookahead.h",
         "esp-claw/overlay/components/robodog_phase0/src/robodog_phase0.c",
         "esp-claw/overlay/components/robodog_phase0/src/robodog_ui.c",
         "esp-claw/overlay/components/robodog_phase0/src/robodog_http.c",
@@ -112,8 +113,12 @@ sh_binary(
         "esp-claw/overlay/components/robodog_phase0/src/voice_split.c",
         "esp-claw/overlay/components/robodog_phase0/src/voice_transcript.c",
         "esp-claw/overlay/components/robodog_phase0/src/voice_md.c",
+        "esp-claw/overlay/components/robodog_phase0/src/voice_lookahead.c",
         "esp-claw/test_voice_split.c",
+        "esp-claw/test_voice_lookahead.c",
         "esp-claw/robodog_claw_e2e.py",
+        "esp-claw/robodog_claw_stress.py",
+        "esp-claw/run_claw_stress.sh",
         "voice/corpus/capabilities.wav",
     ],
     tags = ["manual"],
@@ -151,11 +156,13 @@ cc_library(
         "esp-claw/overlay/components/robodog_phase0/src/voice_split.c",
         "esp-claw/overlay/components/robodog_phase0/src/voice_transcript.c",
         "esp-claw/overlay/components/robodog_phase0/src/voice_md.c",
+        "esp-claw/overlay/components/robodog_phase0/src/voice_lookahead.c",
     ],
     hdrs = [
         "esp-claw/overlay/components/robodog_phase0/include/voice_split.h",
         "esp-claw/overlay/components/robodog_phase0/include/voice_transcript.h",
         "esp-claw/overlay/components/robodog_phase0/include/voice_md.h",
+        "esp-claw/overlay/components/robodog_phase0/include/voice_lookahead.h",
     ],
     strip_include_prefix = "esp-claw/overlay/components/robodog_phase0/include",
     visibility = ["//visibility:public"],
@@ -163,7 +170,10 @@ cc_library(
 
 cc_test(
     name = "test_voice_split",
-    srcs = ["esp-claw/test_voice_split.c"],
+    srcs = [
+        "esp-claw/test_voice_split.c",
+        "esp-claw/test_voice_lookahead.c",
+    ],
     deps = [":esp_claw_voice_pure"],
 )
 
@@ -188,6 +198,26 @@ sh_binary(
         "voice/hermes_voice_e2e.py",
         "voice/voice_bridge.py",
         "voice/e2e_readout.py",
+        "//robodog_client:voice_corpus",
+    ],
+    tags = ["manual"],
+)
+
+# Multi-session gapless-prefetch STRESS (one-step TTS lookahead): runs the
+# dedicated voice-verify gate E2E_RUNS times with corpus cycling (different
+# question per session) and scans the whole run for reset/panic sentinels -
+# the DESIGN.md R7 soak regression check for the new sustained-load path.
+# Host-python tool, exactly like the hermes e2e sh_binary (never writes
+# hardware-e2e.md / .gate-head).
+#
+#   bazel run //robodog_client:claw_stress [-- --artifacts DIR --runs 5]
+sh_binary(
+    name = "claw_stress",
+    srcs = ["esp-claw/run_claw_stress.sh"],
+    data = [
+        "capture.py",
+        "esp-claw/robodog_claw_stress.py",
+        "esp-claw/robodog_claw_e2e.py",
         "//robodog_client:voice_corpus",
     ],
     tags = ["manual"],

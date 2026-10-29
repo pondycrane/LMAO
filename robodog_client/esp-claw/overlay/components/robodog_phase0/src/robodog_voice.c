@@ -20,6 +20,7 @@
 #include "robodog_http.h"
 #include "voice_split.h"
 #include "voice_md.h"
+#include "voice_lookahead.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -73,6 +74,22 @@ static const char *TAG = "robodog_voice";
 #define EVT_LISTEN            BIT0
 #define VOICE_STACK           8192
 
+/* One-step TTS lookahead prefetch (see voice_lookahead.[ch]).  While chunk i
+ * plays, a small background task fetches chunk i+1's WAV into the free
+ * double-buffer slot so the next boundary has no ~1-3 s HTTP gap.  Exactly
+ * one fetch in flight; the two slots (CONFIG_ROBODOG_VOICE_TTS_MAX_RESPONSE
+ * each, ~3 MB total SPIRAM) are allocated ONCE per turn and reset in place
+ * (robodog_http_rx_reset) — no per-chunk alloc/free churn (DESIGN.md R7 tlsf
+ * panic site must not re-trigger).
+ * The prefetch bits use a DEDICATED event group (s_pf_evts) — NEVER
+ * s_voice_evts, whose BIT0 is EVT_LISTEN (set from a GPIO ISR; a collision
+ * would randomly start turns). */
+#define PF_STACK            4096
+#define PF_WAIT_MS          3000   /* bounded DONE wait at a chunk boundary */
+#define EVT_PF_JOB          BIT1   /* a fetch job is queued for the task */
+#define EVT_PF_DONE         BIT2   /* the prefetch task finished (ack/abort) */
+#define EVT_PF_ABORT        BIT4   /* drop the queued/in-flight job, ack DONE */
+
 /* The RLCD's speaker amp enable (same PA the hermes firmware drives on
  * GPIO46).  esp-board-manager registers gpio_pa_control here (board
  * peripherals yaml, active_level=1) but the peripheral init applies the
@@ -84,6 +101,22 @@ static const char *TAG = "robodog_voice";
 static EventGroupHandle_t s_voice_evts;
 static TaskHandle_t s_voice_task;
 static volatile bool s_turn_active;
+
+/* One-step TTS lookahead prefetch task + its DEDICATED event group.  The
+ * prefetch task is the sole writer of an in-flight slot's rx; the voice turn
+ * owns the buffers and ABORT-acks (EVT_PF_ABORT -> DONE) BEFORE freeing any
+ * slot / arena — never a free under the writer (DESIGN R7 invariant #4). */
+static EventGroupHandle_t s_pf_evts;
+static TaskHandle_t s_pf_task;
+static bool s_pf_ready; /* prefetch event group + task created OK */
+
+typedef struct {
+    const char *chunk;      /* chunk text (points into the turn's chunk arena) */
+    size_t index;           /* 1-based chunk index being fetched (diagnostic) */
+    robodog_http_rx_t *rx;  /* destination slot buffer (only the task writes) */
+} voice_pf_job_t;
+static voice_pf_job_t s_pf_job;
+static volatile esp_err_t s_pf_result = ESP_OK;
 
 /* Drive the speaker power-amplifier on (GPIO46 sees the struct-default LOW
  * from the board manager's peripheral init even though the DAC device hook
@@ -642,35 +675,51 @@ esp_err_t robodog_voice_tts_fetch(const char *reply, robodog_http_rx_t *rx)
     return ESP_OK;
 }
 
-esp_err_t robodog_voice_speak(const char *reply)
+/* Split robodog_voice_speak into a FETCH phase and a PLAY phase so the turn
+ * loop can overlap chunk i+1's fetch with chunk i's playback (one-step TTS
+ * lookahead prefetch).  The pieces the double-buffer uses below. */
+
+/* SYNCHRONOUS fetch: reset the caller-owned rx slot IN PLACE (keeps buf/cap —
+ * no per-chunk alloc/free), POST the chunk to Kokoro, and apply the SAME
+ * round-trip + RIFF sanity mapping the old single shout used (http error ->
+ * its esp_err, non-2xx / non-WAVE body -> ESP_FAIL), so a lookahead failure
+ * can fall back with identical error semantics. */
+static esp_err_t voice_speak_fetch_sync(const char *chunk, robodog_http_rx_t *rx)
 {
-    esp_err_t result = ESP_OK;
-    /* Callers always pass a single bounded sentence chunk from the queue
-     * (robodog_voice_split_reply), so no clip here. */
-
-    /* Fetch the WAV through the shared TTS client (single copy of the escaped
-     * request body + the set_post_field UAF fix), then parse + play it. */
-    robodog_http_rx_t rx;
-    robodog_http_rx_init(&rx, CONFIG_ROBODOG_VOICE_TTS_MAX_RESPONSE);
-    if (rx.buf == NULL) {
-        ESP_LOGE(TAG, "TTS: no memory for response buffer");
-        return ESP_ERR_NO_MEM;
+    robodog_http_rx_reset(rx);
+    const esp_err_t err = robodog_voice_tts_fetch(chunk, rx);
+    if (err != ESP_OK) {
+        return err; /* robodog_voice_tts_fetch already logged the round-trip */
     }
-    result = robodog_voice_tts_fetch(reply, &rx);
-    if (result != ESP_OK) {
-        goto out; /* rx freed below; nothing played */
-    }
-
     uint32_t src_rate = 0;
-    const size_t data_off = robodog_wav_pcm_offset((const uint8_t *)rx.buf,
-                                                   rx.len, &src_rate);
-    if (data_off == 0 || data_off == rx.len) {
+    const size_t data_off = robodog_wav_pcm_offset((const uint8_t *)rx->buf,
+                                                   rx->len, &src_rate);
+    if (data_off == 0 || data_off == rx->len) {
         ESP_LOGE(TAG, "TTS: response is not a RIFF/WAVE blob (%u B)",
-                 (unsigned)rx.len);
-        result = ESP_FAIL;
-        goto out;
+                 (unsigned)rx->len);
+        return ESP_FAIL;
     }
-    const size_t in_samples = (rx.len - data_off) / sizeof(int16_t);
+    return ESP_OK;
+}
+
+/* Play an already-buffered TTS WAV from `rx`: parse + resample + PA/unmute +
+ * the `TTS start`/`TTS stop` bracket + the R5 on-screen render + the shared
+ * paced APP-track write.  NEVER inits/frees `rx` — ownership stays with the
+ * caller (the double-buffer slot).  The `TTS start (...)`/`TTS stop` lines
+ * are byte-identical to the old single shout so the gates' bracket counting
+ * is unchanged.  R5: each chunk renders the instant its audio starts — never
+ * at prefetch-commit (the prefetch task never calls the UI). */
+static esp_err_t voice_speak_play(const char *chunk, robodog_http_rx_t *rx)
+{
+    uint32_t src_rate = 0;
+    const size_t data_off = robodog_wav_pcm_offset((const uint8_t *)rx->buf,
+                                                   rx->len, &src_rate);
+    if (data_off == 0 || data_off == rx->len) {
+        ESP_LOGE(TAG, "TTS: response is not a RIFF/WAVE blob (%u B)",
+                 (unsigned)rx->len);
+        return ESP_FAIL;
+    }
+    const size_t in_samples = (rx->len - data_off) / sizeof(int16_t);
     if (src_rate < 8000 || src_rate > 96000) {
         src_rate = 24000; /* Kokoro default; header absent/garbage */
     }
@@ -689,8 +738,7 @@ esp_err_t robodog_voice_speak(const char *reply)
         audio_mixer_open_track(mix, AUDIO_MIXER_TRACK_APP, "robodog_voice",
                                &track) != ESP_OK) {
         ESP_LOGE(TAG, "TTS: could not open APP mixer track");
-        result = ESP_ERR_INVALID_STATE;
-        goto out;
+        return ESP_ERR_INVALID_STATE;
     }
     /* Play at the MIXER's actual sample rate (24 kHz on the hermes-parity
      * audio hub).  Kokoro's native 24 kHz WAV is therefore a PURE passthrough
@@ -706,7 +754,7 @@ esp_err_t robodog_voice_speak(const char *reply)
     size_t out_samples;
     int16_t *out16 = NULL;
     if (src_rate == play_rate) {
-        pcm_src = (const uint8_t *)rx.buf + data_off;   /* passthrough, zero copy */
+        pcm_src = (const uint8_t *)rx->buf + data_off;  /* passthrough, zero copy */
         out_samples = in_samples;
     } else {
         /* 64-bit multiply: in_samples * play_rate overflows uint32 for long
@@ -721,11 +769,10 @@ esp_err_t robodog_voice_speak(const char *reply)
             ESP_LOGE(TAG, "TTS: no SPIRAM for %u-sample resample buffer",
                      (unsigned)out_cap);
             (void)audio_mixer_close_track(track);
-            result = ESP_ERR_NO_MEM;
-            goto out;
+            return ESP_ERR_NO_MEM;
         }
         out_samples = resample_to_rate(
-            (const int16_t *)(rx.buf + data_off), in_samples, out16, out_cap,
+            (const int16_t *)(rx->buf + data_off), in_samples, out16, out_cap,
             src_rate, play_rate);
         pcm_src = (const uint8_t *)out16;
     }
@@ -735,11 +782,12 @@ esp_err_t robodog_voice_speak(const char *reply)
              (unsigned)out_samples, (unsigned long)play_rate,
              src_rate == play_rate ? "(passthrough)" : "(resampled)");
     /* Render THIS chunk's text the instant its audio begins: the TTS fetch
-     * above happened "off-screen", so the on-screen sentence is exactly the
-     * one the speaker starts speaking (no queue-time lead).  robodog_ui_append
-     * _assistant's async queue trips while we pace the playback, so the panel
-     * lands on the new text within a few tens of ms of the audio start. */
-    robodog_ui_append_assistant(reply);
+     * happened "off-screen" (possibly in the prefetch task), so the on-screen
+     * sentence is exactly the one the speaker starts speaking (no queue-time
+     * lead).  robodog_ui_append_assistant's async queue trips while we pace
+     * the playback, so the panel lands on the new text within a few tens of
+     * ms of the audio start. */
+    robodog_ui_append_assistant(chunk);
     robodog_ui_set_agent_state("responding");
     /* Shared paced write (mixer_write_paced): feed the ring in ~20 ms frames
      * with a ~19 ms step so playback rides the codec rate in real time.  A
@@ -749,17 +797,67 @@ esp_err_t robodog_voice_speak(const char *reply)
      * silent" failure).  The helper's stall limit also bounds a wedged ring
      * and surfaces ESP_ERR_TIMEOUT instead of a silent clip. */
     const size_t total = out_samples * sizeof(int16_t);
+    esp_err_t result = ESP_OK;
     const esp_err_t perr = mixer_write_paced(track, pcm_src, total, play_rate);
-    if (perr != ESP_OK && result == ESP_OK) {
+    if (perr != ESP_OK) {
         result = perr;
     }
     (void)audio_mixer_track_flush(track); /* drain the last ~200 ms of ring */
     ESP_LOGI(TAG, "TTS stop");
     audio_mixer_close_track(track);
     heap_caps_free(out16);
-out:
-    robodog_http_rx_free(&rx);
     return result;
+}
+
+esp_err_t robodog_voice_speak(const char *reply)
+{
+    /* Public single-buffer wrapper: fetch + play in one blocking call, EXACTLY
+     * the old behavior — used by the announce-only flash path / any external
+     * caller and the sequential degradation path.  The (fast) voice turn does
+     * NOT go through this wrapper: it drives the split fetch/play functions
+     * through the double-buffer prefetch loop so inter-sentence gaps vanish. */
+    robodog_http_rx_t rx;
+    robodog_http_rx_init(&rx, CONFIG_ROBODOG_VOICE_TTS_MAX_RESPONSE);
+    if (rx.buf == NULL) {
+        ESP_LOGE(TAG, "TTS: no memory for response buffer");
+        return ESP_ERR_NO_MEM;
+    }
+    const esp_err_t fetch = voice_speak_fetch_sync(reply, &rx);
+    if (fetch != ESP_OK) {
+        robodog_http_rx_free(&rx); /* nothing played */
+        return fetch;
+    }
+    const esp_err_t play = voice_speak_play(reply, &rx);
+    robodog_http_rx_free(&rx);
+    return play;
+}
+
+/* ── One-step TTS lookahead prefetch task ───────────────────────────────── */
+/* The task is the ONLY writer of an in-flight slot's rx.  On ABORT it acks
+ * DONE WITHOUT touching `rx` (the caller owns it and is about to free — the
+ * abort-ack precedes every free); on a JOB it resets the slot in place and
+ * fetches.  s_pf_result carries the last job's outcome to the turn loop,
+ * which must consume EVT_PF_DONE before reading it / re-arming a new job. */
+static void voice_prefetch_task(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        const EventBits_t bits = xEventGroupWaitBits(
+            s_pf_evts, EVT_PF_JOB | EVT_PF_ABORT, pdTRUE /* clear */,
+            pdFALSE, portMAX_DELAY);
+        if (bits & EVT_PF_ABORT) {
+            /* Drop the queued/in-flight job: `rx` untouched — the caller owns
+             * it and is about to free; just ack so the teardown can proceed. */
+            s_pf_result = ESP_OK;
+            xEventGroupSetBits(s_pf_evts, EVT_PF_DONE);
+            continue;
+        }
+        if (bits & EVT_PF_JOB) {
+            robodog_http_rx_reset(s_pf_job.rx);
+            s_pf_result = robodog_voice_tts_fetch(s_pf_job.chunk, s_pf_job.rx);
+            xEventGroupSetBits(s_pf_evts, EVT_PF_DONE);
+        }
+    }
 }
 
 /* ── One listen->ASR->agent->TTS turn ───────────────────────────────────── */
@@ -946,21 +1044,210 @@ static void voice_turn(void)
                                  (unsigned)max_chunks);
                     }
                     robodog_ui_set_agent_state("responding");
-                    for (size_t i = 0; i < n; i++) {
-                        const char *chunk = arena + offs[i];
-                        /* Device-side hook the host voice verification gate
-                         * (robodog-claw-voice-verify) counts: one start/stop per
-                         * chunk proves the whole reply was queued and voiced. */
-                        ESP_LOGI(TAG, "voice chunk %u/%u: %.160s",
-                                 (unsigned)(i + 1), (unsigned)n, chunk);
-                        /* The chunk text is rendered INSIDE voice_speak, exactly
-                         * when that chunk's playback starts (not when it is
-                         * queued) — the on-screen sentence and the audible one
-                         * share the same instant, no fetch-latency lead. */
-                        if (robodog_voice_speak(chunk) != ESP_OK) {
-                            /* TTS failed mid-queue: surface it, stop the rest. */
-                            rc = ESP_ERR_INVALID_STATE;
-                            break;
+                    robodog_ui_set_agent_state("responding");
+
+                    /* ── One-step TTS lookahead prefetch (gapless double-buffer)
+                     * The chunk queue is played back-to-back.  While chunk i
+                     * plays (~10-20 s), the background prefetch task fetches
+                     * chunk i+1's WAV into the free slot of a two-slot
+                     * double-buffer (exactly one fetch in flight — no deeper
+                     * pipeline), so the inter-sentence ~1-3 s HTTP gap
+                     * disappears.  The two CONFIG_ROBODOG_VOICE_TTS_MAX_RESPONSE
+                     * slots (~3 MB SPIRAM) are allocated ONCE per turn and
+                     * reset in place (robodog_http_rx_reset) — never
+                     * freed/re-allocated per chunk (the DESIGN.md R7 tlsf
+                     * panic site stays untouched).  If the prefetch machinery
+                     * is unavailable (no task, or the second slot's alloc
+                     * failed) the turn degrades to the current sequential
+                     * single-buffer path — correct, ordered, byte-identical
+                     * console — and a lookahead fetch failure falls back to
+                     * the same synchronous fetch-then-play (never skips /
+                     * reorders / pre-fails). */
+                    robodog_voice_la_t la;
+                    robodog_voice_lookahead_start(&la, n);
+                    const size_t slot_cap =
+                        CONFIG_ROBODOG_VOICE_TTS_MAX_RESPONSE;
+                    robodog_http_rx_t rx[2];
+                    robodog_http_rx_init(&rx[0], slot_cap);
+                    robodog_http_rx_init(&rx[1], slot_cap);
+                    const bool dbl = s_pf_ready &&
+                                     rx[0].buf != NULL && rx[1].buf != NULL;
+                    if (rx[0].buf == NULL && rx[1].buf == NULL) {
+                        /* BOTH slot allocations failed: today's OOM truth —
+                         * nothing can be spoken; straight to the error
+                         * terminal (never a false-complete idle). */
+                        ESP_LOGE(TAG, "TTS: no memory for response buffers "
+                                 "(%u B each); nothing played",
+                                 (unsigned)slot_cap);
+                        rc = ESP_ERR_NO_MEM;
+                        robodog_ui_set_agent_state("error");
+                    } else if (!dbl) {
+                        /* Sequential single-buffer path (second slot OOM or
+                         * prefetch task unavailable): release the unused slot
+                         * for heap headroom and run tonight's exact
+                         * robodog_voice_speak() loop verbatim (graceful,
+                         * ordered). */
+                        robodog_http_rx_free(&rx[0]);
+                        robodog_http_rx_free(&rx[1]);
+                        ESP_LOGW(TAG, "TTS: double-buffer unavailable (%s); "
+                                 "sequential single-buffer path",
+                                 !s_pf_ready ? "no prefetch task"
+                                             : "second slot OOM");
+                        for (size_t i = 0; i < n; i++) {
+                            const char *chunk = arena + offs[i];
+                            /* Device-side hook the host voice verification
+                             * gate counts: one start/stop per chunk proves the
+                             * whole reply was queued and voiced. */
+                            ESP_LOGI(TAG, "voice chunk %u/%u: %.160s",
+                                     (unsigned)(i + 1), (unsigned)n, chunk);
+                            /* The chunk text is rendered INSIDE voice_speak,
+                             * exactly when that chunk's playback starts (not
+                             * when it is queued). */
+                            if (robodog_voice_speak(chunk) != ESP_OK) {
+                                /* TTS failed mid-queue: stop the rest. */
+                                rc = ESP_ERR_INVALID_STATE;
+                                break;
+                            }
+                        }
+                    } else {
+                        /* Double-buffer prefetch loop (gapless).  Chunk 1 is
+                         * fetched synchronously (nothing to overlap yet); each
+                         * subsequent chunk either plays straight from the slot
+                         * the prefetch finished into, or — on any lookahead
+                         * failure / timeout — falls back to a synchronous
+                         * fetch-then-play of EXACTLY that chunk. */
+                        int cur_slot = 0;
+                        const esp_err_t f1 = voice_speak_fetch_sync(
+                            arena + offs[0], &rx[0]);
+                        if (f1 != ESP_OK) {
+                            /* Chunk 1 fetch failed — the same fail-stop error
+                             * terminal as today; nothing has played yet. */
+                            rc = f1;
+                            robodog_ui_set_agent_state("error");
+                        } else {
+                            bool armed = false;
+                            for (size_t i = 1; i <= n && rc == ESP_OK; i++) {
+                                const char *chunk = arena + offs[i - 1];
+                                /* The host voice verification gate counts one
+                                 * `voice chunk i/n` per queued chunk — logged
+                                 * at PLAY time here, never by the prefetch
+                                 * task (prefetch logs avoid the gate regexes:
+                                 * no "TTS start"/"TTS stop"/"voice chunk"). */
+                                ESP_LOGI(TAG, "voice chunk %u/%u: %.160s",
+                                         (unsigned)i, (unsigned)n, chunk);
+                                robodog_voice_lookahead_begin_play(&la, i,
+                                                                   cur_slot);
+                                if (i < n) {
+                                    const int ns = robodog_voice_lookahead_claim(
+                                        &la, i + 1);
+                                    if (ns >= 0) {
+                                        s_pf_job = (voice_pf_job_t){
+                                            .chunk = arena + offs[i],
+                                            .index = i + 1,
+                                            .rx = &rx[ns],
+                                        };
+                                        armed = true;
+                                        xEventGroupSetBits(s_pf_evts,
+                                                           EVT_PF_JOB);
+                                    }
+                                }
+                                /* Plays chunk i (R5 render inside, at playback
+                                 * START) while the prefetch task (armed above)
+                                 * fetches chunk i+1 concurrently. */
+                                const esp_err_t perr = voice_speak_play(
+                                    chunk, &rx[cur_slot]);
+                                robodog_voice_lookahead_end_play(&la, i,
+                                                                 cur_slot);
+                                if (perr != ESP_OK) {
+                                    /* Mid-queue play failure: surface it, stop
+                                     * the rest (fail-stop unchanged). */
+                                    rc = ESP_ERR_INVALID_STATE;
+                                    break;
+                                }
+                                if (i < n) {
+                                    /* Wait for the lookahead fetch of i+1
+                                     * (bounded).  A correctly-sized chunk takes
+                                     * ~10-20 s to play vs ~1-3 s to fetch, so
+                                     * DONE is almost always already set; the
+                                     * bounded wait also covers a short chunk /
+                                     * slow network — correctness over
+                                     * gaplessness: fall back to sync
+                                     * fetch-then-play rather than skip. */
+                                    if (armed) {
+                                        xEventGroupWaitBits(
+                                            s_pf_evts, EVT_PF_DONE, pdTRUE,
+                                            pdFALSE, pdMS_TO_TICKS(PF_WAIT_MS));
+                                        /* The prefetch TASK only reports
+                                         * s_pf_result; the slot bookkeeping
+                                         * that prefetched() scans lives in the
+                                         * TURN-LOCAL `la` (robodog_voice_speak's
+                                         * stack), which the task cannot reach.
+                                         * So commit/fail MUST be called HERE,
+                                         * on the observing side, right after
+                                         * DONE — otherwise slot_ix is never
+                                         * populated and prefetched() returns
+                                         * -1 on every boundary, forcing each
+                                         * chunk through a redundant synchronous
+                                         * re-fetch: the exact ~1-3 s inter-
+                                         * chunk gap the prefetch exists to
+                                         * remove (GAP_VERIFY caught this). */
+                                        if (s_pf_result == ESP_OK) {
+                                            robodog_voice_lookahead_commit(&la);
+                                        } else {
+                                            robodog_voice_lookahead_fail(&la);
+                                        }
+                                        armed = false;
+                                    }
+                                    const int pslot =
+                                        robodog_voice_lookahead_prefetched(
+                                            &la, i + 1);
+                                    if (s_pf_result == ESP_OK && pslot >= 0) {
+                                        /* Gapless swap: chunk i+1 is already
+                                         * buffered in pslot. */
+                                        cur_slot = pslot;
+                                        ESP_LOGI(TAG,
+                                                 "prefetch chunk %u/%u ready "
+                                                 "(%u B)",
+                                                 (unsigned)(i + 1),
+                                                 (unsigned)n,
+                                                 (unsigned)rx[pslot].len);
+                                    } else {
+                                        /* Lookahead fetch failed or timed out:
+                                         * the EXACT synchronous fetch-then-play
+                                         * as today — chunk i+1 is NEVER
+                                         * skipped, reordered or pre-failed on
+                                         * a lookahead error.  Reuse this
+                                         * chunk's just-freed slot. */
+                                        cur_slot = (cur_slot == 0) ? 1 : 0;
+                                        ESP_LOGW(TAG,
+                                                 "prefetch chunk %u/%u failed "
+                                                 "(%s); sync fallback",
+                                                 (unsigned)(i + 1),
+                                                 (unsigned)n,
+                                                 esp_err_to_name(s_pf_result));
+                                        const esp_err_t f2 =
+                                            voice_speak_fetch_sync(
+                                                arena + offs[i],
+                                                &rx[cur_slot]);
+                                        if (f2 != ESP_OK) {
+                                            rc = ESP_ERR_INVALID_STATE;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        /* Teardown memory-safety (DESIGN.md R7 / invariant #4):
+                         * the prefetch task may still own s_pf_job (chunk ->
+                         * arena) or be mid-fetch into a slot rx.  ABORT-ack
+                         * BEFORE any free — set EVT_PF_ABORT and wait for the
+                         * task's DONE ack; only then free the arena/offs and
+                         * the slot buffers.  Never free a buffer the prefetch
+                         * task can touch. */
+                        robodog_voice_lookahead_abort(&la);
+                        if (s_pf_ready) {
+                            xEventGroupSetBits(s_pf_evts, EVT_PF_ABORT);
+                            xEventGroupWaitBits(s_pf_evts, EVT_PF_DONE, pdTRUE,
+                                                pdFALSE, portMAX_DELAY);
                         }
                     }
                 }
@@ -1079,6 +1366,23 @@ esp_err_t robodog_voice_init(void)
         vEventGroupDelete(s_voice_evts);
         s_voice_evts = NULL;
         return ESP_ERR_NO_MEM;
+    }
+    /* One-step TTS lookahead prefetch task + its DEDICATED event group (the
+     * turn loop ABORT-acks it before freeing buffers).  On failure the
+     * double-buffer path is simply disabled: the turn then always runs the
+     * synchronous single-buffer path (graceful, ordered, no regression). */
+    s_pf_ready = false;
+    s_pf_evts = xEventGroupCreate();
+    if (s_pf_evts == NULL) {
+        ESP_LOGW(TAG, "prefetch event group create failed; sequential path only");
+    } else if (xTaskCreate(voice_prefetch_task, "rd_voice_pf", PF_STACK,
+                           NULL, 3, &s_pf_task) != pdPASS) {
+        ESP_LOGW(TAG, "prefetch task create failed; sequential path only");
+        vEventGroupDelete(s_pf_evts);
+        s_pf_evts = NULL;
+    } else {
+        s_pf_ready = true;
+        ESP_LOGI(TAG, "TTS lookahead prefetch task ready (rd_voice_pf)");
     }
     (void)voice_init_boot_button();
     const esp_console_cmd_t cmd = {

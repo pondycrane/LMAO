@@ -21,6 +21,7 @@ used the bridge journal.  Same loud-skip convention as the hermes gate.
 """
 
 import argparse
+import contextlib
 import json
 import os
 import re
@@ -70,6 +71,38 @@ SILENCE = os.environ.get("E2E_AUDIO_SG", "sg audio -c")
 
 def log(msg):
     print(f"[e2e] {time.strftime('%H:%M:%S')} {msg}", flush=True)
+
+
+# ---------------------------------------------------------------------------
+# Board reset/panic sentinels (NO_RESET leg)
+# ---------------------------------------------------------------------------
+# Any console line matching these marks a board reset or heap/panic fault.  The
+# two console decoders (wait_for_log + collect_voice_chunks) feed every line
+# through note_panic(), so a mid-run reboot (rst:0x / Guru Meditation / the
+# DESIGN.md R7 tlsf heap corruption) is NAMED by the NO_RESET leg instead of
+# only failing whichever leg was mid-wait.
+PANIC_RE = re.compile(
+    r"rst:0x|Guru Meditation|assert failed|Backtrace|abort\\(\\)|tlsf|"
+    r"heap.corr|CORRUPT|StoreProhibited|LoadProhibited|Rebooting"
+)
+
+# Per-run accumulator: run_loop clears it at the start of every session and
+# converts it into the NO_RESET assert at the end.
+RUN_RESET_LINES = []
+
+
+def note_panic(ln):
+    if PANIC_RE.search(ln):
+        RUN_RESET_LINES.append(ln)
+        log(f"PANIC SENTINEL: {ln[:160]}")
+
+
+def set_no_reset(res):
+    if RUN_RESET_LINES:
+        res["asserts"]["NO_RESET"] = "FAIL " + RUN_RESET_LINES[0]
+    else:
+        res["asserts"]["NO_RESET"] = "PASS (no reset/panic markers)"
+    return res
 
 
 def shell_run(cmd, timeout=120):
@@ -276,6 +309,7 @@ def wait_for_log(s, patterns, timeout, label="", spill=None):
             while b"\n" in acc:
                 line, acc = acc.split(b"\n", 1)
                 ln = line.decode("utf-8", "replace").strip()
+                note_panic(ln)  # NO_RESET: reset/panic sentinel scan
                 for pat in patterns:
                     m = re.search(pat, ln)
                     if m:
@@ -297,15 +331,37 @@ def wait_for_log(s, patterns, timeout, label="", spill=None):
 CHUNK_RE = re.compile(r"voice chunk (\d+)/(\d+):\s*(.*)")
 TTS_START_RE = re.compile(r"TTS start")
 TTS_STOP_RE = re.compile(r"TTS stop")
+# ESP log timestamp prefix `I (123456)` where 123456 is MILLISECONDS of
+# uptime (measured on this device: a board 23 min from boot reads ~1,404,000).
+# Used to measure the inter-chunk gap (TTS stop(i) -> TTS start(i+1)): the
+# prefetch feature overlaps the next WAV fetch with the current playback, so
+# that gap collapses from the ~1-3 s Kokoro HTTP round-trip (fetch was on the
+# critical path BEFORE the fix) to a few ms (next WAV already buffered).
+ESP_TS_RE = re.compile(r"^[IWED] \((\d+)\)")
+# A prefetched chunk begins playback within ~a mixer-open of the previous stop
+# (<50 ms observed); anything past this means a synchronous fetch-then-play is
+# happening (prefetch NOT effective). Generous headroom above the observed ~ms
+# to stay robust against log-timestamp jitter.
+GAP_THRESHOLD_MS = 250
 # R3: the device logs `voice truncated: ...` (robodog_voice.c) when a reply
 # exceeds CONFIG_ROBODOG_VOICE_TTS_MAX_CHUNKS and its tail is dropped — the
 # turn is NOT a complete readout and the gate MUST fail on this marker.
 TRUNCATED_RE = re.compile(r"voice truncated")
+# Which TTS path the firmware actually took (diagnoses GAP_VERIFY): the
+# voice-split queue can run either through the lookahead prefetch (gapless
+# `prefetch chunk i+1 ready` swaps + few-ms gaps), or its per-chunk sync
+# fallback (`prefetch chunk i+1 failed ...; sync fallback` — the ~1-3 s fetch
+# still lands in the gap), or the whole turn on the sequential single-buffer
+# path (`double-buffer unavailable` at turn start).
+PF_READY_RE = re.compile(r"prefetch chunk \d+/\d+ ready")
+PF_FAIL_RE = re.compile(r"prefetch chunk \d+/\d+ failed")
+DBUFF_UNAVAIL_RE = re.compile(r"double-buffer unavailable")
 
 
 def collect_voice_chunks(s, timeout, seed=b""):
     """Scan the console while the chunk queue plays back.  Returns
-    (chunks, starts, stops, max_n, truncated):
+    (chunks, starts, stops, max_n, truncated, gaps, pf_ready, pf_fail,
+    dbl_unavail):
       chunks    maps chunk index i (1-based) to (n_total, text)
       starts/stops  count the `TTS start`/`TTS stop` brackets
       max_n     the ADVERTISED chunk total — the `voice chunk i/n` denominator
@@ -316,6 +372,16 @@ def collect_voice_chunks(s, timeout, seed=b""):
       truncated True when the device logged the `voice truncated:` marker —
                 the reply was too long for the queue cap and its tail was NOT
                 read out (R3).
+      gaps      list of inter-chunk playback gaps in MILLISECONDS:
+                TTS start(i+1) - TTS stop(i) from the ESP log timestamps (which
+                tick in ms).  Empty when no pair completed (or the first chunk
+                only).  With the lookahead prefetch active each gap is a few
+                ms; without it each gap is the ~1-3 s Kokoro fetch that ran on
+                the critical path between chunks.
+      pf_ready/pf_fail/dbl_unavail  counts of the console markers that say
+                which TTS path ran (`prefetch chunk i+1 ready` = gapless swap,
+                `prefetch chunk i+1 failed` = sync fallback per chunk,
+                `double-buffer unavailable` = whole turn on sequential path).
     Ends when EVERY advertised chunk 1..max_n is seen with its own start AND
     stop — i.e. the last `TTS stop` of a COMPLETE queue — or when `timeout`
     runs out (a truncated queue runs to timeout so the leg reports FAIL).
@@ -329,6 +395,9 @@ def collect_voice_chunks(s, timeout, seed=b""):
     starts = stops = 0
     max_n = 0
     truncated = False
+    gaps = []
+    last_stop_ms = None
+    pf_ready = pf_fail = dbl_unavail = 0
     while time.time() < deadline:
         data = s.read(8192)
         if data:
@@ -336,6 +405,7 @@ def collect_voice_chunks(s, timeout, seed=b""):
             while b"\n" in acc:
                 line, acc = acc.split(b"\n", 1)
                 ln = line.decode("utf-8", "replace").strip()
+                note_panic(ln)  # NO_RESET: reset/panic sentinel scan
                 m = CHUNK_RE.search(ln)
                 if m:
                     i, n = int(m.group(1)), int(m.group(2))
@@ -345,10 +415,28 @@ def collect_voice_chunks(s, timeout, seed=b""):
                 if TRUNCATED_RE.search(ln):
                     truncated = True
                     log("voice truncated marker seen (reply exceeds max chunks)")
-                if TTS_START_RE.search(ln):
+                if PF_READY_RE.search(ln):
+                    pf_ready += 1
+                if PF_FAIL_RE.search(ln):
+                    pf_fail += 1
+                if DBUFF_UNAVAIL_RE.search(ln):
+                    dbl_unavail += 1
+                ts = ESP_TS_RE.match(ln)
+                t_ms = int(ts.group(1)) if ts else None
+                if t_ms is not None and TTS_START_RE.search(ln):
+                    if last_stop_ms is not None:
+                        gaps.append(t_ms - last_stop_ms)
                     starts += 1
-                if TTS_STOP_RE.search(ln):
+                if t_ms is not None and TTS_STOP_RE.search(ln):
+                    last_stop_ms = t_ms
                     stops += 1
+                elif t_ms is None:
+                    # no timestamp parsed (e.g. app> prompt echo): still count
+                    # brackets so completeness checks stay robust
+                    if TTS_START_RE.search(ln):
+                        starts += 1
+                    if TTS_STOP_RE.search(ln):
+                        stops += 1
             if len(acc) > 65536:
                 acc = acc[-65536:]
         if (
@@ -358,7 +446,7 @@ def collect_voice_chunks(s, timeout, seed=b""):
             and stops >= max_n
         ):
             break
-    return chunks, starts, stops, max_n, truncated
+    return chunks, starts, stops, max_n, truncated, gaps, pf_ready, pf_fail, dbl_unavail
 
 
 def unescape_reply(escaped):
@@ -451,7 +539,11 @@ def capture_subtitle(s, artifacts):
 # One voice loop
 # ---------------------------------------------------------------------------
 def run_loop(n, instr, artifacts, voice_verify):
+    # Per-run console scan accumulator for the NO_RESET leg; cleared so a
+    # reset/panic seen in an earlier session cannot leak into this one.
+    RUN_RESET_LINES.clear()
     res = {"loop": n + 1, "asserts": {}, "artifacts": {"asr": "", "reply": ""}}
+    res["corpus"] = instr.get("transcript", instr.get("wav", ""))
     run_dir = artifacts / f"loop{n + 1}"
     run_dir.mkdir(parents=True, exist_ok=True)
     target_txt = instr["transcript"]
@@ -512,6 +604,7 @@ def run_loop(n, instr, artifacts, voice_verify):
             for k in skip:
                 res["asserts"][k] = "SKIP (no ASR -> no turn)"
             res["artifacts"]["reply"] = ""
+            set_no_reset(res)  # the scan may still have seen a reset/panic
             s.close()
             return res
 
@@ -541,6 +634,7 @@ def run_loop(n, instr, artifacts, voice_verify):
         ring_txt = ""
         chunks, starts, stops = {}, 0, 0
         max_n, truncated = 0, False
+        gaps, pf_ready, pf_fail, dbl_unavail = [], 0, 0, 0
         if voice_verify:
             # No separate `TTS start` wait: wait_for_log would CONSUME the
             # `voice chunk i/n` line that precedes each `TTS start`, making
@@ -551,10 +645,10 @@ def run_loop(n, instr, artifacts, voice_verify):
             # A fresh mic capture every turn: delete any previous speaker.wav
             # first so a capture_mic failure can never silently re-ASR a stale
             # capture from an earlier run (which produced a bogus FULL_READOUT).
-            try:
+            # SIM105: blank-except -> contextlib.suppress (a fresh mic capture
+            # every turn must never re-ASR a stale earlier capture).
+            with contextlib.suppress(Exception):
                 mic_path.unlink(missing_ok=True)
-            except Exception:
-                pass
             # The chunk queue plays the WHOLE reply as back-to-back chunks;
             # keep the test mic recording in the BACKGROUND for the full
             # reply window while the console scanner below collects every
@@ -572,7 +666,7 @@ def run_loop(n, instr, artifacts, voice_verify):
                     cap_done.set()
 
             threading.Thread(target=_cap, daemon=True).start()
-            chunks, starts, stops, max_n, truncated = collect_voice_chunks(
+            chunks, starts, stops, max_n, truncated, gaps, pf_ready, pf_fail, dbl_unavail = collect_voice_chunks(
                 s, REPLY_TIMEOUT, seed=leftover
             )
             # The re-ASR below reads the WHOLE captured WAV, so wait for the
@@ -660,6 +754,43 @@ def run_loop(n, instr, artifacts, voice_verify):
                 res["asserts"]["CHUNKED_QUEUE"] = (
                     "FAIL (no `voice chunk i/n` logs — the queue did not run)"
                 )
+            # GAP_VERIFY: the feature's actual effect is the COLLAPSED gap
+            # between chunks.  On the pre-fix code each TTS stop(i) was
+            # followed by the blocking Kokoro fetch of chunk(i+1), so the
+            # stop->start gap was ~1-3 s; with the lookahead prefetch the next
+            # WAV is already buffered and the gap is a few ms.  Measured from
+            # the ESP log timestamps.
+            if gaps:
+                gap_ms = [round(g, 1) for g in gaps]
+                res["artifacts"]["chunk_gaps_ms"] = gap_ms
+                gstr = " ".join(f"{g:.1f}ms" for g in gap_ms)
+                # Which TTS path actually ran — from the console markers — so
+                # a FAIL pinpoints WHY the gap is large instead of guessing.
+                if dbl_unavail:
+                    path = f"sequential single-buffer path (double-buffer unavailable)"
+                elif pf_fail:
+                    path = f"{pf_fail} sync-fallback fetch(es) in the play gap"
+                elif pf_ready:
+                    path = f"{pf_ready} gapless prefetch swap(s)"
+                else:
+                    path = "no path markers on console"
+                if all(0 <= g < GAP_THRESHOLD_MS for g in gap_ms):
+                    res["asserts"]["GAP_VERIFY"] = (
+                        f"PASS inter-chunk stop->start gaps {gstr} "
+                        f"(all < {GAP_THRESHOLD_MS}ms = prefetch active; "
+                        f"pre-fix these were the ~1-3 s fetch on the critical path; {path})"
+                    )
+                else:
+                    res["asserts"]["GAP_VERIFY"] = (
+                        f"FAIL inter-chunk stop->start gaps {gstr} — "
+                        f"gap(s) >= {GAP_THRESHOLD_MS}ms mean a synchronous "
+                        f"fetch ran between chunks (lookahead prefetch NOT "
+                        f"taking effect; {path})"
+                    )
+            else:
+                res["asserts"]["GAP_VERIFY"] = (
+                    "SKIP (no inter-chunk stop->start pair captured)"
+                )
             # FULL_READOUT: the reply's LAST words must appear in the mic
             # capture — the read-out reached the reply's end, nothing was cut
             # off.  `reply` is the line-safe full text (R1), so tail_tokens
@@ -720,6 +851,7 @@ def run_loop(n, instr, artifacts, voice_verify):
                 res["asserts"]["SUBTITLE"] = "FAIL " + (sub_err or "blank readback")
             res["artifacts"]["subtitle"] = sub_txt
     finally:
+        set_no_reset(res)
         s.close()
     return res
 
@@ -730,6 +862,16 @@ def main():
         "--corpus",
         default="capabilities",
         help="corpus slug to voice-drive (corpus.json); default 'capabilities'",
+    )
+    ap.add_argument(
+        "--corpus-cycle",
+        metavar="SLUGS",
+        default=None,
+        help="cycle the voice-driven question per loop so no two consecutive "
+        "sessions ask the same question: 'auto' = "
+        "time,joke,greeting,capabilities,count, or an explicit comma-"
+        "separated slug list.  Default (unset) = today's single-corpus "
+        "behavior (--corpus) so the regular gate invocations are unchanged.",
     )
     ap.add_argument("--artifacts", default=str(Path.home() / "artifacts"))
     ap.add_argument(
@@ -766,8 +908,27 @@ def main():
         sys.exit(f"unknown corpus slug '{args.corpus}': {sorted(man)}")
     instr = man[args.corpus]
 
+    # --corpus-cycle: consecutive sessions ask DIFFERENT questions (cycle
+    # length 5 > 1).  Unset -> single-corpus behavior (gates unchanged).
+    cyc = None
+    if args.corpus_cycle:
+        raw = args.corpus_cycle
+        slugs = (
+            ["time", "joke", "greeting", "capabilities", "count"]
+            if raw.strip().lower() == "auto"
+            else [s.strip() for s in raw.split(",") if s.strip()]
+        )
+        if not slugs:
+            sys.exit("--corpus-cycle: empty slug list")
+        unknown = [s for s in slugs if s not in man]
+        if unknown:
+            sys.exit(f"unknown --corpus-cycle slugs {unknown}: {sorted(man)}")
+        cyc = slugs
+        log(f"corpus cycle: {', '.join(cyc)} across {N_RUNS} runs")
+
     results = []
     for i in range(N_RUNS):
+        instr = man[cyc[i % len(cyc)]] if cyc else man[args.corpus]
         r = run_loop(i, instr, artifacts, voice_verify)
         results.append(r)
         for k, v in r["asserts"].items():
@@ -785,11 +946,16 @@ def main():
         f"# {title}\n",
         f"Generated: {time.strftime('%Y-%m-%d %H:%M')}",
         f"Board: {DETECTED_PORT}",
-        f"Corpus: {args.corpus} ({instr['transcript']!r})",
-        f"Runs: {N_RUNS}\n",
     ]
+    lines.append(
+        f"Corpus: CYCLE[{', '.join(cyc)}] pooled across {N_RUNS} runs"
+        if cyc
+        else f"Corpus: {args.corpus} ({instr['transcript']!r})"
+    )
+    lines.append(f"Runs: {N_RUNS}\n")
     for r in results:
         lines.append(f"## loop {r['loop']}")
+        lines.append(f"- Corpus: {r.get('corpus', '')!r}")
         for k, v in r["asserts"].items():
             lines.append(f"- **{k}**: {v}")
         lines.append(f"- ASR verbatim: {r['artifacts'].get('asr', '')!r}")
@@ -800,9 +966,9 @@ def main():
         return v is not None and (v.startswith("PASS") or v.startswith("SKIP"))
 
     keys = (
-        ("OPEN_SESSION", "ASR_MATCH", "REPLY", "TTS", "CHUNKED_QUEUE", "FULL_READOUT")
+        ("OPEN_SESSION", "ASR_MATCH", "REPLY", "TTS", "CHUNKED_QUEUE", "FULL_READOUT", "NO_RESET")
         if voice_verify
-        else ("OPEN_SESSION", "ASR_MATCH", "REPLY", "TTS", "RING", "SUBTITLE")
+        else ("OPEN_SESSION", "ASR_MATCH", "REPLY", "TTS", "RING", "SUBTITLE", "NO_RESET")
     )
 
     def passed(r):
@@ -826,9 +992,13 @@ def main():
         "# RoboDog ESP-Claw Voice-Loop E2E — Hardware Evidence\n",
         f"Generated: {time.strftime('%Y-%m-%d %H:%M')}",
         f"Board: {DETECTED_PORT}  (Waveshare ESP32-S3 RLCD-4.2, 0x303A:0x1001)",
-        f"Corpus: {args.corpus} ({instr['transcript']!r})",
-        f"Runs: {N_RUNS}\n",
     ]
+    brief.append(
+        f"Corpus: CYCLE[{', '.join(cyc)}] pooled across {N_RUNS} runs"
+        if cyc
+        else f"Corpus: {args.corpus} ({instr['transcript']!r})"
+    )
+    brief.append(f"Runs: {N_RUNS}\n")
     for r in results:
         for k, v in r["asserts"].items():
             brief.append(f"- **{k}**: {v}")

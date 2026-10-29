@@ -24,7 +24,9 @@
 #include "voice_md.h"
 
 /* ── tiny harness ───────────────────────────────────────────────────────── */
-static int s_failures = 0;
+/* Non-static so test_voice_lookahead.c (R9 double-buffer exchange) asserts
+ * against the SAME counter and the shared main() reflects its failures. */
+int s_failures = 0;
 
 #define CHECK(cond, fmt, ...)                                                  \
     do {                                                                       \
@@ -307,6 +309,16 @@ static void test_md_strip(void)
           "truncated to cap-1: '%s' (n=%zu)", out, n);
 }
 
+/* ── R9: voice_lookahead (one-step TTS double-buffer exchange) ────────── */
+/* Defined in test_voice_lookahead.c (same translation unit set / cc_test),
+ * sharing this harness's s_failures counter. */
+extern void test_lookahead_exactly_one(void);
+extern void test_lookahead_strict_order(void);
+extern void test_lookahead_no_double_claim_playing(void);
+extern void test_lookahead_fail_abort(void);
+extern void test_lookahead_full_turn(void);
+extern void test_lookahead_single_chunk(void);
+
 /* ── main ───────────────────────────────────────────────────────────────── */
 
 int main(void)
@@ -317,6 +329,12 @@ int main(void)
     test_transcript_join();
     test_transcript_cap_keep();
     test_md_strip();
+    test_lookahead_exactly_one();
+    test_lookahead_strict_order();
+    test_lookahead_no_double_claim_playing();
+    test_lookahead_fail_abort();
+    test_lookahead_full_turn();
+    test_lookahead_single_chunk();
 
     if (s_failures != 0) {
         fprintf(stderr, "test_voice_split: %d FAILURE(S)\n", s_failures);
