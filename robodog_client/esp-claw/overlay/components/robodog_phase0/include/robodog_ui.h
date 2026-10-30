@@ -67,6 +67,9 @@ void robodog_ui_append_assistant(const char *text);
  *        "idle" / "listening" / "processing" / "responding" / "error".
  */
 void robodog_ui_set_agent_state(const char *state);
+/* Show the conversation session's friendly name (or short id) centered in the
+ * top status bar.  Thread-safe: enqueued to the UI task. */
+void robodog_ui_set_session(const char *name);
 
 #ifdef __cplusplus
 }
