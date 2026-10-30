@@ -57,6 +57,7 @@ typedef enum {
     UI_CMD_ASSISTANT,
     UI_CMD_ASSISTANT_APPEND,
     UI_CMD_STATE,
+    UI_CMD_SESSION,
 } ui_cmd_type_t;
 
 typedef struct {
@@ -80,12 +81,14 @@ static TaskHandle_t s_ui_task;
 static lv_display_t *s_disp;
 
 static lv_obj_t *s_status_label;
+static lv_obj_t *s_session_label;
 static lv_obj_t *s_state_label;
 static lv_obj_t *s_body_scroller;
 static lv_obj_t *s_body_label;
 
 static char s_status_text[96];
 static char s_agent_state[16];
+static char s_session_text[64];   /* centered top-bar: friendly name / short id */
 static char s_transcript[2048];      /* current exchange, newest last */
 static char s_last_user[480];        /* latest user prompt (for the exchange reset) */
 static char s_assistant[2048];       /* current turn's assistant reply, accumulated
@@ -150,6 +153,13 @@ static void ui_refresh_status_locked(void)
         const char *st = s_agent_state[0] ? s_agent_state : "idle";
         if (strcmp(lv_label_get_text(s_state_label), st) != 0) {
             lv_label_set_text(s_state_label, st);
+        }
+    }
+    /* Centered conversation-session name / short id. */
+    if (s_session_label != NULL) {
+        const char *ss = s_session_text[0] ? s_session_text : "\u2026";
+        if (strcmp(lv_label_get_text(s_session_label), ss) != 0) {
+            lv_label_set_text(s_session_label, ss);
         }
     }
 }
@@ -242,7 +252,7 @@ static esp_err_t ui_build_screen(void)
     ESP_RETURN_ON_FALSE(s_status_label != NULL, ESP_ERR_NO_MEM, TAG,
                         "create status label failed");
     lv_obj_set_pos(s_status_label, UI_PAD, 4);
-    lv_obj_set_width(s_status_label, UI_PANEL_W - 2 * UI_PAD - 130);
+    lv_obj_set_width(s_status_label, 90);
     lv_obj_set_style_text_align(s_status_label, LV_TEXT_ALIGN_LEFT, 0);
     /* Force white paper + black ink at the LABEL level, independent of any
      * theme: an opaque white label background with pure-black text.  (The
@@ -253,6 +263,21 @@ static esp_err_t ui_build_screen(void)
     lv_obj_set_style_text_color(s_status_label, lv_color_black(), 0);
     lv_obj_set_style_text_font(s_status_label, &lv_font_montserrat_16, 0);
     ui_refresh_status_locked();
+
+    /* Centered conversation-session name / short id (top-middle, between the
+     * WiFi-left and the voice-state-right).  Set via robodog_session once a
+     * title exists, or by the session's short id before the first question. */
+    s_session_label = lv_label_create(scr);
+    ESP_RETURN_ON_FALSE(s_session_label != NULL, ESP_ERR_NO_MEM, TAG,
+                        "create session label failed");
+    lv_obj_set_pos(s_session_label, (UI_PANEL_W - 170) / 2, 4);
+    lv_obj_set_width(s_session_label, 170);
+    lv_obj_set_style_text_align(s_session_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_bg_color(s_session_label, lv_color_white(), 0);
+    lv_obj_set_style_bg_opa(s_session_label, LV_OPA_COVER, 0);
+    lv_obj_set_style_text_color(s_session_label, lv_color_black(), 0);
+    lv_obj_set_style_text_font(s_session_label, &lv_font_montserrat_16, 0);
+    lv_label_set_text(s_session_label, "\u2026");
 
     /* Right-aligned live voice/agent state indicator (idle / listening /
      * processing / responding / error), black-on-white like the rest. */
@@ -406,6 +431,9 @@ static void ui_process_cmd(const ui_cmd_t *cmd)
     case UI_CMD_STATE:
         ui_ascii_copy(s_agent_state, sizeof(s_agent_state), cmd->state);
         break;
+    case UI_CMD_SESSION:
+        ui_ascii_copy(s_session_text, sizeof(s_session_text), cmd->text);
+        break;
     }
     ui_refresh_status_locked();
     ui_flush_locked();
@@ -537,4 +565,9 @@ void robodog_ui_append_assistant(const char *text)
 void robodog_ui_set_agent_state(const char *state)
 {
     ui_enqueue(UI_CMD_STATE, NULL, state);
+}
+
+void robodog_ui_set_session(const char *name)
+{
+    ui_enqueue(UI_CMD_SESSION, name, NULL);
 }

@@ -42,6 +42,7 @@
 
 #include "claw_agent_mgr.h"
 #include "claw_core.h"
+#include "robodog_session.h"
 #include "audio_hub.h"
 #include "wifi_manager.h"
 #include "esp_codec_dev.h"
@@ -72,6 +73,7 @@ static const char *TAG = "robodog_voice";
 #define TTS_WRITE_STALL_LIMIT 20U
 
 #define EVT_LISTEN            BIT0
+#define EVT_RESET             BIT1  /* long-press middle button: clear session */
 #define VOICE_STACK           8192
 
 /* One-step TTS lookahead prefetch (see voice_lookahead.[ch]).  While chunk i
@@ -915,6 +917,10 @@ static void voice_turn(void)
      * flight; the reply is appended when it finalizes (stale-caption safe). */
     robodog_ui_show_user(text);
 
+    /* Auto-title the conversation session from the FIRST question (friendly
+     * name for the top-middle RLCD label); a no-op once a title exists. */
+    robodog_session_note_question(text);
+
     uint32_t request_id = 0;
     /* Voice-scoped format directive at the ONE seam we control.  The shared
      * base prompt is upstream-owned and IM-oriented (it nudges the model
@@ -943,7 +949,9 @@ static void voice_turn(void)
     memcpy(agent_input + vlen, text, tlen + 1);
     free(text);
     esp_err_t err = claw_agent_mgr_start_root_run_text(
-        agent_input, NULL, 0, CONFIG_ROBODOG_LLM_TIMEOUT_MS, &request_id);
+        agent_input,
+        robodog_session_id()[0] ? robodog_session_id() : NULL,
+        0, CONFIG_ROBODOG_LLM_TIMEOUT_MS, &request_id);
     free(agent_input);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "start_root_run_text failed: %s", esp_err_to_name(err));
@@ -1282,7 +1290,13 @@ static void voice_turn(void)
  * one voice task wakes for both. */
 #define BOOT_BUTTON_GPIO GPIO_NUM_0
 #define BOOT_BUTTON_DEBOUNCE_US 300000UL
+#define BOOT_BUTTON_LONG_PRESS_US 1500000UL /* hold >= 1.5 s -> clear session */
 
+static uint64_t s_press_start_us; /* set on NEGEDGE, compared on POSEDGE (ISR-only) */
+
+/* ANYEDGE ISR: a short tap (release < LONG_PRESS) starts a voice turn
+ * (EVT_LISTEN, same as the `rd_listen` console command); a hold >= 1.5 s
+ * clears/resets the conversation session (EVT_RESET, fresh id). */
 static void IRAM_ATTR boot_button_isr(void *arg)
 {
     (void)arg;
@@ -1292,9 +1306,17 @@ static void IRAM_ATTR boot_button_isr(void *arg)
         return;
     }
     s_last_us = now;
+    const uint32_t level = gpio_get_level(BOOT_BUTTON_GPIO);
     BaseType_t hpw = pdFALSE;
-    if (s_voice_evts != NULL) {
-        xEventGroupSetBitsFromISR(s_voice_evts, EVT_LISTEN, &hpw);
+    if (level == 0) {
+        /* pressed (active-low): arm the press-start timestamp */
+        s_press_start_us = now;
+    } else if (s_voice_evts != NULL) {
+        /* released: branch on the held duration */
+        const bool long_press =
+            (now - s_press_start_us) >= BOOT_BUTTON_LONG_PRESS_US;
+        xEventGroupSetBitsFromISR(s_voice_evts,
+                                  long_press ? EVT_RESET : EVT_LISTEN, &hpw);
     }
     if (hpw) {
         portYIELD_FROM_ISR(hpw);
@@ -1309,7 +1331,7 @@ static esp_err_t voice_init_boot_button(void)
         .mode = GPIO_MODE_INPUT,
         .pull_up_en = GPIO_PULLUP_ENABLE,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_NEGEDGE,
+        .intr_type = GPIO_INTR_ANYEDGE,
     };
     gpio_config(&io);
     esp_err_t err = gpio_install_isr_service(ESP_INTR_FLAG_LOWMED);
@@ -1321,8 +1343,8 @@ static esp_err_t voice_init_boot_button(void)
         ESP_LOGW(TAG, "BOOT button ISR add failed: %s", esp_err_to_name(err));
         return err;
     }
-    ESP_LOGI(TAG, "BOOT button armed on GPIO%d -> rd_listen (push to talk)",
-             BOOT_BUTTON_GPIO);
+    ESP_LOGI(TAG, "BOOT button armed on GPIO%d (tap = talk, 1.5 s hold = "
+                  "clear session)", BOOT_BUTTON_GPIO);
 #else
     ESP_LOGI(TAG, "BOOT button disabled (CONFIG_ROBODOG_VOICE_BOOT_BUTTON=n)");
 #endif
@@ -1333,8 +1355,16 @@ static void voice_task(void *arg)
 {
     (void)arg;
     for (;;) {
-        xEventGroupWaitBits(s_voice_evts, EVT_LISTEN, pdTRUE /* clear */,
-                            pdFALSE, portMAX_DELAY);
+        const EventBits_t bits = xEventGroupWaitBits(
+            s_voice_evts, EVT_LISTEN | EVT_RESET, pdTRUE /* clear */, pdFALSE,
+            portMAX_DELAY);
+        if (bits & EVT_RESET) {
+            /* Long-press: clear the conversation session (fresh id).  Does
+             * not start a listen. */
+            ESP_LOGI(TAG, "RD_SESSION_RESET -> new session");
+            robodog_session_reset();
+            continue;
+        }
         ESP_LOGI(TAG, "RD_LISTEN -> voice turn");
         voice_turn();
     }
@@ -1355,12 +1385,28 @@ static int cmd_rd_listen(int argc, char **argv)
     return 0;
 }
 
+static int cmd_rd_session(int argc, char **argv)
+{
+    if (argc > 1 && strcmp(argv[1], "reset") == 0) {
+        robodog_session_reset();
+        ESP_LOGI(TAG, "rd_session reset -> %s", robodog_session_id());
+        return 0;
+    }
+    ESP_LOGI(TAG, "session id=%s title=\"%s\"",
+             robodog_session_id(), robodog_session_title());
+    return 0;
+}
+
 esp_err_t robodog_voice_init(void)
 {
     s_voice_evts = xEventGroupCreate();
     if (s_voice_evts == NULL) {
         return ESP_ERR_NO_MEM;
     }
+    /* Persistent conversation session: load the NVS id+title (or mint a fresh
+     * id) and show it top-middle on the RLCD.  Failure (NVS down) just means
+     * a RAM-only id this boot. */
+    (void)robodog_session_init();
     if (xTaskCreate(voice_task, "robodog_voice", VOICE_STACK, NULL, 5,
                     &s_voice_task) != pdPASS) {
         vEventGroupDelete(s_voice_evts);
@@ -1400,6 +1446,14 @@ esp_err_t robodog_voice_init(void)
     };
     if (esp_console_cmd_register(&diag) != ESP_OK) {
         ESP_LOGW(TAG, "failed to register 'rd_audio_diag' console command");
+    }
+    const esp_console_cmd_t sess = {
+        .command = "rd_session",
+        .help = "show the conversation session; 'rd_session reset' clears it",
+        .func = &cmd_rd_session,
+    };
+    if (esp_console_cmd_register(&sess) != ESP_OK) {
+        ESP_LOGW(TAG, "failed to register 'rd_session' console command");
     }
     ESP_LOGI(TAG, "RoboDog Phase 2 voice loop ready: rd_listen");
     return ESP_OK;
