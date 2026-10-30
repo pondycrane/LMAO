@@ -60,7 +60,13 @@ extern "C" {
 /* Fixed-buffer sizes (character byte caps, NUL not counted in these macros). */
 #define LMA_PB_CAL_ID_MAX    31u
 #define LMA_PB_PARTICIPANT_MAX 31u  /* kid name; empty == family (no filter) */
-#define LMA_PB_EVENT_UID_MAX  63u
+/* 63 was NOT enough: Google Calendar recurring-instance uids are
+ * <base>_YYYYMMDDTHHMMSSZ and real bases reach ~57 chars (74 total), so two
+ * instances truncated to the SAME 63-char prefix and cache_apply merged them
+ * — the later instance overwrote the earlier one, silently dropping the
+ * headline event (and its served pic_data) from the panel.  127 covers the
+ * observed maximum with headroom. */
+#define LMA_PB_EVENT_UID_MAX  127u
 #define LMA_PB_EVENT_TITLE_MAX 127u
 #define LMA_PB_EVENT_NOTES_MAX 255u
 #define LMA_PB_EVENT_PIC_MAX   31u
