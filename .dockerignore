@@ -17,3 +17,6 @@ Dockerfile
 rust-client/
 smart_irrigation/
 rnode_firmware/
+robodog_client/
+# Generated graphify output — not server code.
+graphify-out/
