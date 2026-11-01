@@ -9,9 +9,14 @@
  *                     (participant empty == no filter / family mode)
  *   CalEvent        { string uid = 1;  string title = 2;  string notes = 3;
  *                     uint64 start_ms = 4;  uint64 end_ms = 5;
- *                     bool deleted = 6;  string pic = 7; }
+ *                     bool deleted = 6;  string pic = 7;
+ *                     bytes pic_data = 8;  Weather weather = 9; }
  *   CalendarBundle  { uint32 format = 1;  string calendar_id = 2;
- *                     repeated CalEvent events = 3;  uint64 watermark_ms = 4; }
+ *                     repeated CalEvent events = 3;  uint64 watermark_ms = 4;
+ *                     Weather current = 5; }
+ *   Weather         { sint32 temp_c10 = 1;  uint32 code = 2; }
+ *                     (temp in tenths of degC, zigzag on the wire; code is the
+ *                      WMO 4677 weather code; absent message == no forecast)
  *
  * Deliberately dependency-free (no malloc, no strings heap, no lwip): strings
  * land in fixed-size buffers, so this file builds and self-tests on a bare
@@ -40,6 +45,7 @@ extern "C" {
 #define LMA_PB_BUNDLE_CALID  2u /* CalendarBundle.calendar_id string          */
 #define LMA_PB_BUNDLE_EVENT  3u /* CalendarBundle.events      repeated CalEvent */
 #define LMA_PB_BUNDLE_WM     4u /* CalendarBundle.watermark_ms varint uint64  */
+#define LMA_PB_BUNDLE_CURRENT 5u /* CalendarBundle.current Weather (conditions now) */
 
 #define LMA_PB_EV_UID     1u /* CalEvent.uid      string          */
 #define LMA_PB_EV_TITLE   2u /* CalEvent.title    string          */
@@ -49,6 +55,13 @@ extern "C" {
 #define LMA_PB_EV_DELETED 6u /* CalEvent.deleted  varint bool     */
 #define LMA_PB_EV_PIC     7u /* CalEvent.pic      string          */
 #define LMA_PB_EV_PICDATA 8u /* CalEvent.pic_data bytes (1bpp tile) */
+#define LMA_PB_EV_WEATHER 9u /* CalEvent.weather Weather (forecast at start_ms) */
+
+/* Weather submessage (proto/lma_messages.proto).  Field numbers must not
+ * drift: the server fills CalendarBundle.current and CalEvent.weather from
+ * Open-Meteo (lma_core/weather.py). */
+#define LMA_PB_WX_TEMP 1u /* Weather.temp_c10 sint32 (zigzag) tenths of degC */
+#define LMA_PB_WX_CODE 2u /* Weather.code     uint32 WMO 4677 weather code   */
 
 /* RLCD image contract (see lma_core/calendar_pics.py): 144x144 1-bit (the
  * whole line drawing), row-major, MSB first, bit 1 = ink.  2592 bytes.  The
@@ -92,6 +105,16 @@ typedef struct {
     char participant[LMA_PB_PARTICIPANT_MAX + 1];
 } lma_cal_request_t;
 
+/* One weather reading.  `present` distinguishes "server sent a forecast"
+ * from "no forecast for this slot" (weather disabled, or an event beyond the
+ * forecast horizon) -- an absent Weather renders NOTHING on the panel, never
+ * a placeholder 0 degC. */
+typedef struct {
+    int32_t temp_c10;  /* tenths of a degree Celsius (may be negative) */
+    uint32_t code;     /* WMO 4677 weather code (0 = clear .. 99 = storm) */
+    bool present;      /* a Weather message was decoded for this slot */
+} lma_weather_t;
+
 typedef struct {
     char uid[LMA_PB_EVENT_UID_MAX + 1];
     char title[LMA_PB_EVENT_TITLE_MAX + 1];
@@ -102,6 +125,7 @@ typedef struct {
     char pic[LMA_PB_EVENT_PIC_MAX + 1]; /* icon-pack key, "" = none */
     uint8_t pic_data[LMA_PB_PIC_TILE_BYTES]; /* 1bpp 144x144 image (XBM) */
     size_t pic_data_len;  /* 0 = no image served */
+    lma_weather_t weather; /* forecast at start_ms (present == false -> none) */
 } lma_cal_event_t;
 
 typedef struct {
@@ -110,6 +134,7 @@ typedef struct {
     lma_cal_event_t events[LMA_PB_EVENT_MAX];
     size_t event_count;
     uint64_t watermark_ms; /* server pre-read watermark; use as next since_ms */
+    lma_weather_t current; /* conditions at reply time (present == false -> none) */
 } lma_cal_bundle_t;
 
 /* Build an all-default request: "" calendar_id, since 0, max 0, i.e. the
@@ -124,7 +149,7 @@ int lma_proto_req_encode(const lma_cal_request_t *req, uint8_t *buf, size_t cap)
 /* Round-trip / host-test decoder for the request; returns 1 on success. */
 int lma_proto_req_decode(const uint8_t *data, size_t len, lma_cal_request_t *out);
 
-/* Zero a bundle (all strings "", no events, format/watermark 0). */
+/* Zero a bundle (all strings "", no events, format/watermark 0, no weather). */
 void lma_proto_bundle_init(lma_cal_bundle_t *out);
 
 /* Decode a CalendarBundle payload; returns 1 on success, 0 on malformed or

@@ -20,3 +20,12 @@ CONFIG_ESP_WIFI_ENABLED=y
 
 # Allow light-sleep frequency scaling between calendar syncs.
 CONFIG_PM_ENABLE=y
+
+# The main task runs the whole display loop: WiFi connect, the framed-TCP
+# calendar sync (lwIP getaddrinfo + esp_log formatting), the u8g2 render and
+# the 15200-byte RD_SHOT printf dump.  The IDF default (3584 B) overflowed as
+# soon as the weather band/forecast slot added a few dozen more locals to
+# render_screen — the panel reset-looped right after getting an IP.  8 KB gives
+# the sync+render+dump chain room to spare (the boot log prints the high-water
+# mark so the headroom is observable, not assumed).
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192

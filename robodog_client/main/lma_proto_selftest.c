@@ -29,6 +29,14 @@ static void wvar(wbuf *w, uint64_t v)
     } while (v);
 }
 
+/* protobuf sint32 zigzag: (n << 1) ^ (n >> 31), computed without shifting a
+ * negative int (UB). */
+static void wvar_zigzag32(wbuf *w, int32_t v)
+{
+    const uint32_t u = (uint32_t)v;
+    wvar(w, (u << 1) ^ ((u & 0x80000000u) ? 0xFFFFFFFFu : 0u));
+}
+
 static void wfield_var(wbuf *w, uint32_t fld, uint64_t v)
 {
     wvar(w, ((uint64_t)fld << 3) | 0u);
@@ -184,6 +192,108 @@ static int test_bundle_decode(void)
     return 0;
 }
 
+/* Weather submessage: CalendarBundle.current (field 5) + CalEvent.weather
+ * (field 9).  This is the wire the server fills from Open-Meteo, so the
+ * decode must survive zigzag-negative temperatures and absent slots. */
+static int test_weather_decode(void)
+{
+    int passed = 0;
+    wbuf cur = {{0}, 0}, ev1 = {{0}, 0}, ev2 = {{0}, 0}, w = {{0}, 0};
+
+    /* current: -2.5 degC (zigzag 49) and WMO 71 (snow). */
+    wvar(&cur, ((uint64_t)LMA_PB_WX_TEMP << 3) | 0u);
+    wvar_zigzag32(&cur, -25);
+    wfield_var(&cur, LMA_PB_WX_CODE, 71);
+
+    /* event 1 carries a forecast (4.6 degC clear); event 2 carries none. */
+    wfield_ld(&ev1, LMA_PB_EV_UID, "ev-wx");
+    wfield_var(&ev1, LMA_PB_EV_START, 1700000000000ULL);
+    {
+        wbuf wx = {{0}, 0};
+        wfield_var(&wx, LMA_PB_WX_CODE, 0);
+        /* temp_c10 = 46 -> zigzag 92 */
+        wfield_var(&wx, LMA_PB_WX_TEMP, 92);
+        wfield_msg(&ev1, LMA_PB_EV_WEATHER, &wx);
+    }
+    wfield_ld(&ev2, LMA_PB_EV_UID, "ev-nowx");
+
+    wfield_var(&w, LMA_PB_BUNDLE_FORMAT, 1);
+    wfield_msg(&w, LMA_PB_BUNDLE_EVENT, &ev1);
+    wfield_msg(&w, LMA_PB_BUNDLE_EVENT, &ev2);
+    wfield_msg(&w, LMA_PB_BUNDLE_CURRENT, &cur);
+
+    lma_cal_bundle_t b;
+    CHECK(lma_proto_bundle_decode(w.b, w.n, &b) == 1);
+    CHECK(b.event_count == 2);
+
+    CHECK(b.current.present == true);
+    CHECK(b.current.temp_c10 == -25);   /* zigzag negative round-trips */
+    CHECK(b.current.code == 71);
+
+    CHECK(b.events[0].weather.present == true);
+    CHECK(b.events[0].weather.temp_c10 == 46);
+    CHECK(b.events[0].weather.code == 0);
+
+    /* An event without a Weather message must read as "no forecast" -- not as
+     * a 0 degC/clear reading. */
+    CHECK(b.events[1].weather.present == false);
+    CHECK(b.events[1].weather.temp_c10 == 0);
+    CHECK(b.events[1].weather.code == 0);
+
+    /* A Weather carrying only a code still marks the slot as present. */
+    {
+        wbuf wx = {{0}, 0}, ev3 = {{0}, 0}, w3 = {{0}, 0};
+        wfield_var(&wx, LMA_PB_WX_CODE, 95);
+        wfield_ld(&ev3, LMA_PB_EV_UID, "ev-code");
+        wfield_msg(&ev3, LMA_PB_EV_WEATHER, &wx);
+        wfield_msg(&w3, LMA_PB_BUNDLE_EVENT, &ev3);
+        lma_cal_bundle_t b3;
+        CHECK(lma_proto_bundle_decode(w3.b, w3.n, &b3) == 1);
+        CHECK(b3.events[0].weather.present == true);
+        CHECK(b3.events[0].weather.code == 95);
+        CHECK(b3.events[0].weather.temp_c10 == 0);
+    }
+
+    /* Unknown fields inside Weather are skipped (forward compatibility). */
+    {
+        wbuf wx = {{0}, 0}, w4 = {{0}, 0};
+        wfield_var(&wx, LMA_PB_WX_CODE, 3);
+        wfield_var(&wx, 9u, 1234);       /* unknown varint inside Weather */
+        emit_unknown_fixed32(&wx, 7u);   /* unknown fixed32 inside Weather */
+        wfield_msg(&w4, LMA_PB_BUNDLE_CURRENT, &wx);
+        lma_cal_bundle_t b4;
+        CHECK(lma_proto_bundle_decode(w4.b, w4.n, &b4) == 1);
+        CHECK(b4.current.present == true);
+        CHECK(b4.current.code == 3);
+    }
+
+    /* Truncated Weather payloads must be rejected, never half-applied. */
+    {
+        uint8_t bad[4] = {0x2A, 0x03, 0x08, 0x80}; /* current, len 3, truncated */
+        lma_cal_bundle_t t;
+        CHECK(lma_proto_bundle_decode(bad, sizeof(bad), &t) == 0);
+    }
+    {
+        uint8_t bad2[3] = {0x2A, 0x05, 0x08}; /* current claims 5 bytes, 1 given */
+        lma_cal_bundle_t t;
+        CHECK(lma_proto_bundle_decode(bad2, sizeof(bad2), &t) == 0);
+    }
+
+    /* Every prefix of the weather-bearing bundle decodes without faulting. */
+    for (size_t cut = 0; cut <= w.n; cut++) {
+        lma_cal_bundle_t t;
+        (void)lma_proto_bundle_decode(w.b, cut, &t);
+    }
+
+    /* An empty payload leaves both weather slots absent. */
+    lma_cal_bundle_t z;
+    CHECK(lma_proto_bundle_decode(w.b, 0, &z) == 1);
+    CHECK(z.current.present == false);
+
+    printf("test_weather_decode: %d checks passed\n", passed);
+    return 0;
+}
+
 static int test_robustness(void)
 {
     int passed = 0;
@@ -264,6 +374,7 @@ int main(void)
     printf("lma_proto self-test\n");
     if (test_req_roundtrip() != 0 ||
         test_bundle_decode() != 0 ||
+        test_weather_decode() != 0 ||
         test_robustness() != 0) {
         printf("RESULT: FAIL\n");
         return 1;

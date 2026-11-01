@@ -258,6 +258,68 @@ int lma_proto_req_decode(const uint8_t *data, size_t len, lma_cal_request_t *out
 
 /* ---------------------------------------------------------- bundle side */
 
+/* protobuf sint32/sint64 are zigzag-encoded: n <-> (n << 1) ^ (n >> 31).
+ * Decoding the raw varint as a signed int would turn -2.5 degC (zigzag 4)
+ * into +4, i.e. a winter panel printing "39F" instead of "27F". */
+static int32_t uv_decode_zigzag32(uint64_t v)
+{
+    uint32_t u = (uint32_t)v;
+    return (int32_t)((u >> 1) ^ (~(u & 1u) + 1u));
+}
+
+/*
+ * Decode a Weather submessage (CalendarBundle.current / CalEvent.weather).
+ * `end` is the exclusive end offset of the submessage payload within data.
+ * Sets out->present on any successfully parsed field, so a Weather that only
+ * carries a code (no temperature) still reads as "a forecast exists".
+ */
+static int weather_decode(const uint8_t *data, size_t *pos, size_t end,
+                          lma_weather_t *out)
+{
+    uint64_t v;
+    bool saw_field = false;
+
+    memset(out, 0, sizeof(*out));
+    while (*pos < end) {
+        uint64_t key;
+        if (uv_decode(data, end, pos, &key) != 0 || *pos > end) {
+            return 0;
+        }
+        uint32_t fld = (uint32_t)(key >> 3);
+        unsigned wt = (unsigned)(key & 7u);
+
+        switch (fld) {
+        case LMA_PB_WX_TEMP:
+            if (wt != 0 || uv_decode(data, end, pos, &v) != 0) {
+                if (skip_field(data, end, pos, wt) != 0) {
+                    return 0;
+                }
+                break;
+            }
+            out->temp_c10 = uv_decode_zigzag32(v);
+            saw_field = true;
+            break;
+        case LMA_PB_WX_CODE:
+            if (wt != 0 || uv_decode(data, end, pos, &v) != 0) {
+                if (skip_field(data, end, pos, wt) != 0) {
+                    return 0;
+                }
+                break;
+            }
+            out->code = (uint32_t)v;
+            saw_field = true;
+            break;
+        default:
+            if (skip_field(data, end, pos, wt) != 0) {
+                return 0;
+            }
+            break;
+        }
+    }
+    out->present = saw_field;
+    return 1;
+}
+
 /*
  * Decode one CalEvent (length-delimited field 3 of the bundle).  `end` is the
  * exclusive byte offset of the event's payload within data; it doubles as the
@@ -347,6 +409,22 @@ static int event_decode(const uint8_t *data, size_t *pos, size_t end,
                 ev->pic_data_len = n;
             }
             break;
+        case LMA_PB_EV_WEATHER:
+            /* Weather submessage: forecast at start_ms (absent = none). */
+            if (wt != 2 || uv_decode(data, end, pos, &v) != 0 ||
+                (size_t)v > end - *pos) {
+                if (skip_field(data, end, pos, wt) != 0) {
+                    return 0;
+                }
+                break;
+            }
+            {
+                size_t wx_end = *pos + (size_t)v;
+                if (!weather_decode(data, pos, wx_end, &ev->weather)) {
+                    return 0;
+                }
+            }
+            break;
         default:
             if (skip_field(data, end, pos, wt) != 0) {
                 return 0;
@@ -428,6 +506,22 @@ int lma_proto_bundle_decode(const uint8_t *data, size_t len, lma_cal_bundle_t *o
                 break;
             }
             out->watermark_ms = v;
+            break;
+        case LMA_PB_BUNDLE_CURRENT:
+            /* Weather: conditions at reply time (absent = weather disabled). */
+            if (wt != 2 || uv_decode(data, len, &pos, &v) != 0 ||
+                (size_t)v > len - pos) {
+                if (skip_field(data, len, &pos, wt) != 0) {
+                    return 0;
+                }
+                break;
+            }
+            {
+                size_t wx_end = pos + (size_t)v;
+                if (!weather_decode(data, &pos, wx_end, &out->current)) {
+                    return 0;
+                }
+            }
             break;
         default:
             if (skip_field(data, len, &pos, wt) != 0) {

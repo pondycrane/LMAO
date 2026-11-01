@@ -17,5 +17,20 @@ IDF_IMG="${IDF_IMG:-espressif/idf:v5.3.1}"
 # The u8g2 frame-dump capture hook is always compiled in (see
 # main/CMakeLists.txt) — capture.py confirms the current production firmware's
 # display, so there is no separate capture build.
+
+# A pre-existing (gitignored) sdkconfig WINS over sdkconfig.defaults, so a tree
+# created before CONFIG_ESP_MAIN_TASK_STACK_SIZE was raised keeps the old 3584 B
+# main-task stack — which reset-loops the board in the sync+render chain (stack
+# overflow right after WiFi gets an IP).  Fail loudly instead of flashing a
+# board that reboots every cycle.
+STACK=$(grep -E '^CONFIG_ESP_MAIN_TASK_STACK_SIZE=' "$APP/sdkconfig" 2>/dev/null | cut -d= -f2)
+if [ -n "${STACK:-}" ] && [ "$STACK" -lt 8192 ]; then
+    echo "error: sdkconfig has CONFIG_ESP_MAIN_TASK_STACK_SIZE=$STACK (< 8192)." >&2
+    echo "       The sync+render+RDSHOT chain overflows the IDF default stack." >&2
+    echo "       Fix: rm $APP/sdkconfig   (it is gitignored; regenerated from" >&2
+    echo "            sdkconfig.defaults on the next build)" >&2
+    exit 1
+fi
+
 exec docker run --rm -v "$APP:/workspace" -w /workspace "$IDF_IMG" \
     idf.py build
