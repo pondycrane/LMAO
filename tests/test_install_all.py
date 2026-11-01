@@ -1003,16 +1003,21 @@ class TestMainWithoutServices:
         assert "K8s Services" in captured
         assert "--include-services not set" in captured
 
-    def test_summary_has_six_rows_when_nothing_detected(self, capsys):
-        """Summary should show all six rows even when nothing is connected.
+    def test_summary_has_a_row_per_device_and_service(self, capsys):
+        """Every device/service gets its own summary row, even when nothing
+        is connected or no services were requested.
 
-        Six rows: Cardputer, RNode (Heltec), Local Registry, Pi Server,
-        K8s Services, IoT Ingest Consumer.
+        Seven rows: Cardputer, RNode (Heltec), Local Registry, Pi Server,
+        K8s Services, IoT Ingest Consumer, Calendar Sync CronJob.
         """
         with pytest.raises(SystemExit):
             install_all.main([])
         captured = capsys.readouterr().out
-        assert captured.count("[SKIP]") == 6
+        assert captured.count("[SKIP]") == 7
+        for row in ("Cardputer", "RNode", "Local Registry", "Pi Server",
+                    "K8s Services", "IoT Ingest Consumer",
+                    "Calendar Sync CronJob"):
+            assert row in captured, f"summary is missing the {row} row"
 
 
 class TestMainWithServicesSkipped:
