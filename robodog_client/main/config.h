@@ -72,13 +72,17 @@
 #define RD_TCP_CONNECT_TIMEOUT_MS  5000
 #define RD_TCP_FRAME_TIMEOUT_MS    5000
 /* Display clock/calendar timezone: minutes east of UTC.
- * . -240 = US Eastern Daylight (EDT, spring/summer) — correct now
- * . -300 = US Eastern Standard (EST, winter)
+ * . -300 = US Eastern Standard (EST, winter) — correct now (DST ended
+ *          2026-11-01, the first Sunday of November)
+ * . -240 = US Eastern Daylight (EDT, spring/summer)
  * The device has no RTC/SNTP (esp_sntp absent from the IDF image), so the
  * clock is derived from the server's epoch-ms watermark and shown in this
- * offset.  Adjust when DST changes. */
+ * offset.  A fixed offset cannot follow DST by itself: flip this value and
+ * reflash at each transition (EDT starts the 2nd Sunday of March, EST the
+ * 1st Sunday of November).  The server-side `cal_events` times are absolute
+ * epoch ms, so only the DISPLAYED clock and the day qualifiers move. */
 #ifndef RD_TZ_OFFSET_MINUTES
-#define RD_TZ_OFFSET_MINUTES (-240)
+#define RD_TZ_OFFSET_MINUTES (-300)
 #endif
 #define RD_SNTP_WAIT_MAX_MS        3000u
 
