@@ -159,6 +159,22 @@ message CalendarRequest {
   string participant = 4;   // kid name; empty == no filter (family)
 }
 
+// Weather at one instant: the forecast the family panel prints beside the
+// clock and on the first event's row.  Deliberately tiny (two varints, ~6 B)
+// because it rides the calendar reply and the LoRa/LXMF envelope budget is
+// shared with the events themselves.
+//   temp_c10 — temperature in TENTHS of a degree Celsius (integer; a display
+//              converts to °F/°C locally, no float on the wire)
+//   code     — WMO 4677 weather code as returned by Open-Meteo (0 clear ..
+//              99 thunderstorm with hail); a display maps it to a short label
+// Presence of the message means "weather known"; an absent message means the
+// server has no forecast for that slot (weather disabled / out of range), so
+// clients MUST render nothing rather than a placeholder value.
+message Weather {
+  sint32 temp_c10 = 1;   // tenths of °C (zigzag: negative temps are common)
+  uint32 code     = 2;   // WMO 4677 weather code
+}
+
 message CalEvent {
   string uid      = 1;   // stable event id (the cal_events PK)
   string title    = 2;
@@ -169,6 +185,7 @@ message CalEvent {
   string pic      = 7;   // calendar-icon pack key, "" = none (assets/calendar-icons)
   bytes  pic_data = 8;   // 1-bit 32x32 row-major tile (128 B, MSB first, 1=ink);
                          // server fills it from cal_pics.tile_1bpp when pic != ""
+  Weather weather = 9;   // forecast at start_ms (absent = no forecast)
 }
 
 message CalendarBundle {   // server -> client, sibling of ChartBundle
@@ -176,6 +193,7 @@ message CalendarBundle {   // server -> client, sibling of ChartBundle
   string calendar_id      = 2;
   repeated CalEvent events = 3;
   uint64 watermark_ms     = 4;   // pre-read server watermark; next since_ms
+  Weather current         = 5;   // conditions now (absent = weather disabled)
 }
 
 // --- Human Communication ---

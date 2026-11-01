@@ -22,6 +22,7 @@ py_library(
         "server_identity.py",
         "sprout_history.py",
         "storage.py",
+        "weather.py",
     ],
     visibility = ["//visibility:public"],
     deps = [

@@ -46,6 +46,7 @@
  * proves the identical code on the host `cc` gate. */
 #include "rd_clip.h"
 #include "rd_datetime.h"
+#include "rd_weather.h"
 
 static const char *TAG = "robodog";
 
@@ -68,6 +69,11 @@ static char s_wm_kid[32];     /* kid the persisted cache/watermark were synced u
 
 static lma_cal_event_t s_cache[LMA_PB_EVENT_MAX];
 static size_t s_cache_count = 0;
+
+/* Current conditions from the last CalendarBundle.current (Weather, field 5).
+ * RAM only, like the per-event forecast: stale weather is worse than none, so
+ * it is never persisted to NVS and never re-rendered from a boot cache. */
+static lma_weather_t s_current_wx;
 
 /* Frame/bundle buffers are static: a bundle can be ~8 KiB, main-task stacks
  * are far smaller. */
@@ -212,6 +218,7 @@ static void cache_persist(void)
 static void cache_clear(void)
 {
     s_cache_count = 0;
+    memset(&s_current_wx, 0, sizeof(s_current_wx));
     nvs_handle_t h;
     nvs_open_rw(&h);
     if (h != 0) {
@@ -286,6 +293,9 @@ static void cache_apply(const lma_cal_bundle_t *bundle)
     if (bundle->watermark_ms > s_watermark) {
         s_watermark = bundle->watermark_ms;
     }
+    /* Conditions now (absent message -> no weather; never a stale carry-over
+     * from a previous reply, so a server that turned weather off clears it). */
+    s_current_wx = bundle->current;
     cache_sort_by_start();
     cache_persist();
     watermark_save();
@@ -797,7 +807,11 @@ static void draw_wrapped_final(u8g2_t *u8g2, int x, int base,
  * u8g2_GetAscent/GetDescent, never assumed): ascent 19, descent -5, so the
  * 24px pitch fits 3 lines whose cap tops stay below the hline (baselines
  * 79/103/127); a 4th line would cross the hline and is truncated instead. */
-#define TITLE_TOP_MARGIN 6
+/* 12 (not 6): the status/weather band sits at baseline 46 (glyph bottom 50),
+ * so the headline title's first glyph top must stay at/below 52.  The band
+ * still holds 3 helvB18 lines at this anchor ((127-52-19)/24+1 == 3), so the
+ * wrapped-title capacity is unchanged. */
+#define TITLE_TOP_MARGIN 12
 #define TITLE_META_GAP   3
 
 /* ---- Display clock: derived from the server's epoch-ms watermark, and
@@ -897,6 +911,34 @@ static void render_screen(rd_state_t state)
         }
     }
 
+    /* ---- status/weather band (baseline 46) ---------------------------
+     * One line under the header, above the headline image (which starts at
+     * y=54), carrying the two status signals a parent actually reads:
+     *   LEFT  — current conditions from CalendarBundle.current ("now 44°F
+     *           clear"), clipped to whatever the right hint leaves free;
+     *   RIGHT — the stale/no-wifi hint when the last sync did not land.
+     * The band is drawn even when there are no events, so a weather-only
+     * reply still puts the temperature on screen.  Nothing is drawn when the
+     * server sent no Weather (weather disabled, or no sync yet) — never a
+     * placeholder reading. */
+    u8g2_SetFont(u8g2, u8g2_font_10x20_tf);
+    {
+        const char *hint = (state == RD_STATE_STALE) ? "stale" :
+                           (state == RD_STATE_OFFLINE) ? "no wifi" : NULL;
+        int right = W - 6;
+        if (hint != NULL) {
+            draw_right(u8g2, W - 6, 46, hint);
+            right -= u8g2_GetStrWidth(u8g2, hint) + 8;
+        }
+        char wx[24];
+        if (s_current_wx.present &&
+            rd_format_weather(&s_current_wx, wx, sizeof wx)) {
+            char band[32];
+            snprintf(band, sizeof(band), "now %s", wx);
+            draw_clipped_title(u8g2, 6, 46, band, right - 6);
+        }
+    }
+
     if (s_cache_count == 0) {
         const char *msg = (state == RD_STATE_OFFLINE) ? "no wifi  :  offline"
                                                       : "no calendar events";
@@ -905,15 +947,6 @@ static void render_screen(rd_state_t state)
         u8g2_SendBuffer(u8g2);
         rd_shot_dump(u8g2);
         return;
-    }
-
-    u8g2_SetFont(u8g2, u8g2_font_10x20_tf);
-
-    /* small status hint when data is not fresh (above the headline image) */
-    if (state == RD_STATE_STALE) {
-        draw_right(u8g2, W - 6, 50, "stale");
-    } else if (state == RD_STATE_OFFLINE) {
-        draw_right(u8g2, W - 6, 50, "no wifi");
     }
 
     const uint64_t now_ck = clock_now_ms(); /* 0 = clock not set yet (boot) */
@@ -1087,6 +1120,21 @@ static void render_screen(rd_state_t state)
                              meta, sizeof(meta));
         draw_right(u8g2, W - 6, img_y + img_sz / 2 + 22, meta);
     }
+    /* First event's forecast (CalEvent.weather): "44°F snow" on the info
+     * column's second line, under the range meta and beside the lower half of
+     * the picture (baseline 180: clear of the meta descent at 152 and of the
+     * first compact row's glyph top at 201).  The start time is already in
+     * the meta directly above, so the slot carries the reading only; the
+     * column is 122 px wide (12 chars at 10x20), so a long label is clipped
+     * with the same measured ellipsis as every other row.  Nothing is drawn
+     * when the server sent no forecast for this event. */
+    if (hl->weather.present) {
+        char wx[24];
+        if (rd_format_weather(&hl->weather, wx, sizeof(wx))) {
+            draw_clipped_title(u8g2, txt_x, img_y + img_sz / 2 + 54, wx,
+                               (W - 6) - txt_x);
+        }
+    }
 
     /* Following events: text-only compact rows — the 2nd..RD_MAX_EVENT_ROWS-1
      * visible only; anything beyond the fifth is dropped by design (time
@@ -1120,8 +1168,11 @@ static void render_screen(rd_state_t state)
 
     u8g2_SendBuffer(u8g2);
     rd_shot_dump(u8g2);
-    ESP_LOGI(TAG, "rendered %u visible of %u cached events (headline uid=%s)",
-             (unsigned)rendered, (unsigned)s_cache_count, vis[0]->uid);
+    ESP_LOGI(TAG, "rendered %u visible of %u cached events (headline uid=%s, "
+                  "weather now=%s, headline=%s)",
+             (unsigned)rendered, (unsigned)s_cache_count, vis[0]->uid,
+             s_current_wx.present ? "yes" : "no",
+             hl->weather.present ? "yes" : "no");
 }
 
 /* ------------------------------------------------------------------ hold */
@@ -1195,9 +1246,11 @@ void robodog_app_main(void)
     display_init();
 
     render_screen(RD_STATE_OFFLINE);
-    ESP_LOGI(TAG, "booted: %u cached events, watermark=%llu, server=%s",
+    ESP_LOGI(TAG, "booted: %u cached events, watermark=%llu, server=%s "
+                  "(main stack high-water %u B free)",
              (unsigned)s_cache_count, (unsigned long long)s_watermark,
-             s_server_host);
+             s_server_host,
+             (unsigned)uxTaskGetStackHighWaterMark(NULL));
 
     for (;;) {
         rd_state_t state;
@@ -1209,6 +1262,8 @@ void robodog_app_main(void)
             state = RD_STATE_OFFLINE;
         }
         render_screen(state);
+        ESP_LOGI(TAG, "cycle done (state=%d), main stack high-water %u B free",
+                 (int)state, (unsigned)uxTaskGetStackHighWaterMark(NULL));
         hold_until_next_sync(state);
     }
 }

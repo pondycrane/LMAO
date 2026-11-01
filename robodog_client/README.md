@@ -85,10 +85,43 @@ The wire format is verified live against the LMAO server.
   since_ms:0}` (no participant = family filter).
 - **Server → client** payload = serialized `CalendarBundle` protobuf
   (`format=1` varint u32, `calendar_id=2` string, `events=3` repeated
-  `CalEvent`, `watermark_ms=4` varint u64).
+  `CalEvent`, `watermark_ms=4` varint u64, `current=5` `Weather`).
 - `CalEvent`: `uid=1` string, `title=2` string, `notes=3` string,
   `start_ms=4` varint u64, `end_ms=5` varint u64, `deleted=6` varint bool,
-  `pic=7` string.
+  `pic=7` string, `pic_data=8` bytes (1bpp 144×144 tile), `weather=9`
+  `Weather`.
+- `Weather`: `temp_c10=1` **sint32** (zigzag; tenths of a degree Celsius, so
+  −2.5 °C is `-25`) and `code=2` varint u32 (WMO 4677 weather code).
+  `CalendarBundle.current` is the conditions now; `CalEvent.weather` is the
+  forecast bucket containing that event's `start_ms`. **An absent `Weather`
+  means "no forecast for this slot"** (weather disabled server-side, or an
+  event past the 16-day hourly horizon) and the panel draws nothing — never
+  a placeholder `0 °C`. `lma_proto` tracks this as `lma_weather_t.present`.
+
+**Weather.** The panel prints the current conditions and the forecast at the
+first event's start. Both ride this same reply (no extra request, no extra
+connection): the server fills `CalendarBundle.current` and each
+`CalEvent.weather` from Open-Meteo when `LMAO_WEATHER_LAT`/`LMAO_WEATHER_LON`
+are set on the deployment. The device renders them with
+`rd_weather.c` (host-tested by `rd_weather_selftest.c`): the wire carries
+tenths of a degree Celsius, and the panel shows whole degrees Fahrenheit
+(`44°F`) plus a short WMO label (`clear`, `partly cloudy`, `drizzle`, `snow
+showers`, …). Weather is **never persisted**: `CalendarBundle.current` lives
+in RAM only, so a boot render or an offline cycle never shows a stale reading.
+
+Refresh cadence differs between the two slots, and it is worth knowing why:
+
+- **`now`** is bundle-level, so it is NOT gated by the delta — it arrives on
+  every reply, i.e. every `RD_SYNC_INTERVAL_SECONDS` (30 min).  The server's
+  15-min cache means a sync usually triggers a fresh Open-Meteo fetch, so the
+  on-screen reading is ~0-45 min old (typically 15-45).  The 30-second redraw
+  inside the hold loop only advances the header clock; the temperature does not
+  change until the next sync.
+- **The headline event's forecast** IS gated by the delta: a row only re-ships
+  when its `updated_ms` moves.  The hourly in-cluster calendar-sync CronJob
+  (`k8s/calendar-sync.yaml`) touches every in-window row on each run, so an
+  event's forecast advances hourly as its date approaches.  If that CronJob is
+  stopped, per-event weather freezes on the panel.
 
 The device sends `since_ms = last watermark` (persisted in NVS), so the reply
 is a small delta; it merges the delta into the NVS-persisted event cache
@@ -393,6 +426,11 @@ python3 capture.py --port /dev/ttyACM0 --reset --n 4 --timeout 100 --describe
 - Header **BLANK** + `no wifi` hint beside the first row → not connected yet:
   pre-sync boot frame, or WiFi/AP unreachable.
 - `stale` hint → connected but last sync failed (showing NVS cache).
+- Weather line under the header (`now 44°F clear`) → the reply carried
+  `CalendarBundle.current`; the headline event's forecast (`27°F snow`) sits in
+  the info column below its range meta. **Neither line is drawn** when the
+  server sent no `Weather` (weather disabled / no sync yet), so a blank band is
+  "no forecast", not "0°F".
 - Row set == Postgres/`GetCalendar` output → data path live; a stale/different
   set means the cache is being shown (compare timestamps against the header).
 - At most 5 event rows are drawn: the headline (big picture, LEFT;

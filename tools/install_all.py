@@ -73,6 +73,7 @@ from lma_core.server_identity import ensure_delivery_destination_hash
 # Server-service install helpers (from tools/install_services.py).
 from tools.install_services import (
     _docker_psql,
+    deploy_calendar_sync,
     deploy_lmao_server,
     detect_serial_devices,
     install_iot_ingest_consumer,
@@ -860,6 +861,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Skip IoT Ingest Consumer deploy (only meaningful with --include-services).",
     )
     parser.add_argument(
+        "--skip-calendar-sync",
+        action="store_true",
+        help="Skip the calendar-sync CronJob deploy (Google Calendar -> cal_events "
+        "-> cal_pics, hourly; only meaningful with --include-services).",
+    )
+    parser.add_argument(
         "--skip-dest-hash",
         action="store_true",
         help="Skip injecting the server DEST_HASH into the Cardputer config "
@@ -1005,6 +1012,8 @@ def main(argv: list[str] | None = None) -> None:
     results.append(k8s_result)
     iot_result = DeviceResult("IoT Ingest Consumer")
     results.append(iot_result)
+    cal_result = DeviceResult("Calendar Sync CronJob")
+    results.append(cal_result)
 
     if args.include_services:
         try:
@@ -1030,6 +1039,13 @@ def main(argv: list[str] | None = None) -> None:
                 if args.setup_registry and not registry_ready:
                     print("  WARNING: registry setup did not succeed — iot-ingest push may fail")
                 install_iot_ingest_consumer(iot_result)
+
+            if args.skip_calendar_sync:
+                cal_result.skip("--skip-calendar-sync")
+            elif args.skip_k8s:
+                cal_result.skip("--skip-k8s (K8s services skipped)")
+            else:
+                deploy_calendar_sync(cal_result)
         except Exception as exc:
             import traceback
 
@@ -1037,10 +1053,12 @@ def main(argv: list[str] | None = None) -> None:
             pi_result.fail(f"Pi Server install error: {exc}")
             k8s_result.fail(f"K8s Services install error: {exc}")
             iot_result.fail(f"IoT Ingest Consumer install error: {exc}")
+            cal_result.fail(f"Calendar Sync install error: {exc}")
     else:
         pi_result.skip("--include-services not set")
         k8s_result.skip("--include-services not set")
         iot_result.skip("--include-services not set")
+        cal_result.skip("--include-services not set")
 
     # ── Summary ──
     _print_summary(results)

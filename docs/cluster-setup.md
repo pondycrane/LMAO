@@ -100,6 +100,14 @@ mirrors:
       - "http://192.168.50.153:5000"
 ```
 
+> **Per-node, and easy to miss.** A node without this stanza cannot pull from
+> the local registry: its pods fail `ImagePullBackOff` on
+> `192.168.50.153:5000/<image>`.  This bit the calendar-sync CronJob when it
+> first scheduled onto **tp1** (which lacks the mirror) — the manifest now pins
+> `nodeSelector: kubernetes.io/hostname: tp4`, where lmao-server, postgres and
+> iot-ingest already run.  Apply the stanza to **every** node before relying on
+> the scheduler's free placement.
+
 ---
 
 ## LMAO IoT Pipeline (NATS JetStream → DuckDB)
@@ -256,3 +264,62 @@ Host turing-bmc
 - Deleted stale node entries from SQLite database to force fresh node registration
 
 **Lesson:** Always use `config.yaml` — never hardcode IPs in systemd service files. If DHCP changes the LAN IP, only `config.yaml` needs updating (and the kubeconfig on selfhost).
+
+---
+
+## Calendar Sync CronJob (hourly)
+
+`k8s/calendar-sync.yaml` runs the family-calendar refresh in-cluster. It
+replaced a host Hermes cron (`lmao-kids-calendar-sync` →
+`~/.hermes/scripts/lmao_kids_sync.sh`), which is now **paused**.
+
+Two stages per run, matching the old script:
+
+1. `tools/calendar_sync.py --window-days 14` — Google Calendar → `cal_events`
+   (Postgres), upsert keyed by event `uid`.
+2. `tools/calendar_pics_sync.py` — themed art → 1-bit 144×144 RLCD tiles in
+   `cal_pics`.
+
+**Why hourly matters beyond data freshness:** the RoboDog panel syncs by delta
+(`since_ms` = its last watermark), so an event row only re-ships when its
+`updated_ms` moves. `CalendarStore.upsert` is an unconditional
+`ON CONFLICT DO UPDATE` and `lmao_cal_touch_trg` stamps `updated_ms` on every
+update — so this job is what re-delivers each in-window event, and therefore
+what refreshes that event's **weather forecast** as its date approaches.
+Stopping the job freezes per-event weather on the panel (the "now" reading is
+unaffected: `CalendarBundle.current` ships on every reply).
+
+Deploy:
+
+```bash
+# with the rest of the services (recommended)
+bazel run //tools:install_all -- --setup-registry --include-services --skip-rnode
+
+# or just this job
+python3 -c "from tools import install_services as s; s.deploy_calendar_sync(r)"
+kubectl apply -f k8s/calendar-sync.yaml
+```
+
+`install_all` also refreshes the `lmao-gcal-token` Secret from
+`~/.hermes/google_token.json` (or `$LMAO_GCAL_TOKEN`) — the token is never in
+the repo, and a missing token fails the deploy rather than shipping a CronJob
+that cannot read Google.
+
+Run one now and watch it:
+
+```bash
+kubectl create job --from=cronjob/lmao-calendar-sync lmao-cal-sync-manual
+kubectl logs -f job/lmao-cal-sync-manual
+```
+
+Networking notes (measured from an in-cluster pod on tp4):
+
+| Target | Reachable | Effect when down |
+|---|---|---|
+| `postgres.default.svc.cluster.local:5432` | yes | stage 1 fails |
+| `192.168.50.200:8000` (vision) | yes | tile QC skipped |
+| `192.168.50.138:8000` (gx10 LLM) | refused (box down) | deterministic "reasoned" search queries |
+| `192.168.10.37:8188` (ComfyUI) | no route | Wikimedia Commons art |
+
+LAN hostnames do **not** resolve under cluster DNS, so the ConfigMap addresses
+these by IP (`gx10-f156` == `192.168.50.138`).

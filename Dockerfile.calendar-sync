@@ -1,0 +1,53 @@
+# LMAO Calendar Sync — CronJob image (Google Calendar -> cal_events -> cal_pics)
+#
+# Build:
+#   docker build -f Dockerfile.calendar-sync -t lmao-calendar-sync .
+#
+# Runs the two calendar stages that used to be a host Hermes cron
+# (~/.hermes/scripts/lmao_kids_sync.sh):
+#   1. tools/calendar_sync.py       Google Calendar -> cal_events (Postgres)
+#   2. tools/calendar_pics_sync.py  themed art -> 1-bit RLCD tiles in cal_pics
+#
+# Deployed by k8s/calendar-sync.yaml (CronJob, hourly) through
+# `install_all --include-services`; see tools/install_services.py
+# deploy_calendar_sync().
+#
+# Deliberately NOT the lmao-server image: this needs the Google client
+# libraries (google-api-python-client + google-auth) and Pillow, which the
+# server image does not carry, and it must not pull in RNS/LXMF/gRPC.
+#
+# Credentials are NEVER baked in: the Postgres parts come from the
+# `lmao-postgres` Secret (env) and the Google authorized-user token is mounted
+# read-only from the `lmao-gcal-token` Secret at /secrets/google_token.json.
+# google-auth refreshes the access token IN MEMORY from the stored
+# refresh_token, so a read-only mount is sufficient (nothing writes back).
+
+FROM python:3.12-slim
+
+WORKDIR /app
+
+# build-essential is only needed if a wheel is missing for this arch; the
+# runtime deps below all ship aarch64 wheels.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# Only what the two stages import: lma_core (calendar_pg/calendar_pics +
+# contact_book_pg DSN), proto (lma_core re-exports lazily) and tools/.
+COPY lma_core/ lma_core/
+COPY proto/ proto/
+COPY tools/ tools/
+
+RUN pip install --no-cache-dir \
+    psycopg[binary] \
+    protobuf \
+    google-api-python-client \
+    google-auth \
+    google-auth-httplib2 \
+    Pillow
+
+ENV PYTHONPATH="/app:${PYTHONPATH}"
+ENV PYTHONUNBUFFERED=1
+
+# Default stage 1; the CronJob runs both stages (see k8s/calendar-sync.yaml).
+CMD ["python", "tools/calendar_sync.py", "--window-days", "14"]

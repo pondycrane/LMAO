@@ -1,0 +1,158 @@
+# LMAO Calendar Sync — K8s CronJob (hourly)
+#
+# Replaces the host-side Hermes cron `lmao-kids-calendar-sync`
+# (~/.hermes/scripts/lmao_kids_sync.sh).  Two stages, in order:
+#
+#   1. tools/calendar_sync.py       Google Calendar -> cal_events (Postgres)
+#   2. tools/calendar_pics_sync.py  themed art -> 1-bit RLCD tiles in cal_pics
+#
+# Why this exists on a schedule at all: the RoboDog panel syncs by DELTA
+# (`since_ms` = its last watermark), so an event row only re-ships when its
+# `updated_ms` moves.  `CalendarStore.upsert` is an unconditional
+# `ON CONFLICT DO UPDATE` and `lmao_cal_touch_trg` stamps `updated_ms` on every
+# update, so this hourly run is what re-delivers every in-window event — and
+# therefore what refreshes each event's weather forecast as the date
+# approaches.  Stopping this job freezes per-event weather on the panel.
+#
+# Credentials (never in this file):
+#   - Postgres user/password/db: the `lmao-postgres` Secret (same one the
+#     server uses), composed into a DSN by lma_core.contact_book_pg.
+#   - Google authorized-user token: the `lmao-gcal-token` Secret, mounted
+#     read-only.  install_all creates/refreshes it from the host's
+#     ~/.hermes/google_token.json (or $LMAO_GCAL_TOKEN).
+#
+# Prerequisites:
+#   - Postgres running in-cluster (k8s/postgres.yaml)
+#   - Image published to the local registry:
+#       bazel run //tools:install_all -- --setup-registry --include-services
+#     (or: docker build -f Dockerfile.calendar-sync -t lmao-calendar-sync . ;
+#          docker tag … 192.168.50.153:5000/lmao-calendar-sync:latest ;
+#          docker push …)
+#
+# Usage:
+#   kubectl apply -f k8s/calendar-sync.yaml
+#   kubectl create job --from=cronjob/lmao-calendar-sync lmao-cal-sync-manual
+#   kubectl logs -f job/lmao-cal-sync-manual
+#
+# Networking notes (measured from an in-cluster pod):
+#   - postgres.default.svc.cluster.local:5432  reachable
+#   - 192.168.50.200:8000 (vision)             reachable
+#   - 192.168.50.138:8000 (gx10 LLM)           refused (box down → reasoned fallback)
+#   - 192.168.10.37:8188  (ComfyUI)            no route (→ Wikimedia fallback)
+#   The pics stage degrades gracefully: an unreachable LLM yields deterministic
+#   search queries and an unreachable ComfyUI yields Wikimedia Commons art.
+#   LAN hostnames do NOT resolve under cluster DNS, so the LLM is addressed by
+#   IP here (gx10-f156 == 192.168.50.138).
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: lmao-calendar-sync-config
+  namespace: default
+  labels:
+    app: lmao-calendar-sync
+data:
+  # Stage-2 picture sources.  Addresses are IPs because cluster DNS does not
+  # resolve the LAN hostnames (gx10-f156 / spark-5307).
+  LMAO_IMAGE_LLM_URL: "http://192.168.50.138:8000/v1"
+  LMAO_IMAGE_LLM_MODEL: "deepseek-ai/DeepSeek-V4-Flash-0731"
+  LMAO_IMAGE_GEN_URL: "http://192.168.10.37:8188"
+  LMAO_IMAGE_VISION_URL: "http://192.168.50.200:8000/v1"
+  LMAO_IMAGE_VISION_MODEL: "Qwen/Qwen2.5-VL-72B-Instruct"
+
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: lmao-calendar-sync
+  namespace: default
+  labels:
+    app: lmao-calendar-sync
+spec:
+  # Hourly: bounds how stale an event's weather forecast can be on the panel
+  # (the device itself only syncs every 30 min, and only ships rows whose
+  # updated_ms moved — this job is what moves them).
+  schedule: "0 * * * *"
+  concurrencyPolicy: Forbid
+  # A missed slot (node reboot, cluster hiccup) still runs if we start within
+  # 5 minutes; beyond that, wait for the next hour rather than pile up.
+  startingDeadlineSeconds: 300
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 900
+      template:
+        metadata:
+          labels:
+            app: lmao-calendar-sync
+        spec:
+          # Pinned to tp4, where the rest of LMAO already runs (lmao-server,
+          # postgres, iot-ingest-consumer): the local-registry HTTP mirror in
+          # /etc/rancher/k3s/registries.yaml is configured on tp3/tp4 but NOT
+          # on tp1 — a pod scheduled there fails ImagePullBackOff on
+          # 192.168.50.153:5000.  Pinning also keeps the DB traffic node-local.
+          # Proper fix (if tp4 is ever retired): add the mirror stanza from
+          # docs/cluster-setup.md to /etc/rancher/k3s/registries.yaml on every
+          # node and restart k3s-agent.
+          nodeSelector:
+            kubernetes.io/hostname: tp4
+          restartPolicy: Never
+          containers:
+            - name: calendar-sync
+              image: 192.168.50.153:5000/lmao-calendar-sync:latest
+              imagePullPolicy: Always
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  set -euo pipefail
+                  echo "=== stage 1: Google Calendar -> cal_events ==="
+                  python tools/calendar_sync.py --window-days 14
+                  echo "=== stage 2: themed art -> cal_pics ==="
+                  python tools/calendar_pics_sync.py
+                  echo "=== calendar sync complete ==="
+              envFrom:
+                - configMapRef:
+                    name: lmao-calendar-sync-config
+              env:
+                # Postgres parts (composed into a DSN by lma_core) — same
+                # Secret the lmao-server Deployment reads.
+                - name: LMAO_CONTACTS_PG_HOST
+                  value: "postgres.default.svc.cluster.local"
+                - name: LMAO_CONTACTS_PG_PORT
+                  value: "5432"
+                - name: LMAO_CONTACTS_PG_USER
+                  valueFrom:
+                    secretKeyRef:
+                      name: lmao-postgres
+                      key: POSTGRES_USER
+                - name: LMAO_CONTACTS_PG_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: lmao-postgres
+                      key: POSTGRES_PASSWORD
+                - name: LMAO_CONTACTS_PG_DB
+                  valueFrom:
+                    secretKeyRef:
+                      name: lmao-postgres
+                      key: POSTGRES_DB
+                # Google authorized-user token, read-only.  google-auth
+                # refreshes the access token in memory from refresh_token.
+                - name: LMAO_GCAL_TOKEN
+                  value: "/secrets/google_token.json"
+              volumeMounts:
+                - name: gcal-token
+                  mountPath: /secrets
+                  readOnly: true
+              resources:
+                requests:
+                  cpu: "100m"
+                  memory: "256Mi"
+                limits:
+                  memory: "1Gi"
+          volumes:
+            - name: gcal-token
+              secret:
+                secretName: lmao-gcal-token
