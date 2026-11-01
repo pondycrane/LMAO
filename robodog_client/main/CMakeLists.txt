@@ -5,9 +5,10 @@ idf_component_register(
         "lma_proto.c"
         "rd_clip.c"
         "rd_datetime.c"
-        # lma_proto_selftest.c and rd_datetime_selftest.c are HOST-only test
-        # binaries (each defines its own main()); they are intentionally NOT
-        # part of the IDF build.
+        "rd_weather.c"
+        # lma_proto_selftest.c / rd_datetime_selftest.c / rd_weather_selftest.c
+        # are HOST-only test binaries (each defines its own main()); they are
+        # intentionally NOT part of the IDF build.
     INCLUDE_DIRS "."
     REQUIRES
         nvs_flash

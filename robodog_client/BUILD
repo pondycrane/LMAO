@@ -271,3 +271,46 @@ py_library(
     srcs = ["voice/e2e_readout.py"],
     visibility = ["//tests:__pkg__"],
 )
+
+# ── Host-testable pure-C calendar/panel units ─────────────────────────────
+# lma_proto (wire codec), rd_datetime (row meta/qualifiers), rd_clip (measured
+# clipping) and rd_weather (WMO label + °C→°F) are dependency-free C compiled
+# by BOTH the device firmware (main/CMakeLists.txt) and these host cc_tests, so
+# the wire decode, the date qualifiers, the clip budget and the weather
+# formatting are proven under Bazel against the exact source that runs on the
+# board (same pattern as //firmware_common:lma_encoder and the esp-claw units).
+cc_library(
+    name = "robodog_pure",
+    srcs = [
+        "main/lma_proto.c",
+        "main/rd_clip.c",
+        "main/rd_datetime.c",
+        "main/rd_weather.c",
+    ],
+    hdrs = [
+        "main/lma_proto.h",
+        "main/rd_clip.h",
+        "main/rd_datetime.h",
+        "main/rd_weather.h",
+    ],
+    strip_include_prefix = "main",
+    visibility = ["//visibility:public"],
+)
+
+cc_test(
+    name = "test_lma_proto",
+    srcs = ["main/lma_proto_selftest.c"],
+    deps = [":robodog_pure"],
+)
+
+cc_test(
+    name = "test_rd_datetime",
+    srcs = ["main/rd_datetime_selftest.c"],
+    deps = [":robodog_pure"],
+)
+
+cc_test(
+    name = "test_rd_weather",
+    srcs = ["main/rd_weather_selftest.c"],
+    deps = [":robodog_pure"],
+)
