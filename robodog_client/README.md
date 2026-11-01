@@ -95,7 +95,7 @@ The wire format is verified live against the LMAO server.
   `CalendarBundle.current` is the conditions now; `CalEvent.weather` is the
   forecast bucket containing that event's `start_ms`. **An absent `Weather`
   means "no forecast for this slot"** (weather disabled server-side, or an
-  event past the 72-hour hourly horizon) and the panel draws nothing — never
+  event past the 16-day hourly horizon) and the panel draws nothing — never
   a placeholder `0 °C`. `lma_proto` tracks this as `lma_weather_t.present`.
 
 **Weather.** The panel prints the current conditions and the forecast at the

@@ -49,9 +49,15 @@ OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
 DEFAULT_TTL_S = 900.0
 DEFAULT_TIMEOUT_S = 8.0
 
-# Three days of hourly buckets (72 samples) covers every event a family
-# calendar panel renders; the reply only ever reads the buckets it needs.
-FORECAST_DAYS = 3
+# Open-Meteo's full hourly horizon (16 days = 384 samples, ~7 KB of JSON).
+# A 3-day window looked sufficient but silently left the panel's FIRST event
+# without a forecast whenever the next event was further out than the window
+# (e.g. a kid panel whose only upcoming event is a Ninja Warrior class 4 days
+# away): the slot then read as "no forecast" and the panel drew nothing.
+# 16 days covers every event a family/kid panel renders; anything beyond it
+# still correctly renders no forecast.  The payload size is a server-side
+# fetch, not wire cost — the reply only carries the buckets its events use.
+FORECAST_DAYS = 16
 
 _HOUR_MS = 3_600_000
 

@@ -15,6 +15,7 @@ import pytest
 from lma_core import CalendarBundle
 from lma_core.weather import (
     DEFAULT_TTL_S,
+    FORECAST_DAYS,
     WeatherProvider,
     apply_weather,
     build_url,
@@ -90,6 +91,36 @@ def test_negative_temperatures_round_trip_zigzag():
     assert decoded.current.temp_c10 == 67
     assert decoded.events[0].weather.temp_c10 == -25
     assert decoded.events[0].HasField("weather")
+
+
+def test_forecast_horizon_covers_events_days_out():
+    """The horizon must reach the panel's FIRST event even when it is days
+    away: a 72-hour window left a kid panel's only upcoming event (4 days out)
+    with no forecast, so the panel drew nothing there."""
+    assert FORECAST_DAYS == 16
+    url = build_url(40.6834, -74.4427)
+    assert "forecast_days=16" in url
+
+    # A 16-day payload: an event 4 days out must resolve to a bucket.
+    base = 1793523600
+    times = [base + i * 3600 for i in range(16 * 24)]
+    payload = {
+        "current": {"temperature_2m": 6.7, "weather_code": 0},
+        "hourly": {
+            "time": times,
+            "temperature_2m": [10.0] * len(times),
+            "weather_code": [3] * len(times),
+        },
+    }
+    snap = parse_payload(payload)
+    four_days_out = (base + 4 * 24 * 3600 + 1800) * 1000
+    assert snap.at(four_days_out) == {"temp_c10": 100, "code": 3}
+
+    bundle = CalendarBundle()
+    bundle.events.add().uid = "ninja"
+    bundle.events[0].start_ms = four_days_out
+    assert apply_weather(bundle, snap) == 2
+    assert bundle.events[0].HasField("weather")
 
 
 def test_apply_weather_leaves_unforecast_events_empty():
