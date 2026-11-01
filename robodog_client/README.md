@@ -109,6 +109,20 @@ tenths of a degree Celsius, and the panel shows whole degrees Fahrenheit
 showers`, …). Weather is **never persisted**: `CalendarBundle.current` lives
 in RAM only, so a boot render or an offline cycle never shows a stale reading.
 
+Refresh cadence differs between the two slots, and it is worth knowing why:
+
+- **`now`** is bundle-level, so it is NOT gated by the delta — it arrives on
+  every reply, i.e. every `RD_SYNC_INTERVAL_SECONDS` (30 min).  The server's
+  15-min cache means a sync usually triggers a fresh Open-Meteo fetch, so the
+  on-screen reading is ~0-45 min old (typically 15-45).  The 30-second redraw
+  inside the hold loop only advances the header clock; the temperature does not
+  change until the next sync.
+- **The headline event's forecast** IS gated by the delta: a row only re-ships
+  when its `updated_ms` moves.  The hourly in-cluster calendar-sync CronJob
+  (`k8s/calendar-sync.yaml`) touches every in-window row on each run, so an
+  event's forecast advances hourly as its date approaches.  If that CronJob is
+  stopped, per-event weather freezes on the panel.
+
 The device sends `since_ms = last watermark` (persisted in NVS), so the reply
 is a small delta; it merges the delta into the NVS-persisted event cache
 (union by `uid`, `deleted` tombstones remove), stores the new watermark, and

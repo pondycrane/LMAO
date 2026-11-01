@@ -773,6 +773,191 @@ def install_iot_ingest_consumer(result: DeviceResult, repo_root: str | None = No
     print(f"  OK: IoT Ingest Consumer Running ({registry_image})")
 
 
+GCAL_TOKEN_DEFAULT = "~/.hermes/google_token.json"
+GCAL_SECRET_NAME = "lmao-gcal-token"
+
+
+def _ensure_gcal_token_secret(result: DeviceResult) -> bool:
+    """Create/refresh the ``lmao-gcal-token`` Secret from the host token.
+
+    The Google authorized-user token lives OUTSIDE the repo
+    (``~/.hermes/google_token.json``, or ``$LMAO_GCAL_TOKEN``) and is never
+    committed.  Re-applying it on every deploy keeps the mounted Secret's
+    ``refresh_token`` current, which matters because google-auth refreshes the
+    access token from it on each CronJob run.
+
+    Returns True on success; False (with *result* set to FAIL) when the token
+    file is missing or the Secret cannot be written.
+    """
+    token_path = os.environ.get("LMAO_GCAL_TOKEN") or os.path.expanduser(GCAL_TOKEN_DEFAULT)
+    if not os.path.isfile(token_path):
+        result.fail(
+            f"Google token not found at {token_path} — the CronJob cannot read "
+            "Google Calendar. Authorize once (Hermes google-workspace setup) or "
+            "set LMAO_GCAL_TOKEN to a google_token.json path."
+        )
+        print(f"  FAIL: Google token not found at {token_path}")
+        return False
+
+    # `create --dry-run=client | apply` is idempotent: it updates an existing
+    # Secret in place instead of failing on "already exists".
+    try:
+        gen = subprocess.run(
+            [
+                "kubectl", "create", "secret", "generic", GCAL_SECRET_NAME,
+                f"--from-file=google_token.json={token_path}",
+                "--dry-run=client", "-o", "yaml",
+            ],
+            capture_output=True, text=True,
+        )
+        if gen.returncode != 0:
+            err = (gen.stderr or gen.stdout).strip().split("\n")[-3:]
+            result.fail(f"kubectl create secret failed: {'; '.join(err)}")
+            print(f"  FAIL: kubectl create secret — {'; '.join(err)}")
+            return False
+        apply_proc = subprocess.run(
+            ["kubectl", "apply", "-f", "-"],
+            input=gen.stdout, capture_output=True, text=True,
+        )
+        if apply_proc.returncode != 0:
+            err = (apply_proc.stderr or apply_proc.stdout).strip().split("\n")[-3:]
+            result.fail(f"kubectl apply secret failed: {'; '.join(err)}")
+            print(f"  FAIL: kubectl apply secret — {'; '.join(err)}")
+            return False
+        print(f"  OK: {GCAL_SECRET_NAME} refreshed from {token_path}")
+        return True
+    except subprocess.SubprocessError as exc:
+        result.fail(f"Secret write error: {exc}")
+        print(f"  FAIL: {exc}")
+        return False
+
+
+def deploy_calendar_sync(result: DeviceResult, repo_root: str | None = None) -> None:
+    """Build, release and deploy the calendar-sync CronJob.
+
+    Moves the host-side Hermes cron (``lmao-kids-calendar-sync`` ->
+    ``~/.hermes/scripts/lmao_kids_sync.sh``) into the cluster:
+
+    1. Build ``lmao-calendar-sync:latest`` from ``Dockerfile.calendar-sync``.
+    2. Tag and push to the local registry.
+    3. Refresh the ``lmao-gcal-token`` Secret from the host Google token.
+    4. Apply ``k8s/calendar-sync.yaml`` (ConfigMap + hourly CronJob).
+    5. Verify the CronJob exists with the expected schedule.
+
+    The job runs both stages the host cron ran — ``tools/calendar_sync.py``
+    (Google -> cal_events) then ``tools/calendar_pics_sync.py`` (art ->
+    cal_pics) — so a missing CronJob means the family calendar stops
+    refreshing entirely, and per-event weather stops re-delivering.
+
+    Args:
+        result: A ``DeviceResult`` instance (from ``tools.install_all``).
+        repo_root: Path to the repository root; auto-detected when None.
+    """
+    print("\n--- Calendar Sync: build + push + K8s CronJob ---")
+
+    if repo_root is None:
+        repo_root = _find_repo_root()
+    if not repo_root:
+        result.fail("Cannot locate repo root (no Dockerfile found)")
+        print("  FAIL: Cannot locate repo root (no Dockerfile found)")
+        return
+
+    if shutil.which("docker") is None:
+        result.skip("Docker not found on PATH — install with: apt-get install docker.io")
+        print("  SKIP: Docker not found on PATH")
+        return
+    if shutil.which("kubectl") is None:
+        result.skip("kubectl not found on PATH — install with: apt-get install kubectl")
+        print("  SKIP: kubectl not found on PATH")
+        return
+
+    cluster_ok, cluster_msg = _check_k8s_cluster()
+    print(f"  K8s cluster: {cluster_msg}")
+    registry_ok, registry_msg = _check_registry()
+    print(f"  Local registry: {registry_msg}")
+
+    dockerfile = os.path.join(repo_root, "Dockerfile.calendar-sync")
+    if not os.path.isfile(dockerfile):
+        result.fail(f"Dockerfile not found: {dockerfile}")
+        print(f"  FAIL: Dockerfile not found: {dockerfile}")
+        return
+
+    # ── Build ──
+    try:
+        proc = subprocess.run(
+            ["docker", "build", "-f", dockerfile, "-t", "lmao-calendar-sync", "."],
+            cwd=repo_root, capture_output=True, text=True,
+        )
+    except subprocess.SubprocessError as exc:
+        result.fail(f"Docker build error: {exc}")
+        print(f"  FAIL: {exc}")
+        return
+    if proc.returncode != 0:
+        err = (proc.stderr or proc.stdout).strip().split("\n")[-3:]
+        result.fail(f"Docker build failed: {'; '.join(err)}")
+        print(f"  FAIL: Docker build failed — {'; '.join(err)}")
+        return
+    print("  OK: Docker image built (lmao-calendar-sync:latest)")
+
+    # ── Push ──
+    registry_image = (
+        f"{DEFAULT_REGISTRY_HOST}:{DEFAULT_REGISTRY_PORT}/lmao-calendar-sync:latest"
+    )
+    if not registry_ok:
+        result.fail(f"Cannot release image: {registry_msg}")
+        print(f"  FAIL: {registry_msg}")
+        return
+    if not _tag_and_push(result, "lmao-calendar-sync:latest", registry_image):
+        return
+
+    if not cluster_ok:
+        result.ok(
+            f"Docker image built and pushed to {registry_image}. "
+            "K8s cluster unreachable — run 'kubectl apply -f k8s/calendar-sync.yaml' "
+            "when the cluster is back online."
+        )
+        print("  OK: image released; apply k8s/calendar-sync.yaml when cluster is up")
+        return
+
+    # ── Google token Secret (must exist before the CronJob pod starts) ──
+    if not _ensure_gcal_token_secret(result):
+        return
+
+    # ── Apply the manifest ──
+    manifest = os.path.join(repo_root, "k8s", "calendar-sync.yaml")
+    if not os.path.isfile(manifest):
+        result.fail(f"Manifest not found: {manifest}")
+        print(f"  FAIL: Manifest not found: {manifest}")
+        return
+    proc = _run_kubectl_step(result, "apply", ["kubectl", "apply", "-f", manifest])
+    if proc is None:
+        return
+    for line in proc.stdout.strip().split("\n"):
+        if line.strip():
+            print(f"    {line}")
+
+    # ── Verify the CronJob is registered with the hourly schedule ──
+    proc = _run_kubectl_step(
+        result,
+        "get cronjob",
+        [
+            "kubectl", "get", "cronjob", "lmao-calendar-sync",
+            "-o", "jsonpath={.spec.schedule}",
+        ],
+    )
+    if proc is None:
+        return
+    schedule = proc.stdout.strip()
+    if not schedule:
+        result.fail("CronJob lmao-calendar-sync not found after apply")
+        print("  FAIL: CronJob not found after apply")
+        return
+
+    result.ok(f"Calendar Sync CronJob deployed (schedule '{schedule}', {registry_image})")
+    print(f"  OK: CronJob lmao-calendar-sync deployed (schedule '{schedule}')")
+    print("  Run one now: kubectl create job --from=cronjob/lmao-calendar-sync lmao-cal-sync-manual")
+
+
 def install_k8s_services(result: DeviceResult, repo_root: str | None = None) -> None:
     """Apply Kubernetes manifests via ``kubectl apply -f``.
 

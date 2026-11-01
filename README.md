@@ -575,6 +575,15 @@ CalendarBundle.current = Weather   // conditions now
 CalEvent.weather       = Weather   // forecast bucket at the event's start_ms
 ```
 
+**Refreshing the forecast.** `CalendarBundle.current` ships on *every* reply
+(it is bundle-level, not gated by the delta), so it refreshes on the panel's own
+30-min sync. `CalEvent.weather` is gated by the delta — a row only re-ships
+when its `updated_ms` moves — so an event's forecast advances with the
+**calendar-sync CronJob** (`k8s/calendar-sync.yaml`, hourly). That job's
+unconditional `ON CONFLICT DO UPDATE` makes `lmao_cal_touch_trg` stamp every
+in-window row each run, which is what re-delivers each event with a fresh
+forecast as its date approaches. Stopping the job freezes per-event weather.
+
 `temp_c10` stays in tenths of a degree **Celsius** on the wire so the panel
 does the °F conversion with no float and no locale; the WMO code is passed
 through raw and each display maps it to its own label. An absent `Weather`
@@ -854,6 +863,10 @@ when running in Docker):
 | `LMAO_AUTOIFACE_DEVICES` | unset (all interfaces) | Comma-separated interface allowlist for AutoInterface (e.g. `wlan0`) |
 | `LMAO_TCP_PORT` | `4246` | Server's RNS `TCPServerInterface` listen port (hostNetwork) — the deterministic home-network transport for wifi/human clients (multicast AutoInterface is unreliable through the home AP) |
 | `LMAO_CAL_TCP_PORT` | `4247` | Framed-TCP family-calendar read service (RoboDog native client, no RNS): 4-byte-length-prefixed `CalendarRequest`→`CalendarBundle` |
+| `LMAO_WEATHER_LAT` / `LMAO_WEATHER_LON` | unset (weather off) | Household coordinates for the Open-Meteo forecast the server rides on every calendar reply (`CalendarBundle.current` + `CalEvent.weather`). Unset ⇒ no `Weather` message, i.e. byte-identical pre-weather replies. |
+| `LMAO_WEATHER_TTL_S` | `900` | Server-side forecast cache TTL. The panel syncs every 30 min, so a sync almost always triggers a refresh. |
+| `LMAO_WEATHER_URL` | Open-Meteo | Override for a self-hosted forecast endpoint. |
+| `LMAO_GCAL_TOKEN` | `~/.hermes/google_token.json` | **Deploy-time only** (never in a pod env): the Google authorized-user token `install_all` copies into the `lmao-gcal-token` Secret for the calendar-sync CronJob. |
 | `LMAO_TCP_BIND` | `0.0.0.0` | Server's RNS TCP bind IP |
 | `LMAO_ANNOUNCE_INTERVAL` | `0` (off) | Seconds between server re-announces over non-LoRa interfaces so fresh wifi clients can resolve the server's delivery identity |
 | `LMAO_SERVER_HOST` | `192.168.50.67` | Client-side: RNS `TCPClientInterface` target (the LMAO server's IP); overrides with `LMAO_SERVER_PORT` |

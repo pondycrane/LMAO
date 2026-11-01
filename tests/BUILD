@@ -305,6 +305,15 @@ py_test(
 )
 
 py_test(
+    name = "test_calendar_sync_cronjob",
+    srcs = ["test_calendar_sync_cronjob.py"],
+    deps = [
+        "//tools:install_all_lib",
+        "@lmao_pip//pytest",
+    ],
+)
+
+py_test(
     name = "test_weather",
     srcs = ["test_weather.py"],
     deps = [
