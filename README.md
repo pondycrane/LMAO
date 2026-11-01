@@ -579,7 +579,7 @@ CalEvent.weather       = Weather   // forecast bucket at the event's start_ms
 does the °F conversion with no float and no locale; the WMO code is passed
 through raw and each display maps it to its own label. An absent `Weather`
 means "no forecast for this slot" (weather disabled, or an event past the
-72-hour hourly horizon) — clients MUST render nothing rather than a
+16-day hourly horizon) — clients MUST render nothing rather than a
 placeholder. With the env unset the reply is byte-identical to a pre-weather
 server, so older clients are unaffected.
 
