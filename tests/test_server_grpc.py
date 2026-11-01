@@ -34,6 +34,29 @@ def grpc_service_with_mocks():
     cleanup_common_mocks()
 
 
+@pytest.fixture
+def real_calendar_bundle(grpc_service_with_mocks):
+    """Patch ``server.CalendarBundle`` to the REAL generated class for the
+    weather tests (conftest mocks proto types for import isolation, and a
+    mocked bundle cannot carry real Weather fields).  Restores on teardown."""
+    import importlib.util
+    import os
+
+    import lmao_server.server as server_mod
+
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    spec = importlib.util.spec_from_file_location(
+        "_real_lma_messages_pb2", os.path.join(root, "proto", "lma_messages_pb2.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    saved = server_mod.CalendarBundle
+    server_mod.CalendarBundle = mod.CalendarBundle
+    try:
+        yield mod.CalendarBundle
+    finally:
+        server_mod.CalendarBundle = saved
+
+
 class TestLMAOGrpcService:
     """Tests for LMAOGrpcService RPC methods."""
 
@@ -229,6 +252,80 @@ class TestLMAOGrpcService:
         fake.sync.assert_called_once_with(
             calendar_id="family", since_ms=0, max_events=0, participant=""
         )
+
+    @pytest.mark.asyncio
+    async def test_get_calendar_attaches_weather(self, grpc_service_with_mocks,
+                                                 real_calendar_bundle):
+        """A configured WEATHER provider fills CalendarBundle.current and each
+        event's Weather slot on the gRPC path (the panel's live transport)."""
+        grpc_svc, _ = grpc_service_with_mocks
+
+        import lmao_server.server as server_mod
+        from lma_core.weather import WeatherProvider
+
+        fake = MagicMock()
+        fake.sync.return_value = ([{
+            "uid": "u1", "calendar_id": "family", "title": "Swim class",
+            "notes": "", "start_ms": 1793530800000, "end_ms": 1793534400000,
+            "deleted": False, "pic": "",
+        }], 1000)
+        server_mod.CALENDAR = fake
+        server_mod.WEATHER = WeatherProvider(
+            40.6834, -74.4427,
+            fetch=lambda url, timeout: {
+                "current": {"temperature_2m": 6.7, "weather_code": 0},
+                "hourly": {
+                    "time": [1793530800],
+                    "temperature_2m": [1.9],
+                    "weather_code": [71],
+                },
+            },
+        )
+        try:
+            req = MagicMock()
+            req.calendar_id = "family"
+            req.since_ms = 0
+            req.max_events = 0
+            req.participant = ""
+
+            bundle = await grpc_svc.GetCalendar(req, AsyncMock())
+
+            assert bundle.HasField("current")
+            assert bundle.current.temp_c10 == 67
+            assert bundle.events[0].HasField("weather")
+            assert bundle.events[0].weather.temp_c10 == 19
+            assert bundle.events[0].weather.code == 71
+        finally:
+            server_mod.WEATHER = None
+
+    @pytest.mark.asyncio
+    async def test_get_calendar_without_weather_provider(
+            self, grpc_service_with_mocks, real_calendar_bundle):
+        """With WEATHER unset the bundle carries no Weather message, so the
+        reply stays byte-compatible with a pre-weather server."""
+        grpc_svc, _ = grpc_service_with_mocks
+
+        import lmao_server.server as server_mod
+
+        fake = MagicMock()
+        fake.sync.return_value = ([{
+            "uid": "u1", "calendar_id": "family", "title": "Swim class",
+            "notes": "", "start_ms": 1793530800000, "end_ms": 1793534400000,
+            "deleted": False, "pic": "",
+        }], 1000)
+        server_mod.CALENDAR = fake
+        server_mod.WEATHER = None
+
+        req = MagicMock()
+        req.calendar_id = "family"
+        req.since_ms = 0
+        req.max_events = 0
+        req.participant = ""
+
+        bundle = await grpc_svc.GetCalendar(req, AsyncMock())
+
+        assert not bundle.HasField("current")
+        assert not bundle.events[0].HasField("weather")
 
     @pytest.mark.asyncio
     async def test_subscribe_receives_messages(self, grpc_service_with_mocks):

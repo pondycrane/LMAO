@@ -25,6 +25,7 @@ import logging
 from typing import Any
 
 from lma_core import CalendarBundle, CalendarRequest
+from lma_core.weather import apply_weather
 
 _logger = logging.getLogger(__name__)
 
@@ -50,9 +51,16 @@ async def _read_frame(reader: asyncio.StreamReader) -> bytes:
 
 
 def _sync_to_bundle(
-    store: Any, calendar_id: str, since_ms: int, max_events: int, participant: str = ""
+    store: Any, calendar_id: str, since_ms: int, max_events: int,
+    participant: str = "", weather: Any = None,
 ) -> bytes:
-    """Run a delta sync and serialize a CalendarBundle reply frame payload."""
+    """Run a delta sync and serialize a CalendarBundle reply frame payload.
+
+    ``weather`` is a ``lma_core.weather.WeatherProvider`` (or None when the
+    deployment has no location configured): it fills ``bundle.current`` and
+    each event's ``weather`` forecast.  Weather is attached by the SYNC path
+    (not per-request), so a delta reply carries it exactly like a full one.
+    """
     events, watermark = store.sync(
         calendar_id=calendar_id or "family",
         since_ms=since_ms,
@@ -72,11 +80,13 @@ def _sync_to_bundle(
         e.deleted = ev["deleted"]
         e.pic = ev["pic"]
     bundle.watermark_ms = watermark
+    if weather is not None:
+        apply_weather(bundle, weather.snapshot())
     return bundle.SerializeToString()
 
 
 async def _handle_conn(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
-                       store: Any) -> None:
+                       store: Any, weather: Any = None) -> None:
     peer = writer.get_extra_info("peername")
     try:
         _logger.debug("calendar TCP client connected: %s", peer)
@@ -90,6 +100,7 @@ async def _handle_conn(reader: asyncio.StreamReader, writer: asyncio.StreamWrite
             since_ms=req.since_ms,
             max_events=req.max_events,
             participant=req.participant or "",
+            weather=weather,
         )
         writer.write(_frame(payload))
         await writer.drain()
@@ -108,10 +119,16 @@ async def start_calendar_tcp_server(
     store: Any,
     host: str = "0.0.0.0",
     port: int = 4247,
+    weather: Any = None,
 ) -> asyncio.AbstractServer:
-    """Start the framed-TCP calendar read service. Returns the `Server`."""
+    """Start the framed-TCP calendar read service. Returns the `Server`.
+
+    ``weather`` (a ``lma_core.weather.WeatherProvider``) attaches the current
+    conditions + per-event forecast to every reply; None leaves the bundle
+    weather-free, byte-identical to a pre-weather server.
+    """
     server = await asyncio.start_server(
-        lambda r, w: _handle_conn(r, w, store),
+        lambda r, w: _handle_conn(r, w, store, weather),
         host,
         port,
     )

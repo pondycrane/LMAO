@@ -41,6 +41,8 @@ from lma_core.rns_di import LXMF, RNS
 from lma_core.rns_init import init_rns_and_lxmf as _shared_init
 from lma_core.rns_init import warn_if_rnode_missing
 from lma_core.sprout_history import SproutHistory
+from lma_core.weather import WeatherProvider, apply_weather
+from lma_core.weather import from_env as weather_from_env
 
 # Local imports
 from lmao_server import config
@@ -133,6 +135,12 @@ _CONTACTS_LOCK = threading.Lock()
 # out-of-band with direct SQL).  Initialized in async_main() next to the
 # contact book; ``None`` means calendar syncs get no data reply.
 CALENDAR: "CalendarStore | None" = None  # noqa: F841 — assigned in async_main()
+
+# Weather for the calendar replies (current conditions + per-event forecast).
+# Opt-in per deployment via LMAO_WEATHER_LAT/LON; ``None`` means every calendar
+# reply is sent without a Weather message (byte-identical to a pre-weather
+# server).  Initialized in async_main().
+WEATHER: "WeatherProvider | None" = None  # noqa: F841 — assigned in async_main()
 
 
 def _learn_contact(source_hash: str) -> None:
@@ -537,6 +545,11 @@ class Server:
                         if i == headline:
                             _fill_pic_data(PIC_STORE, ev["pic"], entry)
                     cal_env.calendar.watermark_ms = watermark
+                    if WEATHER is not None:
+                        filled = apply_weather(cal_env.calendar,
+                                               WEATHER.snapshot())
+                        logger.debug("Calendar reply carries %d weather slots.",
+                                     filled)
                     send(cal_env)
                     logger.info(
                         "Calendar reply sent (%d events, watermark %d).",
@@ -964,6 +977,11 @@ if GRPC_AVAILABLE:
                 if i == headline:
                     _fill_pic_data(PIC_STORE, ev["pic"], entry)
             bundle.watermark_ms = watermark
+            if WEATHER is not None:
+                # asnapshot() runs the blocking Open-Meteo GET off the event
+                # loop; the provider serves its 15-min cache in the meantime.
+                filled = apply_weather(bundle, await WEATHER.asnapshot())
+                logger.info("GetCalendar weather slots=%d", filled)
             return bundle
 
 
@@ -1051,6 +1069,17 @@ async def async_main():
     # CalEvent.pic_data (field 8) so the RoboDog display can draw real icons.
     global PIC_STORE
     PIC_STORE = open_pic_store()
+
+    # Weather for the calendar replies (RoboDog prints "now 46°F clear" and the
+    # first event's forecast).  Opt-in: without LMAO_WEATHER_LAT/LON the
+    # provider stays None and replies carry no Weather message.
+    global WEATHER
+    WEATHER = weather_from_env()
+    if WEATHER is not None:
+        logger.info("Weather enabled (%.4f, %.4f, ttl %ss)",
+                    WEATHER.latitude, WEATHER.longitude, WEATHER.ttl_s)
+    else:
+        logger.info("Weather disabled (set LMAO_WEATHER_LAT/LON to enable)")
 
     # Create Server instance (wraps router + identity)
     lmao_server = Server(config_dict=cfg_dict)
@@ -1161,6 +1190,7 @@ async def async_main():
             cal_tcp_server = await start_calendar_tcp_server(
                 CALENDAR,
                 port=int(os.environ.get("LMAO_CAL_TCP_PORT", "4247")),
+                weather=WEATHER,
             )
         except Exception as e:
             logger.warning("Calendar TCP read service unavailable (%s)", e)

@@ -151,3 +151,52 @@ async def test_family_request_defaults_participant_to_empty():
     finally:
         server.close()
         await server.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_weather_provider_rides_the_reply():
+    """A configured provider fills CalendarBundle.current + per-event weather
+    on the framed-TCP path (the RoboDog client's actual transport)."""
+    from lma_core.weather import WeatherProvider
+
+    store = _fake_store([dict(_EVENT)])
+    provider = WeatherProvider(
+        40.6834, -74.4427,
+        fetch=lambda url, timeout: {
+            "current": {"temperature_2m": 6.7, "weather_code": 0},
+            "hourly": {
+                "time": [1700000000 // 3600 * 3600],
+                "temperature_2m": [1.9],
+                "weather_code": [71],
+            },
+        },
+    )
+    server = await start_calendar_tcp_server(store, port=0, weather=provider)
+    port = server.sockets[0].getsockname()[1]
+    try:
+        _length, bundle = await _sync(port, "family", 0)
+        assert bundle.HasField("current")
+        assert bundle.current.temp_c10 == 67
+        assert bundle.current.code == 0
+        assert bundle.events[0].HasField("weather")
+        assert bundle.events[0].weather.temp_c10 == 19
+        assert bundle.events[0].weather.code == 71
+    finally:
+        server.close()
+        await server.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_no_weather_provider_leaves_reply_unchanged():
+    """Without a provider the reply carries no Weather message at all, so a
+    pre-weather deployment's wire bytes stay identical."""
+    store = _fake_store([dict(_EVENT)])
+    server = await start_calendar_tcp_server(store, port=0)
+    port = server.sockets[0].getsockname()[1]
+    try:
+        _length, bundle = await _sync(port, "family", 0)
+        assert not bundle.HasField("current")
+        assert not bundle.events[0].HasField("weather")
+    finally:
+        server.close()
+        await server.wait_closed()

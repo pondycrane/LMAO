@@ -421,6 +421,76 @@ class TestCalendarReply:
         assert entry.uid == "u1"
         assert entry.pic == "swim"
 
+    def test_calendar_request_carries_weather(self, server_with_mocks):
+        """The LXMF calendar reply carries the same weather as gRPC/TCP: the
+        one apply_weather rule, so a LoRa client sees the same conditions the
+        RoboDog panel does.  Uses the REAL envelope/bundle classes (a mocked
+        bundle cannot carry Weather fields) and reads the reply back off the
+        outbound LXMF message."""
+        server = server_with_mocks
+
+        import importlib.util
+        import os
+
+        import lmao_server.server as server_mod
+        from lma_core.weather import WeatherProvider
+
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        spec = importlib.util.spec_from_file_location(
+            "_real_lma_messages_pb2", os.path.join(root, "proto", "lma_messages_pb2.py"))
+        real_pb2 = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(real_pb2)
+
+        fake_store = MagicMock()
+        fake_store.sync.return_value = (
+            [{
+                "uid": "u1", "calendar_id": "family", "title": "Swim class",
+                "notes": "", "start_ms": 1793530800000,
+                "end_ms": 1793534400000, "deleted": False, "pic": "",
+            }],
+            999,
+        )
+
+        saved_envelope = server_mod.LMAOEnvelope
+        saved_calendar = server_mod.CALENDAR
+        saved_weather = server_mod.WEATHER
+        server_mod.LMAOEnvelope = real_pb2.LMAOEnvelope
+        server_mod.CALENDAR = fake_store
+        server_mod.WEATHER = WeatherProvider(
+            40.6834, -74.4427,
+            fetch=lambda url, timeout: {
+                "current": {"temperature_2m": 6.7, "weather_code": 0},
+                "hourly": {"time": [1793530800],
+                           "temperature_2m": [1.9], "weather_code": [71]},
+            },
+        )
+        try:
+            req_env = real_pb2.LMAOEnvelope()
+            req_env.request.calendar.calendar_id = "family"
+            req_env.request.calendar.since_ms = 0
+            req_env.request.calendar.max_events = 0
+
+            msg = MagicMock()
+            msg.get_source.return_value = MagicMock()
+            msg.get_source.return_value.hash = b"\x0b" * 16
+            msg.content = req_env.SerializeToString()
+            msg.title_as_string.return_value = "p:Envelope"
+
+            server.handle_lxmf_delivery(msg)
+
+            server.router.handle_outbound.assert_called_once()
+            out = sys.modules["LXMF"].LXMessage.call_args.kwargs["content"]
+            reply = real_pb2.LMAOEnvelope()
+            reply.ParseFromString(out)
+            assert reply.calendar.current.temp_c10 == 67
+            assert reply.calendar.current.code == 0
+            assert reply.calendar.events[0].weather.temp_c10 == 19
+            assert reply.calendar.events[0].weather.code == 71
+        finally:
+            server_mod.LMAOEnvelope = saved_envelope
+            server_mod.CALENDAR = saved_calendar
+            server_mod.WEATHER = saved_weather
+
     def test_calendar_request_no_reply_without_store(self, server_with_mocks, caplog):
         server = server_with_mocks
 

@@ -38,6 +38,7 @@ _PROTO_NAMES = frozenset(
         "CalendarRequest",
         "CalEvent",
         "CalendarBundle",
+        "Weather",
     }
 )
 
