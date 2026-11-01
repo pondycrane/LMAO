@@ -545,7 +545,7 @@ index and two triggers at startup (same pattern as the Postgres contact book):
 Clients read via the LMAO wire protocol: `LMAOEnvelope{ request.calendar }`
 (lookup `CalendarRequest{ calendar_id, since_ms, max_events, participant }` —
 participant = kid name, empty == no filter (family) →
-`CalendarBundle{ events[], watermark_ms }`). A sync returns every event with
+`CalendarBundle{ events[], watermark_ms, current }`). A sync returns every event with
 `updated_ms > since_ms` (0 = full fetch) and a watermark to use as the next
 `since_ms` — delta-only, so replies stay small regardless of history length.
 Bound by the server-side page cap (100 events); calendar clients are
@@ -560,6 +560,28 @@ title rows — generated and stored in Postgres (`cal_pics` table) by the
 --key <key>` — either from a pack SVG or a small line drawing found online and
 fetched as a URL (`--source https://…`). The client resolves the key to the
 stored tile for display.
+
+**Weather rides the same reply.** When the deployment sets
+`LMAO_WEATHER_LAT`/`LMAO_WEATHER_LON` (the in-cluster manifest pins the
+household coordinates), the server fetches the Open-Meteo forecast (no API
+key, cached 15 min) and fills two optional `Weather` submessages on every
+calendar reply — on the gRPC, framed-TCP **and** LXMF paths, from one shared
+rule (`lma_core/weather.py: apply_weather`):
+
+```
+Weather { sint32 temp_c10 = 1;   // tenths of °C (zigzag: negatives common)
+          uint32 code     = 2; } // WMO 4677 weather code
+CalendarBundle.current = Weather   // conditions now
+CalEvent.weather       = Weather   // forecast bucket at the event's start_ms
+```
+
+`temp_c10` stays in tenths of a degree **Celsius** on the wire so the panel
+does the °F conversion with no float and no locale; the WMO code is passed
+through raw and each display maps it to its own label. An absent `Weather`
+means "no forecast for this slot" (weather disabled, or an event past the
+72-hour hourly horizon) — clients MUST render nothing rather than a
+placeholder. With the env unset the reply is byte-identical to a pre-weather
+server, so older clients are unaffected.
 
 ### 7d. RoboDog — RLCD family-calendar display client (native, ESP-IDF)
 
@@ -659,6 +681,12 @@ Outputs in `robodog_client/shots/` (gitignored):
   dropped), so a shorter set is not a data-path error unless a hint says so.
   On a kid panel the header shows the kid name LEFT + `YYYY-MM-DD HH:MM`
   RIGHT (no divider); family keeps the centered clock.
+- **Weather**: with the server's `LMAO_WEATHER_LAT/LON` set, a status line
+  sits under the header (baseline 46) reading `now 44°F clear` on the LEFT and
+  the `stale`/`no wifi` hint on the RIGHT, and the headline event's forecast
+  prints in the info column under its range meta (`27°F snow`). Both come from
+  the reply's `Weather` slots; when the server sends none, neither line is
+  drawn (never a placeholder `0°F`). Forecasts are Fahrenheit, rounded.
 - Row meta reads `HH:MM-HH:MM` (start–end range) right-aligned on every row;
   the headline title is a word-wrapped `helvB18` block (bottom-anchored, with
   an ellipsis on the final shown line when it overflows). Non-today events

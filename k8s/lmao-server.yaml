@@ -133,6 +133,18 @@ spec:
                 secretKeyRef:
                   name: lmao-postgres
                   key: POSTGRES_DB
+            # Weather for the calendar replies: the RoboDog RLCD prints the
+            # current conditions ("now 46°F clear") and the forecast at the
+            # first event's start ("at 12:30 46°F snow showers").  The server
+            # fetches Open-Meteo (no key) and rides a ~6-byte Weather message
+            # on the same CalendarBundle the panel already polls.  Unset →
+            # no Weather message at all (byte-identical pre-weather replies).
+            # Coordinates = the household town (Berkeley Heights, NJ); the
+            # panel itself renders the clock in its own build-time tz offset.
+            - name: LMAO_WEATHER_LAT
+              value: "40.6834"
+            - name: LMAO_WEATHER_LON
+              value: "-74.4427"
           ports:
             - name: grpc
               containerPort: 50051
