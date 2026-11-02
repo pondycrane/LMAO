@@ -36,9 +36,6 @@
 /* Declared in the overlay boards/waveshare.../setup_device.c (board device). */
 esp_err_t robodog_board_display_get(esp_lcd_panel_handle_t *out_panel,
                                     esp_lcd_panel_io_handle_t *out_io);
-/* Declared in robodog_phase0.c: force the RD_SHOT publisher to dump the
- * current frame immediately (bypasses the 4 s self-tick throttle). */
-void robodog_rdshot_capture_now(void);
 
 static const char *TAG = "robodog_ui";
 
@@ -380,11 +377,16 @@ static void ui_flush_locked(void)
         lv_obj_invalidate(s_state_label);
     }
     /* Synchronous full refresh: drives LVGL render -> panel flush ->
-     * robodog_rdshot_publish (frame captured every time, never event-flaky),
-     * then force the RD_SHOT dump so a capture right now reads the fresh
-     * frame. */
+     * robodog_rdshot_publish, so the RETAINED frame is always the current
+     * screen and any on-demand capture (`rdshot`, `capture.py`) reads it.
+     * NEVER dump the frame here: a 15000 B hex dump is ~30 KB (~2.6 s at
+     * 115200), and forcing one per UI command put the UI task tens of seconds
+     * behind its queue — during a 6-chunk reply that is ~30 s of lag, so the
+     * status label still showed `idle` seconds into the NEXT listen (the panel
+     * lied about the live state, which is what made "hit listen -> idle" look
+     * like a firmware fault).  Dumping is the publisher's job on its own
+     * cadence and on demand (`rdshot`), never on the UI's critical path. */
     esp_lv_adapter_refresh_now(s_disp);
-    robodog_rdshot_capture_now();
 }
 
 static void ui_process_cmd(const ui_cmd_t *cmd)
@@ -430,6 +432,11 @@ static void ui_process_cmd(const ui_cmd_t *cmd)
         break;
     case UI_CMD_STATE:
         ui_ascii_copy(s_agent_state, sizeof(s_agent_state), cmd->state);
+        /* State transitions are part of the console contract: a gate (and a
+         * human) can see exactly when the panel claimed each state, which is
+         * how a "panel still says idle during a listen" report is attributed
+         * to the writer instead of guessed at. */
+        ESP_LOGI(TAG, "state -> %s", s_agent_state);
         break;
     case UI_CMD_SESSION:
         ui_ascii_copy(s_session_text, sizeof(s_session_text), cmd->text);
@@ -523,8 +530,13 @@ static void ui_enqueue(ui_cmd_type_t type, const char *text, const char *state)
     }
     if (s_ui_queue != NULL) {
         /* Non-blocking: a full queue means LVGL is backed up; drop the event
-         * rather than stall the caller (the transcript is best-effort). */
-        xQueueSend(s_ui_queue, &cmd, 0);
+         * rather than stall the caller (the transcript is best-effort) — but
+         * never silently: a dropped STATE command leaves the panel showing a
+         * stale state, which reads as a firmware fault. */
+        if (xQueueSend(s_ui_queue, &cmd, 0) != pdTRUE) {
+            ESP_LOGW(TAG, "ui queue full; dropped cmd type=%d state=%s",
+                     (int)type, cmd.state);
+        }
     }
 }
 

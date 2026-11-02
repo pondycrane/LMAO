@@ -197,7 +197,7 @@ python3 robodog_client/capture.py --port /dev/ttyACM0 --reset --n 8 --timeout 18
 Frames are auto-detected by their `RD_SHOT` header/buffer size (15000 B =
 voice board 400×300 landscape LUT; 15200 B = calendar app 300×400 portrait),
 and the voice-board vision prompt transcribes the XiaoZhi status/subtitle text
-instead of calendar rows. Capture is throttled to one full frame per ~4 s so
+instead of calendar rows. Capture is throttled to one full frame per ~10 s so
 the serial dump never interleaves or starves the realtime audio.
 
 ### Software button (RD_LISTEN)
@@ -232,7 +232,7 @@ compiled into every hermes build, like the capture hook.
 | `hermes-platform/xiaozhi/` | **Hermes platform plugin** (plugin.yaml + adapter.py + __init__.py) deployed to `~/.hermes/plugins/platforms/xiaozhi/`. Makes the board a first-class Hermes gateway client (see "Hermes gateway integration" below). |
 | `lmao-robodog-voice.service` | systemd **user** unit for the bridge, run from `~/xiaozhi/` with a Python venv (`fastapi`, `uvicorn`, `websockets`, `opuslib`, `faster-whisper`, `numpy`). |
 | `kokoro_server.py` + `kokoro-tts.service` | **Kokoro-82M** TTS (Apache-2.0, ~82M params, 24 kHz native) exposed as OpenAI `/v1/audio/speech` on the GPU host `spark-5307:8004`, also systemd-user-managed. |
-| `lmao-robodog-voice.service` env | ASR = local faster-whisper `base`; brain = `HERMES_BRAIN_URL` (default `ws://127.0.0.1:8101/xiaozhi/brain`, the board's Hermes session; `DEVICE_ID` pins the identity, else hello device_id/mac or a persisted uuid); fallback LLM = `gx10-f156:8000/v1` (`deepseek-ai/DeepSeek-V4-Flash-0731`); TTS = `spark-5307:8004`; downlink = `DOWNLINK_PACE` (seconds per 60 ms Opus frame, default `0.0582` = ~97% real-time), so the 24 kHz reply is streamed at play-rate and the board's ~2.5 s decode pipeline never overflows (issue #267). |
+| `lmao-robodog-voice.service` env | ASR = local faster-whisper `base`; brain = `HERMES_BRAIN_URL` (default `ws://127.0.0.1:8101/xiaozhi/brain`, the board's Hermes session; `DEVICE_ID` pins the identity, else hello device_id/mac or a persisted uuid); fallback LLM = `192.168.50.3:8000/v1` (`qwen3.8-flash-next`, spark-73dd — the stable always-on endpoint); TTS = `spark-5307:8004`; downlink = `DOWNLINK_PACE` (seconds per 60 ms Opus frame, default `0.0582` = ~97% real-time), so the 24 kHz reply is streamed at play-rate and the board's ~2.5 s decode pipeline never overflows (issue #267). |
 
 Loop:
 
@@ -292,10 +292,11 @@ ASR → claw agent LLM → Kokoro TTS → ES8311 speaker → RLCD render). See
 bash robodog_client/esp-claw/fetch_esp_claw.sh
 
 # build in espressif/idf:v5.5.4 (endpoints overridable per-build)
-CLAW_IDF_IMG=espressif/idf:v5.5.4 \
-CLAW_ASR_URL=http://192.168.50.153:11801/v1/audio/transcriptions \
-CLAW_TTS_URL=http://192.168.50.153:11804/v1/audio/speech \
-bash robodog_client/esp-claw/build_esp_claw.sh
+# Endpoint defaults are committed (spark-5307 = 192.168.50.27 for Whisper/
+# Kokoro, spark-73dd = 192.168.50.3 for qwen3.8-flash-next); all three are on
+# the board's own subnet, so no host socat forward is needed. Override with
+# CLAW_ASR_URL / CLAW_TTS_URL / CLAW_LLM_BASE_URL / CLAW_LLM_MODEL if they move.
+CLAW_IDF_IMG=espressif/idf:v5.5.4 bash robodog_client/esp-claw/build_esp_claw.sh
 
 # flash (host esptool — the board's sanctioned path) + provision NVS
 # (WiFi + LLM + cfg_ver schema key) at 0xA000
@@ -326,7 +327,13 @@ rdshot                 # force-publish the current screen frame (RD_SHOT)
 ```
 
 The RLCD status bar shows WiFi (left) and the live voice state **top-right**:
-`idle` → `listening` → `processing` (ASR+LLM) → `responding` (TTS) → `idle`.
+`idle` → `listening` → `processing` (ASR+LLM) → `responding` (TTS) → `idle`
+(`error` for a real fault, `truncated` when a reply exceeded the chunk cap).
+A tap of the BOOT button (or `rd_listen`) always starts a listen — the press
+is debounced, not the release, so a quick tap works; holding it ≥ 1.5 s
+clears the conversation session instead.  The utterance buffer grows in 2 s
+steps while you speak, so a listen never fails on a large contiguous SPIRAM
+allocation; a capture fault ends in `error`, never a silent `idle`.
 
 Phase 2 full-loop hardware gate (drives the corpus WAV into the board mic via
 the test rig's ALSA `hw:2` and asserts each leg from the device serial
@@ -335,6 +342,15 @@ console + an RD_SHOT vision readback):
 ```sh
 python3 robodog_client/esp-claw/robodog_claw_e2e.py --corpus capabilities
 # OPEN_SESSION / ASR_MATCH / REPLY / RING / SUBTITLE -> Overall: PASS
+```
+
+Multi-session stress gate (≥ 5 back-to-back sessions, different question
+each; catches "first turn works, later turns drop back to idle"):
+
+```sh
+bazel run //robodog_client:claw_stress -- --runs 5
+# OPEN_SESSION / ASR_MATCH / REPLY / TTS / CHUNKED_QUEUE / FULL_READOUT
+# / NO_COLLAPSE / NO_RESET -> Overall: PASS
 ```
 
 Mutually exclusive with the calendar + hermes voice firmwares — flashing

@@ -62,8 +62,8 @@ worktree). For each CRITICAL/HIGH finding:
    //robodog_client:build_robodog_claw` bakes dead spark-5307 endpoints):
    ```bash
    CLAW_IDF_IMG=espressif/idf:v5.5.4 \
-   CLAW_ASR_URL=http://192.168.50.153:11801/v1/audio/transcriptions \
-   CLAW_TTS_URL=http://192.168.50.153:11804/v1/audio/speech \
+   CLAW_ASR_URL=http://192.168.50.27:8001/v1/audio/transcriptions \
+   CLAW_TTS_URL=http://192.168.50.27:8004/v1/audio/speech \
    bash robodog_client/esp-claw/build_esp_claw.sh
    ```
 3. **Re-flash the board when the firmware image changed** (the fixed image must

@@ -54,7 +54,12 @@ CONSOLE_BAUD = 115200
 
 # Whisper endpoint for re-ASR of the board's spoken reply (the host reaches it
 # through the same socat forward the board uses, or an env override).
-ASR_URL = os.environ.get("RD_ASR_URL", "http://192.168.50.153:11801/v1/audio/transcriptions")
+# Re-ASR of the board's spoken reply.  Default = the same Whisper endpoint the
+# BOARD calls (spark-5307 = 192.168.50.27, on this host's LAN); the old
+# 192.168.50.153:11801 value was the workspace socat forward, which is gone now
+# that spark-5307 sits on 192.168.50.0/24 and both sides reach it directly.
+ASR_URL = os.environ.get("RD_ASR_URL",
+                         "http://192.168.50.27:8001/v1/audio/transcriptions")
 ASR_MODEL = os.environ.get("RD_ASR_MODEL", "whisper-1")
 # Playback settle after `listen started` before the test speaker plays the
 # corpus into the board mic (mic/ADC ramp).  Too early -> attenuated below the
@@ -77,10 +82,10 @@ def log(msg):
 # Board reset/panic sentinels (NO_RESET leg)
 # ---------------------------------------------------------------------------
 # Any console line matching these marks a board reset or heap/panic fault.  The
-# two console decoders (wait_for_log + collect_voice_chunks) feed every line
-# through note_panic(), so a mid-run reboot (rst:0x / Guru Meditation / the
-# DESIGN.md R7 tlsf heap corruption) is NAMED by the NO_RESET leg instead of
-# only failing whichever leg was mid-wait.
+# console drain thread (ConsoleTail) feeds every line through note_panic(), so
+# a mid-run reboot (rst:0x / Guru Meditation / the DESIGN.md R7 tlsf heap
+# corruption) is NAMED by the NO_RESET leg instead of only failing whichever
+# leg was mid-wait — and it is seen even while the host is busy with audio.
 PANIC_RE = re.compile(
     r"rst:0x|Guru Meditation|assert failed|Backtrace|abort\\(\\)|tlsf|"
     r"heap.corr|CORRUPT|StoreProhibited|LoadProhibited|Rebooting"
@@ -263,23 +268,117 @@ def trim_loudest_window(path: Path, out: Path, seconds: float):
 # ---------------------------------------------------------------------------
 # Device console (serial) tail
 # ---------------------------------------------------------------------------
-def open_console(port):
-    s = serial.Serial(port, CONSOLE_BAUD, timeout=0.2)
-    time.sleep(1.0)  # let USB-Serial/JTAG enumeration settle
-    s.reset_input_buffer()
-    return s
+class ConsoleTail:
+    """Owns the device console and drains it CONTINUOUSLY.
 
+    The console is the single assert source for this gate, so a line may never
+    be lost.  Reading only while a `wait_for_log` runs loses lines whenever the
+    host blocks elsewhere: `play_wav` (~10 s) and the remote re-ASR (tens of
+    seconds) leave the USB-Serial/JTAG buffer unread while the device keeps
+    printing (the RD_SHOT self-tick alone is ~7 KB/s), so the ASR/reply/TTS
+    lines of the NEXT session are dropped — the gate then reports a false
+    "session ended before ASR" on a board that actually worked.  A background
+    thread therefore reads the port for the whole session and every scanner is
+    a cursor over the accumulated lines (start = an index, not a byte offset),
+    so no consumer can consume or discard another's lines.
 
-def write_cmd(s, cmd):
-    s.write(f"{cmd}\r\n".encode())
-    s.flush()
+    Also drains the console during host-side audio work, which keeps the
+    device's blocking `printf` cheap instead of stalling its tasks on a full
+    CDC FIFO."""
+
+    def __init__(self, port):
+        self.s = serial.Serial(port, CONSOLE_BAUD, timeout=0.2)
+        time.sleep(1.0)  # let USB-Serial/JTAG enumeration settle
+        self.s.reset_input_buffer()
+        self._cond = threading.Condition()
+        self._lines = []
+        self._closed = False
+        self._thread = threading.Thread(target=self._drain, daemon=True)
+        self._thread.start()
+
+    def _drain(self):
+        acc = b""
+        while not self._closed:
+            try:
+                data = self.s.read(8192)
+            except Exception:  # noqa: BLE001 — port vanished: stop draining
+                break
+            if not data:
+                continue
+            acc += data
+            while b"\n" in acc:
+                raw, acc = acc.split(b"\n", 1)
+                ln = raw.decode("utf-8", "replace").strip()
+                note_panic(ln)  # NO_RESET: reset/panic sentinel scan
+                with self._cond:
+                    self._lines.append(ln)
+                    self._cond.notify_all()
+
+    def write(self, cmd):
+        self.s.write(f"{cmd}\r\n".encode())
+        self.s.flush()
+
+    def mark(self):
+        """Cursor for "everything from now on"."""
+        with self._cond:
+            return len(self._lines)
+
+    def take(self, start, timeout):
+        """Block until lines past `start` exist or `timeout` elapses.
+        Returns (lines_from_start, new_cursor)."""
+        deadline = time.time() + timeout
+        with self._cond:
+            while len(self._lines) == start and not self._closed:
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    break
+                self._cond.wait(min(remaining, 1.0))
+            return self._lines[start:], len(self._lines)
+
+    def close(self):
+        self._closed = True
+        with self._cond:
+            self._cond.notify_all()
+        self._thread.join(timeout=2.0)
+        self.s.close()
 
 
 # ---------------------------------------------------------------------------
 # Transcript normalization + fuzzy match
 # ---------------------------------------------------------------------------
+# Spoken numbers -> digits.  Whisper renders spoken numerals as digits
+# ("twenty to thirty" -> "20 to 30"), so a verbatim-word comparison scored a
+# perfectly-heard corpus as a partial miss (`count slowly from twenty to
+# thirty` vs `out slowly from 20 to 30` = 0.50 overlap -> false FAIL).  Both
+# sides are normalized, so "twenty" and "20" become the same token.
+_NUM_WORDS = {
+    "zero": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+    "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11,
+    "twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15,
+    "sixteen": 16, "seventeen": 17, "eighteen": 18, "nineteen": 19,
+    "twenty": 20, "thirty": 30, "forty": 40, "fifty": 50, "sixty": 60,
+    "seventy": 70, "eighty": 80, "ninety": 90,
+}
+
+
 def norm(text):
-    return re.sub(r"[^a-z0-9 ]+", " ", text.lower()).split()
+    """Tokenize for fuzzy matching: lowercase, punctuation stripped, and
+    spoken numbers collapsed to digits (tens + unit pairs combined)."""
+    toks = re.sub(r"[^a-z0-9 ]+", " ", text.lower()).split()
+    out = []
+    i = 0
+    while i < len(toks):
+        t = toks[i]
+        v = _NUM_WORDS.get(t)
+        if v is not None and v >= 20:
+            nxt = _NUM_WORDS.get(toks[i + 1]) if i + 1 < len(toks) else None
+            if nxt is not None and 1 <= nxt <= 9:
+                out.append(str(v + nxt))
+                i += 2
+                continue
+        out.append(str(v) if v is not None else t)
+        i += 1
+    return out
 
 
 def token_overlap(a, b):
@@ -290,39 +389,26 @@ def token_overlap(a, b):
     return inter / max(len(an), len(bn))
 
 
-def wait_for_log(s, patterns, timeout, label="", spill=None):
-    """Scan the serial console for any line matching one of `patterns`.
-    Returns the regex Match, or None on timeout.
-
-    With `spill` (bytearray/bytes), every already-read byte BEYOND the matched
-    line is appended to it before returning: wait_for_log buffers up to 8 KB of
-    console per read and DISCARDS the unprocessed remainder on return, which
-    otherwise swallows lines that arrive right behind the match (e.g. the
-    `voice chunk 1/n` line immediately after `agent reply:`)."""
+def wait_for_log(tail, patterns, timeout, label="", start=None):
+    """Wait for a console line matching one of `patterns`, scanning from
+    `start` (an index into the drained lines; default = from now on).
+    Returns (regex Match or None, cursor AFTER the matched line) so the caller
+    can hand the same cursor to the next scanner — the line-level equivalent of
+    the old byte `spill` hack, which no longer needs to exist because nothing
+    is ever discarded."""
+    pos = tail.mark() if start is None else start
     deadline = time.time() + timeout
-    acc = b""
-    while time.time() < deadline:
-        data = s.read(8192)
-        if data:
-            acc += data
-            # keep only the tail (in case a line spans reads); process whole lines
-            while b"\n" in acc:
-                line, acc = acc.split(b"\n", 1)
-                ln = line.decode("utf-8", "replace").strip()
-                note_panic(ln)  # NO_RESET: reset/panic sentinel scan
-                for pat in patterns:
-                    m = re.search(pat, ln)
-                    if m:
-                        if label:
-                            log(f"{label}: {ln[:160]}")
-                        if spill is not None:
-                            spill.extend(acc)
-                        return m, ln
-            if len(acc) > 65536:
-                acc = acc[-65536:]
-    if spill is not None:
-        spill.extend(acc)
-    return None, ""
+    while True:
+        lines, pos = tail.take(pos, max(0.0, deadline - time.time()))
+        for ln in lines:
+            for pat in patterns:
+                m = re.search(pat, ln)
+                if m:
+                    if label:
+                        log(f"{label}: {ln[:160]}")
+                    return m, pos
+        if time.time() >= deadline:
+            return None, pos
 
 
 # --voice-verify console collectors: the device logs one `voice chunk i/n`
@@ -358,10 +444,10 @@ PF_FAIL_RE = re.compile(r"prefetch chunk \d+/\d+ failed")
 DBUFF_UNAVAIL_RE = re.compile(r"double-buffer unavailable")
 
 
-def collect_voice_chunks(s, timeout, seed=b""):
-    """Scan the console while the chunk queue plays back.  Returns
-    (chunks, starts, stops, max_n, truncated, gaps, pf_ready, pf_fail,
-    dbl_unavail):
+def collect_voice_chunks(tail, timeout, start=None):
+    """Scan the drained console from `start` while the chunk queue plays back.
+    Returns (chunks, starts, stops, max_n, truncated, gaps, pf_ready, pf_fail,
+    dbl_unavail, cursor):
       chunks    maps chunk index i (1-based) to (n_total, text)
       starts/stops  count the `TTS start`/`TTS stop` brackets
       max_n     the ADVERTISED chunk total — the `voice chunk i/n` denominator
@@ -382,15 +468,13 @@ def collect_voice_chunks(s, timeout, seed=b""):
                 which TTS path ran (`prefetch chunk i+1 ready` = gapless swap,
                 `prefetch chunk i+1 failed` = sync fallback per chunk,
                 `double-buffer unavailable` = whole turn on sequential path).
+      cursor    the index just past the last line scanned (hand to the next
+                scanner).
     Ends when EVERY advertised chunk 1..max_n is seen with its own start AND
     stop — i.e. the last `TTS stop` of a COMPLETE queue — or when `timeout`
-    runs out (a truncated queue runs to timeout so the leg reports FAIL).
-
-    `seed` replays bytes that wait_for_log already consumed past its match
-    (see its `spill` param) so the `voice chunk 1/n` line that lands right
-    behind `agent reply:` is not lost."""
+    runs out (a truncated queue runs to timeout so the leg reports FAIL)."""
     deadline = time.time() + timeout
-    acc = seed if isinstance(seed, bytes) else bytes(seed)  # may be bytearray
+    pos = tail.mark() if start is None else start
     chunks = {}
     starts = stops = 0
     max_n = 0
@@ -398,47 +482,40 @@ def collect_voice_chunks(s, timeout, seed=b""):
     gaps = []
     last_stop_ms = None
     pf_ready = pf_fail = dbl_unavail = 0
-    while time.time() < deadline:
-        data = s.read(8192)
-        if data:
-            acc += data
-            while b"\n" in acc:
-                line, acc = acc.split(b"\n", 1)
-                ln = line.decode("utf-8", "replace").strip()
-                note_panic(ln)  # NO_RESET: reset/panic sentinel scan
-                m = CHUNK_RE.search(ln)
-                if m:
-                    i, n = int(m.group(1)), int(m.group(2))
-                    chunks[i] = (n, m.group(3).strip())
-                    max_n = max(max_n, n)
-                    log(f"chunk {i}/{n} seen")
-                if TRUNCATED_RE.search(ln):
-                    truncated = True
-                    log("voice truncated marker seen (reply exceeds max chunks)")
-                if PF_READY_RE.search(ln):
-                    pf_ready += 1
-                if PF_FAIL_RE.search(ln):
-                    pf_fail += 1
-                if DBUFF_UNAVAIL_RE.search(ln):
-                    dbl_unavail += 1
-                ts = ESP_TS_RE.match(ln)
-                t_ms = int(ts.group(1)) if ts else None
-                if t_ms is not None and TTS_START_RE.search(ln):
-                    if last_stop_ms is not None:
-                        gaps.append(t_ms - last_stop_ms)
+    while True:
+        lines, pos = tail.take(pos, max(0.0, deadline - time.time()))
+        for ln in lines:
+            m = CHUNK_RE.search(ln)
+            if m:
+                i, n = int(m.group(1)), int(m.group(2))
+                chunks[i] = (n, m.group(3).strip())
+                max_n = max(max_n, n)
+                log(f"chunk {i}/{n} seen")
+            if TRUNCATED_RE.search(ln):
+                truncated = True
+                log("voice truncated marker seen (reply exceeds max chunks)")
+            if PF_READY_RE.search(ln):
+                pf_ready += 1
+            if PF_FAIL_RE.search(ln):
+                pf_fail += 1
+            if DBUFF_UNAVAIL_RE.search(ln):
+                dbl_unavail += 1
+            ts = ESP_TS_RE.match(ln)
+            t_ms = int(ts.group(1)) if ts else None
+            if t_ms is not None and TTS_START_RE.search(ln):
+                if last_stop_ms is not None:
+                    gaps.append(t_ms - last_stop_ms)
+                starts += 1
+            if t_ms is not None and TTS_STOP_RE.search(ln):
+                last_stop_ms = t_ms
+                stops += 1
+            elif t_ms is None:
+                # no timestamp parsed (e.g. app> prompt echo): still count
+                # brackets so completeness checks stay robust
+                if TTS_START_RE.search(ln):
                     starts += 1
-                if t_ms is not None and TTS_STOP_RE.search(ln):
-                    last_stop_ms = t_ms
+                if TTS_STOP_RE.search(ln):
                     stops += 1
-                elif t_ms is None:
-                    # no timestamp parsed (e.g. app> prompt echo): still count
-                    # brackets so completeness checks stay robust
-                    if TTS_START_RE.search(ln):
-                        starts += 1
-                    if TTS_STOP_RE.search(ln):
-                        stops += 1
-            if len(acc) > 65536:
-                acc = acc[-65536:]
         if (
             max_n
             and all(i in chunks for i in range(1, max_n + 1))
@@ -446,7 +523,10 @@ def collect_voice_chunks(s, timeout, seed=b""):
             and stops >= max_n
         ):
             break
-    return chunks, starts, stops, max_n, truncated, gaps, pf_ready, pf_fail, dbl_unavail
+        if time.time() >= deadline:
+            break
+    return (chunks, starts, stops, max_n, truncated, gaps, pf_ready, pf_fail,
+            dbl_unavail, pos)
 
 
 def unescape_reply(escaped):
@@ -470,24 +550,20 @@ def tail_tokens(text, k=12):
     return set(toks[-k:]) if toks else set()
 
 
-def read_shot_frame(s, timeout=30, validate=True):
-    """Scan the console for an RD_SHOT_BEGIN..RD_SHOT_END block; return raw
-    bytes + (w,h).  With validate=True, keeps reading past truncated frames
-    (the forced `rdshot` frame races the self-tick flood) until a complete
-    bufsize-length frame is seen."""
+def read_shot_frame(tail, timeout=30, validate=True, start=None):
+    """Scan the drained console from `start` for an RD_SHOT_BEGIN..RD_SHOT_END
+    block; return (raw bytes, (w,h,len), cursor).  With validate=True, keeps
+    scanning past truncated frames (the forced `rdshot` frame races the
+    self-tick dump) until a complete bufsize-length frame is seen."""
     deadline = time.time() + timeout
-    acc = b""
+    pos = tail.mark() if start is None else start
     in_shot = False
     want = 0
+    w = h = 0
     hex_acc = []
-    while time.time() < deadline:
-        chunk = s.read(16384)
-        if not chunk:
-            continue
-        acc += chunk
-        while b"\n" in acc:
-            line, acc = acc.split(b"\n", 1)
-            ln = line.decode("utf-8", "replace").strip()
+    while True:
+        lines, pos = tail.take(pos, max(0.0, deadline - time.time()))
+        for ln in lines:
             if not in_shot:
                 m = re.search(r"RD_SHOT_BEGIN\s+bufsize=(\d+)\s+w=(\d+)\s+h=(\d+)", ln)
                 if m:
@@ -498,29 +574,30 @@ def read_shot_frame(s, timeout=30, validate=True):
             else:
                 if "RD_SHOT_END" in ln:
                     data = bytes.fromhex("".join(hex_acc))
-                    # The forced `rdshot` frame often races the self-tick flood
-                    # and arrives truncated (< bufsize).  Keep reading for a
+                    # The forced `rdshot` frame often races the self-tick dump
+                    # and arrives truncated (< bufsize).  Keep scanning for a
                     # complete frame — the self-tick guarantees a full one
                     # within the timeout — instead of failing on the first
                     # partial.  validate==False callers accept any frame.
                     if validate and len(data) == want:
-                        return data, (want, w, h)
+                        return data, (want, w, h), pos
                     if not validate:
-                        return data, (want, w, h)
+                        return data, (want, w, h), pos
                     in_shot = False
                     hex_acc = []
                 elif re.match(r"^[0-9a-fA-F]+$", ln):
                     hex_acc.append(ln)
-    return None, (0, 0, 0)
+        if time.time() >= deadline:
+            return None, (0, 0, 0), pos
 
 
-def capture_subtitle(s, artifacts):
-    """Send `rdshot` on the already-open console `s` and read a frame; decode
-    + vision-read it back.  Reuses the loop's console (reopening a second
-    handle races the heavy self-tick RD_SHOT flood and loses frames)."""
+def capture_subtitle(tail, artifacts):
+    """Send `rdshot` on the already-open console and read a frame; decode +
+    vision-read it back.  Reuses the loop's console (a second handle races the
+    RD_SHOT dump and loses frames)."""
     try:
-        write_cmd(s, "rdshot")
-        data, (want, w, h) = read_shot_frame(s, timeout=25)
+        tail.write("rdshot")
+        data, (want, w, h), _ = read_shot_frame(tail, timeout=25)
         if data is None or len(data) != want:
             return "", "no RD_SHOT frame"
         out = artifacts / "subtitle.i1"
@@ -549,11 +626,11 @@ def run_loop(n, instr, artifacts, voice_verify):
     target_txt = instr["transcript"]
     target_wav = HERE.parent / "voice" / "corpus" / instr["wav"]
 
-    s = open_console(DETECTED_PORT)
+    tail = ConsoleTail(DETECTED_PORT)
     try:
         # ---- OPEN_SESSION: trigger + confirm listen ------
-        write_cmd(s, "rd_listen")
-        m, _ = wait_for_log(s, [r"listen started"], timeout=15, label="OPEN")
+        tail.write("rd_listen")
+        m, cur = wait_for_log(tail, [r"listen started"], timeout=15, label="OPEN")
         res["asserts"]["OPEN_SESSION"] = (
             "PASS listen started" if m else "FAIL (no 'listen started' after rd_listen)"
         )
@@ -563,9 +640,10 @@ def run_loop(n, instr, artifacts, voice_verify):
         log(f"playing corpus {target_wav.name} into board mic ...")
         play_wav(target_wav)
 
-        asr_spill = bytearray()
-        m_asr, _ = wait_for_log(
-            s, [r'ASR text="([^"]*)"'], timeout=ASR_TIMEOUT, label="ASR", spill=asr_spill
+        asr_start = cur
+        m_asr, cur = wait_for_log(
+            tail, [r'ASR text="([^"]*)"'], timeout=ASR_TIMEOUT, label="ASR",
+            start=asr_start
         )
         asr_txt = m_asr.group(1) if m_asr else ""
         res["artifacts"]["asr"] = asr_txt
@@ -576,22 +654,36 @@ def run_loop(n, instr, artifacts, voice_verify):
                 if frac >= 0.75
                 else f"FAIL overlap={frac:.2f} asr={asr_txt!r} want={target_txt!r}"
             )
+        elif m_asr is not None:
+            res["asserts"]["ASR_MATCH"] = (
+                "FAIL (ASR returned an EMPTY transcription: the board captured "
+                "and posted the utterance, the endpoint heard no words — an "
+                "acoustic miss, not a capture fault)"
+            )
         else:
             res["asserts"]["ASR_MATCH"] = "FAIL (no `ASR text=` on console)"
             # Diagnose: surface the board's OWN capture/VAD/Whisper decisions
-            # (spilled beyond the ASR wait) so a failed acoustic leg says why —
-            # VAD never heard speech vs Whisper round-trip failure vs silent.
-            if asr_spill:
-                board_lines = [
-                    bl
-                    for bl in asr_spill.decode("utf-8", "replace").splitlines()
-                    if any(k in bl for k in ("robodog_voice", "ASR", "utterance", "speech", "bail"))
-                    and "RD_SHOT" not in bl
-                ]
-                if board_lines:
-                    log("board capture/VAD/ASR decisions (no `ASR text=`):")
-                    for bl in board_lines[-12:]:
-                        log("   | " + bl.strip()[:160])
+            # from the whole ASR window so a failed acoustic leg says why —
+            # VAD never heard speech vs Whisper round-trip failure vs a
+            # capture fault.  The tail keeps every line, so nothing scrolled
+            # past (the old byte spill lost this evidence behind the RD_SHOT
+            # dump).
+            board_lines = [
+                ln for ln in tail.take(0, 0)[0][asr_start:cur]
+                if any(k in ln for k in ("robodog_voice", "ASR", "utterance",
+                                         "speech", "bail", "SPIRAM", "capture"))
+                and "RD_SHOT" not in ln
+            ]
+            if board_lines:
+                log("board capture/VAD/ASR decisions (no `ASR text=`):")
+                for bl in board_lines[-12:]:
+                    log("   | " + bl.strip()[:160])
+                # Persist them: the multi-session stress gate classifies a
+                # session that never reached ASR (silent listen vs capture
+                # fault / SPIRAM exhaustion) from this evidence.
+                res["artifacts"]["capture_diag"] = "\n".join(
+                    bl.strip()[:200] for bl in board_lines[-12:]
+                )
 
         # Fail fast: no ASR means no agent run / TTS / subtitle in this turn —
         # waiting for the reply would just burn the full 180 s REPLY_TIMEOUT.
@@ -605,16 +697,17 @@ def run_loop(n, instr, artifacts, voice_verify):
                 res["asserts"][k] = "SKIP (no ASR -> no turn)"
             res["artifacts"]["reply"] = ""
             set_no_reset(res)  # the scan may still have seen a reset/panic
-            s.close()
+            tail.close()
             return res
 
         # ---- REPLY: native agent LLM ------
-        # spill: wait_for_log buffers up to 8 KB of console and discards the
-        # unprocessed remainder past the match — exactly where the first
-        # `voice chunk 1/n` lands — so hand it to the voice-verify collector.
-        leftover = bytearray()
-        m_rep, _ = wait_for_log(
-            s, [r"agent reply: (.+)"], timeout=REPLY_TIMEOUT, label="REPLY", spill=leftover
+        # The cursor after `ASR text=` is handed forward, so the `voice chunk
+        # 1/n` line that lands right behind `agent reply:` is scanned by the
+        # collector instead of being discarded (no byte-level spill).
+        reply_start = cur
+        m_rep, cur = wait_for_log(
+            tail, [r"agent reply: (.+)"], timeout=REPLY_TIMEOUT, label="REPLY",
+            start=reply_start
         )
         reply = m_rep.group(1).strip() if m_rep else ""
         # R1: the device logs the reply JSON-escaped (line-safe, one console
@@ -666,15 +759,17 @@ def run_loop(n, instr, artifacts, voice_verify):
                     cap_done.set()
 
             threading.Thread(target=_cap, daemon=True).start()
-            chunks, starts, stops, max_n, truncated, gaps, pf_ready, pf_fail, dbl_unavail = collect_voice_chunks(
-                s, REPLY_TIMEOUT, seed=leftover
+            (chunks, starts, stops, max_n, truncated, gaps, pf_ready, pf_fail,
+             dbl_unavail, cur) = collect_voice_chunks(
+                tail, REPLY_TIMEOUT, start=reply_start
             )
             # The re-ASR below reads the WHOLE captured WAV, so wait for the
             # background capture to actually finish (bounded by
             # VOICE_CAP_SECS) — reading a half-written RIFF yields nothing.
             cap_done.wait()
         else:
-            m_tts, _ = wait_for_log(s, [r"TTS start"], timeout=REPLY_TIMEOUT, label="TTS")
+            m_tts, cur = wait_for_log(tail, [r"TTS start"], timeout=REPLY_TIMEOUT,
+                                      label="TTS", start=cur)
             if m_tts:
                 log("TTS start seen; capturing board speaker on test mic ...")
                 try:
@@ -682,9 +777,12 @@ def run_loop(n, instr, artifacts, voice_verify):
                 except Exception as e:
                     log(f"ring capture failed: {e}")
                 # Board TTS is real-time paced (~16 s for a long reply); wait for
-                # `TTS stop` NOW, before the slow ring re-ASR below scrolls it past
-                # the serial buffer and makes the acceptance leg unobservable.
-                m_tts_stop, _ = wait_for_log(s, [r"TTS stop"], timeout=REPLY_TIMEOUT, label="TTS")
+                # `TTS stop` from the TTS-start cursor.  The tail keeps draining
+                # in the background, so the slow ring capture + re-ASR below can
+                # no longer scroll this line out of reach.
+                m_tts_stop, cur = wait_for_log(tail, [r"TTS stop"],
+                                               timeout=REPLY_TIMEOUT, label="TTS",
+                                               start=cur)
         try:
             # The board's reply is faint but spans the whole TTS window; a
             # single loudest-3s burst is often ambient noise and lets
@@ -767,7 +865,7 @@ def run_loop(n, instr, artifacts, voice_verify):
                 # Which TTS path actually ran — from the console markers — so
                 # a FAIL pinpoints WHY the gap is large instead of guessing.
                 if dbl_unavail:
-                    path = f"sequential single-buffer path (double-buffer unavailable)"
+                    path = "sequential single-buffer path (double-buffer unavailable)"
                 elif pf_fail:
                     path = f"{pf_fail} sync-fallback fetch(es) in the play gap"
                 elif pf_ready:
@@ -799,10 +897,10 @@ def run_loop(n, instr, artifacts, voice_verify):
             # above (CHUNKED_QUEUE, advertised max_n) is authoritative; this
             # is the acoustic corroboration (PASS-WEAK tolerated for marginal
             # speaker->mic coupling).
-            tail = tail_tokens(reply)
+            tail_toks = tail_tokens(reply)
             got = set(norm(ring_txt)) if ring_txt else set()
             overlap = token_overlap(ring_txt, reply)
-            if ring_txt and tail and len(tail & got) >= 2:
+            if ring_txt and tail_toks and len(tail_toks & got) >= 2:
                 res["asserts"]["FULL_READOUT"] = (
                     f"PASS tail tokens read out (overlap={overlap:.2f})"
                 )
@@ -833,7 +931,7 @@ def run_loop(n, instr, artifacts, voice_verify):
 
             # ---- SUBTITLE: the reply renders on the RLCD ------
             time.sleep(1.0)
-            sub_txt, sub_err = capture_subtitle(s, run_dir)
+            sub_txt, sub_err = capture_subtitle(tail, run_dir)
             # The panel readback must carry the ASSISTANT REPLY (Phase 1 gate
             # contract: "rd_chat N*N -> the reply renders on screen").  The
             # readback is OCR-noisy (whole-screen transcript), so require >= 2
@@ -852,7 +950,7 @@ def run_loop(n, instr, artifacts, voice_verify):
             res["artifacts"]["subtitle"] = sub_txt
     finally:
         set_no_reset(res)
-        s.close()
+        tail.close()
     return res
 
 
