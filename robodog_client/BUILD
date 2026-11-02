@@ -94,6 +94,7 @@ sh_binary(
         "esp-claw/rewrite_component_paths.py",
         "esp-claw/patches/0002-init.patch",
         "esp-claw/patches/0003-audio-hub-24k.patch",
+        "esp-claw/patches/0004-capture-drop-log-rate-limit.patch",
         "esp-claw/overlay/boards/waveshare_ESP32_S3_RLCD_4_2/setup_device.c",
         "esp-claw/overlay/components/robodog_phase0/CMakeLists.txt",
         "esp-claw/overlay/components/robodog_phase0/Kconfig",

@@ -64,6 +64,16 @@ static const char *TAG = "robodog_voice";
 #define VOICE_FRAME_BYTES     (VOICE_FRAME_SAMPLES * VOICE_CH * (VOICE_BITS / 8))
 #define VAD_ENERGY            300  /* int16 mean-abs amplitude = speech */
 #define VAD_SILENCE_MS        800  /* trailing silence ends the utterance */
+/* Minimum ACCUMULATED speech before trailing silence may end the utterance.
+ * Without it a single noise blip (a chair creak, a click, a door) counted as
+ * "speech", and the very next 800 ms of quiet ended the listen — typically
+ * BEFORE the user had said anything, so the turn captured ~1.5 s of room
+ * noise, ASR returned no text, and the panel dropped straight back to `idle`.
+ * That is the other half of the reported "hit listen, it switches right back
+ * to idle": the trigger worked, but a blip closed the window.  Below this
+ * threshold the buffered audio is discarded as a blip and listening
+ * continues (still bounded by the no-speech timeout and the hard caps). */
+#define VAD_MIN_SPEECH_MS     CONFIG_ROBODOG_VOICE_MIN_SPEECH_MS
 
 #define VOICE_MAX_SAMPLES     (CONFIG_ROBODOG_VOICE_MAX_SECS * VOICE_RATE)
 
@@ -299,10 +309,13 @@ static bool frame_is_speech(const int16_t *pcm, size_t samples)
  * all, and (F2) caps the continuous-speech phase at
  * CONFIG_ROBODOG_VOICE_SPEECH_MAX_SECS so a noise-saturated mic cannot burn
  * the whole window.  The SPIRAM capture buffer is allocated lazily on the
- * first speech frame (F1) and the caller frees it.  A no-speech bail returns
- * NULL with zero samples — no allocation, no free, nothing to corrupt.
- * Returns the captured SAMPLES via *out_samples and a SPIRAM buffer the
- * caller owns (or NULL when no usable utterance was captured). */
+ * first speech frame (F1) and GROWS in small steps (capture_grow) so no huge
+ * contiguous allocation is ever required; the caller frees it.  A no-speech
+ * bail returns NULL with zero samples — no allocation, no free, nothing to
+ * corrupt.  Returns the captured SAMPLES via *out_samples and a SPIRAM buffer
+ * the caller owns (or NULL when no usable utterance was captured);
+ * *out_fault reports a buffer allocation fault (vs a genuinely silent
+ * listen) so the turn can end in "error" instead of a false "idle". */
 /* The APP capture subscriber is opened ONCE and kept across turns (F3, stress
  * round R7): voice_capture no longer re-opens/closes it per listen.  Closing
  * per turn meant tearing down the subscriber's 5 KB ring + rate-conversion
@@ -317,9 +330,83 @@ static bool frame_is_speech(const int16_t *pcm, size_t samples)
  * available) — correct for this standalone-agent board. */
 static audio_capture_sub_handle_t s_cap_sub = NULL;
 
-static int16_t *voice_capture(size_t *out_samples)
+/* Utterance buffer growth step: the capture buffer grows on demand in fixed
+ * steps of CONFIG_ROBODOG_VOICE_CAPTURE_STEP_SECS (2 s = 64 KB at 16 kHz s16)
+ * instead of being allocated at its VOICE_MAX_SECS worst case (45 s =
+ * 1.44 MB) on the first speech frame.  A single 1.44 MB *contiguous* SPIRAM
+ * block is NOT reliably available once a voice turn has run — the heap is
+ * fragmented by the turn's own buffers (TTS double-buffer slots, ASR
+ * response, LVGL) — so the old all-at-once allocation failed, `voice_capture`
+ * returned zero samples, and the turn collapsed straight back to idle.  That
+ * was the reported "hit listen, the board switches right back to idle": the
+ * FIRST turn after a boot worked, every following one died on that malloc.
+ * Growing in small steps keeps every allocation comfortably satisfiable while
+ * still allowing the full VOICE_MAX_SECS window for a long utterance. */
+#define CAPTURE_STEP_SAMPLES \
+    ((size_t)VOICE_RATE * (size_t)CONFIG_ROBODOG_VOICE_CAPTURE_STEP_SECS)
+
+/* Grow `buf` (SPIRAM) to hold at least `need` samples, in whole steps and
+ * never past VOICE_MAX_SAMPLES.  On failure the existing buffer stays valid
+ * and *cap is unchanged (the caller then ends the utterance with what it
+ * already has rather than dropping the turn). */
+static int16_t *capture_grow(int16_t *buf, size_t *cap, size_t need)
+{
+    if (need <= *cap) {
+        return buf;
+    }
+    size_t want = *cap;
+    while (want < need) {
+        want += CAPTURE_STEP_SAMPLES;
+    }
+    if (want > VOICE_MAX_SAMPLES) {
+        want = VOICE_MAX_SAMPLES;
+    }
+    if (want <= *cap) {
+        return buf; /* already at the hard cap */
+    }
+    int16_t *grown = heap_caps_realloc(buf, want * sizeof(int16_t),
+                                       MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (grown == NULL) {
+        return NULL;
+    }
+    *cap = want;
+    return grown;
+}
+
+/* Append `n` samples of one captured frame to the utterance buffer, growing
+ * it in steps first.  Returns false when the buffer cannot grow (the caller
+ * decides: end the utterance, or report a capture fault when nothing was
+ * buffered yet). */
+static bool capture_append(int16_t **buf, size_t *cap, size_t *got,
+                           const int16_t *frame, size_t n)
+{
+    const size_t space = VOICE_MAX_SAMPLES - *got;
+    if (n > space) {
+        n = space; /* hard cap reached */
+    }
+    if (n == 0) {
+        return true;
+    }
+    if (*got + n > *cap) {
+        int16_t *grown = capture_grow(*buf, cap, *got + n);
+        if (grown == NULL) {
+            return false;
+        }
+        *buf = grown;
+    }
+    memcpy(*buf + *got, frame, n * sizeof(int16_t));
+    *got += n;
+    return true;
+}
+
+/* Capture one utterance.  `*out_fault` distinguishes a capture/allocation
+ * fault from a genuinely silent listen: a fault must end the turn in the
+ * visible "error" state, never as a clean idle (the panel must not report
+ * "user said nothing" when the board could not even buffer the audio). */
+static int16_t *voice_capture(size_t *out_samples, bool *out_fault)
 {
     *out_samples = 0;
+    *out_fault = false;
     if (s_cap_sub == NULL) {
         audio_capture_handle_t cap = NULL;
         if (audio_hub_get_capture(&cap) != ESP_OK) {
@@ -346,16 +433,25 @@ static int16_t *voice_capture(size_t *out_samples)
     (void)audio_capture_sub_flush(s_cap_sub);
     ESP_LOGI(TAG, "listen started (16k/1/16, VAD energy=%d silence=%dms)",
              VAD_ENERGY, VAD_SILENCE_MS);
+    /* One-line memory state per listen: the capture buffer grows on demand,
+     * so knowing the free/largest SPIRAM block tells whether a long utterance
+     * can still be buffered (and diagnoses an allocation fault immediately). */
+    ESP_LOGI(TAG, "spiram free=%u largest=%u (capture grows in %d s steps)",
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM),
+             CONFIG_ROBODOG_VOICE_CAPTURE_STEP_SECS);
     robodog_ui_set_agent_state("listening");
 
     /* F1: the capture buffer is allocated lazily on the FIRST speech frame,
      * NOT for the whole listen phase.  A no-speech bail can therefore never
-     * allocate-and-then-free a ~1.4 MB SPIRAM block — the exact path that
-     * tripped `tlsf_free: block already marked as free` under sustained
-     * voice-loop load and panicked the board (unplanned reboot, rst:0xc).
-     * Pre-speech silence is dropped; from the first speech frame everything
-     * (trailing silence included) is buffered exactly as before. */
+     * allocate-and-then-free a SPIRAM block — the path that tripped
+     * `tlsf_free: block already marked as free` under sustained voice-loop
+     * load and panicked the board (unplanned reboot, rst:0xc).  Pre-speech
+     * silence is dropped; from the first speech frame everything (trailing
+     * silence included) is buffered.  The buffer grows in small steps (see
+     * capture_grow) so no single huge contiguous allocation is ever needed. */
     int16_t *buf = NULL;
+    size_t cap_samples = 0; /* samples the buffer holds (grown in steps) */
     const int64_t t0 = esp_timer_get_time();
     const int64_t no_speech_us = (int64_t)CONFIG_ROBODOG_VOICE_NO_SPEECH_TIMEOUT_MS * 1000LL;
     const int64_t speech_cap_us = (int64_t)CONFIG_ROBODOG_VOICE_SPEECH_MAX_SECS * 1000000LL;
@@ -365,6 +461,8 @@ static int16_t *voice_capture(size_t *out_samples)
     size_t got = 0;     /* total samples committed to buf */
     bool ever_speech = false;
     uint32_t silence_ms = 0;
+    uint32_t speech_ms = 0;    /* accumulated speech, for the blip gate */
+    size_t streamed_bytes = 0; /* any audio at all from the capture hub */
 
     for (;;) {
         const int64_t now = esp_timer_get_time();
@@ -388,54 +486,83 @@ static int16_t *voice_capture(size_t *out_samples)
         size_t want = (size_t)(VOICE_FRAME_SAMPLES - fi);
         size_t n = audio_capture_sub_read(s_cap_sub, (uint8_t *)(frame + fi),
                                           want * (VOICE_BITS / 8), 150);
-        if (n == 0) {
-            if (ever_speech && silence_ms >= VAD_SILENCE_MS) {
-                break; /* trailing silence elapsed */
-            }
-            continue;
+        if (n > 0) {
+            streamed_bytes += n;
+            fi += n / (VOICE_BITS / 8);
         }
-        fi += n / (VOICE_BITS / 8);
-        if (fi < VOICE_FRAME_SAMPLES) {
-            continue; /* wait for a whole frame */
-        }
-        const bool speech = frame_is_speech(frame, VOICE_FRAME_SAMPLES);
-        if (speech) {
-            if (!ever_speech) {
-                /* First speech frame: allocate the utterance buffer now and
-                 * seed it with this frame (F1 — no big alloc for silence). */
-                buf = heap_caps_malloc(VOICE_MAX_SAMPLES * sizeof(int16_t),
-                                       MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-                if (buf == NULL) {
-                    ESP_LOGE(TAG, "no SPIRAM for %u-sample capture buffer",
-                             (unsigned)VOICE_MAX_SAMPLES);
+        if (fi == VOICE_FRAME_SAMPLES) {
+            /* A whole frame is ready: classify it and buffer it. */
+            const bool speech = frame_is_speech(frame, VOICE_FRAME_SAMPLES);
+            if (speech) {
+                if (!ever_speech) {
+                    speech_t0 = now;
+                }
+                if (!capture_append(&buf, &cap_samples, &got, frame,
+                                    VOICE_FRAME_SAMPLES)) {
+                    /* Growth failed on the FIRST buffered audio: nothing
+                     * usable was captured -> a real fault, not a silent
+                     * listen. */
+                    ESP_LOGE(TAG, "no SPIRAM for the utterance buffer (free=%u "
+                             "largest=%u); cannot capture this turn",
+                             (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+                             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
+                    *out_fault = true;
                     break;
                 }
-                got = 0;
-                memcpy(buf, frame, VOICE_FRAME_SAMPLES * sizeof(int16_t));
-                got += VOICE_FRAME_SAMPLES;
-                speech_t0 = now;
-            } else {
-                size_t space = VOICE_MAX_SAMPLES - got;
-                size_t cp = (space < VOICE_FRAME_SAMPLES) ? space : VOICE_FRAME_SAMPLES;
-                memcpy(buf + got, frame, cp * sizeof(int16_t));
-                got += cp;
+                ever_speech = true;
+                silence_ms = 0;
+                speech_ms += VOICE_FRAME_MS;
+            } else if (ever_speech) {
+                /* Buffer trailing / inter-phrase audio too (word tails).  A
+                 * growth failure here ends the utterance with everything
+                 * already buffered — the user's speech start is kept and still
+                 * goes to ASR instead of the whole turn collapsing to idle. */
+                if (!capture_append(&buf, &cap_samples, &got, frame,
+                                    VOICE_FRAME_SAMPLES)) {
+                    ESP_LOGW(TAG, "utterance buffer growth failed at %u ms; "
+                             "ending the utterance with %u samples",
+                             (unsigned)(got * 1000 / VOICE_RATE), (unsigned)got);
+                    break;
+                }
+                silence_ms += VOICE_FRAME_MS;
             }
-            ever_speech = true;
-            silence_ms = 0;
-        } else if (ever_speech) {
-            /* Buffer trailing / inter-phrase audio too (word tails). */
-            size_t space = VOICE_MAX_SAMPLES - got;
-            size_t cp = (space < VOICE_FRAME_SAMPLES) ? space : VOICE_FRAME_SAMPLES;
-            memcpy(buf + got, frame, cp * sizeof(int16_t));
-            got += cp;
-            silence_ms += VOICE_FRAME_MS;
+            fi = 0;
         }
-        fi = 0;
+        /* ONE settle point for the trailing-silence verdict, reached whether
+         * or not new audio arrived this iteration (a quiet ring must still be
+         * able to end a real utterance, and a blip must be retired even when
+         * the stream stalls). */
         if (ever_speech && silence_ms >= VAD_SILENCE_MS) {
-            break;
+            if (speech_ms >= VAD_MIN_SPEECH_MS) {
+                break; /* trailing silence after real speech */
+            }
+            /* A blip, not an utterance: discard it and keep the window open
+             * for the user's actual speech (the no-speech timeout still
+             * bounds this).  Discarding means the buffered frames are
+             * dropped, NOT freed — the buffer is reused as the utterance
+             * grows. */
+            ESP_LOGI(TAG, "ignoring a %u ms blip (< %d ms speech); "
+                     "still listening", (unsigned)speech_ms,
+                     VAD_MIN_SPEECH_MS);
+            got = 0;
+            speech_ms = 0;
+            silence_ms = 0;
+            ever_speech = false;
+            speech_t0 = -1;
         }
     }
 
+    /* A capture that delivered NOTHING at all is not "the user was silent":
+     * the ADC/codec stream itself stalled (I2S RX overrun, a wedged codec, or
+     * the hub's capture task stopped reading).  Reporting it as silence made
+     * the turn end in a clean `idle` — the panel claimed "nothing heard" for
+     * a broken capture path.  Surface it as a fault so the turn ends in
+     * `error` and the console says why. */
+    if (streamed_bytes == 0 && buf == NULL) {
+        ESP_LOGE(TAG, "capture stream produced no audio in %d ms "
+                 "(codec/I2S RX stalled?)", CONFIG_ROBODOG_VOICE_NO_SPEECH_TIMEOUT_MS);
+        *out_fault = true;
+    }
     /* The capture subscriber is deliberately NOT closed here (F3): keeping
      * the APP ring + converters alive across turns removes the per-turn ring
      * teardown free — the `tlsf_free` panic site under heap corruption. */
@@ -486,8 +613,35 @@ static size_t build_wav_header(uint8_t *dst, size_t dst_cap, size_t data_bytes)
     return hdr;
 }
 
+/* Write `len` bytes to an OPEN esp_http_client request body, looping over
+ * partial writes.  Used to stream the ASR multipart body (see
+ * robodog_voice_asr) instead of assembling it in one contiguous buffer. */
+static esp_err_t http_write_all(esp_http_client_handle_t client,
+                                const void *data, size_t len)
+{
+    const uint8_t *p = (const uint8_t *)data;
+    while (len > 0) {
+        const int w = esp_http_client_write(client, (const char *)p, (int)len);
+        if (w <= 0) {
+            return ESP_FAIL;
+        }
+        p += (size_t)w;
+        len -= (size_t)w;
+    }
+    return ESP_OK;
+}
+
 /* POST captured PCM to Whisper; returns heap text (caller frees) or NULL.
- * Non-static: the `rd_asr` probe reuses this exact path (DRY). */
+ * Non-static: the `rd_asr` probe reuses this exact path (DRY).
+ *
+ * The multipart body is STREAMED (open + write header / WAV header / PCM /
+ * footer) rather than assembled into one `head_len + wav_len + pcm_bytes +
+ * foot_len` SPIRAM buffer.  That contiguous copy was a second ~1.44 MB
+ * allocation right behind the capture buffer, and after a turn it failed just
+ * like the capture malloc did — turning every later listen into "no usable
+ * utterance" (the "hit listen -> back to idle" regression).  Streaming keeps
+ * the peak allocation at the capture buffer alone, and it never copies the
+ * utterance. */
 char *robodog_voice_asr(const int16_t *pcm, size_t samples)
 {
     const size_t pcm_bytes = samples * sizeof(int16_t);
@@ -510,33 +664,20 @@ char *robodog_voice_asr(const int16_t *pcm, size_t samples)
     const size_t wav_len = build_wav_header(wav_hdr, sizeof(wav_hdr), pcm_bytes);
     const size_t body_len = head_len + wav_len + pcm_bytes + foot_len;
 
-    char *body = heap_caps_malloc(body_len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (body == NULL) {
-        ESP_LOGE(TAG, "ASR: no memory for %u B multipart body", (unsigned)body_len);
-        return NULL;
-    }
-    size_t o = 0;
-    memcpy(body + o, header, head_len);            o += head_len;
-    memcpy(body + o, wav_hdr, wav_len);            o += wav_len;
-    memcpy(body + o, pcm, pcm_bytes);              o += pcm_bytes;
-    memcpy(body + o, footer, foot_len);            o += foot_len;
-
     robodog_http_rx_t rx;
     robodog_http_rx_init(&rx, CONFIG_ROBODOG_ASR_MAX_RESPONSE);
     char *text = NULL;
     if (rx.buf == NULL) {
         ESP_LOGE(TAG, "ASR: no memory for response buffer");
-        heap_caps_free(body);
         return NULL;
     }
     esp_http_client_config_t cfg = {
         .url = CONFIG_ROBODOG_ASR_URL,
         .method = HTTP_METHOD_POST,
         .timeout_ms = 60000,
-        .event_handler = robodog_http_event_handler,
-        .user_data = &rx,
         .buffer_size = 512,
     };
+    int status = 0;
     esp_http_client_handle_t client = esp_http_client_init(&cfg);
     if (client == NULL) {
         ESP_LOGE(TAG, "ASR: http client init failed");
@@ -545,9 +686,35 @@ char *robodog_voice_asr(const int16_t *pcm, size_t samples)
     char ctype[96];
     snprintf(ctype, sizeof(ctype), "multipart/form-data; boundary=%s", boundary);
     esp_http_client_set_header(client, "Content-Type", ctype);
-    esp_http_client_set_post_field(client, body, body_len);
-    const esp_err_t err = esp_http_client_perform(client);
-    const int status = esp_http_client_get_status_code(client);
+
+    esp_err_t err = esp_http_client_open(client, (int)body_len);
+    if (err == ESP_OK) {
+        err = http_write_all(client, header, head_len);
+    }
+    if (err == ESP_OK) {
+        err = http_write_all(client, wav_hdr, wav_len);
+    }
+    if (err == ESP_OK) {
+        err = http_write_all(client, pcm, pcm_bytes);
+    }
+    if (err == ESP_OK) {
+        err = http_write_all(client, footer, foot_len);
+    }
+    if (err == ESP_OK) {
+        /* Send the request and consume the response headers; the body is then
+         * read straight into the accumulator (no event handler needed). */
+        (void)esp_http_client_fetch_headers(client);
+        while (rx.len + 1 < rx.cap) {
+            const int r = esp_http_client_read(client, rx.buf + rx.len,
+                                               (int)(rx.cap - 1 - rx.len));
+            if (r <= 0) {
+                break;
+            }
+            rx.len += (size_t)r;
+        }
+        rx.buf[rx.len] = '\0';
+    }
+    status = esp_http_client_get_status_code(client);
     esp_http_client_cleanup(client);
     if (err == ESP_OK && status >= 200 && status < 300 && rx.len > 0) {
         cJSON *root = cJSON_Parse(rx.buf);
@@ -569,7 +736,6 @@ char *robodog_voice_asr(const int16_t *pcm, size_t samples)
 out:
     ESP_LOGI(TAG, "ASR text=\"%s\"", text != NULL ? text : "(empty)");
     robodog_http_rx_free(&rx);
-    heap_caps_free(body);
     return text;
 }
 
@@ -882,14 +1048,22 @@ static void voice_turn(void)
     }
 
     size_t samples = 0;
-    int16_t *pcm = voice_capture(&samples);
+    bool cap_fault = false;
+    int16_t *pcm = voice_capture(&samples, &cap_fault);
     if (pcm == NULL || samples < VOICE_FRAME_SAMPLES * 2) {
-        ESP_LOGW(TAG, "no usable utterance captured (%u samples)",
-                 (unsigned)samples);
         if (pcm != NULL) {
             heap_caps_free(pcm);
         }
-        robodog_ui_set_agent_state("idle");
+        if (cap_fault) {
+            /* The board could not buffer the audio at all (SPIRAM fault):
+             * a real fault, never a clean "you said nothing" idle. */
+            ESP_LOGE(TAG, "capture fault; ending turn in error");
+            robodog_ui_set_agent_state("error");
+        } else {
+            ESP_LOGW(TAG, "no usable utterance captured (%u samples)",
+                     (unsigned)samples);
+            robodog_ui_set_agent_state("idle");
+        }
         s_turn_active = false;
         return;
     }
@@ -1257,6 +1431,20 @@ static void voice_turn(void)
                             xEventGroupWaitBits(s_pf_evts, EVT_PF_DONE, pdTRUE,
                                                 pdFALSE, portMAX_DELAY);
                         }
+                        /* Free the turn's two TTS slots NOW that the prefetch
+                         * task can no longer touch them (it acked the abort
+                         * above).  They are allocated per turn and MUST be
+                         * released: the double-buffer path used to omit this
+                         * free, leaking the whole ~3 MB pair on EVERY voiced
+                         * turn.  After the first reply the heap could then
+                         * never satisfy the next turn's slots — the board
+                         * rendered the reply but played nothing
+                         * ("TTS: no memory for response buffers") and ended in
+                         * `error`; the leaked megabytes also starved the next
+                         * turn's capture buffer, which is what dropped the
+                         * board straight back to idle on later listens. */
+                        robodog_http_rx_free(&rx[0]);
+                        robodog_http_rx_free(&rx[1]);
                     }
                 }
                 free(offs);
@@ -1280,19 +1468,36 @@ static void voice_turn(void)
                  resp.error_message != NULL ? resp.error_message : "");
         robodog_ui_set_agent_state("error");
     }
+    /* Release the response's owned strings (text / error_message / target
+     * channel+chat): `claw_core_response_free` is the upstream contract (see
+     * app_claw_cli.c) — skipping it leaked the reply text on every turn. */
+    claw_core_response_free(&resp);
     s_turn_active = false;
 }
 
 /* ── Task + trigger ─────────────────────────────────────────────────────── */
 
-/* BOOT button (GPIO0): physical push-to-talk.  Falling-edge ISR with a 300 ms
- * debounce sets the same EVT_LISTEN bit the `rd_listen` command sets, so the
- * one voice task wakes for both. */
+/* BOOT button (GPIO0): physical push-to-talk.  A press/release pair sets the
+ * same EVT_LISTEN bit the `rd_listen` command sets, so the one voice task
+ * wakes for both.
+ *
+ * Debounce is applied to the PRESS edge only, and a release is honoured only
+ * when a press is armed:
+ *   - A quick tap used to be swallowed entirely: the release edge arrived
+ *     inside BOOT_BUTTON_DEBOUNCE_US of the press edge and was dropped, so
+ *     the button did nothing unless held > 300 ms.
+ *   - A release with no armed press (contact bounce, or an edge while the
+ *     button was already up) used to fall through to the duration branch with
+ *     a STALE press timestamp — held >= 1.5 s by construction — and fire a
+ *     session reset instead of a listen.  Now a stray release is ignored. */
 #define BOOT_BUTTON_GPIO GPIO_NUM_0
-#define BOOT_BUTTON_DEBOUNCE_US 300000UL
+#define BOOT_BUTTON_DEBOUNCE_US 300000UL    /* min spacing between PRESSES */
+#define BOOT_BUTTON_BOUNCE_US 20000UL       /* contact bounce on release */
 #define BOOT_BUTTON_LONG_PRESS_US 1500000UL /* hold >= 1.5 s -> clear session */
 
-static uint64_t s_press_start_us; /* set on NEGEDGE, compared on POSEDGE (ISR-only) */
+static volatile uint64_t s_press_start_us; /* armed on press, read on release */
+static volatile uint64_t s_last_press_us;  /* last accepted press edge */
+static volatile bool s_press_armed;
 
 /* ANYEDGE ISR: a short tap (release < LONG_PRESS) starts a voice turn
  * (EVT_LISTEN, same as the `rd_listen` console command); a hold >= 1.5 s
@@ -1300,24 +1505,31 @@ static uint64_t s_press_start_us; /* set on NEGEDGE, compared on POSEDGE (ISR-on
 static void IRAM_ATTR boot_button_isr(void *arg)
 {
     (void)arg;
-    static uint64_t s_last_us;
     const uint64_t now = esp_timer_get_time();
-    if (now - s_last_us < BOOT_BUTTON_DEBOUNCE_US) {
+    if (gpio_get_level(BOOT_BUTTON_GPIO) == 0) {
+        /* Press: ignore bounce (already armed) and rapid re-presses. */
+        if (s_press_armed || now - s_last_press_us < BOOT_BUTTON_DEBOUNCE_US) {
+            return;
+        }
+        s_last_press_us = now;
+        s_press_start_us = now;
+        s_press_armed = true;
         return;
     }
-    s_last_us = now;
-    const uint32_t level = gpio_get_level(BOOT_BUTTON_GPIO);
-    BaseType_t hpw = pdFALSE;
-    if (level == 0) {
-        /* pressed (active-low): arm the press-start timestamp */
-        s_press_start_us = now;
-    } else if (s_voice_evts != NULL) {
-        /* released: branch on the held duration */
-        const bool long_press =
-            (now - s_press_start_us) >= BOOT_BUTTON_LONG_PRESS_US;
-        xEventGroupSetBitsFromISR(s_voice_evts,
-                                  long_press ? EVT_RESET : EVT_LISTEN, &hpw);
+    /* Release: only meaningful for an armed press; a release inside the
+     * contact-bounce window keeps the press armed (the real release follows). */
+    if (!s_press_armed || s_voice_evts == NULL) {
+        return;
     }
+    const uint64_t held = now - s_press_start_us;
+    if (held < BOOT_BUTTON_BOUNCE_US) {
+        return;
+    }
+    s_press_armed = false;
+    const bool long_press = held >= BOOT_BUTTON_LONG_PRESS_US;
+    BaseType_t hpw = pdFALSE;
+    xEventGroupSetBitsFromISR(s_voice_evts,
+                              long_press ? EVT_RESET : EVT_LISTEN, &hpw);
     if (hpw) {
         portYIELD_FROM_ISR(hpw);
     }

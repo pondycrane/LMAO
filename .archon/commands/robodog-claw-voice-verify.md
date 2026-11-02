@@ -54,7 +54,7 @@ FULL_READOUT  : the test mic, recording across ALL chunk brackets, captured
 python3 -c "import serial; import PIL"
 ffmpeg -version >/dev/null
 getent group audio | grep -q "$(whoami)"
-curl -s -m 8 http://192.168.50.153:11801/v1/audio/transcriptions -o /dev/null -w '%{http_code}\n'
+curl -s -m 8 http://192.168.50.27:8001/v1/audio/transcriptions -o /dev/null -w '%{http_code}\n'
 ```
 
 ## Phase 2: DETECT — board + test audio

@@ -24,15 +24,16 @@ menu "RoboDog Phase 0 probes"
 
     config ROBODOG_ASR_URL
         string "Whisper ASR transcription endpoint (device-facing)"
-        default "http://192.168.50.153:11801/v1/audio/transcriptions"
+        default "http://192.168.50.27:8001/v1/audio/transcriptions"
         help
             OpenAI-compatible /v1/audio/transcriptions endpoint the device
-            POSTs the embedded corpus WAV to during rd_asr.  The user's own
-            Whisper endpoint; overridden per-build via the robodog sdkconfig
-            fragment (CLAW_ASR_URL env) so LAN IPs never need committing.
-            spark-5307 (Whisper) lives on the livecam 192.168.10.0/24 subnet,
-            which the RLCD board (192.168.50.0/24) has no route to; the
-            workspace host forwards it here (socat 11801 -> :8001).
+            POSTs captured speech to.  The user's own Whisper endpoint;
+            overridden per-build via the robodog sdkconfig fragment
+            (CLAW_ASR_URL env) so LAN IPs never need committing.
+            spark-5307 (Whisper :8001 + Kokoro :8004) is on the board's own
+            192.168.50.0/24 subnet, so the device reaches it DIRECTLY — no
+            host socat forward.  (When it lived on 192.168.10.0/24 the host
+            forwarded 11801/11804; that is no longer needed.)
 
     config ROBODOG_ASR_MODEL
         string "ASR model name sent in the multipart form"
@@ -44,12 +45,12 @@ menu "RoboDog Phase 0 probes"
 
     config ROBODOG_TTS_URL
         string "Kokoro TTS endpoint (device-facing)"
-        default "http://192.168.50.153:11804/v1/audio/speech"
+        default "http://192.168.50.27:8004/v1/audio/speech"
         help
             OpenAI-compatible /v1/audio/speech endpoint the device POSTs JSON
-            to during rd_tts.  Overridden per-build via CLAW_TTS_URL env.
-            Kokoro (spark-5307) is on 192.168.10.0/24, unreachable from the
-            board; forwarded on the workspace host (socat 11804 -> :8004).
+            to.  Overridden per-build via CLAW_TTS_URL env.  Kokoro
+            (spark-5307) is on the board's own 192.168.50.0/24 subnet, so the
+            device reaches it directly.
 
     config ROBODOG_TTS_MODEL
         string "TTS model name in the request JSON"
@@ -86,6 +87,43 @@ menu "RoboDog Phase 2 voice loop"
             burning the whole VOICE_MAX_SECS window and transcribing half a
             minute of noise.  A normal push-to-talk utterance is far below
             this (the corpus scripts are ~3-10 s).
+
+    config ROBODOG_VOICE_CAPTURE_STEP_SECS
+        int "Utterance buffer growth step (seconds of audio)"
+        default 2
+        range 1 10
+        help
+            The utterance buffer grows on demand in steps of this many seconds
+            of 16 kHz s16 audio (2 s = 64 KB), instead of being allocated at
+            its VOICE_MAX_SECS worst case (45 s = 1.44 MB) on the first speech
+            frame.  A single 1.44 MB *contiguous* SPIRAM block is not reliably
+            available once a voice turn has run (the heap is fragmented by the
+            turn's TTS slots / ASR buffers / LVGL), so the all-at-once
+            allocation failed and every later listen collapsed straight back
+            to idle — the reported "hit listen, the board switches right back
+            to idle".  Small steps keep every allocation satisfiable while
+            still allowing the full VOICE_MAX_SECS window for a long utterance.
+
+    config ROBODOG_VOICE_MIN_SPEECH_MS
+        int "Minimum accumulated speech before trailing silence ends the listen (ms)"
+        default 100
+        range 20 2000
+        help
+            The trailing-silence rule (VAD_SILENCE_MS=800) ends the utterance
+            once 800 ms of quiet follows speech.  A single noise blip (chair
+            creak, click, door) counted as speech, so the very next 800 ms of
+            quiet closed the listen — typically BEFORE the user had said
+            anything.  The turn then captured ~1.5 s of room noise, ASR
+            returned no text, and the panel dropped straight back to idle:
+            the other half of the reported "hit listen, it switches right back
+            to idle".  Below this much accumulated speech the buffered audio
+            is discarded as a blip and listening continues (still bounded by
+            the no-speech timeout and the hard caps).  A click/creak is one or
+            two 20 ms frames, so 100 ms (5 frames) rejects blips while keeping
+            a real utterance — measured on this rig's marginal speaker->mic
+            coupling, a short corpus utterance ("what time is it") only crosses
+            the energy threshold for ~180-200 ms, so a higher floor silently
+            discarded genuine speech and the listen bailed with 0 samples.
 
     config ROBODOG_VOICE_NO_SPEECH_TIMEOUT_MS
         int "Bail out of the listen phase if no speech within this many ms"

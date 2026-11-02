@@ -138,7 +138,8 @@ is script-level PCM I/O, not a voice pipeline). All C, on-device:
    console (E2E hook), render as user message, inject into the agent.
 4. **LLM**: native `claw_core` — OpenAI-style custom endpoint,
    NVS-configured (`base_url`, key, model). Default: the existing
-   `gx10-f156:8000/v1` DeepSeek-V4-Flash the bridge already falls back to.
+   `spark-73dd:8000/v1` `qwen3.8-flash-next` (192.168.50.3) — the stable,
+   always-on LLM endpoint, on the board's own subnet.
    No Hermes, no brain WS, no adapter. ESP-Claw structured memory/skills are
    available but out of scope for parity.
 5. **TTS**: POST `/v1/audio/speech` to the user's own Kokoro endpoint
@@ -246,7 +247,7 @@ LMAO-owned tooling in this folder (all in `robodog_client/esp-claw/`):
   layout-identical local `robodog_display_lcd_{config,handles}_t` types.
 - `patches/0002-init.patch` — `main.c` calls `robodog_init()`.
 - `overlay/components/robodog_phase0/` — LMAO component: RD_SHOT publisher
-  (self-ticking, 4 s cadence — see capture seam below), console commands
+  (self-ticking, 10 s cadence — see capture seam below), console commands
   `rdshot` / `rd_asr` / `rd_tts` / `rd_chat`, embedded corpus WAV for ASR.
 - `build_esp_claw.sh` — Docker `espressif/idf:v5.5.4`, generates
   `sdkconfig.defaults.robodog` (model endpoints via `CLAW_*` env),
@@ -295,16 +296,37 @@ Model configuration (NVS, namespace `app`):
 
 - `wifi_ssid` / `wifi_password` → Hankerker on the 192.168.50.0/24 LAN.
 - `llm_backend=openai_compatible`, `llm_endpoint=static`,
-  `llm_base_url=http://gx10-f156:8000/v1`, `llm_model=deepseek-ai/DeepSeek-V4-Flash-0731`,
+  `llm_base_url=http://192.168.50.3:8000/v1`, `llm_model=qwen3.8-flash-next`,
   `llm_auth_type=none`, `llm_sup_tools=true` (false → the agent refuses with
   "Selected backend does not support tool calls" even though the backend is
   OpenAI-compatible), `llm_sup_vis=false`.
-- Whisper/Kokoro are on the **livecam 192.168.10.0/24 subnet**, which the
-  board (192.168.50.0/24) cannot route to. The workspace host forwards them:
-  `socat TCP-LISTEN:11801,TCP:192.168.10.37:8001` and `:11804 → :8004`
-  (Kokoro). Build with `CLAW_ASR_URL=http://192.168.50.153:11801/v1/audio/transcriptions`
-  `CLAW_TTS_URL=http://192.168.50.153:11804/v1/audio/speech` and the overlay
-  POSTs through the forwards. `dev_display_lcd`-independent of the board.
+- **Current endpoint topology (no forwards).** spark-5307 now resolves to
+  **192.168.50.27**, i.e. the BOARD's own subnet, so the device reaches
+  Whisper (`:8001`) and Kokoro (`:8004`) **directly** — the workspace socat
+  forwards on `11801`/`11804` (which used to bridge the old
+  `192.168.10.37` livecam address) are gone.  The committed defaults are the
+  LAN IP, not the host name, because the board's resolver does not know the
+  LAN names: `CLAW_ASR_URL=http://192.168.50.27:8001/v1/audio/transcriptions`,
+  `CLAW_TTS_URL=http://192.168.50.27:8004/v1/audio/speech`.
+- **LLM = qwen3.8-flash-next on spark-73dd (192.168.50.3:8000/v1)** — the
+  stable, always-on endpoint, on the board's subnet too.  It is the default in
+  `flash_esp_claw.sh` (`llm_base_url`/`llm_model` NVS keys), replacing the old
+  `gx10-f156:8000/v1` `deepseek-ai/DeepSeek-V4-Flash-0731`, which is NOT
+  running (a board pointed there fails the agent run with
+  `agent run failed (ESP_ERR_TIMEOUT)` and ends the turn in `error`).
+  Host-side gates use the same endpoints (the e2e re-ASR default is
+  `http://192.168.50.27:8001/v1/audio/transcriptions`).
+- **Kokoro upgrade verified.** The upgraded server keeps the same
+  OpenAI-shaped contract the firmware speaks (POST `/v1/audio/speech`
+  `{model,input,voice}` -> 24 kHz mono s16 WAV; `/v1/models` and `/voices`
+  are still 404, so nothing in the firmware needed to change) and now answers
+  in **0.1-1.2 s** per chunk (was 1-3 s) with the full voice set available
+  (`af_heart`, `af_bella`, `af_nova`, `am_michael`, `bf_emma`, `bm_george`,
+  `zf_xiaobei`, `jf_alpha`, `ef_dora`, `hf_alpha` all 200).  The one-step TTS
+  lookahead prefetch stays (it is what removes the inter-chunk gap on a slow
+  network), and a 5-session soak against the upgraded server passed 4/5 fully
+  plus one acoustic ASR miss with the whole chain intact (2 chunks voiced,
+  FULL_READOUT 0.98).
 
 ### RD_SHOT capture seam — finding for Phase 1 (root cause + implemented seam)
 
@@ -328,7 +350,7 @@ frame is sourced deterministically:
   `setup_device.c`), registers an LVGL display via `esp_lv_adapter` directly
   (no display_service / system_ui), and loads its text-only screen. This is
   deterministic — it comes up on every boot.
-- **Frame source**: `robodog_phase0`'s rdshot publisher self-ticks every 4 s
+- **Frame source**: `robodog_phase0`'s rdshot publisher self-ticks every 10 s
   and force-publishes on the `rdshot` command. Normally it publishes the
   retained frame from the last panel flush; as a **deterministic fallback it
   reads the panel's live 1-bpp `frame_buf` directly**
@@ -506,6 +528,121 @@ Phase 2 delivers the **device-initiated voice loop**, hardware-verified end-to-e
   (likely the esp_ae 24k→16k converter or an LWIP/LVGL buffer) or a PSRAM
   speed check — tracked pending longer soak.
 
+- **"Hit listen -> straight back to idle": the utterance buffer's single
+  1.44 MB allocation.** `voice_capture` used to `malloc` the WHOLE
+  `VOICE_MAX_SECS` window (45 s = 1.44 MB contiguous SPIRAM) on the first
+  speech frame, and `robodog_voice_asr` then built a second contiguous
+  ~1.44 MB multipart body.  The first turn after a boot could satisfy both;
+  every later turn could not — the previous turn's buffers (two 1.5 MB TTS
+  slots, the ASR response, LVGL, WiFi/Lua) leave the heap with no free block
+  that large, so the capture malloc failed, `voice_capture` returned zero
+  samples and the turn ended in `idle` after ~2.6 s.  Reproduced 4/4 turns:
+  `no SPIRAM for 720000-sample capture buffer` -> `no usable utterance
+  captured (0 samples)` -> idle (the reported symptom).  Fixed by removing
+  BOTH big allocations:
+  - the utterance buffer now **grows in `CONFIG_ROBODOG_VOICE_CAPTURE_STEP_SECS`
+    steps** (2 s = 64 KB) as audio arrives (`capture_grow`/`capture_append`),
+    so the typical 2-6 s utterance never allocates more than 64-192 KB and no
+    single huge contiguous block is ever needed; a growth failure mid-utterance
+    ends the utterance with everything already buffered (still transcribed)
+    instead of dropping the turn;
+  - the ASR multipart body is **streamed** (`esp_http_client_open` + four
+    `esp_http_client_write` calls + `fetch_headers` + a direct body read) so
+    the captured PCM is never copied into a second contiguous buffer.
+  A capture fault (the first allocation failing) now ends the turn in the
+  visible **`error`** state, never as a clean `idle` — the panel must not
+  claim "user said nothing" when the board could not buffer the audio.  The
+  turn also logs `spiram free=/largest=` at every listen so this class of
+  fault is attributable from the console.
+- **The BOOT button swallowed quick taps and could fire a session reset.**
+  The old ANYEDGE ISR debounced *every* edge, so a tap released inside 300 ms
+  of its press edge was dropped entirely (the button did nothing unless held
+  > 300 ms), and a release edge arriving without an accepted press edge fell
+  through to the duration branch with a stale press timestamp — which is
+  >= 1.5 s by construction — and fired `EVT_RESET` (clear session) instead of
+  a listen.  Now the debounce applies to PRESS edges only, a release is
+  honoured only when a press is armed (20 ms contact-bounce floor), and a
+  stray release is ignored: every tap starts a listen, a >= 1.5 s hold still
+  clears the session.
+- **The UI no longer dumps an RD_SHOT frame per command.** Every UI command
+  used to end with `robodog_rdshot_capture_now()`, i.e. a 15000 B hex dump
+  (~30 KB, ~2.6 s at 115200) on the UI task's critical path.  A chunked reply
+  issues ~2 commands per chunk, so a 6-chunk answer left the UI queue ~30 s
+  behind: the status label still showed `idle` seconds into the NEXT listen,
+  which made a working listen look like "hit listen -> back to idle" (the
+  panel lied, not the state machine).  The flush already publishes the
+  retained frame (`robodog_rdshot_publish`), and captures are on demand
+  (`rdshot` / the self-tick), so the UI now only renders + refreshes; the
+  panel tracks the live state within one command.
+- **The RD_SHOT self-tick no longer starves the console.** The publisher
+  dumped a 15000 B frame (≈30 KB of hex, ~2.6 s of link time) every 4 s, i.e.
+  ~65% of the 115200 USB-JTAG link, so every real log line (ASR text, agent
+  reply, TTS brackets) arrived seconds late — and a host that stopped reading
+  for a few seconds (playing the corpus, re-ASR of the reply) could lose them
+  outright, which is how a gate ends up reporting a false "session ended
+  before ASR".  On-demand captures are immediate (`rdshot`, and the UI's
+  forced dump after every render), so the self-tick only needs to guarantee a
+  frame exists for a caller that never asks: it is now 10 s, still well inside
+  `capture.py`'s 30 s window, and leaves the link to the logs.  The host
+  gates additionally drain the console continuously in a background thread
+  (`ConsoleTail` in `robodog_claw_e2e.py`), so no line can be lost while the
+  host is busy with audio.
+- **A noise blip no longer closes the listen window.** The trailing-silence
+  rule (800 ms) ended the utterance as soon as speech stopped — but ANY frame
+  above the energy threshold counted as speech, so a chair creak / click / door
+  closed the listen ~1 s in, typically BEFORE the user spoke.  The turn then
+  captured ~1.5 s of room noise, ASR returned no text, and the panel went
+  straight back to `idle` — indistinguishable from the reported "hit listen,
+  it switches right back to idle", and it also produced the intermittent empty
+  ASR in the multi-session gate.  `CONFIG_ROBODOG_VOICE_MIN_SPEECH_MS`
+  (default 100 ms = 5 frames; a click/creak is 1-2 frames) now gates the
+  trailing-silence verdict: below it the buffered audio is discarded as a
+  blip (`ignoring a <n> ms blip ...; still listening`) and the window stays
+  open, still bounded by the no-speech timeout and the hard caps.  The verdict
+  has ONE settle point in the capture loop, reached whether or not new audio
+  arrived, so a quiet ring still ends a real utterance and a blip is retired
+  even when the stream stalls.  The floor must stay LOW: on this rig's
+  marginal speaker→mic coupling a short corpus utterance ("what time is it")
+  only crosses the energy threshold for ~180-200 ms, so a 300 ms floor
+  discarded genuine speech and the listen bailed with 0 samples (measured on
+  hardware — see the `ignoring a <n> ms blip` console line).
+- **A stalled capture stream is a fault, not silence.** If the listen window
+  delivered no PCM at all (I2S RX overrun / wedged codec / capture task
+  stopped), the old code reported `no usable utterance` and ended in a clean
+  `idle` — the panel claimed "nothing heard" for a broken capture path.  It
+  now logs `capture stream produced no audio` and ends the turn in `error`.
+- **The idle capture subscriber no longer floods the console.** Keeping the
+  APP subscriber open across turns (F3) means it is never drained between
+  turns, so upstream `audio_capture` logged a ring-overflow warning on EVERY
+  20 ms frame — ~30 KB/s (12.7 MB dropped observed) on the 115200 USB-JTAG
+  console, which saturates it and can block the capture task inside
+  `ESP_LOGW` while a turn is listening (dropped audio -> VAD misses speech).
+  `patches/0004-capture-drop-log-rate-limit.patch` rate-limits that warning to
+  one line per 5 s carrying the running total.
+
+- **Two per-turn SPIRAM leaks — the other half of "later turns go silent".**
+  Even with the capture cliff gone, every turn after the first still ended in
+  `error` with the reply rendered but nothing spoken.  Measured on the
+  console (`spiram free=`): only ~1 MB free after a handful of turns.  Two
+  leaks, both fixed:
+  - the TTS **double-buffer slots were never freed on the normal (prefetch)
+    path**: `rx[0]`/`rx[1]` (2 x `CONFIG_ROBODOG_VOICE_TTS_MAX_RESPONSE`
+    = ~3 MB) were allocated per turn, and only the `!dbl` sequential fallback
+    released them.  The prefetch branch therefore leaked ~3 MB per voiced
+    turn; after the first reply the heap could never satisfy the next turn's
+    slots (`TTS: no memory for response buffers ... nothing played`) -> the
+    turn ended in `error`, and the leaked megabytes also starved the next
+    turn's capture buffer -> `idle`.  The slots are now freed right after the
+    prefetch task ACKs the abort (the only point where nothing can still be
+    writing them).
+  - `claw_core_response_t` (`text` / `error_message` / `target_*`) is owned
+    heap memory the caller must release with `claw_core_response_free()` (the
+    upstream `app_claw_cli.c` does).  `voice_turn` and `rd_chat` skipped it,
+    leaking the reply text every turn.  Both now free it on every exit path.
+  With both leaks closed the per-listen `spiram free=/largest=` line stays
+  flat across turns, and the multi-session stress gate's NO_COLLAPSE +
+  CHUNKED_QUEUE legs prove turns 2..N behave like turn 1.
+
 - **The reply is CHUNKED at sentence breaks and queued, not truncated.** The
   esp-claw root agent is verbose by default (a full "what can you do" dump is
   60+ s of speech), so `voice_turn()` splits the FULL reply via
@@ -614,6 +751,12 @@ Phase 2 delivers the **device-initiated voice loop**, hardware-verified end-to-e
   `rst:*` / tlsf / heap-corruption — the R7 soak regression the prefetch's
   new sustained-load path must not re-trigger; `robodog_claw_stress.py`
   drives it, additive, and never writes `hardware-e2e.md`/`.gate-head`).
+  It also carries the **NO_COLLAPSE** leg: a session that never reaches ASR
+  because the board could not capture/buffer the audio (`no usable utterance`,
+  `capture fault`, `no SPIRAM`, `capture buffer growth failed`) FAILs — that
+  is exactly the "first turn works, every later one drops back to idle"
+  regression class, which a single-session gate cannot see.
+  Run it with `bazel run //robodog_client:claw_stress -- --runs 5`.
 - **Speaker output needs explicit re-assert before playback.** Even paced,
   this board's ES8311 was silent until `voice_speak` itself calls
   `esp_codec_dev_set_out_mute(dac, false)` + `esp_codec_dev_set_out_vol(dac, 80)`
@@ -700,3 +843,44 @@ frame.
 
 Phase-0 probes re-passed with no regression (the HTTP refactor): `rd_asr` →
 device→Whisper 200 / `text="What can you do?"`.
+
+## Phase 2 fix round — "hit listen, the board switches right back to idle"
+
+Reported symptom: many listens after a button press returned to `idle`
+immediately instead of opening the voice window.  Root causes (all reproduced
+on hardware, all fixed — see the bullets above for the mechanism of each):
+
+| # | Cause | Fix | Evidence |
+|---|---|---|---|
+| 1 | Utterance buffer = one 1.44 MB contiguous SPIRAM malloc on the first speech frame; only turn 1 after boot could satisfy it | grows in 2 s steps (`CONFIG_ROBODOG_VOICE_CAPTURE_STEP_SECS`) | pre-fix 4/4 turns: `no SPIRAM for 720000-sample capture buffer` -> `no usable utterance` -> idle; post-fix 5/5 turns voice normally |
+| 2 | ASR multipart body = a second ~1.44 MB contiguous copy | streamed upload (`esp_http_client_open` + 4 writes) | same runs above |
+| 3 | TTS double-buffer slots (~3 MB) never freed on the prefetch path | freed after the prefetch task ACKs the abort | pre-fix `spiram free=1053340` after 2 turns + `TTS: no memory for response buffers` -> `error`; post-fix flat `spiram free=4200xxx largest=4194304` across 5 turns |
+| 4 | `claw_core_response_t` strings never released | `claw_core_response_free()` on every exit path (voice + rd_chat) | same leak measurement |
+| 5 | A noise blip tripped the energy VAD and the 800 ms trailing silence closed the window before the user spoke | `CONFIG_ROBODOG_VOICE_MIN_SPEECH_MS` (100 ms) gates the trailing-silence verdict; a blip is discarded and listening continues | console: `ignoring a 180 ms blip (< 100 ms speech); still listening` -> then a real utterance proceeds |
+| 6 | BOOT button: every edge debounced (quick taps swallowed) and a stray release fired `EVT_RESET` from a stale timestamp | press-only debounce; release honoured only when a press is armed | shared `EVT_LISTEN` path proven via `rd_listen`; the ISR branch is by-inspection (the physical press cannot be driven remotely) |
+| 7 | UI forced a 30 KB RD_SHOT dump per UI command (~2.6 s each), putting the UI queue tens of seconds behind — the panel showed `idle` mid-listen | UI renders + refreshes only; dumping is the publisher's job (self-tick 10 s + on demand) | RD_SHOT frame captured during a listen reads `listening`; state transitions now logged (`state -> listening`) |
+| 8 | Console: idle capture subscriber flooded ~30 KB/s of ring-overflow warnings; 4 s RD_SHOT self-tick ate ~65% of the link | `patches/0004-capture-drop-log-rate-limit.patch` (1 line / 5 s) + 10 s self-tick + host-side continuous drain (`ConsoleTail`) | gate no longer loses ASR/reply/TTS lines while the host plays audio or re-ASRs |
+| 9 | A stalled capture stream was reported as "user silent" -> clean `idle` | `capture stream produced no audio` -> turn ends in `error` | console + panel state |
+
+Verification on the board (`/dev/ttyACM0`, Waveshare ESP32-S3 RLCD-4.2,
+esp-claw @ pinned commit, IDF v5.5.4):
+
+```
+# multi-session stress (5 sessions, different question each)
+bazel run //robodog_client:claw_stress -- --runs 5
+  session 1 'what time is it'          ASR 1.00 / 1 chunk  / FULL_READOUT 0.86
+  session 2 'tell me a joke'           ASR 1.00 / 1 chunk  / FULL_READOUT 0.72
+  session 3 'how are you today'        ASR 1.00 / 1 chunk  / FULL_READOUT 0.87
+  session 4 'what can you do'          ASR 1.00 / 4 chunks / FULL_READOUT 0.61
+  session 5 'count slowly ... thirty'  ASR 0.83 / 1 chunk  / FULL_READOUT 0.91
+  NO_COLLAPSE 5/5 PASS, NO_RESET 5/5 PASS -> Overall: PASS
+
+# standard voice-loop gate
+python3 robodog_client/esp-claw/robodog_claw_e2e.py --corpus capabilities
+  OPEN_SESSION / ASR_MATCH / REPLY / TTS / RING / SUBTITLE / NO_RESET -> Overall: PASS
+```
+
+Panel + state, captured with the RD_SHOT → `capture.decode_hermes` → vision
+readback path: a press with no speech shows `listening` on the status row and
+ends in the intended `no speech within 12000 ms` bail (`state -> idle`), while
+a press followed by speech runs the full chain and renders the reply.

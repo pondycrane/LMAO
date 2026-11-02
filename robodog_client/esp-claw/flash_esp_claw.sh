@@ -17,8 +17,13 @@
 # are committed:
 #   FLASH_PORT, FLASH_BAUD            (defaults /dev/ttyACM0, 460800)
 #   CLAW_WIFI_SSID / CLAW_WIFI_PASSWORD (default: robodog_client/main/local_secrets.h)
-#   CLAW_LLM_BASE_URL                 (default http://gx10-f156:8000/v1)
-#   CLAW_LLM_MODEL                    (default deepseek-ai/DeepSeek-V4-Flash-0731)
+#   CLAW_LLM_BASE_URL                 (default http://192.168.50.3:8000/v1)
+#   CLAW_LLM_MODEL                    (default qwen3.8-flash-next)
+#                                     spark-73dd (192.168.50.3) serves
+#                                     qwen3.8-flash-next and is on the BOARD's
+#                                     own subnet, so the device reaches it
+#                                     directly.  gx10-f156:8000 (the old
+#                                     DeepSeek default) is NOT running today.
 #
 #   bazel run //robodog_client:flash_robodog_claw [-- --port /dev/ttyACM0]
 set -euo pipefail
@@ -78,8 +83,8 @@ if [ "$NVS" -eq 1 ]; then
         echo "error: no CLAW_WIFI_SSID and no local_secrets.h default found" >&2
         exit 1
     fi
-    LLM_BASE="${CLAW_LLM_BASE_URL:-http://gx10-f156:8000/v1}"
-    LLM_MODEL="${CLAW_LLM_MODEL:-deepseek-ai/DeepSeek-V4-Flash-0731}"
+    LLM_BASE="${CLAW_LLM_BASE_URL:-http://192.168.50.3:8000/v1}"
+    LLM_MODEL="${CLAW_LLM_MODEL:-qwen3.8-flash-next}"
 
     NVS_WORK="$(mktemp -d /tmp/robodog_claw_nvs.XXXXXX)"
     # cfg_ver must match the app's APP_CONFIG_SCHEMA_VERSION ("1") or
