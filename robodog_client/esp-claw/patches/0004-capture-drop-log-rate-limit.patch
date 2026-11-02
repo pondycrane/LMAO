@@ -1,0 +1,39 @@
+--- a/components/common/audio_hub/src/audio_capture.c
++++ b/components/common/audio_hub/src/audio_capture.c
+@@ -23,6 +23,7 @@
+ #include "esp_codec_dev.h"
+ #include "esp_err.h"
+ #include "esp_log.h"
++#include "esp_timer.h"
+ 
+ #include "dev_audio_codec.h"
+ #include "audio_memory.h"
+@@ -62,6 +63,7 @@
+     StreamBufferHandle_t     ring;
+     SemaphoreHandle_t        io_mtx;
+     uint64_t                 dropped_bytes;
++    uint64_t                 last_drop_log_us;
+     char                    *owner_tag;
+     struct audio_capture_t  *parent;
+ };
+@@ -79,7 +81,19 @@
+     dropped += bytes - sent;
+     if (dropped > 0) {
+         sub->dropped_bytes += dropped;
+-        ESP_LOGW(TAG, "sub ring overflow role=%d owner=%s drop=%u total=%" PRIu64, (int)sub->role, sub->owner_tag ? sub->owner_tag : "?", (unsigned)dropped, sub->dropped_bytes);
++        /* RoboDog: a subscriber that is deliberately left OPEN while idle
++         * (the voice loop keeps its APP subscriber across turns to avoid the
++         * per-turn ring teardown) is never drained between turns, so this
++         * fires on EVERY 20 ms frame — ~30 KB/s of console output, which
++         * saturates the USB-JTAG console and blocks this capture task inside
++         * ESP_LOGW while a turn is listening (dropped audio -> VAD misses
++         * speech).  Rate-limit to one line per 5 s carrying the running
++         * total, which keeps the diagnostic without the flood. */
++        const uint64_t now_us = esp_timer_get_time();
++        if (now_us - sub->last_drop_log_us >= 5000000ULL) {
++            sub->last_drop_log_us = now_us;
++            ESP_LOGW(TAG, "sub ring overflow role=%d owner=%s drop=%u total=%" PRIu64, (int)sub->role, sub->owner_tag ? sub->owner_tag : "?", (unsigned)dropped, sub->dropped_bytes);
++        }
+     }
+     return sent;
+ }

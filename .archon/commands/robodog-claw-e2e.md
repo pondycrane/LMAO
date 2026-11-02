@@ -56,8 +56,9 @@ Every leg is asserted from the **device serial console** logs
 python3 -c "import serial; import PIL"      # orchestrator + capture
 ffmpeg -version >/dev/null                  # audio play/record
 getent group audio | grep -q "$(whoami)"    # ALSA test speaker/mic access
-# Whisper/Kokoro reachable on the board's subnet via the host-forward socat:
-curl -s -m 8 http://192.168.50.153:11801/v1/audio/transcriptions -o /dev/null -w '%{http_code}\n'
+# Whisper/Kokoro (spark-5307 = 192.168.50.27) are on the board's own subnet —
+# both the board and this host reach them directly (no socat forward):
+curl -s -m 8 http://192.168.50.27:8001/v1/audio/transcriptions -o /dev/null -w '%{http_code}\n'
 # (the board's ASR/TTS URLs are baked by build_esp_claw.sh from CLAW_ASR_URL/CLAW_TTS_URL)
 ```
 

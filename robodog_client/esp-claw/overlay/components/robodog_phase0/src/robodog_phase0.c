@@ -46,7 +46,15 @@ static const char *TAG = "robodog";
 /* ── RD_SHOT capture publishing ──────────────────────────────────────────── */
 
 #define RD_SHOT_MAX_BUF       (16384)
-#define RD_SHOT_INTERVAL_US   (4000000ULL) /* 15000 B -> ~30 KB hex @115200 ~= 2.6 s */
+/* Self-tick cadence.  15000 B of hex is ~30 KB on the console (~2.6 s at
+ * 115200), so a 4 s tick consumed ~65% of the link and pushed every real log
+ * line (ASR text, agent reply, TTS brackets) seconds behind — and a host that
+ * blocked for a few seconds (playing the corpus, re-ASR of the reply) could
+ * lose them entirely.  On-demand captures (`rdshot`, and the UI's forced dump
+ * after a render) are immediate, so the self-tick only exists to guarantee a
+ * frame exists for a caller that never asks; 10 s leaves most of the link for
+ * logs while still returning a frame well inside `capture.py`'s 30 s window. */
+#define RD_SHOT_INTERVAL_US   (10000000ULL)
 
 static portMUX_TYPE s_rdshot_mux = portMUX_INITIALIZER_UNLOCKED;
 static uint8_t *s_rdshot_frame;     /* retained copy of the last flushed frame */
@@ -280,6 +288,7 @@ static int cmd_rd_chat(int argc, char **argv)
     memset(&resp, 0, sizeof(resp));
     err = claw_agent_mgr_receive_root_for(request_id, &resp,
                                           CONFIG_ROBODOG_LLM_TIMEOUT_MS + 30000);
+    int rc = 0;
     if (err == ESP_OK && resp.text != NULL) {
         /* Line-safe reply log: a raw "%s" would truncate at the first newline
          * of the agent's multi-line markdown reply; JSON-escape like the voice
@@ -296,13 +305,17 @@ static int cmd_rd_chat(int argc, char **argv)
         ESP_LOGE(TAG, "rd_chat: agent error (%s): %s", esp_err_to_name(err),
                  resp.error_message);
         robodog_ui_set_agent_state("error");
-        return 1;
+        rc = 1;
     } else {
         ESP_LOGE(TAG, "rd_chat: receive_root_for failed: %s", esp_err_to_name(err));
         robodog_ui_set_agent_state("error");
-        return 1;
+        rc = 1;
     }
-    return 0;
+    /* `claw_core_response_free` is the upstream ownership contract (see
+     * app_claw_cli.c): text / error_message / target_* are heap strings the
+     * caller must release on EVERY path. */
+    claw_core_response_free(&resp);
+    return rc;
 }
 
 /* ── registration ────────────────────────────────────────────────────────── */
