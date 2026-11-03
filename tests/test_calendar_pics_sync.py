@@ -329,5 +329,59 @@ class _FakePics:
         pass
 
 
+class TestVerifyPrompt:
+    """The gate must be theme-level for pokemon, or valid renders get rejected
+    and the retry loop collapses onto whichever character happens to pass."""
+
+    def test_pokemon_accepts_any_pokemon_not_just_the_named_one(self):
+        p = cps.build_verify_prompt("charmander", "pokemon", accept=cps.POKE_SUBJECTS)
+        assert "Pokémon character" in p
+        assert "any Pokémon character is acceptable" in p
+        assert "'charmander'" in p          # names the seeded pick as a hint
+        assert "photograph" in p and "costume" in p   # keeps cosplay photos out
+
+    def test_pokemon_prompt_is_theme_level_even_with_a_pool(self):
+        # the pool must not narrow it back to name-exact matching
+        a = cps.build_verify_prompt("goldeen", "pokemon", accept=["goldeen"])
+        assert "any Pokémon character is acceptable" in a
+
+    def test_paw_prompt_lists_the_dogs(self):
+        p = cps.build_verify_prompt("marshall", "paw patrol", accept=cps.PAW_SUBJECTS)
+        assert "PAW Patrol" in p
+        for dog in ("marshall", "chase", "skye", "rubble", "zuma"):
+            assert dog in p
+        assert "real dog photo" in p
+
+    def test_sea_prompt_uses_the_coherent_pool(self):
+        pool = cps.SEA_COHERENT["ice skating"]
+        p = cps.build_verify_prompt("seal", "sea animal", accept=pool)
+        assert "sea animals" in p
+        for name in pool:
+            assert name in p
+        assert "dolphin" not in p   # legless animals stay out of ice skating
+
+    def test_sea_prompt_defaults_to_the_full_pool(self):
+        p = cps.build_verify_prompt("octopus", "sea animal")
+        assert "octopus" in p and "whale" in p
+
+
+class TestParseVerdict:
+    def test_true_with_character(self):
+        assert cps._parse_verdict('{"match": true, "character": "Psyduck"}') == (True, "Psyduck")
+
+    def test_false_with_character(self):
+        assert cps._parse_verdict('{"match": false, "character": "unknown"}') == (False, "unknown")
+
+    def test_string_truthy(self):
+        assert cps._parse_verdict('{"match": "yes"}') == (True, "")
+
+    def test_garbage_is_unparseable(self):
+        assert cps._parse_verdict("no verdict here") == (None, "")
+
+    def test_parse_match_still_returns_a_bool(self):
+        assert cps._parse_match('{"match": true}') is True
+        assert cps._parse_match("nope") is None
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__] + sys.argv[1:]))
