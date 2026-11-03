@@ -36,7 +36,7 @@ LUT) and `--describe` reads it back with the self-hosted vision model
 `RD_VISION_BASE_URL` / `RD_VISION_MODEL`). You reason from that transcription —
 it is what the panel really shows.
 
-The voice loop itself (ASR → Hermes brain → Kokoro TTS → speaker) is verified
+The voice loop itself (ASR → Hermes brain → Qwen3-TTS → speaker) is verified
 functionally; this gate proves the hermes client **renders on the RLCD** and
 that the capture pipeline works for it.
 

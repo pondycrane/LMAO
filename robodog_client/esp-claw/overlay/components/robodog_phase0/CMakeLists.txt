@@ -7,7 +7,7 @@
 #     using the RD_SHOT protocol so the host capture.py reconstructs the
 #     display pixel-for-pixel (same contract as the hermes/calendar firmwares).
 #   - Console probes proving the device-initiated model-endpoint HTTP paths
-#     (DESIGN.md Phase 0): rd_asr (Whisper), rd_tts (Kokoro), rd_chat (LLM via
+#     (DESIGN.md Phase 0): rd_asr (Whisper), rd_tts (Qwen3-TTS), rd_chat (LLM via
 #     the native claw_agent_mgr per-turn API).
 #
 # Phase 1 (board + display) additions:

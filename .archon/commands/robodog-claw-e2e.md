@@ -40,7 +40,7 @@ host rd_listen (USB-JTAG) -> board voice task -> ES7210 mic subscriber opened
    -> test speaker -> corpus WAV -> board mic
    -> board -> Whisper /v1/audio/transcriptions (host-forward) -> ASR text
    -> board claw_agent_mgr -> gx10 LLM -> reply rendered on RLCD
-   -> board -> Kokoro /v1/audio/speech -> 24 kHz WAV -> 16 kHz resample
+   -> board -> Qwen3-TTS /v1/audio/speech -> 24 kHz WAV -> 16 kHz resample
    -> ES8311 speaker (TTS start/stop)
    -> test mic captures the reply -> host re-ASR (ring closure)
    -> RD_SHOT frame of the rendered reply -> vision readback (subtitle)
@@ -56,9 +56,12 @@ Every leg is asserted from the **device serial console** logs
 python3 -c "import serial; import PIL"      # orchestrator + capture
 ffmpeg -version >/dev/null                  # audio play/record
 getent group audio | grep -q "$(whoami)"    # ALSA test speaker/mic access
-# Whisper/Kokoro (spark-5307 = 192.168.50.27) are on the board's own subnet —
+# Whisper/Qwen3-TTS (spark-5307 = 192.168.50.27) are on the board's own subnet —
 # both the board and this host reach them directly (no socat forward):
 curl -s -m 8 http://192.168.50.27:8001/v1/audio/transcriptions -o /dev/null -w '%{http_code}\n'
+curl -s -m 8 -o /dev/null -w '%{http_code}\n' -H 'Content-Type: application/json' \
+  -d '{"model":"qwen3-tts","input":"ok","voice":""}' \
+  http://192.168.50.27:8004/v1/audio/speech
 # (the board's ASR/TTS URLs are baked by build_esp_claw.sh from CLAW_ASR_URL/CLAW_TTS_URL)
 ```
 
@@ -73,9 +76,14 @@ curl -s -m 8 http://192.168.50.27:8001/v1/audio/transcriptions -o /dev/null -w '
 ```bash
 python3 robodog_client/esp-claw/robodog_claw_e2e.py --corpus capabilities \
   --artifacts "$ARTIFACTS_DIR"
-# Volume default RD_PLAY_VOL=0.8; RD_PLAY_SETTLE=3 (ms after `listen started`);
-# corpus 'capabilities' = "what can you do". E2E_RUNS=N overrides (default 1:
-# each full loop is ~60-80 s; the voice loop is slow by design).
+# Chinese leg (dual-language path; same gate, Chinese corpus):
+python3 robodog_client/esp-claw/robodog_claw_e2e.py --corpus zh_hello \
+  --artifacts "$ARTIFACTS_DIR"
+# Volume default RD_PLAY_VOL=0.7, overridden by each corpus's pinned
+# `play_vol` (zh_hello = 0.9: the rig's Chinese coupling needs a louder drive);
+# RD_PLAY_SETTLE=3 (ms after `listen started`); corpus 'capabilities' =
+# "what can you do", 'zh_hello' = "你好世界今天很好". E2E_RUNS=N overrides
+# (default 1: each full loop is ~60-80 s; the voice loop is slow by design).
 ```
 
 - The gate reads the RD_SHOT frame **from the same console handle** (a second
@@ -91,14 +99,35 @@ Assertions (PASS/FAIL/SKIP, verbatim evidence written back to the artifact):
 
 1. **OPEN_SESSION** — after `rd_listen`, device logs `listen started`.
 2. **ASR_MATCH** — device `ASR text="..."` normalized-matches the corpus
-   transcript (>= 0.75 token overlap). Empty / missing ASR → **FAIL (no ASR)**
-   and the rest of the turn is SKIP'd (fail-fast, no 180 s hang).
-3. **REPLY** — device `agent reply: <text>` non-empty (native agent + LLM).
-4. **TTS** — device `TTS start` then `TTS stop` (ES8311 playback leg).
-5. **RING** — test mic captured the board speaker; host re-ASR (same Whisper
+   transcript (>= 0.75 token overlap; Latin words + one token per CJK
+   ideograph). Empty / missing ASR → **FAIL (no ASR)** and the rest of the
+   turn is SKIP'd (fail-fast, no 180 s hang).
+3. **ASR_LANG** — device `ASR language=<tag> prob=<p>` equals the corpus's
+   expected tag (`chinese` -> `zh`, otherwise `en`). No `language` field is
+   sent with the upload, so this is the endpoint's own detection: it proves
+   Chinese speech was heard AS Chinese, not forced through an English model.
+4. **REPLY_LANG** — device `voice reply language=<dir>` equals `zh-TW` for a
+   Chinese utterance (the Traditional-Chinese reply directive) and `en`
+   otherwise. This is the dual-language wiring's own evidence, independent of
+   what the model happens to answer.
+5. **REPLY** — device `agent reply: <text>` non-empty (native agent + LLM);
+   for a Chinese corpus it MUST contain CJK (an English answer despite the
+   zh-TW directive is a FAIL), and for an English corpus it MUST be
+   Latin-dominant (a Chinese-dominant answer — the session-memory carry-over
+   that the explicit "reply in English" directive fixes — is a FAIL).
+6. **TTS** — device `TTS start` then `TTS stop` (ES8311 playback leg).
+7. **RING** — test mic captured the board speaker; host re-ASR (same Whisper
    endpoint) overlaps the reply (or audible-only → PASS-WEAK).
-6. **SUBTITLE** — RD_SHOT frame -> `capture.decode_hermes` -> Qwen2.5-VL
-   readback carries >= 2 distinct reply tokens (the reply renders on the RLCD).
+8. **SUBTITLE** — RD_SHOT frame -> `capture.decode_hermes` -> Qwen2.5-VL
+   readback carries >= 2 distinct reply tokens (the reply renders on the RLCD);
+   CJK is transcribed as CJK (the vision prompt forbids translation).
+
+Chinese leg: `--corpus zh_hello` drives the pinned `你好世界` fixture
+(`serena`, `language: chinese`). Its characters are identical in Simplified and
+Traditional because faster-whisper may emit either script; a script-dependent
+phrase would make ASR_MATCH flap. The *reply* is Traditional (the directive),
+rendered by the generated Noto Sans CJK TC font and spoken by the Chinese-native
+timbre the TTS server picks from the reply's script.
 
 Write `$ARTIFACTS_DIR/robodog-claw-e2e/robodog-claw-e2e.md` (under the run
 subdir where the verbatim transcripts also live), plus a top-level
@@ -113,6 +142,8 @@ contract. Never writes `.gate-head`:
 **Corpus**: capabilities ('what can you do')   **Runs**: 1
 - OPEN_SESSION: PASS/FAIL
 - ASR_MATCH:    ...
+- ASR_LANG:     ...
+- REPLY_LANG:   ...
 - REPLY:        ...
 - TTS:          ...
 - RING:         ...

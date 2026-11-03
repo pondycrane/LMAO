@@ -5,7 +5,7 @@
  * LVGL text (verified pixel-for-pixel via the RD_SHOT capture hook), and the
  * board proves its device-initiated HTTP round-trips to the user's model
  * endpoints (Whisper ASR, OpenAI-style LLM via the native claw_agent_mgr
- * chat-injection seam, Kokoro TTS).
+ * chat-injection seam, Qwen3-TTS).
  *
  * SPDX-License-Identifier: Apache-2.0
  */

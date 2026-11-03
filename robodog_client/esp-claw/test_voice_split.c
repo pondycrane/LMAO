@@ -59,8 +59,9 @@ static size_t split_all(const char *reply, size_t cap, char *arena,
                         size_t arena_cap, size_t *offsets, size_t max_chunks,
                         bool *truncated, char *rebuild, size_t rebuild_cap)
 {
-    const size_t n = robodog_voice_split_reply(reply, cap, arena, arena_cap,
-                                               offsets, max_chunks, truncated);
+    const size_t n = robodog_voice_split_reply(reply, cap, 0, arena,
+                                               arena_cap, offsets, max_chunks,
+                                               truncated);
     memset(rebuild, 0, rebuild_cap);
     for (size_t i = 0; i < n; i++) {
         if (i > 0 && strlen(rebuild) + 1 < rebuild_cap) {
@@ -309,15 +310,73 @@ static void test_md_strip(void)
           "truncated to cap-1: '%s' (n=%zu)", out, n);
 }
 
-/* ── R9: voice_lookahead (one-step TTS double-buffer exchange) ────────── */
-/* Defined in test_voice_lookahead.c (same translation unit set / cc_test),
+/* ── First-chunk budget: a smaller opening chunk, full-size later ones ─── */
+static void test_splitter_first_cap(void)
+{
+    char arena[4096];
+    size_t offsets[64];
+    char rebuild[2048];
+    bool truncated = false;
+    const char *reply =
+        "The living room lamp is currently off, and the blinds are closed, so "
+        "the room is fairly dark. I have turned the lamp on for you. Your "
+        "first meeting today is at nine thirty in the morning.";
+
+    /* first_cap limits ONLY chunk 1; later chunks may use the full cap. */
+    const size_t n = split_all(reply, 176, arena, sizeof(arena), offsets, 64,
+                               &truncated, rebuild, sizeof(rebuild));
+    CHECK(n >= 2, "a 3-sentence reply splits into >= 2 chunks (got %zu)", n);
+    CHECK(strlen(arena + offsets[0]) <= 176, "chunk 1 fits the base cap");
+
+    const size_t n2 = robodog_voice_split_reply(
+        reply, 176, 96, arena, sizeof(arena), offsets, 64, &truncated);
+    CHECK(n2 >= n, "the tighter first budget never reduces the chunk count "
+          "(%zu vs %zu)", n2, n);
+    CHECK(strlen(arena + offsets[0]) <= 96,
+          "chunk 1 respects first_cap (len=%zu)", strlen(arena + offsets[0]));
+    for (size_t i = 1; i < n2; i++) {
+        CHECK(strlen(arena + offsets[i]) <= 176,
+              "chunk %zu still uses the base cap (len=%zu)", i + 1,
+              strlen(arena + offsets[i]));
+    }
+
+    /* first_cap == 0 means "no special first budget". */
+    const size_t n3 = robodog_voice_split_reply(
+        reply, 176, 0, arena, sizeof(arena), offsets, 64, &truncated);
+    CHECK(n3 == n, "first_cap=0 matches the plain cap split (%zu vs %zu)", n3,
+          n);
+
+    /* A larger first_cap is ignored (it must never widen the base budget). */
+    const size_t n4 = robodog_voice_split_reply(
+        reply, 176, 400, arena, sizeof(arena), offsets, 64, &truncated);
+    CHECK(n4 == n, "first_cap larger than cap is ignored (%zu vs %zu)", n4, n);
+}
+
+/* ── R9: voice_pipeline (N-slot TTS chunk pipeline) ───────────────────── */
+/* Defined in test_voice_pipeline.c (same translation unit set / cc_test),
  * sharing this harness's s_failures counter. */
-extern void test_lookahead_exactly_one(void);
-extern void test_lookahead_strict_order(void);
-extern void test_lookahead_no_double_claim_playing(void);
-extern void test_lookahead_fail_abort(void);
-extern void test_lookahead_full_turn(void);
-extern void test_lookahead_single_chunk(void);
+extern void test_pipe_bounded_inflight(void);
+extern void test_pipe_free_slot_reserved(void);
+extern void test_pipe_no_steal_of_busy_slots(void);
+extern void test_pipe_full_turn(void);
+extern void test_pipe_sync_fallback_and_reset(void);
+extern void test_pipe_single_chunk(void);
+
+/* ── R11: voice_pcm (chunk-boundary silence trim) ─────────────────────── */
+/* Defined in test_voice_pcm.c (same translation unit set / cc_test),
+ * sharing this harness's s_failures counter. */
+extern void test_pcm_trim_basic(void);
+extern void test_pcm_trim_lead_budget(void);
+extern void test_pcm_trim_hold_window(void);
+extern void test_pcm_trim_degenerate(void);
+
+/* ── R10: UTF-8 display path (CJK) ────────────────────────────────────── */
+/* Defined in test_robodog_utf8.c (same translation unit set / cc_test),
+ * sharing this harness's s_failures counter. */
+extern void test_utf8_decode(void);
+extern void test_utf8_sanitize(void);
+extern void test_splitter_utf8_cjk(void);
+extern void test_transcript_utf8(void);
 
 /* ── main ───────────────────────────────────────────────────────────────── */
 
@@ -329,12 +388,21 @@ int main(void)
     test_transcript_join();
     test_transcript_cap_keep();
     test_md_strip();
-    test_lookahead_exactly_one();
-    test_lookahead_strict_order();
-    test_lookahead_no_double_claim_playing();
-    test_lookahead_fail_abort();
-    test_lookahead_full_turn();
-    test_lookahead_single_chunk();
+    test_utf8_decode();
+    test_utf8_sanitize();
+    test_splitter_utf8_cjk();
+    test_transcript_utf8();
+    test_splitter_first_cap();
+    test_pipe_bounded_inflight();
+    test_pipe_free_slot_reserved();
+    test_pipe_no_steal_of_busy_slots();
+    test_pipe_full_turn();
+    test_pipe_sync_fallback_and_reset();
+    test_pipe_single_chunk();
+    test_pcm_trim_basic();
+    test_pcm_trim_lead_budget();
+    test_pcm_trim_hold_window();
+    test_pcm_trim_degenerate();
 
     if (s_failures != 0) {
         fprintf(stderr, "test_voice_split: %d FAILURE(S)\n", s_failures);

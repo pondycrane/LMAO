@@ -22,7 +22,7 @@ description: |
       (fast-pass only when HEAD is unchanged — the #87 regression guard)
   11. Reports results back to the GitHub issue with follow-up suggestions
 
-  Models: archon tiers (large/medium/small) resolved from ~/.archon/config.yaml (today all map to gx10 DeepSeek V4 Flash — edit config.yaml once to reroute when the local model is down) for everything. No Claude anywhere.
+  Models: archon tiers (large/medium/small) resolved from ~/.archon/config.yaml (today the create-plan/plan node runs on the medium tier, which prefers kimi-coding/k3 on the 'pi' provider; the large/small agent tiers map to local gx10 DeepSeek V4 Flash. archon binds one provider+model per tier, so the gx10 backup is a one-line reroute in ~/.archon/config.yaml when the primary model is down) for everything. No Claude anywhere.
 
 inputs:
   # Declared so the review-chain commands' $INPUTS.* references resolve
@@ -135,7 +135,7 @@ nodes:
     depends_on: [classify, web-research]
     when: "$classify.output.issue_type != 'bug'"
     context: fresh
-    model: large
+    model: medium
     effort: high
 
   # Bridge: ensure investigation.md exists for the implement step.

@@ -37,7 +37,7 @@ description: |
   NOT for: Cardputer/LoRa work (use lmao-feature-dev), GitHub-issue fixes
   (use lmao-fix-issue), Smart Irrigation (use smart-irrigation-dev), standalone reviews.
 
-  Models: archon tiers (large/medium/small) resolved from ~/.archon/config.yaml (today all map to gx10 DeepSeek V4 Flash — edit config.yaml once to reroute when the local model is down) for the
+  Models: archon tiers (large/medium/small) resolved from ~/.archon/config.yaml (today the create-plan/plan node runs on the medium tier, which prefers kimi-coding/k3 on the 'pi' provider; the large/small agent tiers map to local gx10 DeepSeek V4 Flash. archon binds one provider+model per tier, so the gx10 backup is a one-line reroute in ~/.archon/config.yaml when the primary model is down) for the
   agent. The screen-capture vision READBACK inside robodog-hardware-e2e is a fixed
   pipeline (Qwen2.5-VL via capture.py --describe), not the agent model. No Claude anywhere.
 
@@ -59,7 +59,7 @@ nodes:
   - id: create-plan
     command: robodog-create-plan
     context: fresh
-    model: large
+    model: medium
     effort: high
 
   # ═══════════════════════════════════════════════════════════════════

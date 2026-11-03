@@ -5,10 +5,15 @@
  * display_service/system_ui are gated behind a Kconfig symbol the board
  * manager silently drops for this custom-typed panel, so normally nothing
  * initialises the display), then renders PR #278-style text-only parity:
- * no face/emote, ~16 px pure-black ASCII font on the white panel (the LVGL
- * theme default grey binarizes to thin greys on the 1-bpp reflective panel,
- * so the labels force lv_color_black()), left-aligned full-panel multiline
- * wrap, status bar (WiFi/agent state) on top.
+ * no face/emote, ~16 px pure-black font on the white panel (the LVGL theme
+ * default grey binarizes to thin greys on the 1-bpp reflective panel, so the
+ * labels force lv_color_black()), left-aligned full-panel multiline wrap,
+ * status bar (WiFi/agent state) on top.
+ *
+ * The font is the build-time-generated Noto Sans CJK TC 16 px 1 bpp face
+ * (gen_font_tc_16.sh), so Traditional Chinese (and English) transcripts
+ * render as real glyphs; UTF-8 is preserved and only codepoints the font
+ * cannot draw become '?'.
  *
  * Roles/timing mirror today's SetChatMessage("user"|"assistant", ...):
  *   - robodog_ui_show_user     - render the user transcript (ASR completion)
@@ -43,10 +48,11 @@ esp_err_t robodog_ui_start(void);
 void robodog_ui_show_user(const char *text);
 
 /**
- * @brief Render/append the assistant reply.  ASCII-sanitized; clears the
- *        in-turn "thinking" state.  Stale-caption rule: only ever appends the
- *        reply that just finalized for the current turn (never replays an old
- *        one) - the response must be passed from the current run.
+ * @brief Render/append the assistant reply.  UTF-8-sanitized against the CJK
+ *        font; clears the in-turn "thinking" state.  Stale-caption rule: only
+ *        ever appends the reply that just finalized for the current turn
+ *        (never replays an old one) - the response must be passed from the
+ *        current run.
  */
 void robodog_ui_show_assistant(const char *text);
 

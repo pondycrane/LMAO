@@ -120,7 +120,9 @@ HERMES_VISION_PROMPT = (
     "This is the monochrome RLCD screen of an AI voice-assistant device "
     "(XiaoZhi). Transcribe exactly any visible text (labels, dates, status or "
     "subtitle lines) and describe what is shown (a face/character, icons, "
-    "layout). If the screen is blank, say BLANK.\n"
+    "layout). Transcribe in the ORIGINAL language/script — do not translate; "
+    "keep Chinese characters exactly as displayed. If the screen is blank, "
+    "say BLANK.\n"
     "Reply as a short list.")
 
 

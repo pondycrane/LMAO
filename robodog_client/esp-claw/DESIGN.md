@@ -16,7 +16,7 @@ Today's voice mode is a three-process, two-firmware stack:
 ```
 board mic --Opus/WS :8000--> voice_bridge (VAD, faster-whisper ASR)
     --"user" text--> Hermes brain WS (:8101, xiaozhi platform plugin)
-    <--Kokoro WAV--  Hermes auto-TTS (spark-5307:8004)
+    <--Qwen3-TTS WAV-- Hermes auto-TTS (spark-5307:8004)
 board speaker <--paced 24 kHz Opus-- voice_bridge
 RLCD <--{"type":"stt"/"tts"} frames over the same WS-- bridge-driven
 ```
@@ -37,16 +37,17 @@ mic/speaker is off-device, and the board is a dumb audio terminal.
 └──────┬───────────────┬──────────────────────────┬───────────────────────┘
        │ POST /v1/audio/transcriptions          │ POST /v1/audio/speech
        ▼               │ /v1/chat/completions    ▼
- Whisper endpoint  OpenAI-style LLM       Kokoro TTS endpoint
+ Whisper endpoint  OpenAI-style LLM       Qwen3-TTS endpoint
  (user's own,      endpoint (gx10 vLLM    (user's own,
-  LAN, URL build-  or cloud key,          spark-5307:8004, af_heart;
-  time Kconfig)    NVS-cfg)               URL build-time Kconfig)
+  LAN, URL build-  or cloud key,          spark-5307:8004, voice empty =
+  time Kconfig)    NVS-cfg)               server picks by language;
+                                          URL build-time Kconfig)
 ```
 
 Survives unchanged: the acoustic test rig + corpus, `capture.py` (RD_SHOT
 format), the calendar firmware, and the user's own LAN model services —
-**Kokoro TTS** (`kokoro_server.py` / `kokoro-tts.service`, `spark-5307:8004`,
-`af_heart`) and a **Whisper ASR** endpoint — which the board calls directly.
+**Qwen3-TTS** (`spark-5307:8004`, `qwen3-tts.service`) and a **Whisper ASR**
+endpoint — which the board calls directly.
 Endpoint configuration (not hardcoded): the **LLM** base URL/model are
 NVS-provisioned (`flash_esp_claw.sh` writes the `app` namespace — WiFi +
 `llm_base_url` / `llm_model`); the **ASR/TTS** endpoint URLs/model/voice are
@@ -72,6 +73,11 @@ Mirror the XiaoZhi precedent (`fetch_xiaozhi.sh`); no vendoring (AGENTS.md):
 - `overlay/` — LMAO-owned board package + voice component +
   `sdkconfig.defaults.robodog_claw`, copied into the fetched tree at build
   time (additive; no upstream files modified).
+- `gen_font_tc_16.sh` — rasterises the sha256-pinned Noto Sans CJK TC OTF
+  (tag `Sans2.004`) into an LVGL 16 px/1 bpp font with `lv_font_conv@1.5.2`,
+  staged into the overlay component at build time (cache
+  `~/.cache/lmao-fonts`; the generated C is never committed). Requires
+  Node.js ≥ 18 + network on the first build only.
 - `build_esp_claw.sh` — Docker `espressif/idf:v5.5.4` (ESP-Claw's recommended
   IDF, **not** the v6.0.2 XiaoZhi image),
   `idf.py bmgr -c ./boards -b lmao/robodog_rlcd_4_2 && idf.py build`.
@@ -107,12 +113,15 @@ emote-centric, so parity is explicit work, not config:
   agent events (Event Router, verbose `agent_stage`) and rendering: user
   transcript on ASR completion, assistant reply as it finalizes — same
   roles/timing as `SetChatMessage("user"|"assistant", …)` today.
-- Theme: no emote/`emoji_box`, noto-sans-basic-16-equivalent font (Montserrat-16,
-  pure black — the LVGL theme default is a mid-grey that binarizes to thin
-  greys on the 1-bpp panel), left-aligned, full-panel wrap
-  (`CONFIG_USE_MULTILINE_CHAT_MESSAGE` semantics), ASCII-sanitize before render
-  (same glyph constraint as the bridge's `display_text_ascii()`), status bar
-  with WiFi/agent state.
+- Theme: no emote/`emoji_box`, 16 px Noto Sans CJK TC (generated at build
+  time from the sha256-pinned OTF by `gen_font_tc_16.sh`; ASCII + CJK
+  punctuation + CJK Unified Ideographs, so Traditional Chinese replies render
+  as real glyphs rather than `?`), pure black — the LVGL theme default is a
+  mid-grey that binarizes to thin greys on the 1-bpp panel; left-aligned,
+  full-panel wrap (`CONFIG_USE_MULTILINE_CHAT_MESSAGE` semantics),
+  UTF-8-sanitize before render (keep every drawable codepoint, replace only
+  emoji/exotic scripts with `?`, never split a multi-byte sequence), status
+  bar with WiFi/agent state.
 - **Stale-caption rule preserved**: never show the previous reply during the
   current turn (bridge solved it with the `_caption_queue` split; here the
   single local render owner makes it trivial — E2E assert stays).
@@ -142,9 +151,10 @@ is script-level PCM I/O, not a voice pipeline). All C, on-device:
    always-on LLM endpoint, on the board's own subnet.
    No Hermes, no brain WS, no adapter. ESP-Claw structured memory/skills are
    available but out of scope for parity.
-5. **TTS**: POST `/v1/audio/speech` to the user's own Kokoro endpoint
-   (today: `spark-5307:8004`, voice `af_heart` — the bridge already talks to
-   it with this exact OpenAI-shaped API) → stream 24 kHz WAV → PCM → I2S TX.
+5. **TTS**: POST `/v1/audio/speech` to the user's own Qwen3-TTS endpoint
+   (today: `spark-5307:8004`, voice **empty** — the server picks a native
+   speaker from the reply text's script; see "Voice selection" below) →
+   stream 24 kHz WAV → PCM → I2S TX.
    Blocking I2S write gives real-time pacing for free — the Opus
    `DOWNLINK_PACE` / 40-frame decode queue problem (#267/#272) disappears
    with the protocol.
@@ -153,12 +163,16 @@ is script-level PCM I/O, not a voice pipeline). All C, on-device:
 
 Adapt `robodog_client/voice/hermes_voice_e2e.py` phases, assertions
 retargeted from the bridge journal to the **device serial console** (plus
-Whisper/Kokoro endpoint logs):
+Whisper/Qwen3-TTS endpoint logs):
 
 - OPEN_SESSION: RD_LISTEN + console listen log
 - ASR_MATCH: corpus WAV via test speaker → console `ASR text=` fuzzy match
-  (≥75 % token overlap)
-- REPLY: console agent-reply log
+  (≥75 % token overlap; Latin words + one token per CJK ideograph)
+- ASR_LANG: console `ASR language=` matches the corpus language (`zh`/`en`) —
+  the endpoint auto-detected it (no `language` field is sent)
+- REPLY_LANG: console `voice reply language=` shows the directive the turn
+  chose (`zh-TW` for a Chinese utterance, `en` otherwise)
+- REPLY: console agent-reply log (a Chinese corpus must yield a CJK reply)
 - RING: test-mic capture → re-ASR of the board's spoken reply
 - SUBTITLE: RD_SHOT → `capture.decode_hermes` → Qwen2.5-VL readback must
   transcribe the reply
@@ -168,11 +182,15 @@ Whisper/Kokoro endpoint logs):
 reply — asserts the FULL reply was queued AND read out to its end:
 - CHUNKED_QUEUE: every console `voice chunk i/n` has its own `TTS start`…
   `TTS stop` bracket (deterministic console evidence; the queue ran 1..n)
-- GAP_VERIFY: the feature's actual effect — each inter-chunk gap
-  `TTS stop(i) → TTS start(i+1)` measured from the console's ms timestamps
-  must be < 250 ms.  Pre-fix that gap was the ~1-3 s blocking Kokoro fetch on
-  the critical path; prefetch collapses it to a few ms (next chunk buffered).
-  Emits the measured per-gap ms values into the gate artifact.
+- PIPELINE_AHEAD: every boundary AFTER the first logged
+  `pipeline chunk i/n buffered=yes` — the deterministic proof that the next
+  sentence was already synthesized when its turn came, so no endpoint fetch
+  sits on the play path (the "long delay between response segments"
+  regression).  Emits the per-boundary buffered/ahead series.
+- GAP_VERIFY: the measured inter-chunk gap `TTS stop(i) → TTS start(i+1)`
+  from the console's ms timestamps must be < 250 ms.  Pre-fix that gap was the
+  endpoint fetch on the critical path; the pipeline collapses it to a few ms
+  (next chunk already buffered).  Emits the per-gap ms values.
 - FULL_READOUT: whole-reply test-mic capture re-ASRs ≥2 of the reply's LAST
   12 tokens — nothing was cut off at the end (PASS-WEAK tolerated for marginal
   speaker→mic coupling; CHUNKED_QUEUE is the authoritative leg)
@@ -185,9 +203,10 @@ bridge health checks); `robodog-hermes-*` workflows stay until cutover.
 Clean cutover per repo contract: delete `voice_bridge.py`,
 `hermes-platform/xiaozhi/`, `lmao-robodog-voice.service`, the three XiaoZhi
 patches + `build_xiaozhi.sh` / `fetch_xiaozhi.sh`, hermes E2E/workflow docs.
-Kokoro (`kokoro_server.py` / `kokoro-tts.service`) stays — it **is** the
-user's TTS endpoint; the Whisper endpoint is the user's own, external to this
-repo. Update `robodog_client/README.md`, `docs/archon-workflows.md`,
+Qwen3-TTS (`qwen3-tts.service` on spark-5307) stays — it **is** the user's
+TTS endpoint; the Whisper endpoint is the user's own, external to this repo.
+`kokoro_server.py` / `kokoro-tts.service` in this repo are the superseded
+engine and are no longer the serving unit. Update `robodog_client/README.md`, `docs/archon-workflows.md`,
 AGENTS.md workflow table.
 
 ## Phasing
@@ -249,6 +268,13 @@ LMAO-owned tooling in this folder (all in `robodog_client/esp-claw/`):
 - `overlay/components/robodog_phase0/` — LMAO component: RD_SHOT publisher
   (self-ticking, 10 s cadence — see capture seam below), console commands
   `rdshot` / `rd_asr` / `rd_tts` / `rd_chat`, embedded corpus WAV for ASR.
+  **Console input is ASCII-only**: the IDF console's linenoise runs in dumb
+  mode on USB-Serial/JTAG and its `sanitize()` drops every byte where
+  `isprint((char)c)` is false — all UTF-8 lead/continuation bytes — so typed
+  Chinese never reaches a command's argv.  The *display* path is UTF-8 (reply
+  text from the LLM, ASR text over HTTP), so Chinese is exercised by asking in
+  ASCII for a Chinese reply (`rd_chat Reply in Traditional Chinese: …`) or via
+  the voice/HTTP paths.
 - `build_esp_claw.sh` — Docker `espressif/idf:v5.5.4`, generates
   `sdkconfig.defaults.robodog` (model endpoints via `CLAW_*` env),
   `idf.py bmgr -c ./boards -b waveshare/waveshare_ESP32_S3_RLCD_4_2 && idf.py build`.
@@ -302,7 +328,7 @@ Model configuration (NVS, namespace `app`):
   OpenAI-compatible), `llm_sup_vis=false`.
 - **Current endpoint topology (no forwards).** spark-5307 now resolves to
   **192.168.50.27**, i.e. the BOARD's own subnet, so the device reaches
-  Whisper (`:8001`) and Kokoro (`:8004`) **directly** — the workspace socat
+  Whisper (`:8001`) and Qwen3-TTS (`:8004`) **directly** — the workspace socat
   forwards on `11801`/`11804` (which used to bridge the old
   `192.168.10.37` livecam address) are gone.  The committed defaults are the
   LAN IP, not the host name, because the board's resolver does not know the
@@ -316,17 +342,52 @@ Model configuration (NVS, namespace `app`):
   `agent run failed (ESP_ERR_TIMEOUT)` and ends the turn in `error`).
   Host-side gates use the same endpoints (the e2e re-ASR default is
   `http://192.168.50.27:8001/v1/audio/transcriptions`).
-- **Kokoro upgrade verified.** The upgraded server keeps the same
+- **TTS engine is Qwen3-TTS on `:8004` (2026-11-02 cutover).** Same
   OpenAI-shaped contract the firmware speaks (POST `/v1/audio/speech`
-  `{model,input,voice}` -> 24 kHz mono s16 WAV; `/v1/models` and `/voices`
-  are still 404, so nothing in the firmware needed to change) and now answers
-  in **0.1-1.2 s** per chunk (was 1-3 s) with the full voice set available
-  (`af_heart`, `af_bella`, `af_nova`, `am_michael`, `bf_emma`, `bm_george`,
-  `zf_xiaobei`, `jf_alpha`, `ef_dora`, `hf_alpha` all 200).  The one-step TTS
-  lookahead prefetch stays (it is what removes the inter-chunk gap on a slow
-  network), and a 5-session soak against the upgraded server passed 4/5 fully
-  plus one acoustic ASR miss with the whole chain intact (2 chunks voiced,
-  FULL_READOUT 0.98).
+  `{model,input,voice}` -> 24 kHz mono s16 WAV), so the firmware needed no
+  code change — only `CLAW_TTS_MODEL` (`qwen3-tts`) and `CLAW_TTS_VOICE`
+  (**empty**) in the sdkconfig fragment. Warm, a 2-4 s sentence chunk takes
+  ~1.5-5 s (measured 1.2-1.3 s for a 1.2 s utterance up to ~5 s for 5 s of
+  audio, i.e. RTF ≈ 1) — and the endpoint returns the WAV whole, so the
+  pipeline keeps several chunks synthesized ahead instead of a one-step
+  lookahead. Under load (a busy GPU host) a single chunk was measured at
+  14-54 s, which is exactly the case the N-slot pipeline absorbs. Kokoro's `af_heart`
+  remains accepted as an alias, but see "Voice selection" — it now resolves
+  to a **Chinese-native** timbre and gives English replies a Chinese accent.
+
+### Voice selection — native English and native Chinese (2026-11-02)
+
+Qwen3-TTS-1.7B-CustomVoice has 9 fixed timbres whose native language is baked
+in: `aiden`/`ryan` are English-native; `serena`/`vivian`/`uncle_fu`/`dylan`/
+`eric` are Chinese-native; `ono_anna` Japanese; `sohee` Korean. A
+Chinese-native timbre reading an English reply sounds like fluent English with
+a Chinese accent, and `instruct` does **not** remove it — measured against a
+native American-English reference, `instruct: "neutral American English
+accent"` on Serena moved its spectral envelope by 0.09 (13.618 -> 13.704,
+i.e. no change). So voice choice must follow the language.
+
+The board sends `"voice":""`. The server then infers the spoken language from
+the **reply text's script** and picks that language's native timbre: English
+-> `aiden`, Chinese -> `serena`, Japanese -> `ono_anna`, Korean -> `sohee`.
+An explicit `language` field still wins, and naming a timbre pins it. Nothing
+about this needs language plumbing in the firmware: the LLM already answers in
+the user's language, so the reply text is the authoritative signal.
+
+The mixed-script rule is deliberately asymmetric: **any** real Chinese clause
+(>= 2 CJK chars) selects Chinese even when Latin letters outnumber it, because
+an English-native timbre mangles Chinese (`好的` came out `Hara`) while a
+Chinese-native timbre reads an embedded English clause verbatim
+(`好的,turn on the lights please` transcribed exactly). Kana wins over CJK,
+hangul wins over both.
+
+Verified on the board-shaped request (`{"model":"qwen3-tts","input":…,
+"voice":""}`): English -> ASR `en` 0.99, Chinese -> ASR `zh` 0.99; the old
+`"voice":"af_heart"` request produced English at only 0.70 language
+confidence (the accent). The same cutover also removed Whisper's forced
+`language="en"`, which had been transcribing every Chinese utterance as a
+plausible English sentence; the endpoint now auto-detects and returns
+`language`/`probability`, so the board's `ASR text=` log shows the detected
+language in the JSON it already parses.
 
 ### RD_SHOT capture seam — finding for Phase 1 (root cause + implemented seam)
 
@@ -384,8 +445,9 @@ tox-Free fixtures confirm the endpoint shapes).
 ### Phase 1 notes / deltas from the design above
 
 - `rd_asr`/`rd_tts` prove the endpoint shapes: Whisper takes a multipart
-  `file`+`model=whisper-1` POST to `/v1/audio/transcriptions`; Kokoro takes
-  JSON `{model, voice, input}` to `/v1/audio/speech` and streams WAV.
+  `file`+`model=whisper-1` POST to `/v1/audio/transcriptions`; Qwen3-TTS
+  takes JSON `{model, voice, input}` to `/v1/audio/speech` and streams WAV.
+  `voice` may be empty — the server then chooses a native speaker (below).
 - ES8311 + ES7210 audio devices initialize on boot (board port, no
   extra work) — good groundwork for Phase 2's native voice loop.
 - The board boots the RoboDog **text-only chat UI** (Phase 1) directly —
@@ -407,9 +469,11 @@ RD_SHOT**, hardware-verified on the board.
   wholesale-copied over the upstream waveshare copy at build time.
   `patches/0001-rdshot.patch` is deleted; only `0002-init.patch` (wires
   `robodog_init()`) remains.
-- **Deterministic text-only UI** (`robodog_ui.c`): no face/emote, ~16 px
-  Montserrat-16 ASCII font (ships with LVGL — no vendoring; noto-sans-basic
-  equivalent), **pure-black text on an opaque white label background**. The
+- **Deterministic text-only UI** (`robodog_ui.c`): no face/emote, 16 px
+  **Noto Sans CJK TC** face (generated at build time by
+  `gen_font_tc_16.sh` from the sha256-pinned `noto-cjk` OTF, cached in
+  `~/.cache/lmao-fonts` — never committed; Montserrat-16 stays enabled as
+  LVGL's default), **pure-black text on an opaque white label background**. The
   LVGL-theme labels otherwise render against a black screen with a mid-grey
   text that binarizes thin on the 1-bpp panel, so the status + body labels
   force `bg=white COVER` + `text=black` for crisp black-on-white. Left-aligned
@@ -417,6 +481,12 @@ RD_SHOT**, hardware-verified on the board.
   (`WIFI ON/OFF | <agent state>`). Registers its own LVGL display via
   `esp_lv_adapter` (not esp-claw's gated display_service), so it comes up on
   **every** boot.
+- **Traditional Chinese text** (`robodog_utf8.c`): the transcript, session
+  title and chunk splitter are UTF-8 aware — drawable codepoints are copied
+  byte-for-byte, only undrawable ones (emoji/exotic scripts) become `?`, and
+  no buffer/chunk boundary ever splits a multi-byte sequence. The generated
+  font is rasterised at 16 px / 1 bpp with compact 20 px rows (the OTF's
+  natural 30 px row would fit only 8 transcript rows).
 - **Agent rendering (stale-caption-safe)**: `rd_chat` (the per-turn
   chat-injection seam Phase 2's voice component will also use) renders the
   user transcript (`Style "> <text>"`) before the run and the assistant reply
@@ -471,7 +541,48 @@ boot deterministically.
 ## Phase 2 — results (implemented)
 
 Phase 2 delivers the **device-initiated voice loop**, hardware-verified end-to-end
-(RD_LISTEN → mic → Whisper ASR → agent LLM → Kokoro TTS → speaker → RLCD render).
+(RD_LISTEN → mic → Whisper ASR → agent LLM → Qwen3-TTS → speaker → RLCD render),
+and it is **dual-language**: Mandarin Chinese speech is heard, answered,
+displayed and spoken in Chinese (the English path is unchanged).
+
+### Dual-language voice (English + Traditional Chinese)
+
+The ASR upload carries **no `language` field**, so the Whisper endpoint
+auto-detects the spoken language and returns `language`/`probability` with the
+`text` — Chinese speech is transcribed as Chinese instead of being forced
+through an English decode. The device surfaces that detection as
+`ASR language=<tag> prob=<p>` (the gate's `ASR_LANG` leg), then:
+
+- picks the reply directive from the tag (CJK script detection is the fallback
+  when an older endpoint omits it), logging `voice reply language=zh-TW|en`
+  (the gate's `REPLY_LANG` leg). A Chinese turn gets a Traditional-Chinese
+  directive: *reply in 繁體中文 (Taiwan usage), Traditional characters only,
+  spoken prose, no markdown*; an English turn gets *reply in English, plain
+  prose, no markdown*. **Both name the language explicitly** — the session
+  memory carries earlier turns, so after a Chinese conversation the model
+  answered a later ENGLISH question in Chinese until the directive said
+  "reply in English" (measured on the English gate). Whisper may return
+  Simplified, so the Traditional rule must be explicit too, or the model
+  mirrors the transcript. This rides the same per-turn directive seam as the
+  existing "no markdown" rule, so the upstream base prompt is never rewritten.
+- renders the reply with the build-time Noto Sans CJK TC font, keeps UTF-8
+  byte-for-byte (`robodog_utf8.c`; only emoji/exotic scripts become `?`), and
+  the chunk splitter cuts at CJK sentence breaks (。！？；…) on codepoint
+  boundaries, so no Chinese character is ever split between TTS chunks.
+- speaks it through Qwen3-TTS with an **empty `voice`**: the server picks the
+  native timbre of the reply's script (`serena` for Chinese, `aiden` for
+  English). Qwen3-TTS timbres have a native language baked in, so pinning one
+  voice for both languages would read one of them with a foreign accent.
+- titles the session CJK-aware (9 Han chars ≈ 18 Latin widths in the 170 px
+  top-middle label) instead of falling back to `S#<id>` on a Chinese first
+  question.
+
+Gate: `robodog_claw_e2e.py --corpus zh_hello` (pinned `你好世界`, `serena`,
+`language: chinese`). The phrase uses only characters identical in Simplified
+and Traditional because faster-whisper may emit either script; a
+script-dependent phrase would make ASR_MATCH flap. Asserts: `ASR_LANG=zh`,
+`REPLY_LANG=zh-TW`, `REPLY` contains CJK, `SUBTITLE` readback contains the
+Chinese reply (the vision prompt forbids translation).
 
 ### Seam changes vs. the design above
 
@@ -711,37 +822,93 @@ Phase 2 delivers the **device-initiated voice loop**, hardware-verified end-to-e
   with a ~19 ms `vTaskDelay` step so playback rides the 16 kHz codec rate
   (verified on-device: 14.5 s of audio plays over 14.5 s). Do NOT "simplify"
   this back to a single `track_write`.
-- **Inter-chunk TTS fetch latency is hidden by a ONE-STEP LOOKAHEAD
-  PREFETCH.** The chunk queue used to block on the Kokoro HTTP round-trip
-  (~1-3 s) BEFORE each sentence's paced playback, so every inter-sentence
-  boundary had dead air. `robodog_voice_speak` is now split into a fetch
-  phase and a play phase, and while chunk i plays a small background prefetch
-  task fetches chunk i+1's WAV into the free slot of a TWO-SLOT double-buffer
-  (exactly one fetch in flight; at most two
-  `CONFIG_ROBODOG_VOICE_TTS_MAX_RESPONSE` slots ≈ 3 MB SPIRAM, allocated once
-  per turn and reset in place via `robodog_http_rx_reset` — no per-chunk
-  alloc/free, so the R7 free-churn panic site cannot re-run; no deeper
-  pipeline). The play/fetch split keeps the console contract byte-identical
-  (`voice chunk i/n` + per-chunk `TTS start/stop` in order), the R5 render
-  fires at each chunk's playback START (never at prefetch-commit — the
-  prefetch task never touches the UI), fail-stop error semantics and the
-  truncated/error terminals are unchanged, and the slot-exchange bookkeeping
-  is pure C + host-tested (`voice_lookahead.c`, R9). On a lookahead-fetch
-  failure the chunk falls back to the synchronous fetch-then-play path — it
-  never pre-fails, skips or reorders; if the prefetch machinery is
-  unavailable the whole turn degrades to the sequential single-buffer path.
+- **Inter-chunk TTS latency is hidden by an N-SLOT PIPELINE (measured, not
+  assumed).** Qwen3-TTS on the LAN synthesizes at roughly real time and
+  returns each chunk's WAV WHOLE — `Content-Length` set, time-to-first-byte ==
+  total time (measured 1.3 s for a 1.2 s utterance, 4.4 s for a 4.9 s one),
+  so a chunk cannot start playing before its synthesis finished.  A ONE-step
+  lookahead (fetch i+1 while i plays) therefore only hides the fetch when that
+  fetch is shorter than the previous chunk's playback; when the endpoint is
+  busy (measured 14-54 s for a 3-4 s chunk while the GPU host was loaded) the
+  reply stalls for seconds at every sentence boundary — the reported "long
+  delay between response segments".  The queue is now fed by a real pipeline:
+  `CONFIG_ROBODOG_VOICE_TTS_SLOTS` (5) persistent slot buffers,
+  `CONFIG_ROBODOG_VOICE_TTS_LOOKAHEAD` (3) CONCURRENT background fetch workers
+  that keep that many chunks armed ahead, and a play loop that waits only when
+  the next chunk is genuinely not ready.  Concurrency is not decoration: the
+  endpoint serializes synthesis, but every request still costs the board a
+  fixed ~0.5 s of HTTP setup + WAV download.  With ONE worker that cost lands
+  between requests (the server idles while the board reads the previous WAV),
+  and the measured device-side rate was ~1.1x real time — slower than playback,
+  which is what produced the seam gaps.  Overlapping fetches hide the transfer
+  under the server's next synthesis.  The TTS request also uses a 4 KB HTTP RX
+  buffer (a 512-byte one made the board's effective synthesis rate ~1.0x while
+  the same request from a host ran at ~0.88x — the read overhead was letting
+  playback overtake the fetch).  Synthesis thus runs ahead of the speaker
+  and consecutive sentences join without a fetch on the play path.
 
-  ⚠️ **Slot bookkeeping is TURN-LOCAL — commit on observe.** The prefetch task
-  reports only `s_pf_result`; the `slot_ix` table that `prefetched()` scans
-  lives in `robodog_voice_speak`'s stack `la` and the task cannot reach it.
-  The array loop MUST call `robodog_voice_lookahead_commit(&la)`/`fail(&la)`
-  right after the DONE wait — the missing commit silently sent EVERY chunk
-  through the redundant synchronous re-fetch (the exact ~1-3 s gap the feature
-  removes) while the queue still played 1..n correct. The host
-  `GAP_VERIFY` leg is the regression guard: it asserts every
-  `TTS stop(i) → TTS start(i+1)` gap is < 250 ms and reports which path the
-  console markers show (`prefetch chunk i/1 ready` = gapless swap,
-  `prefetch ... failed` = sync fallback).
+  Three further things make it sound like ONE answer rather than clips:
+  - **One mixer track per turn.** The APP track is opened ONCE and every chunk
+    is written into it back-to-back; the old per-chunk `flush`+`close` drained
+    the ring and re-opened the codec at each boundary, adding a silence of its
+    own.
+  - **Boundary silence trim** (`voice_pcm.c`, host-tested): Qwen3-TTS pads each
+    WAV with a lead-in and a tail (measured 150-400 ms).  Played verbatim, each
+    seam doubles that padding.  Leading silence is trimmed entirely on every
+    chunk after the first (`TTS_LEAD_KEEP_MS` keeps the opening breath), and
+    trailing silence is trimmed to `TTS_TAIL_KEEP_MS` on all of them.
+  - **UNIFORM chunk lengths** (`TTS_FIRST_CHARS == TTS_MAX_CHARS == 96 bytes`,
+    ~6.4 s of speech).  This one is counter-intuitive and was measured: the
+    endpoint serializes requests and synthesizes at ~1.0x real time on the
+    board, so the fetch worker cannot start chunk 2 until chunk 1 is done.
+    The seam gap at chunk k+1 is `Σ synth(2..k+1) - Σ play(1..k)`, which is
+    ~0 for UNIFORM chunks but `synth(chunk2) - play(chunk1)` for a short first
+    chunk — a 96-byte opener followed by 144-byte chunks produced a measured
+    7 s silence at the first seam, while uniform 96-byte chunks produced ~0 ms
+    seams.  A tighter first budget only buys first-audio latency at the price
+    of that gap; keep the two equal.
+
+  Memory invariants: the slots are `SLOTS x TTS_MAX_RESPONSE` (5 x 384 KB ≈
+  1.9 MB of PSRAM), allocated ONCE for the firmware's lifetime and reset in
+  place via `robodog_http_rx_reset` — no per-turn/per-chunk alloc/free (the R7
+  free-churn panic site cannot re-run) and no free under the fetch task's
+  writer.  `K <= SLOTS-2` keeps one slot free for the synchronous fallback
+  fetch even while another slot is playing.
+
+  Console contract (unchanged plus one new marker): `voice chunk i/n` then
+  `TTS start`…`TTS stop` per chunk, in order; plus
+  `pipeline chunk i/n buffered=yes|no ahead=k` logged before each chunk plays.
+  `buffered=yes` proves the chunk was already synthesized when its turn came.
+  On a failed/wedged fetch the chunk is fetched synchronously — never skipped,
+  reordered or double-fetched (the old code fired a SECOND request for the
+  same text after a 3 s wait).  If fewer than two slots can be allocated the
+  whole turn degrades to the sequential single-buffer path.
+
+  ⚠️ **Slot bookkeeping is TURN-LOCAL; the worker only reports.** The fetch
+  task never touches the turn's pipeline model (it lives on the voice task's
+  stack): it signals completion through a per-slot event bit + a per-slot
+  result code, and the play loop applies `commit()`/`fail()` when it consumes
+  the chunk.  Teardown sets the abort flag, drains the job queue and waits for
+  the worker's IDLE ack before the turn returns — the slots themselves are
+  never freed, so a mid-flight fetch cannot be freed under its writer.
+  Host regression guards: `//robodog_client:test_voice_split` drives the exact
+  firmware call sequence (`test_voice_pipeline.c`) and the trimmer
+  (`test_voice_pcm.c`); the gate's **PIPELINE_AHEAD** leg asserts every
+  boundary after the first logged `buffered=yes` (no endpoint fetch on the play
+  path; `ahead=k` is emitted as a diagnostic), and **GAP_VERIFY** keeps
+  measuring `TTS stop(i) → TTS start(i+1)` < 250 ms.
+
+  Measured on hardware (same corpus, same reply shape), the two changes that
+  mattered for the reported "long delay between response segments":
+  | build | inter-chunk gaps (console) |
+  |---|---|
+  | one-step lookahead, per-chunk flush/close, 512 B HTTP reads | 4108, 3, 980, 3, 785, 3, 953, 3, **10141**, 2, 4, 3, 2 ms |
+  | uniform 96-B chunks, 3 concurrent fetch workers, 4 KB HTTP reads, one track per turn | 3, 3, 4, 3, 3, 3, 3, 3, 3, 3, 6, 5, 4 ms |
+
+  The per-request overhead is the key: the device's `fetched chunk i/n in N ms`
+  log showed ~0.5 s of HTTP setup + WAV transfer per chunk on top of the
+  endpoint's synthesis, so a serial worker let the server idle between requests
+  and the device-side rate fell to ~1.1x real time (slower than playback).
 - **Multi-session gapless-prefetch stress.** The mandatory gate runs ≥ 5
   consecutive voice sessions (`E2E_RUNS ≥ 5`), each asking a DIFFERENT
   question (corpus slugs time/joke/greeting/capabilities/count cycled so no

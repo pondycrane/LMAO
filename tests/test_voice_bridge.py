@@ -195,7 +195,7 @@ async def test_speak_audio_to_brackets_start_stop(monkeypatch, caplog):
 
 @pytest.mark.asyncio
 async def test_speak_text_to_brackets_start_stop(monkeypatch, caplog):
-    """TTS synthesis path (text reply -> Kokoro audio) also emits the stop frame
+    """TTS synthesis path (text reply -> Qwen3-TTS audio) also emits the stop frame
     and the `tts stop` anchor."""
     ws = FakeWs()
     _frame_sleeps(monkeypatch)
