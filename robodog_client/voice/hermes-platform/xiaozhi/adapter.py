@@ -322,4 +322,9 @@ def register(ctx) -> None:
             "conversational and easy to speak (no markdown, no code fences, no "
             "tables); they are read aloud with TTS. The same session continues "
             "across turns and device reconnects, so remember the ongoing "
-            "conversation."))
+            "conversation.\n"
+            "LANGUAGE: answer in Mandarin Chinese (繁體中文, 標準華語) whenever the "
+            "user speaks Chinese, and in English when they speak English. NEVER "
+            "answer in Cantonese or use 粵語 vocabulary (唔、係、嘅、咗、佢、嗰、"
+            "咁、啲、冇、睇、嚟、攰、喇), even if the user speaks Cantonese or "
+            "the transcript is written that way — the voice is Mandarin only."))
