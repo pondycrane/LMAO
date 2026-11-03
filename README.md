@@ -603,7 +603,7 @@ calendar over the **gRPC `GetCalendar` RPC on :50051** (same
 `CalendarRequest`/`CalendarBundle` messages as every other data path):
 
 ```
-client ──(HTTP/2: GET /lma.LMAO/GetCalendar + DATA CalendarRequest)──▶ 192.168.50.67:50051
+client ──(HTTP/2: GET /lma.LMAO/GetCalendar + DATA CalendarRequest)──▶ tp4:50051
 server ──(DATA: gRPC-framed CalendarBundle)──────────────────────────▶ client
 ```
 
@@ -869,7 +869,7 @@ when running in Docker):
 | `LMAO_GCAL_TOKEN` | `~/.hermes/google_token.json` | **Deploy-time only** (never in a pod env): the Google authorized-user token `install_all` copies into the `lmao-gcal-token` Secret for the calendar-sync CronJob. |
 | `LMAO_TCP_BIND` | `0.0.0.0` | Server's RNS TCP bind IP |
 | `LMAO_ANNOUNCE_INTERVAL` | `0` (off) | Seconds between server re-announces over non-LoRa interfaces so fresh wifi clients can resolve the server's delivery identity |
-| `LMAO_SERVER_HOST` | `192.168.50.67` | Client-side: RNS `TCPClientInterface` target (the LMAO server's IP); overrides with `LMAO_SERVER_PORT` |
+| `LMAO_SERVER_HOST` | `tp4` | Client-side: RNS `TCPClientInterface` target — the LMAO server's **LAN hostname** (`tp4`). Never a LAN IP: the node's `wlan0` is DHCP and has moved before. Overrides with `LMAO_SERVER_PORT` |
 | `LMAO_MQTT_HOST` | `localhost` | MQTT broker hostname (IoT ingest) |
 | `LMAO_MQTT_PORT` | `1883` | MQTT broker port |
 | `LMAO_INGEST_DUCKDB_PATH` | `/data/sensors.db` | DuckDB file path (IoT ingest) |
@@ -1228,7 +1228,8 @@ LMAO_RNODE_PORT=/dev/ttyACM0 bazel run //human_client:client
 
 The Human Client starts with WiFi AutoInterface (no RNode required), plus a
 `TCPClientInterface` to the LMAO server (`LMAO_SERVER_HOST`, default
-`192.168.50.67:4246`) — the deterministic home-network transport that also
+`tp4:4246` — a LAN hostname, never an IP, since the node's `wlan0` is DHCP) —
+the deterministic home-network transport that also
 carries the server's delivery-identity announces.
 If an RNode is connected, LoRa messaging is available.
 

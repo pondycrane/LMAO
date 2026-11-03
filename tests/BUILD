@@ -305,10 +305,29 @@ py_test(
 )
 
 py_test(
+    name = "test_calendar_pics_sync",
+    srcs = ["test_calendar_pics_sync.py"],
+    deps = [
+        "//tools:calendar_pics_sync_lib",
+        "@lmao_pip//pillow",
+        "@lmao_pip//pytest",
+    ],
+)
+
+py_test(
     name = "test_calendar_sync_cronjob",
     srcs = ["test_calendar_sync_cronjob.py"],
     deps = [
         "//tools:install_all_lib",
+        "@lmao_pip//pytest",
+    ],
+)
+
+py_test(
+    name = "test_node_address_drift",
+    srcs = ["test_node_address_drift.py"],
+    deps = [
+        "//tools:check_node_addresses_lib",
         "@lmao_pip//pytest",
     ],
 )

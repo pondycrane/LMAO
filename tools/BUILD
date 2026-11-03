@@ -68,3 +68,47 @@ py_binary(
         "@lmao_pip//psycopg_binary",
     ],
 )
+
+# Calendar CronJob stage 2: for each upcoming kid event without a picture,
+# pick a seeded theme subject (Juliet: random pokemon; Wesley: alternating
+# random PAW Patrol character / coherent sea animal), generate or fetch line
+# art, and upsert the 1-bit RLCD tile into `cal_pics`.
+#   bazel run //tools:calendar_pics_sync
+#   bazel run //tools:calendar_pics_sync -- --dry-run
+#   bazel run //tools:calendar_pics_sync -- --force --since-days 14   # backfill
+py_library(
+    name = "calendar_pics_sync_lib",
+    srcs = ["calendar_pics_sync.py"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//lma_core",
+        "@lmao_pip//pillow",
+        "@lmao_pip//psycopg",
+        "@lmao_pip//psycopg_binary",
+    ],
+)
+
+py_binary(
+    name = "calendar_pics_sync",
+    srcs = ["calendar_pics_sync.py"],
+    main = "calendar_pics_sync.py",
+    visibility = ["//visibility:public"],
+    deps = [":calendar_pics_sync_lib"],
+)
+
+# Drift guard: fails if a Turing-Pi LAN address (DHCP, has moved before) is
+# hardcoded in a runtime path.  Address nodes by hostname instead.
+#   bazel run //tools:check_node_addresses
+py_library(
+    name = "check_node_addresses_lib",
+    srcs = ["check_node_addresses.py"],
+    visibility = ["//visibility:public"],
+)
+
+py_binary(
+    name = "check_node_addresses",
+    srcs = ["check_node_addresses.py"],
+    main = "check_node_addresses.py",
+    visibility = ["//visibility:public"],
+    deps = [":check_node_addresses_lib"],
+)

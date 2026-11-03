@@ -22,6 +22,7 @@ argument-hint: (no arguments - validates current branch changes vs $BASE_BRANCH)
 - Lint: `ruff check` / `ruff format --check` (config `ruff.toml`). Type-check: `mypy` (config `mypy.ini`). Run them on changed files only — master carries pre-existing debt in vendored/standalone files.
 - Vendored code is lint-exempt — never "fix" style in `cardputer_client/lib/urns/**` or `rnode_firmware/esptool.py`.
 - Unit gate: `bazel test //tests:all --test_tag_filters=-requires_hardware` must pass.
+- Address-drift gate: `bazel run //tools:check_node_addresses` must exit 0 — a Turing-Pi LAN IP (DHCP; tp3/tp4 leases moved on 2026-11-02 and broke kubectl, ssh, the RoboDog panel and calendar sync) must never be hardcoded in a runtime path. Address nodes by hostname (`tp1`…`tp4`); see `docs/cluster-setup.md` "Preventing address drift".
 - Hardware E2E is NOT part of this command — `lmao-hardware-e2e` runs it next in the workflow.
 
 **Gate-chain safety — violating these can silently skip mandatory tests:**
