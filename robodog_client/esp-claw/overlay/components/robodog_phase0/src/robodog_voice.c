@@ -1254,18 +1254,33 @@ static const char *const VOICE_STYLE_EN =
     "[This is a spoken voice conversation. Reply in ENGLISH, in plain prose "
     "with no markdown formatting: no asterisks, no # headings, no bullet "
     "lists, no code blocks.] ";
+/* Mandarin ONLY.  The model mirrors the input's register: a Cantonese (or
+ * Cantonese-flavoured) utterance made it answer in Cantonese (唔/係/嘅/咗/佢/
+ * 嗰/咁/啲/冇/睇/嚟/攰/喇) about half the time, and the TTS then voiced those
+ * characters — the board sounded like it switched dialect mid-conversation.
+ * The vocabulary has to be named explicitly; "繁體中文" alone does not exclude
+ * 粵語, and "reply in the user's language" actively invites it. */
 static const char *const VOICE_STYLE_ZH =
-    "[這是一段語音對話。請用繁體中文（台灣用語）以口語化的完整句子回答，"
+    "[這是一段語音對話。請一律用標準華語（台灣國語）的繁體中文口語回答，"
+    "絕對不要使用粵語／廣東話的詞彙或語法（例如唔、係、嘅、咗、佢、嗰、咁、"
+    "啲、冇、睇、嚟、攰、喇、喺），即使使用者用粵語說話也一樣；"
     "只使用繁體字，絕對不要出現任何簡體字。不要使用任何 markdown 格式："
     "不要星號、不要 # 標題、不要項目符號、不要程式碼區塊。] ";
 
 /* Chinese turn?  The endpoint's detected language tag is authoritative; fall
- * back to the transcript's script when an older endpoint omits it. */
+ * back to the transcript's script when an older endpoint omits it.
+ *
+ * Cantonese matters here: faster-whisper can tag it "yue", and a Cantonese
+ * utterance is still Chinese — answering it in English (the non-Chinese
+ * branch) was a real failure mode. "cmn" is Mandarin under the same ISO-639-3
+ * scheme. The reply directive then pins Mandarin, never 粵語. */
 static bool voice_turn_is_chinese(const robodog_asr_meta_t *meta,
                                   const char *text)
 {
     if (meta->language[0] != '\0') {
-        return strncmp(meta->language, "zh", 2) == 0;
+        return strncmp(meta->language, "zh", 2) == 0
+            || strncmp(meta->language, "yue", 3) == 0
+            || strncmp(meta->language, "cmn", 3) == 0;
     }
     return robodog_utf8_has_cjk(text);
 }

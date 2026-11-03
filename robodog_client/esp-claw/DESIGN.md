@@ -355,7 +355,37 @@ Model configuration (NVS, namespace `app`):
   remains accepted as an alias, but see "Voice selection" — it now resolves
   to a **Chinese-native** timbre and gives English replies a Chinese accent.
 
-### Voice selection — native English and native Chinese (2026-11-02)
+### Voice selection — one voice, Mandarin-first (2026-11-03)
+
+**Production pins a single timbre.** `qwen3-tts.service` runs with
+`QWEN_TTS_VOICE=serena`, so every reply — Mandarin or English — is the same
+female speaker. Per-language timbre switching was rejected: it makes the board
+sound like a different person from turn to turn (a short English-only reply
+such as "Okay." was voiced by `aiden` in the middle of a Mandarin
+conversation). Measured speaker-embedding cosine across English, Mandarin and
+mixed replies for the pinned voice: 0.97–0.99, i.e. one identity.
+
+The trade-off is explicit: no Qwen3-TTS timbre is native in both languages, so
+pinning one voice means English replies carry a light Mandarin accent. The
+alternative (native accents in both) requires two speakers and was declined.
+An explicit `voice` in the request still overrides the pin, and the voice-design
+service (:8005) remains the escape hatch for a described voice.
+
+**Replies are Mandarin, never Cantonese.** The model mirrors the input's
+register: a Cantonese (or Cantonese-flavoured) utterance made it answer in
+Cantonese (唔/係/嘅/咗/佢/嗰/咁/啲/冇/睇/嚟/攰/喇) about half the time, and the
+TTS then voiced those characters — the board appeared to switch dialect
+mid-conversation. Both reply directives now name the vocabulary explicitly
+(firmware `VOICE_STYLE_ZH`, Hermes `platform_hint`), because "繁體中文" alone
+does not exclude 粵語 and "reply in the user's language" actively invites it.
+Verified over 6 samples with a Cantonese utterance: all Mandarin, no 粵語
+particles.
+
+`voice_turn_is_chinese()` also accepts `yue`/`cmn` tags, not just `zh`:
+faster-whisper can tag Cantonese as `yue`, and the non-Chinese branch would
+have answered a Cantonese utterance in English.
+
+### Voice selection history — native English and native Chinese (2026-11-02)
 
 Qwen3-TTS-1.7B-CustomVoice has 9 fixed timbres whose native language is baked
 in: `aiden`/`ryan` are English-native; `serena`/`vivian`/`uncle_fu`/`dylan`/
@@ -366,12 +396,12 @@ native American-English reference, `instruct: "neutral American English
 accent"` on Serena moved its spectral envelope by 0.09 (13.618 -> 13.704,
 i.e. no change). So voice choice must follow the language.
 
-The board sends `"voice":""`. The server then infers the spoken language from
-the **reply text's script** and picks that language's native timbre: English
--> `aiden`, Chinese -> `serena`, Japanese -> `ono_anna`, Korean -> `sohee`.
-An explicit `language` field still wins, and naming a timbre pins it. Nothing
-about this needs language plumbing in the firmware: the LLM already answers in
-the user's language, so the reply text is the authoritative signal.
+The board sends `"voice":""`, and the server infers the spoken language from
+the **reply text's script** so pronunciation is right (kana -> Japanese,
+hangul -> Korean, any >=2 CJK chars -> Chinese, else English). The timbre is
+pinned separately by `QWEN_TTS_VOICE` — see "Voice selection" below. An
+explicit `language` field still wins, and naming a timbre in `voice` pins it.
+Nothing about this needs language plumbing in the firmware.
 
 The mixed-script rule is deliberately asymmetric: **any** real Chinese clause
 (>= 2 CJK chars) selects Chinese even when Latin letters outnumber it, because
