@@ -27,14 +27,22 @@ extern "C" {
 /**
  * @brief Split `reply` into sentence-bounded chunks for the TTS queue.
  *
- * Each chunk is at most `cap` characters, cut at the first `.`/`!`/`?`/`;`
- * or newline break within the window (else the last space, else a hard
- * cutoff), with trailing whitespace stripped and the leading whitespace of
- * the next window skipped.  Chunks are written back-to-back as NUL-terminated
- * strings into `arena`; `offsets[i]` holds the byte offset of chunk i.
+ * Each chunk is at most `cap` BYTES (the UI command field and the TTS request
+ * are byte-sized), cut after the last `.`/`!`/`?`/`;`/newline — or a CJK
+ * sentence break (。！？；…) — within the window (else before the last
+ * space, else a hard cutoff), with trailing whitespace stripped and the
+ * leading whitespace of the next window skipped.  The cut always lands on a
+ * UTF-8 codepoint boundary, so a Traditional Chinese reply is never split
+ * mid-character.  Chunks are written back-to-back as NUL-terminated strings
+ * into `arena`; `offsets[i]` holds the byte offset of chunk i.
  *
  * @param[in]  reply       the full agent reply (NUL-terminated)
  * @param[in]  cap         max characters per chunk
+ * @param[in]  first_cap   max characters for the FIRST chunk only (0 = use
+ *                         `cap`).  The first chunk's synthesis is the whole
+ *                         time-to-first-audio, so a smaller first budget makes
+ *                         the reply start speaking sooner while later chunks
+ *                         stay large enough for natural prosody.
  * @param[out] arena       output buffer for the NUL-terminated chunk strings
  * @param[in]  arena_cap   size of `arena` in bytes
  * @param[out] offsets     receives the byte offset of each chunk; must hold at
@@ -48,9 +56,9 @@ extern "C" {
  *         n is 0 and nothing is written.
  */
 size_t robodog_voice_split_reply(const char *reply, size_t cap,
-                                 char *arena, size_t arena_cap,
-                                 size_t *offsets, size_t max_chunks,
-                                 bool *truncated);
+                                 size_t first_cap, char *arena,
+                                 size_t arena_cap, size_t *offsets,
+                                 size_t max_chunks, bool *truncated);
 
 #ifdef __cplusplus
 }

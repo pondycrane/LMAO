@@ -29,11 +29,13 @@ extern "C" {
  *            cut at punctuation don't need it; a chunk starting with a space
  *            or newline, or a buffer ending in a newline, is appended as-is);
  *          - drop-oldest: after the append, only the most-recent `keep_cap`
- *            characters are kept, so a huge reply can never roll the chunk
- *            currently being read off the buffer.
+ *            BYTES are kept, so a huge reply can never roll the chunk
+ *            currently being read off the buffer.  Both the append bound and
+ *            the head trim land on UTF-8 codepoint boundaries, so CJK text is
+ *            never split mid-character.
  * @param[in,out] buf       NUL-terminated accumulation buffer
  * @param[in]     buf_size  allocated size of `buf` in bytes (>= 1)
- * @param[in]     keep_cap  max chars retained after the append (<= buf_size-1)
+ * @param[in]     keep_cap  max BYTES retained after the append (<= buf_size-1)
  * @param[in]     chunk     the sentence chunk to append (NUL-terminated)
  */
 void robodog_transcript_append_chunk(char *buf, size_t buf_size,

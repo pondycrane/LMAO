@@ -13,6 +13,8 @@ Per session (the same legs as `robodog_claw_e2e.py --voice-verify`, reused
 directly so there is ONE copy of the loop):
     OPEN_SESSION   `rd_listen` -> `listen started`
     ASR_MATCH      corpus played into the mic -> `ASR text=` matches
+    ASR_LANG       `ASR language=` equals the corpus language
+    REPLY_LANG     `voice reply language=` shows the turn's directive
     REPLY          `agent reply:` from the native agent seam
     TTS            every chunk TTS-bracketed
     CHUNKED_QUEUE  the WHOLE reply was queued and voiced (no dropped tail)
@@ -46,9 +48,13 @@ CYCLE = ["time", "joke", "greeting", "capabilities", "count"]
 LEGS = (
     "OPEN_SESSION",
     "ASR_MATCH",
+    "ASR_LANG",
+    "REPLY_LANG",
     "REPLY",
     "TTS",
     "CHUNKED_QUEUE",
+    "PIPELINE_AHEAD",
+    "GAP_VERIFY",
     "FULL_READOUT",
     "NO_COLLAPSE",
     "NO_RESET",

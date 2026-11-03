@@ -260,8 +260,8 @@ voice_bridge <--voice/reply frames--WS:8101-- xiaozhi adapter <--send()/send_voi
 ```
 
 - **Identity / sessions**: the board's session and chat key is its stable Device-Id/MAC; reconnects (bridge restart, board reattach) reuse it, so the conversation history and memory survive.
-- **Spoken replies**: inbound turns are VOICE-type, so Hermes auto-TTS fires by default for this platform (adapter-local `_should_auto_tts_for_chat` — the global `voice.auto_tts` stays off so telegram/matrix/signal are unaffected). `tts.provider: openai` points Hermes' TTS at **our Kokoro** (`~/.hermes/config.yaml` `tts.openai.base_url: http://spark-5307:8004/v1`, `voice: af_heart`) — the exact voice the board already uses. The reply audio returns to the bridge as a `voice` frame and is streamed to the board.
-- **Fallback**: if the brain is unreachable the bridge synthesizes the `reply` text itself with Kokoro (stateless; no memory/tools). Last-resort it calls gx10 directly.
+- **Spoken replies**: inbound turns are VOICE-type, so Hermes auto-TTS fires by default for this platform (adapter-local `_should_auto_tts_for_chat` — the global `voice.auto_tts` stays off so telegram/matrix/signal are unaffected). `tts.provider: openai` points Hermes' TTS at **our Qwen3-TTS** (`~/.hermes/config.yaml` `tts.openai.base_url: http://spark-5307:8004/v1`, `model: qwen3-tts`, `voice: ""`) — the same server the board calls. An empty voice makes the server pick a **native speaker of the reply's language** (English → `aiden`, Chinese → `serena`); Qwen3-TTS timbres have a native language baked in, so `af_heart`/`serena` reading English carries a Chinese accent that `instruct` cannot remove. The reply audio returns to the bridge as a `voice` frame and is streamed to the board.
+- **Fallback**: if the brain is unreachable the bridge synthesizes the `reply` text itself with Qwen3-TTS (stateless; no memory/tools). Last-resort it calls gx10 directly.
 - **Config / deploy**: enable the platform in `~/.hermes/config.yaml` under `gateway.platforms.xiaozhi.enabled: true` + `plugins.enabled` (`platforms/xiaozhi`), set `XIAOZHI_ALLOW_ALL_USERS=true` (LAN device; `XIAOZHI_ALLOWED_USERS` for a device-id allow-list), then `systemctl --user restart hermes-gateway`. The board then appears in `hermes gateway status` (or the `Platforms:` line of `hermes status`) as **XiaoZhi Voice Companion**. The plugin's source of truth lives in the repo under `robodog_client/voice/hermes-platform/xiaozhi/`; deploy by copying it to `~/.hermes/plugins/platforms/xiaozhi/`.
 - **Latency**: measured first-audio ~6.5 s after VAD finalize on the Hermes path (ASR + agent turn + auto-TTS), vs ~3–4 s for the thin stateless path. Accepted per the issue: the Hermes path earns sessions, multi-turn memory and tools; the stateless gx10 path stays as the fallback.
 
@@ -284,18 +284,30 @@ RLCD-4.2 board — the board calls its own ASR / LLM / TTS endpoints over LAN,
 no bridge, no Hermes. Phase 0 (spike) + Phase 1 (PR #278 text-only chat UI +
 deterministic RD_SHOT) are implemented and hardware-verified; **Phase 2 adds the
 native on-device voice loop** (`rd_listen` → ES7210 mic → energy-VAD → Whisper
-ASR → claw agent LLM → Kokoro TTS → ES8311 speaker → RLCD render). See
-`robodog_client/esp-claw/DESIGN.md` for the full details + fixes. TL;DR:
+ASR → claw agent LLM → Qwen3-TTS → ES8311 speaker → RLCD render), and it is
+**dual-language**: English and Mandarin/Traditional Chinese speech are heard,
+answered, displayed and spoken in their own language (see "Dual-language voice"
+below). See `robodog_client/esp-claw/DESIGN.md` for the full details + fixes.
+TL;DR:
 
 ```sh
 # fetch pinned esp-claw -> gitignored robodog_client/.esp-claw/
 bash robodog_client/esp-claw/fetch_esp_claw.sh
 
+# The RLCD face (Noto Sans CJK TC, 16 px, 1 bpp) is generated at build time by
+# esp-claw/gen_font_tc_16.sh: needs Node.js >= 18 (npx lv_font_conv@1.5.2) and
+# network on the FIRST build; the OTF (sha256-pinned) + the generated font are
+# cached in ~/.cache/lmao-fonts afterwards. Never committed.
+
 # build in espressif/idf:v5.5.4 (endpoints overridable per-build)
 # Endpoint defaults are committed (spark-5307 = 192.168.50.27 for Whisper/
-# Kokoro, spark-73dd = 192.168.50.3 for qwen3.8-flash-next); all three are on
+# Qwen3-TTS, spark-73dd = 192.168.50.3 for qwen3.8-flash-next); all three are on
 # the board's own subnet, so no host socat forward is needed. Override with
 # CLAW_ASR_URL / CLAW_TTS_URL / CLAW_LLM_BASE_URL / CLAW_LLM_MODEL if they move.
+# CLAW_TTS_VOICE defaults to EMPTY: the server then picks a native speaker of
+# the reply's language (English -> aiden, Chinese -> serena), so the board
+# speaks native English and native Chinese with no language plumbing here.
+# Set CLAW_TTS_VOICE=<timbre> only to pin one voice for every reply.
 CLAW_IDF_IMG=espressif/idf:v5.5.4 bash robodog_client/esp-claw/build_esp_claw.sh
 
 # flash (host esptool — the board's sanctioned path) + provision NVS
@@ -305,10 +317,13 @@ CLAW_IDF_IMG=espressif/idf:v5.5.4 bash robodog_client/esp-claw/flash_esp_claw.sh
 
 Bazel wrappers: `bazel run //robodog_client:build_robodog_claw` and
 `:flash_robodog_claw`. The board boots a deterministic **text-only chat UI**
-(PR #278 parity: no face/emote, ~14 px ASCII font, left-aligned full-panel
-wrap, WiFi/agent status bar on top). The UI brings the RLCD panel + LVGL up
-itself (esp-claw's own display_service is gated behind a Kconfig symbol this
-board silently drops), so the RD_SHOT capture seam is **always** live:
+(PR #278 parity: no face/emote, 16 px **Noto Sans CJK TC** font generated at
+build time by `esp-claw/gen_font_tc_16.sh` from the sha256-pinned `noto-cjk`
+OTF — Traditional Chinese renders as real glyphs, English too; left-aligned
+full-panel wrap, WiFi/agent status bar on top). The UI brings the RLCD panel +
+LVGL up itself (esp-claw's own display_service is gated behind a Kconfig
+symbol this board silently drops), so the RD_SHOT capture seam is **always**
+live:
 `capture.py --describe` reliably transcribes the rendered frame (no more
 "no panel frame captured yet"). After a text update the UI forces a
 synchronous refresh + immediate RD_SHOT dump, so a capture reads the new
@@ -317,14 +332,67 @@ frame deterministically.
 On-device probe console commands (over `/dev/ttyACM0` 115200, `app> ` REPL):
 
 ```sh
-rd_asr                 # device -> Whisper via host-forward, logs text="..."
-rd_tts <text>          # device -> Kokoro via host-forward, logs WAV bytes
+rd_asr                 # device -> Whisper, logs text="..." + language=.../prob
+rd_tts <text>          # device -> Qwen3-TTS, logs WAV bytes
 rd_chat <question>     # native agent seam -> LLM, renders user + reply to the
                        #   text UI (e.g. `rd_chat 2+2` -> screen shows "4")
 rd_listen              # Phase 2 voice loop: mic -> ASR -> agent -> TTS -> speaker
                        #   (or press the BOOT button — same trigger)
 rdshot                 # force-publish the current screen frame (RD_SHOT)
 ```
+
+> The serial REPL is **ASCII-only input**: the IDF console's linenoise runs in
+> dumb mode on USB-Serial/JTAG and its `sanitize()` drops every byte with
+> `isprint((char)c) == 0`, i.e. all UTF-8 lead/continuation bytes — typing
+> `rd_chat 你好` reaches the command as `rd_chat` (and `rd_chat 你好a` as
+> `rd_chat a`).  The panel still *renders* Chinese fine (reply text is UTF-8
+> from the LLM), so drive Chinese by asking in ASCII for a Chinese reply —
+> `rd_chat Reply in Traditional Chinese: what is the weather in Taipei?` — or
+> use the real voice/HTTP paths, which carry UTF-8 end to end.
+
+### Dual-language voice (English + Traditional Chinese)
+
+The board sends **no `language` field** with the ASR upload, so the Whisper
+endpoint auto-detects the spoken language and returns `language`/`probability`
+alongside `text` — Chinese speech is transcribed as Chinese, never forced
+through an English model. The voice turn then:
+
+1. logs `ASR language=<tag> prob=<p>` (console evidence the E2E gates on);
+2. selects the reply directive by that tag (falling back to CJK script
+   detection when an older endpoint omits it): a Chinese utterance gets
+   **`voice reply language=zh-TW`** — *reply in Traditional Chinese (Taiwan
+   usage), Traditional characters only, spoken prose, no markdown* — everything
+   else gets the English prose directive. **Both directives name the language
+   explicitly**: the agent's session memory carries earlier turns, so a Chinese
+   conversation would otherwise make the model answer a later English question
+   in Chinese (measured on the English gate). Whisper may transcribe in
+   Simplified, so the Traditional rule must also be explicit or the model
+   mirrors the transcript;
+3. renders the reply with the generated Noto Sans CJK TC font (UTF-8 is kept
+   byte-for-byte; only emoji/exotic scripts become `?`), and the chunk
+   splitter never cuts a CJK character in half;
+4. speaks it through Qwen3-TTS with an **empty `voice`**: the server picks the
+   native timbre of the reply's script (`serena` for Chinese, `aiden` for
+   English) — Qwen3-TTS timbres have a native language baked in, so a
+   Chinese-native voice reading English carries an accent. Pin
+   `CLAW_TTS_VOICE=<timbre>` only if one voice must serve every reply.
+
+The session title (top-middle label) is built CJK-aware (9 Han chars fit the
+170 px label, 18 Latin), so a Chinese first question titles the session instead
+of falling back to `S#<id>`. The E2E gates this path with the pinned
+`zh_hello` corpus (`你好世界`, spoken by `serena`, `language: chinese`):
+
+```sh
+python3 robodog_client/esp-claw/robodog_claw_e2e.py --corpus zh_hello
+# OPEN_SESSION / ASR_MATCH / ASR_LANG(zh) / REPLY_LANG(zh-TW) / REPLY(CJK)
+# / TTS / RING / SUBTITLE(CJK readback) -> Overall: PASS
+```
+
+The corpus phrase uses only characters identical in Simplified and Traditional
+(`你好世界`) because faster-whisper may emit either script; a script-dependent
+phrase would make ASR_MATCH flap. Regenerate the fixtures with
+`python3 robodog_client/voice/make_corpus.py [--only zh_hello]` (needs the TTS
+endpoint).
 
 The RLCD status bar shows WiFi (left) and the live voice state **top-right**:
 `idle` → `listening` → `processing` (ASR+LLM) → `responding` (TTS) → `idle`
@@ -341,7 +409,8 @@ console + an RD_SHOT vision readback):
 
 ```sh
 python3 robodog_client/esp-claw/robodog_claw_e2e.py --corpus capabilities
-# OPEN_SESSION / ASR_MATCH / REPLY / RING / SUBTITLE -> Overall: PASS
+# OPEN_SESSION / ASR_MATCH / ASR_LANG / REPLY_LANG / REPLY / RING / SUBTITLE
+# -> Overall: PASS
 ```
 
 Multi-session stress gate (≥ 5 back-to-back sessions, different question
@@ -349,7 +418,8 @@ each; catches "first turn works, later turns drop back to idle"):
 
 ```sh
 bazel run //robodog_client:claw_stress -- --runs 5
-# OPEN_SESSION / ASR_MATCH / REPLY / TTS / CHUNKED_QUEUE / FULL_READOUT
+# OPEN_SESSION / ASR_MATCH / ASR_LANG / REPLY_LANG / REPLY / TTS
+# / CHUNKED_QUEUE / PIPELINE_AHEAD / GAP_VERIFY / FULL_READOUT
 # / NO_COLLAPSE / NO_RESET -> Overall: PASS
 ```
 

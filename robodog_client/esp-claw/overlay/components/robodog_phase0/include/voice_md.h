@@ -2,7 +2,7 @@
  * RoboDog ESP-Claw markdown -> speech-friendly text (LMAO-owned, PURE C).
  *
  * The esp-claw root agent replies in verbose multi-line markdown (headers
- * `**`, bullet lists, inline-code spans, tables, links).  Kokoro reads those
+ * `**`, bullet lists, inline-code spans, tables, links).  Qwen3-TTS reads those
  * syntax markers literally — "asterisk asterisk" around every bold header —
  * so the TTS readout is painful to listen to (and the text-only panel shows
  * the same `**` glyph noise).  This module strips the markdown while keeping

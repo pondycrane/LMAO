@@ -34,7 +34,7 @@ deterministic software button — the WN9 wake word is unreliable on this board)
 ```
 host RD_LISTEN (USB-JTAG) -> board StartListening() -> WS session opens
    -> test speaker -> pinned command WAV -> board mic
-   -> bridge faster-whisper ASR -> Hermes brain -> Kokoro TTS -> board speaker
+   -> bridge faster-whisper ASR -> Hermes brain -> Qwen3-TTS -> board speaker
    -> test mic captures the reply (ring closure) -> host re-ASR
    -> STT/TTS subtitle rendered on the RLCD -> vision readback
 ```

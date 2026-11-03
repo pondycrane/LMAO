@@ -361,10 +361,31 @@ _NUM_WORDS = {
 }
 
 
+# CJK ideograph ranges (Unified, ext. A, compatibility).  Chinese has no
+# word spacing and Whisper's punctuation is unreliable, so each ideograph is
+# its own matching token — the stable unit for ASR_MATCH / SUBTITLE / RING on
+# a Chinese turn (the dual-language path the corpus now gates).
+_CJK_RE = "[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]"
+
+
+def has_cjk(text):
+    """True when the text contains at least one CJK ideograph."""
+    return bool(text) and re.search(_CJK_RE, text) is not None
+
+
+def dominant_script(text):
+    """'cjk' or 'latin' — which script carries the text.  A reply that merely
+    quotes a Chinese word stays 'latin'; a reply WRITTEN in Chinese is 'cjk'."""
+    cjk = len(re.findall(_CJK_RE, text or ""))
+    latin = len(re.findall(r"[A-Za-z]", text or ""))
+    return "cjk" if cjk > latin else "latin"
+
+
 def norm(text):
-    """Tokenize for fuzzy matching: lowercase, punctuation stripped, and
-    spoken numbers collapsed to digits (tens + unit pairs combined)."""
-    toks = re.sub(r"[^a-z0-9 ]+", " ", text.lower()).split()
+    """Tokenize for fuzzy matching: Latin/digit runs become word tokens
+    (lowercase, spoken numbers collapsed to digits), each CJK ideograph its
+    own token.  Punctuation/other scripts are separators."""
+    toks = re.findall(rf"[a-z0-9]+|{_CJK_RE}", text.lower())
     out = []
     i = 0
     while i < len(toks):
@@ -434,20 +455,31 @@ GAP_THRESHOLD_MS = 250
 # turn is NOT a complete readout and the gate MUST fail on this marker.
 TRUNCATED_RE = re.compile(r"voice truncated")
 # Which TTS path the firmware actually took (diagnoses GAP_VERIFY): the
-# voice-split queue can run either through the lookahead prefetch (gapless
-# `prefetch chunk i+1 ready` swaps + few-ms gaps), or its per-chunk sync
-# fallback (`prefetch chunk i+1 failed ...; sync fallback` — the ~1-3 s fetch
-# still lands in the gap), or the whole turn on the sequential single-buffer
-# path (`double-buffer unavailable` at turn start).
+# voice-split queue can run either through the N-slot pipeline (`pipeline
+# chunk i/n buffered=yes ahead=k` + few-ms gaps), or its per-chunk sync
+# fallback (`prefetch chunk i/n failed; sync fallback` — the endpoint fetch
+# lands in the gap), or the whole turn on the sequential single-buffer path
+# (`TTS pipeline unavailable` at turn start).
 PF_READY_RE = re.compile(r"prefetch chunk \d+/\d+ ready")
 PF_FAIL_RE = re.compile(r"prefetch chunk \d+/\d+ failed")
-DBUFF_UNAVAIL_RE = re.compile(r"double-buffer unavailable")
+DBUFF_UNAVAIL_RE = re.compile(r"TTS pipeline unavailable")
+# Per-boundary pipeline state the firmware logs before each chunk plays:
+#   `pipeline chunk 3/8 buffered=yes ahead=2`
+# `buffered=yes` proves the chunk was ALREADY synthesized when its turn came
+# (the pipeline hid the endpoint latency); `ahead=k` is how many later chunks
+# were buffered behind it.  This is the deterministic leg for "no gap between
+# response segments": every boundary after the first MUST be buffered.
+PIPE_STATE_RE = re.compile(r"pipeline chunk (\d+)/(\d+) buffered=(\w+) ahead=(\d+)")
+# Device-side synthesis timing per chunk (`fetched chunk i/n in <ms> ms (<B> B)`).
+# Diagnostic for the seam-gap arithmetic: gap(k) ≈ synth(k+1) - play(k) + drift,
+# so a fetch that takes longer than the chunk it follows is what opens a seam.
+FETCH_MS_RE = re.compile(r"fetched chunk (\d+)/(\d+) in (\d+) ms \((\d+) B\)")
 
 
 def collect_voice_chunks(tail, timeout, start=None):
     """Scan the drained console from `start` while the chunk queue plays back.
     Returns (chunks, starts, stops, max_n, truncated, gaps, pf_ready, pf_fail,
-    dbl_unavail, cursor):
+    dbl_unavail, pipe_states, cursor):
       chunks    maps chunk index i (1-based) to (n_total, text)
       starts/stops  count the `TTS start`/`TTS stop` brackets
       max_n     the ADVERTISED chunk total — the `voice chunk i/n` denominator
@@ -465,9 +497,12 @@ def collect_voice_chunks(tail, timeout, start=None):
                 ms; without it each gap is the ~1-3 s Kokoro fetch that ran on
                 the critical path between chunks.
       pf_ready/pf_fail/dbl_unavail  counts of the console markers that say
-                which TTS path ran (`prefetch chunk i+1 ready` = gapless swap,
-                `prefetch chunk i+1 failed` = sync fallback per chunk,
-                `double-buffer unavailable` = whole turn on sequential path).
+                which TTS path ran (`prefetch chunk i/n ready` = pipeline hit,
+                `prefetch chunk i/n failed` = sync fallback per chunk,
+                `TTS pipeline unavailable` = whole turn on sequential path).
+      pipe_states  maps chunk index i to (buffered: bool, ahead: int) from the
+                `pipeline chunk i/n buffered=… ahead=…` line logged before its
+                playback — the per-boundary proof the pipeline stayed ahead.
       cursor    the index just past the last line scanned (hand to the next
                 scanner).
     Ends when EVERY advertised chunk 1..max_n is seen with its own start AND
@@ -482,6 +517,8 @@ def collect_voice_chunks(tail, timeout, start=None):
     gaps = []
     last_stop_ms = None
     pf_ready = pf_fail = dbl_unavail = 0
+    pipe_states = {}
+    fetch_ms = {}
     while True:
         lines, pos = tail.take(pos, max(0.0, deadline - time.time()))
         for ln in lines:
@@ -498,6 +535,14 @@ def collect_voice_chunks(tail, timeout, start=None):
                 pf_ready += 1
             if PF_FAIL_RE.search(ln):
                 pf_fail += 1
+            mf = FETCH_MS_RE.search(ln)
+            if mf:
+                fetch_ms[int(mf.group(1))] = (int(mf.group(3)), int(mf.group(4)))
+            mp = PIPE_STATE_RE.search(ln)
+            if mp:
+                pipe_states[int(mp.group(1))] = (
+                    mp.group(3) == "yes", int(mp.group(4))
+                )
             if DBUFF_UNAVAIL_RE.search(ln):
                 dbl_unavail += 1
             ts = ESP_TS_RE.match(ln)
@@ -526,7 +571,7 @@ def collect_voice_chunks(tail, timeout, start=None):
         if time.time() >= deadline:
             break
     return (chunks, starts, stops, max_n, truncated, gaps, pf_ready, pf_fail,
-            dbl_unavail, pos)
+            dbl_unavail, pipe_states, fetch_ms, pos)
 
 
 def unescape_reply(escaped):
@@ -638,7 +683,10 @@ def run_loop(n, instr, artifacts, voice_verify):
         # ---- ASR_MATCH: play the corpus into the mic ------
         time.sleep(PLAY_SETTLE)
         log(f"playing corpus {target_wav.name} into board mic ...")
-        play_wav(target_wav)
+        # The corpus pins its own drive level: the rig's speaker->board-mic
+        # coupling needs a louder drive for Chinese (0.7 decoded one word,
+        # 0.9 the whole sentence), while English is fine at the default.
+        play_wav(target_wav, volume=instr.get("play_vol", PLAY_VOL))
 
         asr_start = cur
         m_asr, cur = wait_for_log(
@@ -685,11 +733,58 @@ def run_loop(n, instr, artifacts, voice_verify):
                     bl.strip()[:200] for bl in board_lines[-12:]
                 )
 
+        # ---- ASR_LANG: the endpoint auto-detected the spoken language ------
+        # No `language` field is sent with the upload, so the reported tag is
+        # the endpoint's own detection — the proof that Chinese speech was
+        # heard AS Chinese instead of being forced through an English model.
+        want_lang = "zh" if instr.get("language") == "chinese" else "en"
+        m_lang, cur = wait_for_log(
+            tail, [r"ASR language=(\S+) prob=([\d.]+)"], timeout=10,
+            label="ASR_LANG", start=asr_start
+        )
+        asr_lang = m_lang.group(1) if m_lang else ""
+        res["artifacts"]["asr_lang"] = asr_lang
+        if m_lang:
+            res["asserts"]["ASR_LANG"] = (
+                f"PASS detected {asr_lang} (prob={m_lang.group(2)})"
+                if asr_lang == want_lang
+                else f"FAIL detected {asr_lang}, want {want_lang} "
+                     f"(the ASR endpoint forced or mis-detected the language)"
+            )
+        else:
+            res["asserts"]["ASR_LANG"] = (
+                "FAIL (no `ASR language=` on console — the firmware does not "
+                "surface the endpoint's detected language)"
+            )
+
+        # ---- REPLY_LANG: the turn chose the reply-language directive ------
+        # Console evidence that the dual-language wiring ran: a Chinese
+        # utterance must select the Traditional-Chinese directive, everything
+        # else the English prose directive.
+        want_dir = "zh-TW" if want_lang == "zh" else "en"
+        m_dir, cur = wait_for_log(
+            tail, [r"voice reply language=(\S+)"], timeout=10,
+            label="REPLY_LANG", start=asr_start
+        )
+        got_dir = m_dir.group(1) if m_dir else ""
+        res["artifacts"]["reply_lang"] = got_dir
+        if m_dir:
+            res["asserts"]["REPLY_LANG"] = (
+                f"PASS directive={got_dir}"
+                if got_dir == want_dir
+                else f"FAIL directive={got_dir}, want {want_dir}"
+            )
+        else:
+            res["asserts"]["REPLY_LANG"] = (
+                "FAIL (no `voice reply language=` on console)"
+            )
+
         # Fail fast: no ASR means no agent run / TTS / subtitle in this turn —
         # waiting for the reply would just burn the full 180 s REPLY_TIMEOUT.
         if not asr_txt:
             skip = (
-                ("REPLY", "TTS", "CHUNKED_QUEUE", "FULL_READOUT")
+                ("REPLY", "TTS", "CHUNKED_QUEUE", "PIPELINE_AHEAD",
+                 "GAP_VERIFY", "FULL_READOUT")
                 if voice_verify
                 else ("REPLY", "TTS", "RING", "SUBTITLE")
             )
@@ -716,9 +811,24 @@ def run_loop(n, instr, artifacts, voice_verify):
         # first-line capture.
         reply = unescape_reply(reply)
         res["artifacts"]["reply"] = reply
-        res["asserts"]["REPLY"] = (
-            f"PASS reply={reply!r}" if reply else "FAIL (no `agent reply:` on console)"
-        )
+        if not reply:
+            res["asserts"]["REPLY"] = "FAIL (no `agent reply:` on console)"
+        elif want_lang == "zh" and not has_cjk(reply):
+            # The directive selected Chinese, but the model answered in
+            # English: the language wiring reached the agent and did not take.
+            res["asserts"]["REPLY"] = (
+                f"FAIL reply is not Chinese despite the zh-TW directive: {reply!r}"
+            )
+        elif want_lang == "en" and dominant_script(reply) != "latin":
+            # Symmetric guard: after a Chinese turn the session memory made the
+            # model answer an ENGLISH question in Chinese until the directive
+            # named the language explicitly.  A Latin-dominant reply is the
+            # English turn's contract.
+            res["asserts"]["REPLY"] = (
+                f"FAIL reply is Chinese-dominant despite the en directive: {reply!r}"
+            )
+        else:
+            res["asserts"]["REPLY"] = f"PASS reply={reply!r}"
 
         # ---- TTS + RING: capture the board speaker ------
         m_tts = None
@@ -728,6 +838,8 @@ def run_loop(n, instr, artifacts, voice_verify):
         chunks, starts, stops = {}, 0, 0
         max_n, truncated = 0, False
         gaps, pf_ready, pf_fail, dbl_unavail = [], 0, 0, 0
+        pipe_states = {}
+        fetch_ms = {}
         if voice_verify:
             # No separate `TTS start` wait: wait_for_log would CONSUME the
             # `voice chunk i/n` line that precedes each `TTS start`, making
@@ -760,7 +872,7 @@ def run_loop(n, instr, artifacts, voice_verify):
 
             threading.Thread(target=_cap, daemon=True).start()
             (chunks, starts, stops, max_n, truncated, gaps, pf_ready, pf_fail,
-             dbl_unavail, cur) = collect_voice_chunks(
+             dbl_unavail, pipe_states, fetch_ms, cur) = collect_voice_chunks(
                 tail, REPLY_TIMEOUT, start=reply_start
             )
             # The re-ASR below reads the WHOLE captured WAV, so wait for the
@@ -852,6 +964,47 @@ def run_loop(n, instr, artifacts, voice_verify):
                 res["asserts"]["CHUNKED_QUEUE"] = (
                     "FAIL (no `voice chunk i/n` logs — the queue did not run)"
                 )
+            # PIPELINE_AHEAD: the deterministic leg for "the reply sounds
+            # continuous".  The firmware logs `pipeline chunk i/n buffered=…`
+            # before each chunk plays; every boundary AFTER the first must be
+            # buffered=yes — its synthesis finished while the previous sentence
+            # was still being spoken, so no endpoint fetch sits on the play
+            # path.  `ahead=k` is reported as a diagnostic (how deep the queue
+            # was at that boundary); it is NOT a pass condition because the
+            # fetch worker is serial and the endpoint synthesizes at ~real
+            # time, so a deeper queue naturally shows ahead=0 right after a
+            # chunk becomes ready.
+            if pipe_states:
+                ahead = " ".join(
+                    f"{i}:{'Y' if pipe_states[i][0] else 'N'}/+{pipe_states[i][1]}"
+                    for i in sorted(pipe_states)
+                )
+                res["artifacts"]["pipeline_ahead"] = {
+                    i: {"buffered": b, "ahead": a}
+                    for i, (b, a) in sorted(pipe_states.items())
+                }
+                if fetch_ms:
+                    res["artifacts"]["chunk_fetch_ms"] = {
+                        i: {"ms": ms, "bytes": n}
+                        for i, (ms, n) in sorted(fetch_ms.items())
+                    }
+                unbuffered = [i for i, (b, _) in pipe_states.items()
+                              if i > 1 and not b]
+                if not unbuffered:
+                    res["asserts"]["PIPELINE_AHEAD"] = (
+                        f"PASS every boundary after the first was buffered "
+                        f"({ahead}) — no endpoint fetch on the play path"
+                    )
+                else:
+                    res["asserts"]["PIPELINE_AHEAD"] = (
+                        f"FAIL pipeline fell behind: unbuffered boundaries="
+                        f"{unbuffered} ({ahead}) — a synchronous fetch ran "
+                        f"between sentences"
+                    )
+            else:
+                res["asserts"]["PIPELINE_AHEAD"] = (
+                    "SKIP (no `pipeline chunk i/n` markers on console)"
+                )
             # GAP_VERIFY: the feature's actual effect is the COLLAPSED gap
             # between chunks.  On the pre-fix code each TTS stop(i) was
             # followed by the blocking Kokoro fetch of chunk(i+1), so the
@@ -865,25 +1018,25 @@ def run_loop(n, instr, artifacts, voice_verify):
                 # Which TTS path actually ran — from the console markers — so
                 # a FAIL pinpoints WHY the gap is large instead of guessing.
                 if dbl_unavail:
-                    path = "sequential single-buffer path (double-buffer unavailable)"
+                    path = "sequential single-buffer path (TTS pipeline unavailable)"
                 elif pf_fail:
                     path = f"{pf_fail} sync-fallback fetch(es) in the play gap"
                 elif pf_ready:
-                    path = f"{pf_ready} gapless prefetch swap(s)"
+                    path = f"{pf_ready} pipeline-buffered chunk(s)"
                 else:
                     path = "no path markers on console"
                 if all(0 <= g < GAP_THRESHOLD_MS for g in gap_ms):
                     res["asserts"]["GAP_VERIFY"] = (
                         f"PASS inter-chunk stop->start gaps {gstr} "
-                        f"(all < {GAP_THRESHOLD_MS}ms = prefetch active; "
-                        f"pre-fix these were the ~1-3 s fetch on the critical path; {path})"
+                        f"(all < {GAP_THRESHOLD_MS}ms = TTS pipeline active; "
+                        f"pre-fix these were the endpoint fetch on the critical path; {path})"
                     )
                 else:
                     res["asserts"]["GAP_VERIFY"] = (
                         f"FAIL inter-chunk stop->start gaps {gstr} — "
                         f"gap(s) >= {GAP_THRESHOLD_MS}ms mean a synchronous "
-                        f"fetch ran between chunks (lookahead prefetch NOT "
-                        f"taking effect; {path})"
+                        f"fetch ran between chunks (TTS pipeline NOT taking "
+                        f"effect; {path})"
                     )
             else:
                 res["asserts"]["GAP_VERIFY"] = (
@@ -977,7 +1130,7 @@ def main():
         action="store_true",
         help="dedicated acoustic voice verification mode: asserts the FULL"
         " chunked reply was queued AND read out to its end (CHUNKED_QUEUE +"
-        " FULL_READOUT legs instead of RING/SUBTITLE). Writes"
+        " PIPELINE_AHEAD + FULL_READOUT legs instead of RING/SUBTITLE). Writes"
         " robodog-claw-voice-verify.md; never writes hardware-e2e.md or"
         " .gate-head.",
     )
@@ -1064,9 +1217,11 @@ def main():
         return v is not None and (v.startswith("PASS") or v.startswith("SKIP"))
 
     keys = (
-        ("OPEN_SESSION", "ASR_MATCH", "REPLY", "TTS", "CHUNKED_QUEUE", "FULL_READOUT", "NO_RESET")
+        ("OPEN_SESSION", "ASR_MATCH", "ASR_LANG", "REPLY_LANG", "REPLY", "TTS",
+         "CHUNKED_QUEUE", "PIPELINE_AHEAD", "FULL_READOUT", "NO_RESET")
         if voice_verify
-        else ("OPEN_SESSION", "ASR_MATCH", "REPLY", "TTS", "RING", "SUBTITLE", "NO_RESET")
+        else ("OPEN_SESSION", "ASR_MATCH", "ASR_LANG", "REPLY_LANG", "REPLY",
+              "TTS", "RING", "SUBTITLE", "NO_RESET")
     )
 
     def passed(r):

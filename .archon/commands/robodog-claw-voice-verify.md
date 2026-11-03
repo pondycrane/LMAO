@@ -93,11 +93,24 @@ Assertions (PASS / PASS-WEAK / FAIL / SKIP, verbatim evidence written back):
    queued and every chunk played**. This is the authoritative anti-truncation
    proof (deterministic, console-side). No chunk logs → FAIL (queue did not
    run — regression of the chunker).
-5. **FULL_READOUT** — mic capture spans all chunk brackets; re-ASR carries ≥ 2
+5. **PIPELINE_AHEAD** — the firmware logs
+   `pipeline chunk i/n buffered=yes|no ahead=k` before each chunk plays. Every
+   boundary AFTER the first must be `buffered=yes`: its synthesis finished
+   while the previous sentence was still being spoken, so no endpoint fetch
+   sits on the play path. `ahead=k` (how many later chunks were buffered) is
+   emitted into the artifact as a diagnostic only — the fetch worker is serial
+   and the endpoint synthesizes at ~real time, so `ahead=0` right after a chunk
+   becomes ready is normal. This is the deterministic leg for "the reply
+   sounds continuous": a `buffered=no` boundary means the pipeline fell behind
+   and a synchronous fetch ran between sentences. No `pipeline chunk` markers
+   → SKIP (older firmware).
+6. **FULL_READOUT** — mic capture spans all chunk brackets; re-ASR carries ≥ 2
    of the reply's LAST 12 tokens → PASS (the read-out reached the end). Audible
    but tail absent → PASS-WEAK (marginal speaker→mic coupling; CHUNKED_QUEUE is
    the authoritative evidence). No capture → FAIL.
-6. **TTS** — at least one `TTS start` + `TTS stop` bracket observed.
+7. **TTS** — at least one `TTS start` + `TTS stop` bracket observed.
+8. **GAP_VERIFY** — every measured `TTS stop(i) → TTS start(i+1)` gap < 250 ms
+   (the pipeline, not a fetch, feeds the next sentence).
 
 Write `$ARTIFACTS_DIR/robodog-claw-voice-verify/robodog-claw-voice-verify.md`
 (per-loop `speaker.wav` + `ring_reasr.txt` also recorded). Never writes
@@ -113,6 +126,8 @@ Write `$ARTIFACTS_DIR/robodog-claw-voice-verify/robodog-claw-voice-verify.md`
 - ASR_MATCH:      ...
 - REPLY:          ...
 - CHUNKED_QUEUE:  PASS N chunk(s), all TTS-bracketed (start=.. stop=..)
+- PIPELINE_AHEAD: PASS every boundary after the first was buffered (1:Y/+0 2:Y/+0 ...)
+- GAP_VERIFY:     PASS inter-chunk stop->start gaps 4.0ms ... (< 250ms)
 - FULL_READOUT:   PASS tail tokens read out (overlap=..)
 - TTS:            PASS start+stop
 ## Verbatim transcripts + chunk queue + mic re-ASR (the evidence)

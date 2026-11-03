@@ -733,8 +733,9 @@ Voice loop (all local): the board streams Opus over WebSocket to the
 `robodog_client/voice/`, ops copy at `~/xiaozhi`), which ASRs with
 faster-whisper, submits each utterance to the board's **Hermes session**
 (hermes-gateway's xiaozhi platform plugin, stable board identity
-`~/xiaozhi/device_id`), and streams the reply back as 24 kHz Kokoro TTS
-(`spark-5307:8004`, voice `af_heart`) to the board speaker + subtitle on the
+`~/xiaozhi/device_id`), and streams the reply back as 24 kHz Qwen3-TTS
+(`spark-5307:8004`, empty voice = native speaker of the reply's language) to the
+board speaker + subtitle on the
 RLCD. `capture.py --listen` opens a session ad hoc. The TTS reply is streamed
 in **real time** at ~97% play-rate (`DOWNLINK_PACE`, default 58.2 ms/frame) so
 the board's fixed ~2.5 s decode/playback pipeline never overflows — the full
