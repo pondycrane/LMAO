@@ -613,21 +613,75 @@ def crop_to_subject(raw: bytes) -> bytes:
     return cropped
 
 
+def _parse_verdict(text: str) -> tuple[bool | None, str]:
+    """Parse a gate reply into (verdict, character).  None = unparseable."""
+    obj = _extract_json_object(text)
+    if not obj or "match" not in obj:
+        return None, ""
+    v = obj["match"]
+    verdict = v if isinstance(v, bool) else str(v).strip().lower() in ("true", "yes", "1")
+    character = str(obj.get("character") or "").strip()
+    return verdict, character
+
+
 def _parse_match(text: str):
     """Extract a boolean verdict from a vision reply, or None if unparseable."""
-    obj = _extract_json_object(text)
-    if obj and "match" in obj:
-        v = obj["match"]
-        return v if isinstance(v, bool) else str(v).strip().lower() in ("true", "yes", "1")
-    return None
+    return _parse_verdict(text)[0]
 
 
-def verify_subject(raw: bytes, subject: str, theme: str) -> bool:
-    """Confirm the image's MAIN subject actually depicts the intended theme.
+def _accept_names(theme: str, accept: list[str] | None) -> list[str]:
+    if accept:
+        return list(accept)
+    return PAW_SUBJECTS if theme == "paw patrol" else SEA_SUBJECTS
 
-    Fail-open: if the vision box is unavailable or gives no clear verdict, allow
-    the image (consistent with the crop step). If it clearly says the subject is
-    unrelated (e.g. a boat named "Slowpoke" instead of a pokemon), reject.
+
+def build_verify_prompt(subject: str, theme: str,
+                        accept: list[str] | None = None) -> str:
+    """Gate prompt for *theme* — theme-level, not name-exact, for pokemon.
+
+    The old prompt demanded the image resemble the EXACT chosen character
+    ("a pokemon resembling 'charmander'").  At 144 px the vision model cannot
+    reliably name a specific Pokémon, so valid renders (charmander, poliwag,
+    goldeen, magikarp, slowpoke) were rejected and the retry loop walked the
+    pool until something passed — which landed on Gengar over and over.
+    For pokemon, ANY Pokémon character is acceptable; the reply names which
+    one, so the tile stays traceable.  PAW Patrol keeps name-exactness (the
+    kid knows the dogs) and sea animals keep the action-coherent pool.
+    """
+    reply = ('Reply ONLY a JSON object: {"match": true or false, '
+             '"character": "its name if recognizable, else unknown"}.')
+    if theme == "pokemon":
+        return (
+            "Is the MAIN subject of this image a Pokémon character — a drawn/cartoon "
+            "creature from the Pokémon franchise? A photograph, a person in a costume, "
+            "an unrelated object that merely shares the name (a boat named 'Slowpoke'), "
+            "or a map does NOT count. It does NOT need to be exactly "
+            f"'{subject}' — any Pokémon character is acceptable. " + reply
+        )
+    if theme == "paw patrol":
+        names = ", ".join(_accept_names(theme, accept))
+        return (
+            "Is the MAIN subject of this image a PAW Patrol dog character — one of "
+            f"{names}? A real dog photo, a random person, or an unrelated object that "
+            "merely shares the name does NOT count. " + reply
+        )
+    names = ", ".join(_accept_names(theme, accept))
+    return (
+        "Is the MAIN subject of this image one of these sea animals: "
+        f"{names}? A random person, a map, or an unrelated object that merely shares "
+        "the name does NOT count. " + reply
+    )
+
+
+def verify_subject(raw: bytes, subject: str, theme: str,
+                   accept: list[str] | None = None) -> bool:
+    """Confirm the image's MAIN subject fits the theme.
+
+    Theme-level for pokemon (any Pokémon counts, and the identified character is
+    logged), name-exact for PAW Patrol, and restricted to the action-coherent
+    pool for sea animals.  Fail-open: an unavailable vision box or an unclear
+    verdict allows the image (consistent with the crop step).  A clear negative
+    (a cosplay photo, a boat named "Slowpoke", a map) rejects it.
     """
     if Image is None:
         return True
@@ -637,13 +691,7 @@ def verify_subject(raw: bytes, subject: str, theme: str) -> bool:
 
     b64 = _b64.b64encode(raw).decode()
     endpoint = base + "/chat/completions" if base.endswith("/v1") else base + "/v1/chat/completions"
-    prompt = (
-        f"Is the MAIN subject of this image a {theme} resembling '{subject}' — i.e. "
-        "the intended character/topic for a kid's calendar tile? If it is an "
-        "unrelated object that merely shares the name (a boat named 'Slowpoke', a "
-        "random person, a map), answer false. Reply ONLY a JSON object: "
-        '{"match": true or false, "reason": "one short clause"}.' 
-    )
+    prompt = build_verify_prompt(subject, theme, accept)
     body = json.dumps({
         "model": model,
         "messages": [{"role": "user", "content": [
@@ -663,12 +711,14 @@ def verify_subject(raw: bytes, subject: str, theme: str) -> bool:
     except Exception as exc:  # noqa: BLE001
         print(f"  (vision content gate unavailable: {exc})")
         return True
-    verdict = _parse_match(text)
+    verdict, character = _parse_verdict(text)
     if verdict is None:
         print("  (vision content gate: no clear verdict — allowing)")
         return True
     if not verdict:
         print(f"  (vision content gate REJECTED: not a {theme})")
+    elif character and character.lower() != "unknown":
+        print(f"  (gate accepted: {theme} -> {character})")
     return verdict
 
 
@@ -784,7 +834,7 @@ def main(argv: list[str] | None = None) -> int:
                     break
                 generated_any = True
                 gen = crop_to_subject(gen)  # tighten to the subject (vision)
-                if verify_subject(gen, subj, theme_label):
+                if verify_subject(gen, subj, theme_label, accept=pool):
                     png = to_1bit_png(gen, tw, th, args.threshold)
                     rec = pic_store.put(pic, png, tw, th)
                     print(f"   stored {pic} [generated]: {subj} {theme_label}"
@@ -819,7 +869,7 @@ def main(argv: list[str] | None = None) -> int:
                     try:
                         raw = download(url)
                         raw = crop_to_subject(raw)  # tighten to the subject (vision)
-                        if not verify_subject(raw, subject_word, theme_label):
+                        if not verify_subject(raw, subject_word, theme_label, accept=pool):
                             print(f"   gate rejected candidate ({w}x{h}): {cand[0]!r}")
                             continue
                         png = to_1bit_png(raw, tw, th, args.threshold)
