@@ -143,7 +143,9 @@ class RnsConfig:
                 "enabled": True,
             }
         else:
-            tcp_host = os.environ.get("LMAO_SERVER_HOST", "192.168.50.67").strip()
+            # Prefer the LAN hostname: tp4's wlan0 is DHCP and its address has
+            # moved (it broke clients when it did).  See docs/cluster-setup.md.
+            tcp_host = os.environ.get("LMAO_SERVER_HOST", "tp4").strip()
             if tcp_host:
                 self._interfaces["Home network TCP"] = {
                     "type": "TCPClientInterface",

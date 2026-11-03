@@ -40,8 +40,11 @@
 #endif
 
 /* ---- LMAO calendar sync (synchronous gRPC GetCalendar on the lmao server) ---- */
+/* Hostname, not an IP: tp4's wlan0 is DHCP and its address has already moved
+ * once (.67 -> .68), which silently stranded the panel.  The router's DNS
+ * resolves the node names, and the ESP32 uses the DHCP-provided resolver. */
 #ifndef RD_SERVER_HOST_DEFAULT
-#define RD_SERVER_HOST_DEFAULT "192.168.50.67"
+#define RD_SERVER_HOST_DEFAULT "tp4"
 #endif
 #ifndef RD_CAL_GRPC_PORT
 #define RD_CAL_GRPC_PORT       50051u /* lma.LMAO.GetCalendar (gRPC) on 50051 */
