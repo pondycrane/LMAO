@@ -787,12 +787,15 @@ Chinese reply (the vision prompt forbids translation).
 - **The reply is CHUNKED at sentence breaks and queued, not truncated.** The
   esp-claw root agent is verbose by default (a full "what can you do" dump is
   60+ s of speech), so `voice_turn()` splits the FULL reply via
-  `voice_split_reply()` into sentence-bounded chunks of at most
-  `CONFIG_ROBODOG_VOICE_TTS_MAX_CHARS` (default 240, `range 1 479` so a
-  spoken chunk always fits the RLCD command field — the on-screen sentence is
-  the same text the voice reads, R5) — cut at the first
-  `.!?;`/newline break within the window, else the last space, else a hard
-  cutoff — and each chunk is queued in order: appended to the on-screen reply
+  `voice_split_reply()` into SENTENCE-ALIGNED chunks of
+  `CONFIG_ROBODOG_VOICE_TTS_MAX_CHARS` bytes preferred (default 96, `range 1
+  479` so a spoken chunk always fits the RLCD command field — the on-screen
+  sentence is the same text the voice reads, R5) — the cut lands at the last
+  `.!?;`/`。！？；…` inside the budget, and when the window ends mid-sentence
+  the splitter runs on to the NEXT sentence ender, up to the 479-byte field
+  ceiling, so a seam is never mid-sentence; a newline is only a weak fallback
+  for unpunctuated text, then last space, then a hard cut at the budget — and
+  each chunk is queued in order: appended to the on-screen reply
   (`robodog_ui_append_assistant`, so the whole reply accumulates on the RLCD)
   then spoken (`voice_speak` per chunk; `CONFIG_ROBODOG_VOICE_TTS_MAX_CHUNKS`
   bounds the queue).  The read-out voice therefore finishes EVERY word of the
@@ -887,8 +890,16 @@ Chinese reply (the vision prompt forbids translation).
     seam doubles that padding.  Leading silence is trimmed entirely on every
     chunk after the first (`TTS_LEAD_KEEP_MS` keeps the opening breath), and
     trailing silence is trimmed to `TTS_TAIL_KEEP_MS` on all of them.
-  - **UNIFORM chunk lengths** (`TTS_FIRST_CHARS == TTS_MAX_CHARS == 96 bytes`,
-    ~6.4 s of speech).  This one is counter-intuitive and was measured: the
+  - **SENTENCE-ALIGNED, near-uniform chunk lengths** (`TTS_FIRST_CHARS ==
+    TTS_MAX_CHARS == 96 bytes`, ~6.4 s of speech; a chunk overflows the budget
+    only to finish a longer sentence).  The reported "cuts in mid-sentence,
+    voice sounds weird" defect came from `cap` being treated as a HARD limit:
+    a sentence longer than 96 bytes was cut at the last space, so the speaker
+    stopped mid-clause and resumed mid-clause.  `cap` is now a preferred
+    budget with a 479-byte field ceiling; the seam is a sentence end whenever
+    one exists.  Newlines are a WEAK fallback only — treating them as sentence
+    ends cut at the agent's line wrapping, which produced the same defect.
+    Length variance is absorbed by the deep pipeline: with RTF ~1.0 and
     endpoint serializes requests and synthesizes at ~1.0x real time on the
     board, so the fetch worker cannot start chunk 2 until chunk 1 is done.
     The seam gap at chunk k+1 is `Σ synth(2..k+1) - Σ play(1..k)`, which is
@@ -896,7 +907,9 @@ Chinese reply (the vision prompt forbids translation).
     chunk — a 96-byte opener followed by 144-byte chunks produced a measured
     7 s silence at the first seam, while uniform 96-byte chunks produced ~0 ms
     seams.  A tighter first budget only buys first-audio latency at the price
-    of that gap; keep the two equal.
+    of that gap; keep the two equal.  Sentence alignment does not change this
+    rule: a long sentence overflows to its own end, so the first chunk must
+    not be shorter than the budget or the first seam is exposed.
 
   Memory invariants: the slots are `SLOTS x TTS_MAX_RESPONSE` (5 x 384 KB ≈
   1.9 MB of PSRAM), allocated ONCE for the firmware's lifetime and reset in
