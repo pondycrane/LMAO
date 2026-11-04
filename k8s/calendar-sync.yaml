@@ -37,14 +37,16 @@
 # Networking notes (measured from an in-cluster pod):
 #   - postgres.default.svc.cluster.local:5432  reachable
 #   - 192.168.50.200:8000 (vision)             reachable
-#   - 192.168.50.138:8000 (gx10 LLM)           refused (box down → reasoned fallback)
+#   - 192.168.50.193:8888 (DeepSeek gateway)   reachable (spark-c34f head)
 #   - 192.168.50.27:8188  (ComfyUI)            reachable (spark-5307)
 #   The pics stage degrades gracefully: an unreachable LLM yields deterministic
 #   search queries and an unreachable ComfyUI yields Wikimedia Commons art.
 #   (PAW Patrol tiles are local-generation only — Commons carries no licensed
 #   PAW art, so those events keep their previous tile and retry next run.)
 #   LAN hostnames do NOT resolve under cluster DNS, so the LLM is addressed by
-#   IP here (gx10-f156 == 192.168.50.138).
+#   IP here (spark-c34f == 192.168.50.193).  The pre-2026-10-31 stack
+#   (192.168.50.138:8000 on gx10, `vllm-profile-d.service`) is GONE — see
+#   ~/cluster-ops/recovery-agent/RUNBOOK.example.md for the live topology.
 
 ---
 apiVersion: v1
@@ -57,9 +59,15 @@ metadata:
 data:
   # Stage-2 picture sources.  Addresses are IPs because cluster DNS does not
   # resolve the LAN hostnames (gx10-f156 / spark-5307).
-  LMAO_IMAGE_LLM_URL: "http://192.168.50.138:8000/v1"
-  LMAO_IMAGE_LLM_MODEL: "deepseek-ai/DeepSeek-V4-Flash-0731"
+  LMAO_IMAGE_LLM_URL: "http://192.168.50.193:8888/v1"
+  LMAO_IMAGE_LLM_MODEL: "DeepSeek-V4.1-Flash-1017"
   LMAO_IMAGE_GEN_URL: "http://192.168.50.27:8188"
+  # Per-theme generator: Animagine XL (Danbooru anime checkpoint) knows Pokémon
+  # and renders cleaner chibi line art than FLUX (gate 5/5 vs 3/5 on the live
+  # Pokémon events, 9/10 vs 8/10 tile grade).  FLUX stays the default because
+  # it names PAW Patrol characters (Animagine draws a generic animal — Danbooru
+  # has ~20 posts per PAW dog) and reads sea animals better.
+  LMAO_IMAGE_GEN_MODEL_POKEMON: "animagine-xl-3.0.safetensors"
   LMAO_IMAGE_VISION_URL: "http://192.168.50.200:8000/v1"
   LMAO_IMAGE_VISION_MODEL: "Qwen/Qwen2.5-VL-72B-Instruct"
 

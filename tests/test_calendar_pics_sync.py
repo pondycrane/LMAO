@@ -1,5 +1,6 @@
 """Unit tests for tools/calendar_pics_sync.py (pure logic; no network/DB)."""
 
+import json
 import sys
 from pathlib import Path
 
@@ -233,6 +234,11 @@ class TestGoogleSource:
 
 
 class TestGenPrompt:
+    @pytest.fixture(autouse=True)
+    def _default_model(self, monkeypatch):
+        # these assert the FLUX natural-language prompt
+        monkeypatch.delenv("LMAO_IMAGE_GEN_MODEL", raising=False)
+
     def test_sea_animal_theme(self):
         p = cps.build_gen_prompt("seal", "sea animal", "ice skating")
         assert "seal" in p and "ice skating" in p
@@ -253,6 +259,129 @@ class TestGenPrompt:
 
     def test_sea_prompt_stays_bare(self):
         assert "pokemon" not in cps.build_gen_prompt("seal", "sea animal", "").lower()
+
+
+class TestFluxWorkflow:
+    @pytest.fixture(autouse=True)
+    def _default_model(self, monkeypatch):
+        monkeypatch.delenv("LMAO_IMAGE_GEN_MODEL", raising=False)
+
+    def test_default_model_is_flux(self):
+        assert cps.gen_model() == "flux1-schnell.safetensors"
+        assert cps.gen_style() == "flux"
+
+    def test_graph_is_the_flux_transformer_graph(self):
+        wf = cps._flux_workflow("line art", 1024, 1024,
+                                "flux1-schnell.safetensors")
+        assert wf["1"]["class_type"] == "UNETLoader"
+        assert wf["1"]["inputs"]["unet_name"] == "flux1-schnell.safetensors"
+        assert wf["7"]["inputs"]["steps"] == 4
+
+
+class TestAnimagineModel:
+    """Animagine XL is tag-trained — the FLUX natural-language prompt reads
+    badly to it, so the prompt style and the graph must both switch."""
+
+    @pytest.fixture(autouse=True)
+    def _select_animagine(self, monkeypatch):
+        monkeypatch.setenv("LMAO_IMAGE_GEN_MODEL",
+                           "animagine-xl-3.0-base.safetensors")
+
+    def test_style_is_sdxl_anime(self):
+        assert cps.gen_style() == "sdxl-anime"
+
+    def test_tag_order_subject_then_series(self):
+        # Animagine's caption template: subject, series, everything else
+        tags = [t.strip() for t in
+                cps.build_gen_prompt("pikachu", "pokemon", "tennis").split(",")]
+        assert tags[:3] == ["no humans", "pikachu", "pokemon"]
+        assert "tennis" in tags
+
+    def test_lineart_tags_steer_the_1bit_tile(self):
+        p = cps.build_gen_prompt("seal", "sea animal", "")
+        assert "monochrome" in p and "lineart" in p
+        assert "rating: general" in p and "no humans" in p
+
+    def test_graph_loads_the_selected_checkpoint(self):
+        wf = cps._sdxl_workflow("x", 1024, 1024,
+                                "animagine-xl-3.0-base.safetensors")
+        assert wf["1"]["class_type"] == "CheckpointLoaderSimple"
+        assert wf["1"]["inputs"]["ckpt_name"] == \
+            "animagine-xl-3.0-base.safetensors"
+
+    def test_sampler_follows_the_model_card(self):
+        # Euler Ancestral, <30 steps, CFG 5-7
+        ks = cps._sdxl_workflow("x", 1024, 1024, "a.safetensors")["5"]["inputs"]
+        assert ks["sampler_name"] == "euler_ancestral"
+        assert ks["steps"] == 28
+        assert 5.0 <= ks["cfg"] <= 7.0
+
+    def test_negative_prompt_excludes_nsfw_and_humans(self):
+        neg = cps._sdxl_workflow("x", 1024, 1024, "a.safetensors")["3"]["inputs"]["text"]
+        assert "nsfw" in neg and "rating: sensitive" in neg
+        assert "1girl" in neg and "photograph" in neg
+
+
+class TestPerThemeModel:
+    """A theme override picks the model that actually knows the characters:
+    Animagine knows Pokémon, FLUX knows PAW Patrol (Danbooru has ~20 posts per
+    PAW dog, so the anime checkpoint draws a generic animal)."""
+
+    @pytest.fixture(autouse=True)
+    def _route(self, monkeypatch):
+        monkeypatch.delenv("LMAO_IMAGE_GEN_MODEL", raising=False)
+        monkeypatch.setenv("LMAO_IMAGE_GEN_MODEL_POKEMON",
+                           "animagine-xl-3.0.safetensors")
+
+    def test_theme_override_wins(self):
+        assert cps.gen_model("pokemon") == "animagine-xl-3.0.safetensors"
+        assert cps.gen_style("pokemon") == "sdxl-anime"
+
+    def test_other_themes_keep_the_default(self):
+        assert cps.gen_model("paw patrol") == "flux1-schnell.safetensors"
+        assert cps.gen_model("sea animal") == "flux1-schnell.safetensors"
+
+    def test_env_name_normalizes_spaces(self):
+        assert cps._theme_model_env("paw patrol") == \
+            "LMAO_IMAGE_GEN_MODEL_PAW_PATROL"
+
+    def test_prompt_style_follows_the_routed_model(self):
+        # Pokémon -> tag prompt, PAW -> natural language, in one process
+        assert "monochrome" in cps.build_gen_prompt("pikachu", "pokemon", "")
+        assert "line art" in cps.build_gen_prompt("chase", "paw patrol", "")
+
+    def test_generate_local_sends_the_routed_checkpoint(self, monkeypatch):
+        sent = {}
+
+        class _Resp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def read(self):
+                return b""
+
+        def fake_urlopen(req, timeout=0):
+            if req.full_url.endswith("/prompt"):
+                sent["wf"] = json.loads(req.data)["prompt"]
+            raise OSError("stop after capture")
+
+        monkeypatch.setattr(cps.urllib.request, "urlopen", fake_urlopen)
+        assert cps.generate_local("x", 1024, 1024, theme_label="pokemon") is None
+        assert sent["wf"]["1"]["inputs"]["ckpt_name"] == \
+            "animagine-xl-3.0.safetensors"
+        assert cps.generate_local("x", 1024, 1024,
+                                  theme_label="paw patrol") is None
+        assert sent["wf"]["1"]["inputs"]["unet_name"] == \
+            "flux1-schnell.safetensors"
+
+    def test_paw_tag_is_series_qualified(self):
+        # Danbooru's canonical form; a bare "marshall" reads as a name
+        p = cps.build_tag_prompt("marshall", "paw patrol", "soccer")
+        assert "marshall (paw patrol)" in p
+        assert p.count("paw patrol") == 1
 
 
 class TestBackfillWindow:

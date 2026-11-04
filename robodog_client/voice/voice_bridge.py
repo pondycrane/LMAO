@@ -32,9 +32,9 @@ Env overrides:
   OTA_WS_URL       (default ws://<BRIDGE_HOST>:8000/xiaozhi/v1/)
   WHISPER_MODEL    (default base)  faster-whisper model id
   WHISPER_LANG     (optional)      force language
-  LLM_BASE_URL     (default http://gx10-f156:8000/v1  -- Hermes brain model)
+  LLM_BASE_URL     (default http://spark-c34f:8888/v1  -- Hermes brain model)
   LLM_API_KEY      (default dummy-local-noauth)
-  LLM_MODEL        (default deepseek-ai/DeepSeek-V4-Flash-0731)
+  LLM_MODEL        (default DeepSeek-V4.1-Flash-1017)
   LLM_SYSTEM       (default "You are RoboDog, a helpful voice assistant ...")
   TTS_BASE_URL     (default http://127.0.0.1:50000)  OpenAI TTS base (/v1/audio/speech)
   TTS_SPK_ID       (default 中文女)
@@ -81,9 +81,9 @@ WS_URL = os.environ.get("OTA_WS_URL", f"ws://{LAN_IP}:{WS_PORT}/xiaozhi/v1/")
 
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "base")
 WHISPER_LANG = os.environ.get("WHISPER_LANG", "") or None
-LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "http://gx10-f156:8000/v1").rstrip("/")
+LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "http://spark-c34f:8888/v1").rstrip("/")
 LLM_API_KEY = os.environ.get("LLM_API_KEY", "dummy-local-noauth")
-LLM_MODEL = os.environ.get("LLM_MODEL", "deepseek-ai/DeepSeek-V4-Flash-0731")
+LLM_MODEL = os.environ.get("LLM_MODEL", "DeepSeek-V4.1-Flash-1017")
 LLM_SYSTEM = os.environ.get(
     "LLM_SYSTEM",
     "You are RoboDog, a friendly voice assistant living on an ESP32 desk display. "

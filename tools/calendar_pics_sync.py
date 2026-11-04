@@ -9,6 +9,25 @@ not yet in ``cal_pics``, this stage:
 3. thresholds the best normal image to a 1-bit black-and-white 176x176 tile,
 4. stores it under the event's ``pic`` key.
 
+Generation backend: ComfyUI on spark-5307.  ``LMAO_IMAGE_GEN_MODEL`` names the
+default model; ``LMAO_IMAGE_GEN_MODEL_<THEME>`` overrides it per theme (theme
+uppercased, non-alnum -> ``_``: ``LMAO_IMAGE_GEN_MODEL_POKEMON``,
+``LMAO_IMAGE_GEN_MODEL_PAW_PATROL``, ``LMAO_IMAGE_GEN_MODEL_SEA_ANIMAL``).  A
+``flux*`` name (the default, ``flux1-schnell.safetensors``) runs the FLUX
+transformer graph with a natural-language line-art prompt; any other name is a
+checkpoint in ComfyUI's ``models/checkpoints`` (e.g.
+``animagine-xl-3.0.safetensors``) and runs the SDXL anime graph with
+Animagine's tag-style prompt, negative list and Euler-a sampler settings.
+
+Measured on the node (Qwen2.5-VL naming the rendered character, 2026-11-04):
+FLUX names the requested subject for Pokémon 4/5 (pikachu, charmander,
+squirtle, eevee) and PAW Patrol 3/4 (marshall, chase, skye; rubble came back
+as another PAW dog); Animagine XL 3.0 names Pokémon 3/5 (bulbasaur/charmander
+drift to slowpoke) and only 2/4 PAW dogs — Danbooru has ~20 posts per PAW
+character, so it draws a generic chibi animal.  Hence the default route is
+FLUX everywhere, with Animagine as an opt-in for Pokémon (cleaner anime line
+art, 9/10 vs 8/10 tile grade).
+
 Subjects are paired with the event's ACTION and are kept physically coherent
 (a legless dolphin is not asked to ice-skate; Wesley's sea-animal theme falls
 back to a limbed sea animal like a seal/otter/penguin, Juliet's pokemon theme
@@ -42,6 +61,7 @@ import io
 import json
 import os
 import random
+import re
 import sys
 import time
 import urllib.error
@@ -285,7 +305,7 @@ def _llm_combo(url: str, title: str, subject: str, theme: str) -> dict:
         "\"queries\":[\"a\",\"b\",\"c\"]}. No prose, no code fences."
     )
     body = json.dumps({
-        "model": os.environ.get("LMAO_IMAGE_LLM_MODEL", "deepseek-ai/DeepSeek-V4-Flash-0731"),
+        "model": os.environ.get("LMAO_IMAGE_LLM_MODEL", "DeepSeek-V4.1-Flash-1017"),
         "messages": [
             {"role": "system", "content": sys_msg},
             {"role": "user", "content": f"Event: {title}."},
@@ -344,10 +364,58 @@ def search_commons(query: str, limit: int = 12):
     return out
 
 
-# ComfyUI (FLUX.1-schnell) lives on spark-5307, currently 192.168.50.27.  The
-# LAN hostname works from a host but NOT from an in-cluster pod (cluster DNS
-# doesn't resolve LAN names), so the IP is the portable default.
+# ComfyUI (FLUX.1-schnell + an SDXL anime checkpoint) lives on spark-5307,
+# currently 192.168.50.27.  The LAN hostname works from a host but NOT from an
+# in-cluster pod (cluster DNS doesn't resolve LAN names), so the IP is the
+# portable default.
 _GEN_URL_DEFAULT = "http://192.168.50.27:8188"
+# Which model ComfyUI runs.  ``flux*`` = the FLUX transformer graph (default,
+# field-proven on kid tiles); anything else = a checkpoint file name in
+# ComfyUI's ``models/checkpoints`` (SDXL anime graph, e.g. Animagine XL).
+_GEN_MODEL_DEFAULT = "flux1-schnell.safetensors"
+_FLUX_NEGATIVE = "text, watermark, logo, lowres, blurry, photograph, shading, gray, realistic"
+# Animagine XL's recommended negative list, plus the tags that keep the render
+# inside the 1-bit tile contract (no humans — the subject is an animal or a
+# cartoon character; no color/shading — the panel only has ink and paper).
+_ANIME_NEGATIVE = (
+    "nsfw, rating: sensitive, lowres, bad anatomy, bad hands, text, error, "
+    "missing fingers, extra digit, fewer digits, cropped, worst quality, "
+    "low quality, normal quality, jpeg artifacts, signature, watermark, "
+    "username, blurry, artist name, 1girl, 1boy, human, photograph, realistic, "
+    "color, shading, gradient, 3d, gray background"
+)
+# Danbooru franchise tag for the themed subject pools (Animagine was trained on
+# tag-ordered captions: subject, series, everything else).  PAW Patrol
+# characters are tagged with their series in parentheses, which is also how the
+# checkpoint learned them.
+_FRANCHISE_TAG = {"pokemon": "pokemon"}
+
+
+def _theme_model_env(theme_label: str) -> str:
+    """``LMAO_IMAGE_GEN_MODEL_<THEME>`` — e.g. ``…_PAW_PATROL``."""
+    return "LMAO_IMAGE_GEN_MODEL_" + re.sub(
+        r"[^A-Z0-9]+", "_", theme_label.upper()).strip("_")
+
+
+def gen_model(theme_label: str | None = None) -> str:
+    """The ComfyUI model for *theme_label*, else ``LMAO_IMAGE_GEN_MODEL``.
+
+    Themes differ in which checkpoint knows them: Animagine XL is a Danbooru
+    anime model and renders Pokémon cleanly, but PAW Patrol characters have
+    only a handful of training posts there, so it draws a generic animal —
+    FLUX.1-schnell (trained on broad web imagery) names them.  A per-theme
+    override lets each theme use the model that actually knows it.
+    """
+    if theme_label:
+        override = os.environ.get(_theme_model_env(theme_label))
+        if override:
+            return override
+    return os.environ.get("LMAO_IMAGE_GEN_MODEL", _GEN_MODEL_DEFAULT)
+
+
+def gen_style(theme_label: str | None = None) -> str:
+    """``flux`` (natural-language prompt) or ``sdxl-anime`` (tag prompt)."""
+    return "flux" if "flux" in gen_model(theme_label).lower() else "sdxl-anime"
 
 
 def search_sources(query: str):
@@ -365,7 +433,7 @@ def _subject_phrase(subject_word: str, theme_label: str) -> str:
     return subject_word
 
 
-def build_gen_prompt(subject_word: str, theme_label: str, action: str) -> str:
+def build_flux_prompt(subject_word: str, theme_label: str, action: str) -> str:
     activity = f" doing {action}" if action else " doing a fun activity"
     return (
         f"black and white line art of {_subject_phrase(subject_word, theme_label)}{activity}, "
@@ -374,22 +442,48 @@ def build_gen_prompt(subject_word: str, theme_label: str, action: str) -> str:
     )
 
 
-def generate_local(prompt: str, width: int, height: int) -> bytes | None:
-    """Generate an image on the local ComfyUI node; return PNG bytes or None.
+def build_tag_prompt(subject_word: str, theme_label: str, action: str) -> str:
+    """Danbooru-tag prompt for the Animagine/SDXL anime checkpoint.
 
-    Uses the FLUX.1-schnell checkpoint the node is set up with (falls back to
-    the caller's search path if ComfyUI is down, the checkpoint isn't ready, or
-    generation fails).
+    Animagine does not read natural language well (its card says so): it wants
+    tag-ordered captions — subject first, then the series, then the rest.
+    ``monochrome`` + ``lineart`` + ``white background`` steer the render to the
+    ink-on-paper tile the RLCD panel needs; ``rating: general`` keeps the
+    high-scoring training data from drifting toward NSFW.
     """
-    base = os.environ.get("LMAO_IMAGE_GEN_URL", _GEN_URL_DEFAULT).rstrip("/")
-    # FLUX.1-schnell: transformer-only checkpoint + separate clip/t5/vae models.
-    # This exact graph is verified on the node (ComfyUI docs FLUX template).
-    # Reverted from MOSS-Image on 2026-10-23: MOSS matched FLUX quality on line
-    # art and photo edits but is ~7-10x slower. Kept MOSS as an opt-in text/layout
-    # generator (worst case for text-in-image; not needed for kid tiles).
-    workflow = {
+    tags = ["no humans"]
+    if theme_label == "paw patrol":
+        tags.append(f"{subject_word} (paw patrol)")
+    else:
+        tags.append(subject_word)
+        franchise = _FRANCHISE_TAG.get(theme_label)
+        if franchise:
+            tags.append(franchise)
+    if action:
+        tags.append(action)
+    tags += ["monochrome", "lineart", "greyscale", "simple background",
+             "white background", "full body", "chibi", "rating: general",
+             "high quality", "newest"]
+    return ", ".join(tags)
+
+
+def build_gen_prompt(subject_word: str, theme_label: str, action: str) -> str:
+    """Prompt in the style the theme's selected generator was trained on."""
+    if gen_style(theme_label) == "sdxl-anime":
+        return build_tag_prompt(subject_word, theme_label, action)
+    return build_flux_prompt(subject_word, theme_label, action)
+
+
+def _flux_workflow(prompt: str, width: int, height: int, model: str) -> dict:
+    """FLUX.1-schnell graph: transformer-only checkpoint + clip/t5/vae models.
+
+    This exact graph is verified on the node (ComfyUI docs FLUX template).
+    Reverted from MOSS-Image on 2026-10-23: MOSS matched FLUX quality on line
+    art and photo edits but is ~7-10x slower.
+    """
+    return {
         "1": {"class_type": "UNETLoader",
-              "inputs": {"unet_name": "flux1-schnell.safetensors", "weight_dtype": "default"}},
+              "inputs": {"unet_name": model, "weight_dtype": "default"}},
         "2": {"class_type": "DualCLIPLoader",
               "inputs": {"clip_name1": "clip_l.safetensors",
                          "clip_name2": "t5xxl_fp8_e4m3fn.safetensors",
@@ -399,7 +493,7 @@ def generate_local(prompt: str, width: int, height: int) -> bytes | None:
         "4": {"class_type": "CLIPTextEncode",
               "inputs": {"text": prompt, "clip": ["2", 0]}},
         "5": {"class_type": "CLIPTextEncode",
-              "inputs": {"text": "text, watermark, logo, lowres, blurry, photograph, shading, gray, realistic", "clip": ["2", 0]}},
+              "inputs": {"text": _FLUX_NEGATIVE, "clip": ["2", 0]}},
         "6": {"class_type": "EmptyLatentImage",
               "inputs": {"width": width, "height": height, "batch_size": 1}},
         "7": {"class_type": "KSampler",
@@ -411,6 +505,51 @@ def generate_local(prompt: str, width: int, height: int) -> bytes | None:
         "9": {"class_type": "SaveImage",
               "inputs": {"images": ["8", 0], "filename_prefix": "kids"}},
     }
+
+
+def _sdxl_workflow(prompt: str, width: int, height: int, model: str) -> dict:
+    """SDXL anime-checkpoint graph (Animagine XL and its base/finetunes).
+
+    One ``CheckpointLoaderSimple`` carries the UNet, both CLIPs and the VAE.
+    Sampling follows Animagine's recommended settings: Euler Ancestral, under
+    30 steps, CFG 5-7 (higher CFG burns the anime look into oversaturation,
+    which thresholds badly on a 1-bit panel).
+    """
+    return {
+        "1": {"class_type": "CheckpointLoaderSimple",
+              "inputs": {"ckpt_name": model}},
+        "2": {"class_type": "CLIPTextEncode",
+              "inputs": {"text": prompt, "clip": ["1", 1]}},
+        "3": {"class_type": "CLIPTextEncode",
+              "inputs": {"text": _ANIME_NEGATIVE, "clip": ["1", 1]}},
+        "4": {"class_type": "EmptyLatentImage",
+              "inputs": {"width": width, "height": height, "batch_size": 1}},
+        "5": {"class_type": "KSampler",
+              "inputs": {
+                  "model": ["1", 0], "positive": ["2", 0], "negative": ["3", 0],
+                  "latent_image": ["4", 0], "seed": 0, "steps": 28, "cfg": 6.0,
+                  "sampler_name": "euler_ancestral", "scheduler": "normal",
+                  "denoise": 1.0}},
+        "6": {"class_type": "VAEDecode", "inputs": {"samples": ["5", 0], "vae": ["1", 2]}},
+        "7": {"class_type": "SaveImage",
+              "inputs": {"images": ["6", 0], "filename_prefix": "kids"}},
+    }
+
+
+def generate_local(prompt: str, width: int, height: int,
+                   theme_label: str | None = None) -> bytes | None:
+    """Generate an image on the local ComfyUI node; return PNG bytes or None.
+
+    Runs the model the theme selects (``LMAO_IMAGE_GEN_MODEL_<THEME>``, else
+    ``LMAO_IMAGE_GEN_MODEL``, else FLUX.1-schnell).  Returns None if ComfyUI is
+    down or the model is not installed, so the caller falls back to the search
+    path.
+    """
+    base = os.environ.get("LMAO_IMAGE_GEN_URL", _GEN_URL_DEFAULT).rstrip("/")
+    model = gen_model(theme_label)
+    workflow = (_flux_workflow(prompt, width, height, model)
+                if gen_style(theme_label) == "flux"
+                else _sdxl_workflow(prompt, width, height, model))
     try:
         req = urllib.request.Request(
             f"{base}/prompt", data=json.dumps({"prompt": workflow}).encode(),
@@ -811,7 +950,7 @@ def main(argv: list[str] | None = None) -> int:
         pool, theme_label = combo["pool"], combo["theme"]
         print(f"== {pic} ({','.join(participants)}): '{title}' "
               f"-> [{kw}] {subject_word} ({theme_label}) {queries} "
-              f"[local-gen + commons]")
+              f"[local-gen {gen_model(theme_label)} + commons]")
         try:
             stored = False
             # 1) on-demand local generation first (bespoke themed art). The vision
@@ -831,7 +970,7 @@ def main(argv: list[str] | None = None) -> int:
             generated_any = False
             for subj in uniq_order[:4]:
                 gen = generate_local(build_gen_prompt(subj, theme_label, action),
-                                     1024, 1024)
+                                     1024, 1024, theme_label=theme_label)
                 if not gen:
                     break
                 generated_any = True

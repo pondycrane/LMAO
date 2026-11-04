@@ -41,8 +41,8 @@ Environment=TTS_API_KEY=dummy-local-noauth
 # DEVICE_ID: stable board identity for the Hermes session (MAC preferred); when
 # unset the bridge uses the XiaoZhi hello device_id/mac or a persisted uuid.
 #Environment=DEVICE_ID=<board-mac-here>
-Environment=LLM_BASE_URL=http://gx10-f156:8000/v1
-Environment=LLM_MODEL=deepseek-ai/DeepSeek-V4-Flash-0731
+Environment=LLM_BASE_URL=http://spark-c34f:8888/v1
+Environment=LLM_MODEL=DeepSeek-V4.1-Flash-1017
 Environment=LLM_API_KEY=dummy-local-noauth
 Restart=always
 RestartSec=3

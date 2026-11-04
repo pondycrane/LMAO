@@ -19,13 +19,16 @@ rescue (see issue #89 for the full post-mortem of the #87 run).
 | `robodog-claw-review` | Review-entry twin of `robodog-claw-dev` for an **existing** PR on the RoboDog **ESP-Claw standalone agent** (the same `0x303A:0x1001` board, `robodog_client/esp-claw/`, self-built pinned upstream + LMAO overlay). The PR must exist first (`gh pr create`). Flow: `checkout-pr` → verify-pr-base → review-scope → sync → 5 parallel review agents → synthesize → implement-fixes (rebuild + **re-flash via `flash_esp_claw.sh`** when firmware changed — the claw gates never reflash) → full gate chain re-run (`lmao-validate` → `robodog-claw-e2e` → **`robodog-claw-voice-verify`** → `robodog-production-health`) → summary. Run: `archon workflow run robodog-claw-review "review PR #N"`. |
 | `robodog-claw-dev` | Feature idea → plan → implement → **gates** → PR → 5-agent review → fixes → **gates re-run** → summary, for the **RoboDog ESP-Claw standalone agent** — the SAME Waveshare board running the esp-claw edge_agent (`robodog_client/esp-claw/`, self-built pinned upstream + LMAO overlay: text-only UI + RD_SHOT + the **Phase 2 native voice loop** `rd_listen → ES7210 mic → energy-VAD → Whisper ASR → claw_agent_mgr → Qwen3-TTS → ES8311 speaker → RLCD render`; the board calls Whisper/LLM/Qwen3-TTS on its own, no bridge). Verification is **voice-loop-driven**, two mandatory gates: `robodog-claw-e2e` does serial-console asserts (OPEN_SESSION / ASR_MATCH / REPLY / TTS / RING / SUBTITLE) + test-mic ring re-ASR + RD_SHOT subtitle readback, then `robodog-claw-voice-verify` proves the chunked reply was read out to its END (every `voice chunk i/n` TTS-bracketed on the console + mic re-ASR of the reply's tail tokens; FAILs on a `voice truncated:` dropped tail). Mutually exclusive with the calendar/hermes firmware. |
 
-Both run entirely on pi routing to the in-house GX10 box — every node uses
-the local DeepSeek V4 Flash model (`gx10/deepseek-ai/DeepSeek-V4-Flash-0731`,
-such as `gx10-f156.local:8000/v1`, defined in `~/.pi/agent/models.json`). The
-cloud DeepSeek endpoint is no longer used by default. No Claude anywhere (in
-`robodog-client-dev` the agent model is GX10 too; the separate Qwen2.5-VL
-vision readback inside the capture gate is a fixed pipeline, not the agent
-model).
+Both run entirely on pi routing to the in-house Spark cluster — every node uses
+the local DeepSeek V4.1 Flash model (`gx10/DeepSeek-V4.1-Flash-1017`, served at
+`spark-c34f:8888/v1` by `vllm-dsv41.service`, defined in
+`~/.pi/agent/models.json`). The cloud DeepSeek endpoint is no longer used by
+default. The old gx10 `vllm-profile-d.service` stack (`gx10-f156.local:8000/v1`,
+`deepseek-ai/DeepSeek-V4-Flash-0731`) was removed 2026-10-31 — never point
+anything at it; see `~/cluster-ops/` for the live topology. No Claude anywhere
+(in `robodog-client-dev` the agent model is the Spark cluster too; the separate
+Qwen2.5-VL vision readback inside the capture gate is a fixed pipeline, not the
+agent model).
 
 ```bash
 cd /home/pondycrane/LMAO

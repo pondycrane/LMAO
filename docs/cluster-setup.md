@@ -420,14 +420,90 @@ Verified working 2026-11-02: `marshall`/`chase`/`skye` all generate a clean
 --skip-rnode`, or `./docker/registry/manage.sh push-calendar-sync` if
 present).
 
+### Switching the generator model
+
+`LMAO_IMAGE_GEN_MODEL` picks the default ComfyUI model; `LMAO_IMAGE_GEN_MODEL_<THEME>`
+overrides it per theme (theme uppercased, non-alnum → `_`:
+`…_POKEMON`, `…_PAW_PATROL`, `…_SEA_ANIMAL`) — see `tools/calendar_pics_sync.py`
+`gen_model()`:
+
+| Value | Graph | Prompt style |
+|---|---|---|
+| `flux1-schnell.safetensors` (default) | FLUX transformer (UNET + clip_l/t5xxl + ae VAE), 4 steps, CFG 1 | natural language |
+| any other `*.safetensors` in `models/checkpoints` | SDXL checkpoint (`CheckpointLoaderSimple`), Euler-a, 28 steps, CFG 6 | Danbooru tags (Animagine's template: subject, series, rest) |
+
+The tag path also swaps in Animagine's recommended negative list plus
+`1girl`/`1boy`/`human`/`photograph` (the kid tiles are animals and cartoon
+characters, never people) and `monochrome`/`lineart`/`white background` to
+steer the render into the 1-bit tile contract. PAW Patrol subjects are tagged
+in their Danbooru form, `marshall (paw patrol)`.
+
+**Which model knows which theme** (measured 2026-11-04 on spark-5307; the
+Qwen2.5-VL gate named the rendered character, tiles graded by the same model):
+
+| Theme | FLUX.1-schnell | Animagine XL 3.0 |
+|---|---|---|
+| Pokémon (live events: poliwag, lapras, vulpix, growlithe) | gate 3/5, names right 3/5, tile 8/10 | **gate 5/5**, names right 1/5, tile **9/10** |
+| Pokémon (pikachu, charmander, squirtle, eevee) | names right 4/5 | names right 3/5 |
+| PAW Patrol (marshall, chase, skye, rubble) | **gate 4/4, names right 3/4** | gate 2/4, names right 0/4 — generic chibi animal |
+| Sea animals (seal, octopus) | **recognizable** | generic creature |
+
+So the deployed split is: Pokémon → Animagine XL 3.0, everything else → FLUX
+(`k8s/calendar-sync.yaml`). Danbooru has only ~20 posts per PAW character,
+which is why the anime checkpoint cannot draw them; FLUX's broad web training
+can.
+
+Installing a checkpoint on spark-5307 (ComfyUI has no model-manager endpoint,
+and the box is reachable over the LAN key):
+
+```bash
+ssh -i ~/.ssh/gx10_ed25519 pondycrane@192.168.50.27 \
+  '~/comfyui/venv/bin/python -c "import os; from huggingface_hub import hf_hub_download;
+   print(hf_hub_download(\"cagliostrolab/animagine-xl-3.0\",
+     \"animagine-xl-3.0.safetensors\",
+     local_dir=os.path.expanduser(\"~/comfyui/ComfyUI/models/checkpoints\")))"'
+curl -s http://192.168.50.27:8188/models/checkpoints   # file must be listed
+```
+
+Installed there: `animagine-xl-3.0.safetensors` (the inference-recommended
+model), `animagine-xl-3.0-base.safetensors` (its *training* checkpoint — the
+card says it is not for inference; same graph, so it runs, just weaker), and
+the original `sd_xl_base_1.0.safetensors`.
+
+Then set it in `k8s/calendar-sync.yaml`'s ConfigMap, rebuild/push the image
+(the prompt/graph code lives in the tool, so a ConfigMap-only change cannot
+take effect), and backfill:
+
+```bash
+kubectl create job --from=cronjob/lmao-calendar-sync lmao-cal-backfill \
+  --dry-run=client -o yaml \
+| sed -e 's|python tools/calendar_pics_sync.py|python tools/calendar_pics_sync.py --force --since-days 14|' \
+      -e 's|activeDeadlineSeconds: 900|activeDeadlineSeconds: 5400|' \
+| kubectl apply -f -
+kubectl logs -f job/lmao-cal-backfill
+```
+
+Note: `cagliostrolab/animagine-xl-3.0-base` is the *training* checkpoint —
+its own card says it is not recommended for inference (use
+`cagliostrolab/animagine-xl-3.0`). Both are the same graph here, so switching
+is just another `hf_hub_download` + ConfigMap value.
+
 Networking notes (measured from an in-cluster pod on tp4):
 
 | Target | Reachable | Effect when down |
 |---|---|---|
 | `postgres.default.svc.cluster.local:5432` | yes | stage 1 fails |
-| `192.168.50.200:8000` (vision) | yes | tile QC skipped |
-| `192.168.50.138:8000` (gx10 LLM) | refused (box down) | deterministic "reasoned" search queries |
-| `192.168.10.37:8188` (ComfyUI, **stale**) | no route — this was spark-5307's old wired IP; the ConfigMap now uses `192.168.50.27:8188` | PAW Patrol tiles silently never generated (Commons has no PAW art), sea/pokemon fell back to Commons photos |
+| `192.168.50.200:8000` (vision, spark-eebf) | yes | tile QC skipped |
+| `192.168.50.193:8888` (DeepSeek gateway, spark-c34f) | yes | deterministic "reasoned" search queries |
+| `192.168.50.27:8188` (ComfyUI, spark-5307) | yes | falls back to Commons art |
+| `192.168.50.138:8000` (old gx10 LLM, **retired**) | refused — `vllm-profile-d.service` was removed 2026-10-31 | — |
+| `192.168.10.37:8188` (ComfyUI, **stale**) | no route — this was spark-5307's old wired IP | — |
 
 LAN hostnames do **not** resolve under cluster DNS, so the ConfigMap addresses
-these by IP (`gx10-f156` == `192.168.50.138`).
+these by IP (`spark-c34f` == `192.168.50.193`, `spark-eebf` ==
+`192.168.50.200`, `spark-5307` == `192.168.50.27`). The live cluster topology
+and the serving unit are documented in `~/cluster-ops/`
+(`config/cluster.env.example`, `recovery-agent/RUNBOOK.example.md`): the
+DeepSeek model `DeepSeek-V4.1-Flash-1017` is served by `vllm-dsv41.service`
+(2-node TP=2 TensorFold, head spark-c34f) with its OpenAI-compatible gateway
+on **:8888** — not the retired gx10 `:8000` stack.
