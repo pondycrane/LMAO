@@ -6,18 +6,21 @@ not yet in ``cal_pics``, this stage:
 
 1. reasons about the best SEARCH QUERIES for that event (seeded per event),
 2. searches one or more image sources (Wikimedia Commons, optional Google),
-3. thresholds the best normal image to a 1-bit black-and-white 144x144 tile,
+3. thresholds the best normal image to a 1-bit black-and-white 176x176 tile,
 4. stores it under the event's ``pic`` key.
 
 Subjects are paired with the event's ACTION and are kept physically coherent
 (a legless dolphin is not asked to ice-skate; Wesley's sea-animal theme falls
 back to a limbed sea animal like a seal/otter/penguin, Juliet's pokemon theme
-can play any sport).  The subject is chosen pseudo-randomly per event (deterministic
-per ``uid`` so re-runs are idempotent) rather than always the same animal.
+can play any sport).  The subject is chosen pseudo-randomly per event
+(deterministic per ``uid`` so re-runs are idempotent) and is authoritative:
+the model only refines the action and the search queries for that subject, so
+Juliet gets a varied pokemon (not always Pikachu) and Wesley alternates
+PAW Patrol characters with sea animals (not always sea animals).
 
 Model reasoning: if ``LMAO_IMAGE_LLM_URL`` points at an OpenAI-compatible chat
-endpoint, a small prompt asks it to return 2-3 image-search queries pairing the
-theme subject with the event action; otherwise a deterministic reasoned fallback
+endpoint, a small prompt asks it for an action + 2-3 image-search queries that
+name the already-chosen subject; otherwise a deterministic reasoned fallback
 builds them.
 
 Idempotent: a ``pic`` key already present in ``cal_pics`` is skipped, so re-runs
@@ -25,6 +28,8 @@ only do new events (``--force`` regenerates).
 
 Usage::
     PYTHONPATH=repo python3 tools/calendar_pics_sync.py [--dry-run] [--force]
+    # Backfill recent tiles (e.g. after changing subject selection):
+    PYTHONPATH=repo python3 tools/calendar_pics_sync.py --force --since-days 14
 Needs the same Postgres env (LMAO_CONTACTS_URL / LMAO_CONTACTS_PG_*).
 Google Images source requires GOOGLE_CSE_KEY + GOOGLE_CSE_CX (Custom Search API).
 """
@@ -60,7 +65,8 @@ from lma_core.calendar_pics import PicStore, pick_tile_size  # noqa: E402
 # Juliet -> pokemon-ish (cartoon can do any action). Wesley -> sea animals.
 POKE_SUBJECTS = [
     "pikachu", "squirtle", "bulbasaur", "charmander", "psyduck", "jigglypuff",
-    "snorlax", "poliwag", "goldeen", "slowpoke", "pokeball",
+    "snorlax", "poliwag", "goldeen", "slowpoke", "eevee", "meowth",
+    "growlithe", "lapras", "magikarp", "gengar", "onix", "vulpix",
 ]
 SEA_SUBJECTS = [
     "dolphin", "orca", "sea turtle", "octopus", "crab", "jellyfish",
@@ -96,7 +102,9 @@ ACTIVITY_ACTIONS: dict[str, str] = {
 }
 
 _UA = "LMAO-calendar-pics/1.0 (family calendar)"
-_TILE_W, _TILE_H = 144, 144
+# Kept in lockstep with lma_core.calendar_pics.TILE_W/H (the panel's headline
+# slot); the module's pick_tile_size() is the authority at run time.
+_TILE_W, _TILE_H = 176, 176
 _THRESHOLD = 140  # generous white so photos don't go fully black
 
 # Local Qwen-VL vision box for subject cropping. Default is the ML endpoint IP
@@ -128,17 +136,25 @@ def extract_action(title: str) -> str:
     return DEFAULT_ACTION
 
 
-def pick_subject(participant: str, action: str, uid: str) -> str:
-    """A coherent, seeded per-event subject for the participant's theme."""
+def pick_theme(participant: str, action: str, uid: str) -> tuple[str, list[str]]:
+    """Return (theme_label, subject_pool) for this event.
+
+    Juliet is always pokemon.  Wesley alternates sea animals and PAW Patrol,
+    seeded per event so a recurring title varies across occurrences; sea
+    subjects are restricted to a limb-coherent pool for the event's action.
+    """
     if participant == "juliet":
-        return _seeded_choice(POKE_SUBJECTS, uid)
-    # wesley -> alternate sea animal vs PAW Patrol (seeded per event), so the
-    # same recurring title can show either; PAW dogs can do any action.
+        return "pokemon", POKE_SUBJECTS
     rng = random.Random(hashlib.sha1((uid + ":theme").encode()).hexdigest())
     if rng.random() < 0.5:
-        pool = SEA_COHERENT.get(action, SEA_SUBJECTS)
-        return _seeded_choice(pool, uid)
-    return _seeded_choice(PAW_SUBJECTS, uid)
+        return "sea animal", SEA_COHERENT.get(action, SEA_SUBJECTS)
+    return "paw patrol", PAW_SUBJECTS
+
+
+def pick_subject(participant: str, action: str, uid: str) -> str:
+    """A coherent, seeded per-event subject for the participant's theme."""
+    _, pool = pick_theme(participant, action, uid)
+    return _seeded_choice(pool, uid)
 
 
 def _pool_for(subject: str, action: str) -> tuple[list[str], str]:
@@ -156,30 +172,55 @@ def _pool_for(subject: str, action: str) -> tuple[list[str], str]:
     return SEA_COHERENT.get(action, SEA_SUBJECTS), "sea animal"
 
 
-def build_combo(title: str, participant: str, uid: str) -> list[str]:
-    """Return search queries (primary first) pairing subject + event action.
+def build_combo(title: str, participant: str, uid: str) -> dict:
+    """Pick the event's subject + action + search queries.
 
-    When ``LMAO_IMAGE_LLM_URL`` is set, the local model picks the best THEME
-    subject + action combo for the event and returns the search queries it
-    thinks will produce clean line drawings (always called — tokens are free on
-    the local box; if the reasoning model spins out and returns nothing, we
-    gracefully fall back to the deterministic combo).  Otherwise a deterministic
-    reasoned fallback is used.
+    The SUBJECT is chosen by us — seeded uniformly from the participant's
+    theme pool — and is authoritative: the model never gets to override it
+    (left free, it answers "pikachu" for every pokemon event, and never leaves
+    Wesley's sea-animal theme).  When ``LMAO_IMAGE_LLM_URL`` is set, the model
+    only refines the ACTION and proposes extra queries for that same subject;
+    otherwise a deterministic combo is used.
+
+    Returns ``{subject, theme, pool, action, queries}``; ``queries[0]`` is the
+    subject+action primary search query.
     """
     action = extract_action(title)
     subject = pick_subject(participant, action, uid)
-    primary = f"{subject} {action}".strip() if action else subject
-    queries = [primary, subject]
+    pool, theme = _pool_for(subject, action)
     url = os.environ.get("LMAO_IMAGE_LLM_URL")
     if url:
         try:
-            combo = _llm_combo(url, title, participant)
-            if combo and combo.get("queries"):
-                subj = combo.get("subject") or subject
-                return list(combo["queries"]) + [subj]
+            combo = _llm_combo(url, title, subject, theme)
+            if combo:
+                action = str(combo.get("action") or action).strip()
+                extra = [q for q in combo.get("queries") or [] if _mentions(q, subject)]
+                queries = _dedupe([_primary_query(subject, action)] + extra + [subject])
+                return {"subject": subject, "theme": theme, "pool": pool,
+                        "action": action, "queries": queries}
         except Exception as exc:  # noqa: BLE001
             print(f"  (LLM keyword reasoning unavailable: {exc})")
-    return queries
+    return {"subject": subject, "theme": theme, "pool": pool, "action": action,
+            "queries": [_primary_query(subject, action), subject]}
+
+
+def _primary_query(subject: str, action: str) -> str:
+    return f"{subject} {action}".strip() if action else subject
+
+
+def _mentions(query: str, subject: str) -> bool:
+    """True when *query* actually names *subject* (accent/space-insensitive)."""
+    return _norm_title(subject) in _norm_title(query)
+
+
+def _dedupe(items: list[str]) -> list[str]:
+    seen, out = set(), []
+    for item in items:
+        key = _norm_title(item)
+        if key and key not in seen:
+            seen.add(key)
+            out.append(item)
+    return out
 
 
 def _extract_json_array(text: str) -> list[str]:
@@ -221,22 +262,26 @@ def _extract_json_object(text: str) -> dict:
     return obj if isinstance(obj, dict) else {}
 
 
-def _llm_combo(url: str, title: str, participant: str) -> dict:
-    """Ask the local model for the best theme subject + action combo + queries."""
+def _llm_combo(url: str, title: str, subject: str, theme: str) -> dict:
+    """Ask the local model for an action + extra queries for the FIXED subject.
+
+    The subject is chosen by :func:`pick_subject` and is not up for debate —
+    the model only refines the action and proposes queries that name it.
+    """
     base = url.rstrip("/")
     endpoint = base + "/chat/completions" if base.endswith("/v1") else base + "/v1/chat/completions"
-    theme = "pokemon" if participant == "juliet" else "sea animal"
     sys_msg = (
         "You choose image-search queries for a kid's family-calendar picture tile. "
-        f"The kid's theme is {theme}. Given an event, pick ONE subject from that "
-        "theme that can clearly do the event's action, a concrete action word or "
-        "short phrase, and 2-3 image-search queries that would return clean, "
-        "simple LINE DRAWINGS of that character doing it (e.g. \"seal ice "
-        "skating\", \"cartoon penguin on ice\"). If the event has no obvious "
-        "action (e.g. an \"open house\"), invent a simple visual one the character "
-        "can be shown doing that reads well as a line drawing. Avoid physically "
-        "impossible pairings (a legless fish cannot ice-skate). Reply with ONLY a "
-        "JSON object: {\"subject\":\"...\", \"action\":\"...\", "
+        f"The kid's theme is {theme} and the subject for this event is ALREADY "
+        f"chosen: '{subject}'. You MUST keep that exact subject — never substitute "
+        "another character. Given the event, choose a concrete action word or "
+        "short phrase the subject can clearly do, and 2-3 image-search queries "
+        "that contain the subject and would return clean, simple LINE DRAWINGS of "
+        "it doing that action (e.g. \"seal ice skating\", \"cartoon penguin on "
+        "ice\"). If the event has no obvious action (e.g. an \"open house\"), "
+        "invent a simple visual one that reads well as a line drawing. Avoid "
+        "physically impossible pairings (a legless fish cannot ice-skate). Reply "
+        "with ONLY a JSON object: {\"subject\":\"...\", \"action\":\"...\", "
         "\"queries\":[\"a\",\"b\",\"c\"]}. No prose, no code fences."
     )
     body = json.dumps({
@@ -299,7 +344,10 @@ def search_commons(query: str, limit: int = 12):
     return out
 
 
-_GEN_URL_DEFAULT = "http://192.168.10.37:8188"
+# ComfyUI (FLUX.1-schnell) lives on spark-5307, currently 192.168.50.27.  The
+# LAN hostname works from a host but NOT from an in-cluster pod (cluster DNS
+# doesn't resolve LAN names), so the IP is the portable default.
+_GEN_URL_DEFAULT = "http://192.168.50.27:8188"
 
 
 def search_sources(query: str):
@@ -308,12 +356,21 @@ def search_sources(query: str):
     return list(search_commons(query))
 
 
+def _subject_phrase(subject_word: str, theme_label: str) -> str:
+    """Name the subject so the generator renders the intended character."""
+    if theme_label == "pokemon":
+        return f"{subject_word} (Pokemon character)"
+    if theme_label == "paw patrol":
+        return f"{subject_word} from PAW Patrol"
+    return subject_word
+
+
 def build_gen_prompt(subject_word: str, theme_label: str, action: str) -> str:
     activity = f" doing {action}" if action else " doing a fun activity"
     return (
-        f"black and white line art of {subject_word}{activity}, pure line drawing, "
-        "only thick bold black contour lines on plain white background, no color, "
-        "no fill, no shading, no gray, empty interior, vector line art, minimal"
+        f"black and white line art of {_subject_phrase(subject_word, theme_label)}{activity}, "
+        "pure line drawing, only thick bold black contour lines on plain white background, "
+        "no color, no fill, no shading, no gray, empty interior, vector line art, minimal"
     )
 
 
@@ -558,21 +615,75 @@ def crop_to_subject(raw: bytes) -> bytes:
     return cropped
 
 
+def _parse_verdict(text: str) -> tuple[bool | None, str]:
+    """Parse a gate reply into (verdict, character).  None = unparseable."""
+    obj = _extract_json_object(text)
+    if not obj or "match" not in obj:
+        return None, ""
+    v = obj["match"]
+    verdict = v if isinstance(v, bool) else str(v).strip().lower() in ("true", "yes", "1")
+    character = str(obj.get("character") or "").strip()
+    return verdict, character
+
+
 def _parse_match(text: str):
     """Extract a boolean verdict from a vision reply, or None if unparseable."""
-    obj = _extract_json_object(text)
-    if obj and "match" in obj:
-        v = obj["match"]
-        return v if isinstance(v, bool) else str(v).strip().lower() in ("true", "yes", "1")
-    return None
+    return _parse_verdict(text)[0]
 
 
-def verify_subject(raw: bytes, subject: str, theme: str) -> bool:
-    """Confirm the image's MAIN subject actually depicts the intended theme.
+def _accept_names(theme: str, accept: list[str] | None) -> list[str]:
+    if accept:
+        return list(accept)
+    return PAW_SUBJECTS if theme == "paw patrol" else SEA_SUBJECTS
 
-    Fail-open: if the vision box is unavailable or gives no clear verdict, allow
-    the image (consistent with the crop step). If it clearly says the subject is
-    unrelated (e.g. a boat named "Slowpoke" instead of a pokemon), reject.
+
+def build_verify_prompt(subject: str, theme: str,
+                        accept: list[str] | None = None) -> str:
+    """Gate prompt for *theme* — theme-level, not name-exact, for pokemon.
+
+    The old prompt demanded the image resemble the EXACT chosen character
+    ("a pokemon resembling 'charmander'").  At tile size the vision model cannot
+    reliably name a specific Pokémon, so valid renders (charmander, poliwag,
+    goldeen, magikarp, slowpoke) were rejected and the retry loop walked the
+    pool until something passed — which landed on Gengar over and over.
+    For pokemon, ANY Pokémon character is acceptable; the reply names which
+    one, so the tile stays traceable.  PAW Patrol keeps name-exactness (the
+    kid knows the dogs) and sea animals keep the action-coherent pool.
+    """
+    reply = ('Reply ONLY a JSON object: {"match": true or false, '
+             '"character": "its name if recognizable, else unknown"}.')
+    if theme == "pokemon":
+        return (
+            "Is the MAIN subject of this image a Pokémon character — a drawn/cartoon "
+            "creature from the Pokémon franchise? A photograph, a person in a costume, "
+            "an unrelated object that merely shares the name (a boat named 'Slowpoke'), "
+            "or a map does NOT count. It does NOT need to be exactly "
+            f"'{subject}' — any Pokémon character is acceptable. " + reply
+        )
+    if theme == "paw patrol":
+        names = ", ".join(_accept_names(theme, accept))
+        return (
+            "Is the MAIN subject of this image a PAW Patrol dog character — one of "
+            f"{names}? A real dog photo, a random person, or an unrelated object that "
+            "merely shares the name does NOT count. " + reply
+        )
+    names = ", ".join(_accept_names(theme, accept))
+    return (
+        "Is the MAIN subject of this image one of these sea animals: "
+        f"{names}? A random person, a map, or an unrelated object that merely shares "
+        "the name does NOT count. " + reply
+    )
+
+
+def verify_subject(raw: bytes, subject: str, theme: str,
+                   accept: list[str] | None = None) -> bool:
+    """Confirm the image's MAIN subject fits the theme.
+
+    Theme-level for pokemon (any Pokémon counts, and the identified character is
+    logged), name-exact for PAW Patrol, and restricted to the action-coherent
+    pool for sea animals.  Fail-open: an unavailable vision box or an unclear
+    verdict allows the image (consistent with the crop step).  A clear negative
+    (a cosplay photo, a boat named "Slowpoke", a map) rejects it.
     """
     if Image is None:
         return True
@@ -582,13 +693,7 @@ def verify_subject(raw: bytes, subject: str, theme: str) -> bool:
 
     b64 = _b64.b64encode(raw).decode()
     endpoint = base + "/chat/completions" if base.endswith("/v1") else base + "/v1/chat/completions"
-    prompt = (
-        f"Is the MAIN subject of this image a {theme} resembling '{subject}' — i.e. "
-        "the intended character/topic for a kid's calendar tile? If it is an "
-        "unrelated object that merely shares the name (a boat named 'Slowpoke', a "
-        "random person, a map), answer false. Reply ONLY a JSON object: "
-        '{"match": true or false, "reason": "one short clause"}.' 
-    )
+    prompt = build_verify_prompt(subject, theme, accept)
     body = json.dumps({
         "model": model,
         "messages": [{"role": "user", "content": [
@@ -608,28 +713,42 @@ def verify_subject(raw: bytes, subject: str, theme: str) -> bool:
     except Exception as exc:  # noqa: BLE001
         print(f"  (vision content gate unavailable: {exc})")
         return True
-    verdict = _parse_match(text)
+    verdict, character = _parse_verdict(text)
     if verdict is None:
         print("  (vision content gate: no clear verdict — allowing)")
         return True
     if not verdict:
         print(f"  (vision content gate REJECTED: not a {theme})")
+    elif character and character.lower() != "unknown":
+        print(f"  (gate accepted: {theme} -> {character})")
     return verdict
 
 
-def kid_events_needing_pics(cal, pic_store, force: bool = False) -> list[tuple]:
+def kid_events_needing_pics(cal, pic_store, force: bool = False,
+                            since_days: int = 0, limit: int = 0) -> list[tuple]:
+    """Events missing a pic; ``since_days`` also includes recent (past) events.
+
+    Default window is future events only.  ``--force --since-days N`` is the
+    backfill path: every kid event that started within the last N days (or is
+    still upcoming) is regenerated, so a tile picked under the old
+    always-Pikachu rule gets replaced.  ``limit`` caps the batch, nearest
+    events first.
+    """
     have = set(pic_store.keys()) if not force else set()
+    now_ms = int(time.time() * 1000)
+    cutoff_ms = now_ms - since_days * 86400_000
     sql = """
         SELECT uid, title, pic, participants
         FROM cal_events
         WHERE deleted = FALSE AND participants <> '[]'::jsonb AND pic <> ''
-          AND start_ms > (EXTRACT(epoch FROM now()) * 1000)::bigint
-        ORDER BY start_ms
+          AND start_ms > %s
+        ORDER BY abs(start_ms - %s), start_ms
     """
     with cal._lock, cal._conn.cursor() as cur:
-        cur.execute(sql)
+        cur.execute(sql, (cutoff_ms, now_ms))
         rows = cur.fetchall()
-    return [r for r in rows if r[2] not in have]
+    needed = [r for r in rows if r[2] not in have]
+    return needed[:limit] if limit > 0 else needed
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -638,6 +757,11 @@ def main(argv: list[str] | None = None) -> int:
                         help="list events/keys that need a pic, do not search/store")
     parser.add_argument("--force", action="store_true",
                         help="regenerate pics even if the pic key is already stored")
+    parser.add_argument("--since-days", type=int, default=0, metavar="N",
+                        help="backfill window: also include events that started "
+                             "within the last N days (pair with --force)")
+    parser.add_argument("--limit", type=int, default=0, metavar="N",
+                        help="process at most N events, nearest to now first")
     parser.add_argument("--threshold", type=int, default=_THRESHOLD)
     args = parser.parse_args(argv)
 
@@ -660,13 +784,17 @@ def main(argv: list[str] | None = None) -> int:
     tile = pick_tile_size()
     tw, th = tile[0], tile[1]
 
-    needed = kid_events_needing_pics(cal, pic_store, force=args.force)
+    needed = kid_events_needing_pics(cal, pic_store, force=args.force,
+                                     since_days=args.since_days,
+                                     limit=args.limit)
     if args.dry_run:
         print(f"=== {len(needed)} kid event(s) need a pic ===")
         for uid, title, pic, participants in needed:
             participant = participants[0] if participants else "kid"
+            combo = build_combo(title, participant, uid)
             print(f"  {pic}  {','.join(participants):<14} {title} -> "
-                  f"queries={build_combo(title, participant, uid)}")
+                  f"{combo['subject']} ({combo['theme']}, "
+                  f"{combo['action'] or 'general'}) queries={combo['queries']}")
         pic_store.close()
         cal.close()
         return 0
@@ -674,14 +802,16 @@ def main(argv: list[str] | None = None) -> int:
     done, failed = 0, 0
     for uid, title, pic, participants in needed:
         participant = participants[0] if participants else "kid"
-        queries = build_combo(title, participant, uid)
+        combo = build_combo(title, participant, uid)
+        queries = combo["queries"]
         primary = queries[0]
         kw = "LLM" if os.environ.get("LMAO_IMAGE_LLM_URL") else "reasoned"
-        action = extract_action(title)
-        subject_word = primary.split()[0] if primary.split() else participant
-        pool, theme_label = _pool_for(subject_word, action)
+        action = combo["action"]
+        subject_word = combo["subject"]
+        pool, theme_label = combo["pool"], combo["theme"]
         print(f"== {pic} ({','.join(participants)}): '{title}' "
-              f"-> [{kw}] {queries} [local-gen + commons]")
+              f"-> [{kw}] {subject_word} ({theme_label}) {queries} "
+              f"[local-gen + commons]")
         try:
             stored = False
             # 1) on-demand local generation first (bespoke themed art). The vision
@@ -706,7 +836,7 @@ def main(argv: list[str] | None = None) -> int:
                     break
                 generated_any = True
                 gen = crop_to_subject(gen)  # tighten to the subject (vision)
-                if verify_subject(gen, subj, theme_label):
+                if verify_subject(gen, subj, theme_label, accept=pool):
                     png = to_1bit_png(gen, tw, th, args.threshold)
                     rec = pic_store.put(pic, png, tw, th)
                     print(f"   stored {pic} [generated]: {subj} {theme_label}"
@@ -718,8 +848,15 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"   gate rejected {subj!r}: trying another {theme_label} subject...")
             if not stored and not generated_any:
                 print("   (local generation unavailable — falling back to Commons)")
-            # 2) fall back to Wikimedia search if generation didn't land
-            if not stored:
+            # 2) fall back to Wikimedia search if generation didn't land.
+            #    PAW Patrol is proprietary IP: Commons only carries photographs
+            #    (e.g. Jacob Zuma for "zuma"), so searching it is wasted work.
+            #    Those tiles must come from local generation; an event that
+            #    misses here is retried on the next hourly run.
+            if not stored and theme_label == "paw patrol":
+                print("   (PAW Patrol is local-generation only — Commons skipped;"
+                      " will retry next run)")
+            elif not stored:
                 allres = []
                 for q in queries:
                     allres += search_sources(q)
@@ -734,7 +871,7 @@ def main(argv: list[str] | None = None) -> int:
                     try:
                         raw = download(url)
                         raw = crop_to_subject(raw)  # tighten to the subject (vision)
-                        if not verify_subject(raw, subject_word, theme_label):
+                        if not verify_subject(raw, subject_word, theme_label, accept=pool):
                             print(f"   gate rejected candidate ({w}x{h}): {cand[0]!r}")
                             continue
                         png = to_1bit_png(raw, tw, th, args.threshold)

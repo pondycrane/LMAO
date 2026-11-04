@@ -305,10 +305,29 @@ py_test(
 )
 
 py_test(
+    name = "test_calendar_pics_sync",
+    srcs = ["test_calendar_pics_sync.py"],
+    deps = [
+        "//tools:calendar_pics_sync_lib",
+        "@lmao_pip//pillow",
+        "@lmao_pip//pytest",
+    ],
+)
+
+py_test(
     name = "test_calendar_sync_cronjob",
     srcs = ["test_calendar_sync_cronjob.py"],
     deps = [
         "//tools:install_all_lib",
+        "@lmao_pip//pytest",
+    ],
+)
+
+py_test(
+    name = "test_node_address_drift",
+    srcs = ["test_node_address_drift.py"],
+    deps = [
+        "//tools:check_node_addresses_lib",
         "@lmao_pip//pytest",
     ],
 )
@@ -320,6 +339,31 @@ py_test(
         "//lma_core",
         "@lmao_pip//pytest",
         "@lmao_pip//pytest_asyncio",
+    ],
+)
+
+py_test(
+    name = "test_robodog_flash",
+    srcs = ["test_robodog_flash.py"],
+    deps = ["@lmao_pip//pytest"],
+)
+
+py_test(
+    name = "test_robodog_capture",
+    srcs = ["test_robodog_capture.py"],
+    deps = [
+        "//robodog_client:capture_lib",
+        "//robodog_client:e2e_rig_lib",
+        "@lmao_pip//pytest",
+    ],
+)
+
+py_test(
+    name = "test_calendar_bundle",
+    srcs = ["test_calendar_bundle.py"],
+    deps = [
+        "//lma_core",
+        "@lmao_pip//pytest",
     ],
 )
 

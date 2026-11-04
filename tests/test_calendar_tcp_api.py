@@ -7,6 +7,7 @@ native ESP-IDF RoboDog client will speak:
 """
 
 import asyncio
+import time
 from unittest.mock import MagicMock
 
 import pytest
@@ -21,9 +22,13 @@ def _fake_store(events, watermark=999):
     return store
 
 
+# Relative to "now": a full fetch (since_ms == 0) returns the UPCOMING
+# snapshot, so a fixed 2023 timestamp would be filtered out as already ended.
+_NOW_MS = int(time.time() * 1000)
 _EVENT = {
     "uid": "u1", "calendar_id": "family", "title": "Swim class",
-    "notes": "towel", "start_ms": 1700000000001, "end_ms": 1700000000061,
+    "notes": "towel", "start_ms": _NOW_MS + 60_000,
+    "end_ms": _NOW_MS + 3_660_000,
     "deleted": False, "pic": "swim",
 }
 
@@ -160,12 +165,15 @@ async def test_weather_provider_rides_the_reply():
     from lma_core.weather import WeatherProvider
 
     store = _fake_store([dict(_EVENT)])
+    # The forecast bucket must contain the event's start hour; the event is
+    # now-relative because a full fetch returns the UPCOMING snapshot.
+    start_hour_s = (_EVENT["start_ms"] // 1000) // 3600 * 3600
     provider = WeatherProvider(
         40.6834, -74.4427,
         fetch=lambda url, timeout: {
             "current": {"temperature_2m": 6.7, "weather_code": 0},
             "hourly": {
-                "time": [1700000000 // 3600 * 3600],
+                "time": [start_hour_s],
                 "temperature_2m": [1.9],
                 "weather_code": [71],
             },
@@ -197,6 +205,53 @@ async def test_no_weather_provider_leaves_reply_unchanged():
         _length, bundle = await _sync(port, "family", 0)
         assert not bundle.HasField("current")
         assert not bundle.events[0].HasField("weather")
+    finally:
+        server.close()
+        await server.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_tcp_reply_carries_the_headline_picture():
+    """The framed-TCP path must serve CalEvent.pic_data exactly like gRPC: the
+    hand-written TCP copy never filled it, so the panel's headline drawing
+    could not render over TCP at all."""
+    ev = dict(_EVENT)
+
+    tile = b"\x5A" * 16
+    pic_store = MagicMock()
+    pic_store.get.return_value = {"tile_1bpp": tile}
+
+    server = await start_calendar_tcp_server(
+        _fake_store([ev]), port=0, pic_store=pic_store)
+    port = server.sockets[0].getsockname()[1]
+    try:
+        _length, bundle = await _sync(port, "family", 0)
+        assert len(bundle.events) == 1
+        assert bundle.events[0].pic == "swim"
+        assert bundle.events[0].pic_data == tile
+        pic_store.get.assert_called_once_with("swim")
+    finally:
+        server.close()
+        await server.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_tcp_full_fetch_drops_tombstones():
+    """A full fetch (since_ms == 0) is the server's complete truth, so
+    tombstones are filtered — the same rule gRPC applies (the TCP copy used to
+    ship them to a client that never held the events)."""
+    live = dict(_EVENT)
+    gone = dict(_EVENT, uid="u2", deleted=True)
+
+    server = await start_calendar_tcp_server(_fake_store([live, gone]), port=0)
+    port = server.sockets[0].getsockname()[1]
+    try:
+        _length, full = await _sync(port, "family", 0)
+        assert [e.uid for e in full.events] == ["u1"]
+
+        _length, delta = await _sync(port, "family", 5)
+        assert [e.uid for e in delta.events] == ["u1", "u2"]
+        assert delta.events[1].deleted is True
     finally:
         server.close()
         await server.wait_closed()

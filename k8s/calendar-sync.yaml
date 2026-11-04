@@ -38,9 +38,11 @@
 #   - postgres.default.svc.cluster.local:5432  reachable
 #   - 192.168.50.200:8000 (vision)             reachable
 #   - 192.168.50.138:8000 (gx10 LLM)           refused (box down → reasoned fallback)
-#   - 192.168.10.37:8188  (ComfyUI)            no route (→ Wikimedia fallback)
+#   - 192.168.50.27:8188  (ComfyUI)            reachable (spark-5307)
 #   The pics stage degrades gracefully: an unreachable LLM yields deterministic
 #   search queries and an unreachable ComfyUI yields Wikimedia Commons art.
+#   (PAW Patrol tiles are local-generation only — Commons carries no licensed
+#   PAW art, so those events keep their previous tile and retry next run.)
 #   LAN hostnames do NOT resolve under cluster DNS, so the LLM is addressed by
 #   IP here (gx10-f156 == 192.168.50.138).
 
@@ -57,7 +59,7 @@ data:
   # resolve the LAN hostnames (gx10-f156 / spark-5307).
   LMAO_IMAGE_LLM_URL: "http://192.168.50.138:8000/v1"
   LMAO_IMAGE_LLM_MODEL: "deepseek-ai/DeepSeek-V4-Flash-0731"
-  LMAO_IMAGE_GEN_URL: "http://192.168.10.37:8188"
+  LMAO_IMAGE_GEN_URL: "http://192.168.50.27:8188"
   LMAO_IMAGE_VISION_URL: "http://192.168.50.200:8000/v1"
   LMAO_IMAGE_VISION_MODEL: "Qwen/Qwen2.5-VL-72B-Instruct"
 

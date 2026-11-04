@@ -3,17 +3,28 @@
 Native **ESP-IDF** firmware for the **RoboDog** family-calendar display:
 a Waveshare **ESP32-S3** dev board driving the Waveshare **RLCD-4.2**
 (**ST7305**, 400×300 reflective 1-bit B&W LCD).  No RNS/LXMF here: the device
-reads the family calendar from a synchronous gRPC call on the LMAO server
-and renders it in 1-bit B&W on the ST7305.
+reads the family calendar over the server's **framed-TCP calendar service
+(:4247)** and renders it in 1-bit B&W on the ST7305.
 
 ```
-┌─ LMAO server (lma.LMAO/GetCalendar gRPC, :50051) ───────┐
-│   HTTP/2 unary: CalendarRequest -> CalendarBundle       │
+┌─ LMAO server (framed-TCP calendar read, :4247) ─────────┐
+│  [u32 BE len][CalendarRequest] -> [u32 BE len][Bundle]  │
 └──────────────────────────────────────────────────────────┘
-            ▲ gRPC/HTTP2, single request/reply per sync
+            ▲ plain lwIP socket, one request/reply per sync
 ESP32-S3 ───┘   → decode → merge δ into NVS cache → render ST7305
-                → light-sleep ~30 min → repeat
+                → hold the frame ~30 min (redraw the clock every 30 s) → repeat
 ```
+
+**Transport decision.** An earlier build spoke a hand-rolled HTTP/2 + gRPC
+client for `lma.LMAO/GetCalendar` on `:50051`.  That bought nothing for one
+unary RPC and could not decode response HEADERS, so a non-zero `grpc-status`
+was indistinguishable from an empty reply; any proxy or server-side HTTP/2
+change would have broken it silently.  The framed-TCP service carries the same
+protobuf messages with a 4-byte length prefix, and the server assembles the
+reply with the SAME shared helper as the gRPC and LXMF paths
+(`lma_core/calendar_bundle.build_bundle`) — so the transports cannot drift
+(the old TCP copy had no full-fetch tombstone filter and never attached
+`pic_data`).
 
 ## Board & wiring
 
@@ -62,21 +73,29 @@ and set them once at runtime in NVS:
 | `server_host`(string) | LMAO server host/IP (fallback: `RD_SERVER_HOST_DEFAULT`, `192.168.50.67`) |
 | `kid_name`   (string) | Per-board kid assignment (fallback: `RD_KID_NAME_DEFAULT`, `""` = family).  Non-empty → kid-dedicated panel: the request carries `participant=<kid>`, the server returns only that kid's events, and the header shows the kid name LEFT + live clock RIGHT.  Set at flash time with `--kid-name` — see below. |
 
-Other knobs (`RD_CAL_GRPC_PORT`, `RD_SYNC_INTERVAL_SECONDS`,
-`RD_SNTP_SERVER`, timeouts) are build-time macros in `main/config.h`.
+The NVS key names have ONE definition (`main/rd_store.h`), shared with the
+flash scripts.  Other knobs (`RD_CAL_TCP_PORT`, `RD_SYNC_INTERVAL_SECONDS`,
+`RD_SNTP_SERVER`, `RD_TCP_CONNECT_TIMEOUT_MS`/`RD_TCP_READ_TIMEOUT_MS`,
+`RD_WDT_TIMEOUT_S`) are build-time macros in `main/config.h`.
 
 ## Wire contract (implemented exactly)
 
-Synchronous gRPC unary `lma.LMAO/GetCalendar(CalendarRequest) returns
-(CalendarBundle)` over HTTP/2 to `LMAO_SERVER_HOST:RD_CAL_GRPC_PORT`
-(default `50051` — the LMAO server's gRPC port; `192.168.10.19` LAN).
+Framed-TCP to `LMAO_SERVER_HOST:RD_CAL_TCP_PORT` (default `4247`, the server's
+`LMAO_CAL_TCP_PORT`; host is a LAN hostname, never an IP — tp4's wlan0 is
+DHCP and has moved):
 
-The ESP32 client implements a minimal HTTP/2 + gRPC transport for this single
-RPC: connection preface, SETTINGS/ACK, a constant HPACK header block (literal
-without indexing), and a DATA frame carrying the gRPC-framed `CalendarRequest`
-(1-byte compression flag + 4-byte BE length + protobuf).  The reply DATA is
-stripped of its gRPC header and the `CalendarBundle` decoded by `lma_proto`.
-The wire format is verified live against the LMAO server.
+```
+client -> server   [u32 BE length][CalendarRequest protobuf]
+server -> client   [u32 BE length][CalendarBundle protobuf]
+```
+
+A 0-length request frame is the documented defaults (`calendar_id:"family"`,
+`since_ms:0`).  Connect and read budgets are separate
+(`RD_TCP_CONNECT_TIMEOUT_MS` for a non-blocking connect + `select`;
+`RD_TCP_READ_TIMEOUT_MS` as both the per-recv socket timeout and a total
+deadline), so a slow-drip server cannot stall a whole cycle, and a task
+watchdog (`RD_WDT_TIMEOUT_S`, default 60 s) reboots a wedged board instead of
+leaving a frozen panel.
 
 - **Client → server** payload = serialized `CalendarRequest` protobuf
   (`calendar_id=1` string, `since_ms=2` varint u64, `max_events=3` varint u32,
@@ -88,8 +107,10 @@ The wire format is verified live against the LMAO server.
   `CalEvent`, `watermark_ms=4` varint u64, `current=5` `Weather`).
 - `CalEvent`: `uid=1` string, `title=2` string, `notes=3` string,
   `start_ms=4` varint u64, `end_ms=5` varint u64, `deleted=6` varint bool,
-  `pic=7` string, `pic_data=8` bytes (1bpp 144×144 tile), `weather=9`
-  `Weather`.
+  `pic=7` string, `pic_data=8` bytes (1bpp **176×176** tile, 3872 B),
+  `weather=9` `Weather`.  `pic_data` is served on the single headline event
+  only; the decoder keeps ONE tile at bundle level (`pic_uid` binds it to its
+  event) instead of a per-event 3872-byte slot.
 - `Weather`: `temp_c10=1` **sint32** (zigzag; tenths of a degree Celsius, so
   −2.5 °C is `-25`) and `code=2` varint u32 (WMO 4677 weather code).
   `CalendarBundle.current` is the conditions now; `CalEvent.weather` is the
@@ -260,8 +281,8 @@ voice_bridge <--voice/reply frames--WS:8101-- xiaozhi adapter <--send()/send_voi
 ```
 
 - **Identity / sessions**: the board's session and chat key is its stable Device-Id/MAC; reconnects (bridge restart, board reattach) reuse it, so the conversation history and memory survive.
-- **Spoken replies**: inbound turns are VOICE-type, so Hermes auto-TTS fires by default for this platform (adapter-local `_should_auto_tts_for_chat` — the global `voice.auto_tts` stays off so telegram/matrix/signal are unaffected). `tts.provider: openai` points Hermes' TTS at **our Kokoro** (`~/.hermes/config.yaml` `tts.openai.base_url: http://spark-5307:8004/v1`, `voice: af_heart`) — the exact voice the board already uses. The reply audio returns to the bridge as a `voice` frame and is streamed to the board.
-- **Fallback**: if the brain is unreachable the bridge synthesizes the `reply` text itself with Kokoro (stateless; no memory/tools). Last-resort it calls gx10 directly.
+- **Spoken replies**: inbound turns are VOICE-type, so Hermes auto-TTS fires by default for this platform (adapter-local `_should_auto_tts_for_chat` — the global `voice.auto_tts` stays off so telegram/matrix/signal are unaffected). `tts.provider: openai` points Hermes' TTS at **our Qwen3-TTS** (`~/.hermes/config.yaml` `tts.openai.base_url: http://spark-5307:8004/v1`, `model: qwen3-tts`, `voice: ""`) — the same server the board calls. An empty voice makes the server pick a **native speaker of the reply's language** (English → `aiden`, Chinese → `serena`); Qwen3-TTS timbres have a native language baked in, so `af_heart`/`serena` reading English carries a Chinese accent that `instruct` cannot remove. The reply audio returns to the bridge as a `voice` frame and is streamed to the board.
+- **Fallback**: if the brain is unreachable the bridge synthesizes the `reply` text itself with Qwen3-TTS (stateless; no memory/tools). Last-resort it calls gx10 directly.
 - **Config / deploy**: enable the platform in `~/.hermes/config.yaml` under `gateway.platforms.xiaozhi.enabled: true` + `plugins.enabled` (`platforms/xiaozhi`), set `XIAOZHI_ALLOW_ALL_USERS=true` (LAN device; `XIAOZHI_ALLOWED_USERS` for a device-id allow-list), then `systemctl --user restart hermes-gateway`. The board then appears in `hermes gateway status` (or the `Platforms:` line of `hermes status`) as **XiaoZhi Voice Companion**. The plugin's source of truth lives in the repo under `robodog_client/voice/hermes-platform/xiaozhi/`; deploy by copying it to `~/.hermes/plugins/platforms/xiaozhi/`.
 - **Latency**: measured first-audio ~6.5 s after VAD finalize on the Hermes path (ASR + agent turn + auto-TTS), vs ~3–4 s for the thin stateless path. Accepted per the issue: the Hermes path earns sessions, multi-turn memory and tools; the stateless gx10 path stays as the fallback.
 
@@ -284,18 +305,30 @@ RLCD-4.2 board — the board calls its own ASR / LLM / TTS endpoints over LAN,
 no bridge, no Hermes. Phase 0 (spike) + Phase 1 (PR #278 text-only chat UI +
 deterministic RD_SHOT) are implemented and hardware-verified; **Phase 2 adds the
 native on-device voice loop** (`rd_listen` → ES7210 mic → energy-VAD → Whisper
-ASR → claw agent LLM → Kokoro TTS → ES8311 speaker → RLCD render). See
-`robodog_client/esp-claw/DESIGN.md` for the full details + fixes. TL;DR:
+ASR → claw agent LLM → Qwen3-TTS → ES8311 speaker → RLCD render), and it is
+**dual-language**: English and Mandarin/Traditional Chinese speech are heard,
+answered, displayed and spoken in their own language (see "Dual-language voice"
+below). See `robodog_client/esp-claw/DESIGN.md` for the full details + fixes.
+TL;DR:
 
 ```sh
 # fetch pinned esp-claw -> gitignored robodog_client/.esp-claw/
 bash robodog_client/esp-claw/fetch_esp_claw.sh
 
+# The RLCD face (Noto Sans CJK TC, 16 px, 1 bpp) is generated at build time by
+# esp-claw/gen_font_tc_16.sh: needs Node.js >= 18 (npx lv_font_conv@1.5.2) and
+# network on the FIRST build; the OTF (sha256-pinned) + the generated font are
+# cached in ~/.cache/lmao-fonts afterwards. Never committed.
+
 # build in espressif/idf:v5.5.4 (endpoints overridable per-build)
 # Endpoint defaults are committed (spark-5307 = 192.168.50.27 for Whisper/
-# Kokoro, spark-73dd = 192.168.50.3 for qwen3.8-flash-next); all three are on
+# Qwen3-TTS, spark-73dd = 192.168.50.3 for qwen3.8-flash-next); all three are on
 # the board's own subnet, so no host socat forward is needed. Override with
 # CLAW_ASR_URL / CLAW_TTS_URL / CLAW_LLM_BASE_URL / CLAW_LLM_MODEL if they move.
+# CLAW_TTS_VOICE defaults to EMPTY: the server then picks a native speaker of
+# the reply's language (English -> aiden, Chinese -> serena), so the board
+# speaks native English and native Chinese with no language plumbing here.
+# Set CLAW_TTS_VOICE=<timbre> only to pin one voice for every reply.
 CLAW_IDF_IMG=espressif/idf:v5.5.4 bash robodog_client/esp-claw/build_esp_claw.sh
 
 # flash (host esptool — the board's sanctioned path) + provision NVS
@@ -305,10 +338,13 @@ CLAW_IDF_IMG=espressif/idf:v5.5.4 bash robodog_client/esp-claw/flash_esp_claw.sh
 
 Bazel wrappers: `bazel run //robodog_client:build_robodog_claw` and
 `:flash_robodog_claw`. The board boots a deterministic **text-only chat UI**
-(PR #278 parity: no face/emote, ~14 px ASCII font, left-aligned full-panel
-wrap, WiFi/agent status bar on top). The UI brings the RLCD panel + LVGL up
-itself (esp-claw's own display_service is gated behind a Kconfig symbol this
-board silently drops), so the RD_SHOT capture seam is **always** live:
+(PR #278 parity: no face/emote, 16 px **Noto Sans CJK TC** font generated at
+build time by `esp-claw/gen_font_tc_16.sh` from the sha256-pinned `noto-cjk`
+OTF — Traditional Chinese renders as real glyphs, English too; left-aligned
+full-panel wrap, WiFi/agent status bar on top). The UI brings the RLCD panel +
+LVGL up itself (esp-claw's own display_service is gated behind a Kconfig
+symbol this board silently drops), so the RD_SHOT capture seam is **always**
+live:
 `capture.py --describe` reliably transcribes the rendered frame (no more
 "no panel frame captured yet"). After a text update the UI forces a
 synchronous refresh + immediate RD_SHOT dump, so a capture reads the new
@@ -317,14 +353,67 @@ frame deterministically.
 On-device probe console commands (over `/dev/ttyACM0` 115200, `app> ` REPL):
 
 ```sh
-rd_asr                 # device -> Whisper via host-forward, logs text="..."
-rd_tts <text>          # device -> Kokoro via host-forward, logs WAV bytes
+rd_asr                 # device -> Whisper, logs text="..." + language=.../prob
+rd_tts <text>          # device -> Qwen3-TTS, logs WAV bytes
 rd_chat <question>     # native agent seam -> LLM, renders user + reply to the
                        #   text UI (e.g. `rd_chat 2+2` -> screen shows "4")
 rd_listen              # Phase 2 voice loop: mic -> ASR -> agent -> TTS -> speaker
                        #   (or press the BOOT button — same trigger)
 rdshot                 # force-publish the current screen frame (RD_SHOT)
 ```
+
+> The serial REPL is **ASCII-only input**: the IDF console's linenoise runs in
+> dumb mode on USB-Serial/JTAG and its `sanitize()` drops every byte with
+> `isprint((char)c) == 0`, i.e. all UTF-8 lead/continuation bytes — typing
+> `rd_chat 你好` reaches the command as `rd_chat` (and `rd_chat 你好a` as
+> `rd_chat a`).  The panel still *renders* Chinese fine (reply text is UTF-8
+> from the LLM), so drive Chinese by asking in ASCII for a Chinese reply —
+> `rd_chat Reply in Traditional Chinese: what is the weather in Taipei?` — or
+> use the real voice/HTTP paths, which carry UTF-8 end to end.
+
+### Dual-language voice (English + Traditional Chinese)
+
+The board sends **no `language` field** with the ASR upload, so the Whisper
+endpoint auto-detects the spoken language and returns `language`/`probability`
+alongside `text` — Chinese speech is transcribed as Chinese, never forced
+through an English model. The voice turn then:
+
+1. logs `ASR language=<tag> prob=<p>` (console evidence the E2E gates on);
+2. selects the reply directive by that tag (falling back to CJK script
+   detection when an older endpoint omits it): a Chinese utterance gets
+   **`voice reply language=zh-TW`** — *reply in Traditional Chinese (Taiwan
+   usage), Traditional characters only, spoken prose, no markdown* — everything
+   else gets the English prose directive. **Both directives name the language
+   explicitly**: the agent's session memory carries earlier turns, so a Chinese
+   conversation would otherwise make the model answer a later English question
+   in Chinese (measured on the English gate). Whisper may transcribe in
+   Simplified, so the Traditional rule must also be explicit or the model
+   mirrors the transcript;
+3. renders the reply with the generated Noto Sans CJK TC font (UTF-8 is kept
+   byte-for-byte; only emoji/exotic scripts become `?`), and the chunk
+   splitter never cuts a CJK character in half;
+4. speaks it through Qwen3-TTS with an **empty `voice`**: the server picks the
+   native timbre of the reply's script (`serena` for Chinese, `aiden` for
+   English) — Qwen3-TTS timbres have a native language baked in, so a
+   Chinese-native voice reading English carries an accent. Pin
+   `CLAW_TTS_VOICE=<timbre>` only if one voice must serve every reply.
+
+The session title (top-middle label) is built CJK-aware (9 Han chars fit the
+170 px label, 18 Latin), so a Chinese first question titles the session instead
+of falling back to `S#<id>`. The E2E gates this path with the pinned
+`zh_hello` corpus (`你好世界`, spoken by `serena`, `language: chinese`):
+
+```sh
+python3 robodog_client/esp-claw/robodog_claw_e2e.py --corpus zh_hello
+# OPEN_SESSION / ASR_MATCH / ASR_LANG(zh) / REPLY_LANG(zh-TW) / REPLY(CJK)
+# / TTS / RING / SUBTITLE(CJK readback) -> Overall: PASS
+```
+
+The corpus phrase uses only characters identical in Simplified and Traditional
+(`你好世界`) because faster-whisper may emit either script; a script-dependent
+phrase would make ASR_MATCH flap. Regenerate the fixtures with
+`python3 robodog_client/voice/make_corpus.py [--only zh_hello]` (needs the TTS
+endpoint).
 
 The RLCD status bar shows WiFi (left) and the live voice state **top-right**:
 `idle` → `listening` → `processing` (ASR+LLM) → `responding` (TTS) → `idle`
@@ -341,7 +430,8 @@ console + an RD_SHOT vision readback):
 
 ```sh
 python3 robodog_client/esp-claw/robodog_claw_e2e.py --corpus capabilities
-# OPEN_SESSION / ASR_MATCH / REPLY / RING / SUBTITLE -> Overall: PASS
+# OPEN_SESSION / ASR_MATCH / ASR_LANG / REPLY_LANG / REPLY / RING / SUBTITLE
+# -> Overall: PASS
 ```
 
 Multi-session stress gate (≥ 5 back-to-back sessions, different question
@@ -349,7 +439,8 @@ each; catches "first turn works, later turns drop back to idle"):
 
 ```sh
 bazel run //robodog_client:claw_stress -- --runs 5
-# OPEN_SESSION / ASR_MATCH / REPLY / TTS / CHUNKED_QUEUE / FULL_READOUT
+# OPEN_SESSION / ASR_MATCH / ASR_LANG / REPLY_LANG / REPLY / TTS
+# / CHUNKED_QUEUE / PIPELINE_AHEAD / GAP_VERIFY / FULL_READOUT
 # / NO_COLLAPSE / NO_RESET -> Overall: PASS
 ```
 
@@ -368,31 +459,49 @@ robodog_client/
 │   └── u8g2_st7305/          vendored Waveshare ST7305 driver (verbatim)
 └── main/
     ├── main.c                app_main shim → robodog_app_main()
-    ├── robodog.c             wifi/tcp/sleep loop + u8g2 rendering
+    ├── robodog.c             app loop: sync → merge → render → hold (WDT-armed)
     ├── lma_proto.c/.h        dependency-free protobuf codec (wire layer)
     ├── lma_proto_selftest.c  host-only self-test binary
     ├── config.h              pins, wifi/server/sync configuration
+    ├── rd_store.c/.h         NVS config + schema-versioned event cache
+    ├── rd_net.c/.h           WiFi + framed-TCP calendar transport
+    ├── rd_render.c/.h        ST7305 render + RD_SHOT capture
+    ├── rd_layout.c/.h        panel geometry + fit arithmetic (host-tested)
+    ├── rd_clip_selftest.c    host-only clip/wrap test
+    ├── rd_layout_selftest.c  host-only layout test
     └── CMakeLists.txt        component registration
 ```
 
 ## Status
 
 Hardware-validated on the Waveshare RLCD-4.2 (built in the ESP-IDF Docker
-image, flashed to `/dev/ttyACM0`, gRPC-synced live data, and the render
+image, flashed to `/dev/ttyACM0`, framed-TCP-synced live data, and the render
 confirmed **pixel-exact** against the physical panel via `capture.py` — the
 captured frame matched what the user sees on the RLCD exactly, orientation and
 polarity included).  The header shows the live date once synced; rows are real
-`GetCalendar` events.
+calendar events.
+
+**Layout (400×300 landscape canvas).** Geometry lives in ONE block
+(`main/rd_layout.h`) and is drawn at those positions only:
+
+| Band | Content |
+|---|---|
+| header (baseline 24) | kid name LEFT + live clock RIGHT (family: centered clock) |
+| status (baseline 46) | `now 44°F clear` LEFT, `stale`/`no wifi` RIGHT |
+| headline | 176×176 served tile at x=6/y=52; right column (200 px): wrapped `helvB18` title block, `HH:MM-HH:MM` range meta, forecast |
+| compact rows | `9x15B` rows from baseline 246, stride 16, up to 4 rows (headline + 4 = 5 events) |
+
+The number of title lines and compact rows is COMPUTED from the measured font
+metrics (`rd_layout_title_lines` / `rd_layout_rows`, host-tested by
+`rd_layout_selftest.c`), so a font or geometry change cannot silently push text
+off the panel.
 
 Still environment-dependent / worth a look on real air:
 - **WiFi**: credentials are NVS/built-in (`wifi_ssid`/`wifi_pass`); the board
   is 2.4 GHz-only, so the AP must be 2.4 GHz and reachable from the node.
-- **Frame/width tuning**: title clipping and the icon boxes are tuned for the
-  current data — adjust with the screenshot loop below. The wrapped headline
-  band (top margin / meta gap) is tuned via `TITLE_TOP_MARGIN` /
-  `TITLE_META_GAP` in `render_screen`. (Row count is a fixed cap: the
-  headline picture + 4 compact text rows = 5 event rows at `RD_MAX_EVENT_ROWS`,
-  capture-tuned yy=214 / row_stride=20.)
+- **Frame/width tuning**: title clipping is measured under the active font
+  (`rd_clip`), so a clipped title always fits its budget; adjust the bands in
+  `rd_layout.h` and re-capture.
 - **Per-board delta-safety**: the NVS event cache and watermark are owned by
   the kid the board last synced under (`wm_kid`).  Re-flashing with a
   different `--kid-name` (or set↔family) clears the cache on boot so a
@@ -427,7 +536,7 @@ bazel run //robodog_client:flash_firmware -- --port /dev/ttyACM1 --kid-name wesl
 #   defines), but do not store anything else in this board's NVS.
 
 # capture: reset the board, then read frames; make --n/--timeout wide enough
-# that WiFi connect + first gRPC sync happen (sync landed ~40s post-boot here)
+# that WiFi connect + first calendar sync happen (sync landed ~40s post-boot here)
 python3 capture.py --port /dev/ttyACM0 --reset --n 4 --timeout 100 --describe
 #   shots/frameN.i1                raw 15200-byte u8g2 buffer (panel memory)
 #   shots/panel_raw_portrait.png   panel-native 300×400
@@ -436,7 +545,7 @@ python3 capture.py --port /dev/ttyACM0 --reset --n 4 --timeout 100 --describe
 ```
 
 **Reading the device state from the screenshot:**
-- Header (family): centered `YYYY-MM-DD HH:MM` present → WiFi up + gRPC sync
+- Header (family): centered `YYYY-MM-DD HH:MM` present → WiFi up + TCP sync
   healthy.  Header (kid panel): kid name LEFT + `YYYY-MM-DD HH:MM` RIGHT on the
   same row — same health signals.  (No divider under the header.)
 - Header **BLANK** + `no wifi` hint beside the first row → not connected yet:
@@ -447,15 +556,15 @@ python3 capture.py --port /dev/ttyACM0 --reset --n 4 --timeout 100 --describe
   the info column below its range meta. **Neither line is drawn** when the
   server sent no `Weather` (weather disabled / no sync yet), so a blank band is
   "no forecast", not "0°F".
-- Row set == Postgres/`GetCalendar` output → data path live; a stale/different
+- Row set == Postgres/`CalendarBundle` output → data path live; a stale/different
   set means the cache is being shown (compare timestamps against the header).
-- At most 5 event rows are drawn: the headline (big picture, LEFT;
+- At most 5 event rows are drawn: the headline (176×176 picture, LEFT;
   word-wrapped `helvB18` title block + right-aligned `HH:MM-HH:MM` range meta
-  beside it) plus 4 compact text rows, each title-clipped left with a
-  measured,
-  right-aligned `HH:MM-HH:MM` range meta; a 6th+ visible event is dropped by
-  design (`RD_MAX_EVENT_ROWS` in `render_screen`) — a shorter row set is not a
-  data-path error unless the header hints (`stale`/`no wifi`) say otherwise.
+  beside it) plus up to 4 compact `9x15B` rows, each title-clipped left with a
+  measured, right-aligned `HH:MM-HH:MM` range meta; a 6th+ visible event is
+  dropped by design (`RD_MAX_EVENT_ROWS` in `rd_layout.h`) — a shorter row set
+  is not a data-path error unless the header hints (`stale`/`no wifi`) say
+  otherwise.
 - Non-today events prefix their right-hand meta with a day qualifier so the
   family panel reads unambiguously: `tomorrow` for the next civil day,
   `MM/DD` for a later day in the same civil year, `YYYY/MM/DD` for a later

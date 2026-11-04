@@ -13,12 +13,58 @@ Each node has **two network interfaces**:
 
 | Hostname | Role | Internal IP (eth0) | LAN IP (wlan0) | Hardware | OS |
 |----------|------|-------------------|----------------|----------|----|
-| `tp1` | worker | `192.168.10.11` | `192.168.50.183` | RK1 module slot 1 (new) | Debian 13 (trixie), kernel 6.12.47+rpt |
-| `tp2` | worker | `192.168.10.28` | `192.168.50.156` | RK1 module slot 1 | Debian 11 (bullseye), kernel 5.15.84-v8+ |
-| `tp3` | **control-plane** | `192.168.10.40` | `192.168.50.90` | RK1 module slot 2 | Debian 11 (bullseye), kernel 6.1.21-v8+ |
-| `tp4` | worker | `192.168.10.19` | `192.168.50.67` | RK1 module slot 3 | Debian 11 (bullseye), kernel 5.15.84-v8+ |
+| `tp1` | worker | `192.168.10.11` | DHCP (wlan0 down 2026-11-02) | RK1 module slot 1 (new) | Debian 13 (trixie), kernel 6.12.47+rpt |
+| `tp2` | worker | `192.168.10.28` | `192.168.50.157` (DHCP) | RK1 module slot 1 | Debian 11 (bullseye), kernel 5.15.84-v8+ |
+| `tp3` | **control-plane** | `192.168.10.40` | `192.168.50.91` (DHCP) | RK1 module slot 2 | Debian 11 (bullseye), kernel 6.1.21-v8+ |
+| `tp4` | worker | `192.168.10.19` | `192.168.50.68` (DHCP) | RK1 module slot 3 | Debian 11 (bullseye), kernel 5.15.84-v8+ |
 | `turing-bmc` | BMC | — | `192.168.0.47` (verify — moves w/ LAN) | ESP32 on Turing Pi 2 | BMC firmware (default `root:turing`) |
 | `selfhost` | workstation | — | `192.168.50.153` (eth0) | Raspberry Pi 5 | Ubuntu 26.04 LTS (Resolute Raccoon), aarch64 |
+
+**Address the nodes by hostname, never by LAN IP.** `wlan0` is DHCP and has
+already moved (`tp3` .90→.91, `tp4` .67→.68 on 2026-11-02, which silently broke
+both `kubectl` and the RoboDog panel). The router's DNS resolves the DHCP
+hostnames, so `https://tp3:6443`, `ssh tp4` and the board's `RD_SERVER_HOST_DEFAULT "tp4"`
+all follow a lease change. The LAN IPs above are a snapshot only.
+
+### Preventing address drift
+
+DHCP moving a node's `wlan0` lease used to break four things at once — and
+each failed *silently*: `kubectl` (kubeconfig pinned the old IP), `ssh tp4`,
+the RoboDog panel (`RD_SERVER_HOST_DEFAULT`), and every client whose
+`LMAO_SERVER_HOST` was an IP. Defence in depth, cheapest first:
+
+1. **DHCP reservations (root fix, manual).** On the router (`192.168.50.1`)
+   bind each node's `wlan0` MAC to its current address. That makes the leases
+   stable, but it is a router-side setting with no API here — do it once and
+   the addresses above stop moving. Node MACs:
+
+   ```bash
+   ssh tp3 'ip -br link show wlan0'   # repeat per node
+   ```
+
+2. **Hostname addressing everywhere (already in the tree).** Runtime defaults,
+   manifests and client configs use `tp1`…`tp4`; the router's DNS resolves them
+   for whatever lease DHCP hands out. `tp4.local` (mDNS) also works from
+   machines on the same L2 segment if router DNS is unavailable.
+
+3. **Guard against regressions (automated).** A hardcoded node address in a
+   runtime path now fails the build:
+
+   ```bash
+   bazel run //tools:check_node_addresses        # scans code/manifests/README
+   bazel test //tests:test_node_address_drift
+   ```
+
+   It scans `lma_core`, `lmao_server`, `human_client`, `tools`, `k8s`,
+   `k8s-app`, `cardputer_client`, `robodog_client/main`, `firmware_common`,
+   `smart_irrigation/native-client/main` and `README.md`, and exits 1 listing
+   every offending `file:line`. `docs/cluster-setup.md` is the only allowlisted
+   place that may list the addresses (this snapshot).
+
+4. **Recovering from a move** (if one slips through): find the node by MAC
+   (`sudo arp-scan --interface=wlan0 192.168.50.0/24`), then point the
+   kubeconfig at the hostname (`https://tp3:6443`) rather than the new IP, so
+   the next move needs no edit.
 
 The workstation `selfhost` is a **separate machine** — not a cluster node.
 The internal `192.168.10.x` network is **not reachable from selfhost** — only node-to-node.
@@ -189,16 +235,17 @@ kubectl get pods -A        # all pods
 kubectl get svc -A         # all services
 ```
 
-API server: `https://192.168.50.90:6443` (tp3). Kubeconfig at `~/.kube/config` on selfhost
-(updated: the API cert SAN is still pending the new IP — local kubectl uses
-`insecure-skip-tls-verify` until `k3s certificate rotate`).
+API server: `https://tp3:6443` (tp3, via the router's DNS). Kubeconfig at
+`~/.kube/config` on selfhost uses the hostname and
+`insecure-skip-tls-verify` (the API cert SAN does not yet cover the DHCP LAN IP
+or the hostname).
 
-SSH (from selfhost):
+SSH (from selfhost — hostnames, so a DHCP move needs no edit):
 ```bash
-ssh tp3          # 192.168.50.90 — LAN (current; ~/.ssh/config updated)
-ssh tp2          # 192.168.50.156 — LAN
-ssh tp1          # 192.168.50.183 — LAN
-ssh tp4          # 192.168.50.67 — LAN
+ssh tp3          # control plane
+ssh tp2          # worker
+ssh tp1          # worker
+ssh tp4          # worker (lmao-server + postgres + RNode)
 # internal (from within cluster): tp3=192.168.10.40, tp2/tp4=192.168.10.28/.19, tp1=192.168.10.11
 ```
 
@@ -277,7 +324,7 @@ Two stages per run, matching the old script:
 
 1. `tools/calendar_sync.py --window-days 14` — Google Calendar → `cal_events`
    (Postgres), upsert keyed by event `uid`.
-2. `tools/calendar_pics_sync.py` — themed art → 1-bit 144×144 RLCD tiles in
+2. `tools/calendar_pics_sync.py` — themed art → 1-bit 176×176 RLCD tiles in
    `cal_pics`.
 
 **Why hourly matters beyond data freshness:** the RoboDog panel syncs by delta
@@ -312,6 +359,67 @@ kubectl create job --from=cronjob/lmao-calendar-sync lmao-cal-sync-manual
 kubectl logs -f job/lmao-cal-sync-manual
 ```
 
+### Backfilling tiles after a subject-selection change
+
+Stage 2 is idempotent: a `pic` key already in `cal_pics` is skipped, so
+existing tiles keep whatever subject they were generated with. To regenerate
+recent ones (e.g. after changing the subject pools), run it with `--force` and
+a look-back window — this rewrites every kid event that started within the
+last N days (and every upcoming one):
+
+```bash
+# From the host, through a port-forward (no cluster Job needed):
+kubectl port-forward svc/postgres 5433:5432 &
+PASS=$(kubectl get secret lmao-postgres -o jsonpath='{.data.POSTGRES_PASSWORD}' | base64 -d)
+LMAO_CONTACTS_URL="postgresql://lmao:${PASS}@127.0.0.1:5433/lmao" \
+  bazel run //tools:calendar_pics_sync -- --force --since-days 14 --limit 10
+
+# Preview what would be regenerated (no image work, no DB writes):
+LMAO_CONTACTS_URL=... bazel run //tools:calendar_pics_sync -- \
+  --force --since-days 14 --dry-run
+```
+
+In-cluster, derive a one-off Job from the CronJob template (so the env,
+Secret mounts and node pin stay identical), add the backfill flags to stage 2
+and lift the 900 s job deadline — a tile costs ~60-90 s (FLUX.1-schnell
+generation + vision crop/gate), so the CronJob's `activeDeadlineSeconds: 900`
+only covers ~10 events:
+
+```bash
+kubectl create job --from=cronjob/lmao-calendar-sync lmao-cal-backfill \
+  --dry-run=client -o yaml \
+| sed -e 's|python tools/calendar_pics_sync.py|python tools/calendar_pics_sync.py --force --since-days 14|' \
+      -e 's|activeDeadlineSeconds: 900|activeDeadlineSeconds: 5400|' \
+| kubectl apply -f -
+kubectl logs -f job/lmao-cal-backfill
+```
+
+(`kubectl patch job` cannot do this: a Job's pod template is immutable.)
+
+The backfill only lands on the panel for events the RoboDog re-syncs: each
+regenerated tile bumps `updated_ms` on the events using that `pic`
+(`PicStore.put`), so the panel picks them up on its next 30-min delta sync.
+
+**PAW Patrol tiles are generated, never searched.** Wesley's PAW-theme events
+come from ComfyUI/FLUX (`192.168.50.27:8188` — spark-5307). The ConfigMap used
+to point at spark-5307's *old wired IP* `192.168.10.37`, which is dead: every
+event fell through to Wikimedia Commons, and because Commons carries no
+licensed PAW art, Wesley's PAW-themed events silently kept whatever tile they
+had (usually a sea animal). Verify the address before a backfill:
+
+```bash
+curl -s -m 5 http://192.168.50.27:8188/system_stats | head -c 120
+```
+
+Verified working 2026-11-02: `marshall`/`chase`/`skye` all generate a clean
+1-bit dog-character line drawing and pass the vision gate in 48-75 s.
+
+**The fix must be in the deployed image.** Rebuild/push
+`lmao-calendar-sync` before a backfill or the next hourly run
+(`bazel run //tools:install_all -- --setup-registry --include-services
+--skip-rnode`, or `./docker/registry/manage.sh push-calendar-sync` if
+present).
+
 Networking notes (measured from an in-cluster pod on tp4):
 
 | Target | Reachable | Effect when down |
@@ -319,7 +427,7 @@ Networking notes (measured from an in-cluster pod on tp4):
 | `postgres.default.svc.cluster.local:5432` | yes | stage 1 fails |
 | `192.168.50.200:8000` (vision) | yes | tile QC skipped |
 | `192.168.50.138:8000` (gx10 LLM) | refused (box down) | deterministic "reasoned" search queries |
-| `192.168.10.37:8188` (ComfyUI) | no route | Wikimedia Commons art |
+| `192.168.10.37:8188` (ComfyUI, **stale**) | no route — this was spark-5307's old wired IP; the ConfigMap now uses `192.168.50.27:8188` | PAW Patrol tiles silently never generated (Commons has no PAW art), sea/pokemon fell back to Commons photos |
 
 LAN hostnames do **not** resolve under cluster DNS, so the ConfigMap addresses
 these by IP (`gx10-f156` == `192.168.50.138`).

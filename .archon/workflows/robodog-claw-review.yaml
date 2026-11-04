@@ -4,7 +4,7 @@ description: |
   standalone agent** (Waveshare ESP32-S3 RLCD-4.2 / ST7305, robodog_client/
   esp-claw/, self-built from the pinned upstream + the LMAO overlay: text-only
   UI + deterministic RD_SHOT + the Phase 2 native voice loop rd_listen -> ASR ->
-  agent -> TTS -> speaker; the board calls Whisper / LLM / Kokoro on its own
+  agent -> TTS -> speaker; the board calls Whisper / LLM / Qwen3-TTS on its own
   over LAN — no bridge, no Hermes). It starts AT the code review of an EXISTING
   PR — create the PR manually first (e.g. `gh pr create` from the feature
   branch), then run this. On first node it re-points the (isolated) worktree at
@@ -42,7 +42,7 @@ description: |
   or the hermes voice firmware (robodog-hermes-review) — same board, mutually
   exclusive flashes; never run two board workflows at once.
 
-  Models: archon tiers (large/medium/small) resolved from ~/.archon/config.yaml (today all map to gx10 DeepSeek V4 Flash — edit config.yaml once to reroute when the local model is down) for
+  Models: archon tiers (large/medium/small) resolved from ~/.archon/config.yaml (today the create-plan/plan node runs on the medium tier, which prefers kimi-coding/k3 on the 'pi' provider; the large/small agent tiers map to local gx10 DeepSeek V4 Flash. archon binds one provider+model per tier, so the gx10 backup is a one-line reroute in ~/.archon/config.yaml when the primary model is down) for
   the agent; the RD_SHOT vision readback and the ring re-ASR inside
   robodog-claw-e2e are fixed pipelines, not the agent model. No Claude.
 

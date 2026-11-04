@@ -18,6 +18,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 #include "robodog_ui.h"
+#include "robodog_utf8.h"
 #include "voice_transcript.h"
 
 #include <stdio.h>
@@ -33,6 +34,13 @@
 #include "freertos/task.h"
 #include "lvgl.h"
 
+/* Generated at build time (gen_font_tc_16.sh): Noto Sans CJK TC, 16 px,
+ * 1 bpp — ASCII + CJK punctuation + Bopomofo + CJK Unified Ideographs, so the
+ * RLCD renders Traditional Chinese replies instead of a row of '?'.  Not
+ * committed (AGENTS.md: generated third-party output is fetched/regenerated,
+ * never vendored). */
+LV_FONT_DECLARE(robodog_font_tc_16);
+
 /* Declared in the overlay boards/waveshare.../setup_device.c (board device). */
 esp_err_t robodog_board_display_get(esp_lcd_panel_handle_t *out_panel,
                                     esp_lcd_panel_io_handle_t *out_io);
@@ -44,10 +52,11 @@ static const char *TAG = "robodog_ui";
 #define UI_STATUS_H       32
 #define UI_PAD            10
 
-/* ASCII-only glyph set (parity with the bridge's display_text_ascii()): any
- * non-printable/complex codepoint is replaced so the ~16 px monochrome font
- * never mis-renders.  Multi-byte UTF-8 sequences are collapsed to '?'. */
-#define UI_ASCII_REPLACE  '?'
+/* Glyph set: the generated CJK font covers ASCII, CJK punctuation and the CJK
+ * ideograph blocks, so UTF-8 text is preserved byte-for-byte.  Only codepoints
+ * the font cannot draw (emoji, exotic scripts) become '?'; control characters
+ * are dropped and multi-byte sequences are never split (robodog_utf8.h). */
+#define UI_TEXT_REPLACE  '?'
 
 typedef enum {
     UI_CMD_USER = 0,
@@ -106,31 +115,11 @@ static bool s_chunked;               /* the current exchange is being accumulate
  * bounds the accumulated user lines.  Stays well under s_transcript[2048]. */
 #define UI_TRANSCRIPT_CAP  1600
 
-/* ── ASCII sanitisation ──────────────────────────────────────────────────── */
+/* ── text sanitisation ───────────────────────────────────────────────────── */
 
-static void ui_ascii_copy(char *dst, size_t dst_size, const char *src)
+static void ui_text_copy(char *dst, size_t dst_size, const char *src)
 {
-    size_t d = 0;
-    const char *s = src;
-    while (s && *s && d + 1 < dst_size) {
-        unsigned char c = (unsigned char)*s;
-        if (c < 0x80 && (c >= 0x20 || c == '\n')) {
-            dst[d++] = (char)c;
-            s++;
-        } else {
-            /* Collapse each leading byte of a UTF-8 sequence to a single '?'. */
-            size_t span = 1;
-            if (c >= 0x80) {
-                unsigned char lead = c;
-                if ((lead & 0xE0) == 0xC0) span = 2;
-                else if ((lead & 0xF0) == 0xE0) span = 3;
-                else if ((lead & 0xF8) == 0xF0) span = 4;
-            }
-            dst[d++] = UI_ASCII_REPLACE;
-            s += span;
-        }
-    }
-    dst[d] = '\0';
+    (void)robodog_utf8_sanitize(dst, dst_size, src, UI_TEXT_REPLACE);
 }
 
 /* ── Status bar ──────────────────────────────────────────────────────────── */
@@ -168,14 +157,15 @@ static void ui_append_line(const char *prefix, const char *text)
     const size_t cap = UI_TRANSCRIPT_CAP; /* keep only the most-recent window */
     size_t len = strlen(s_transcript);
 
-    /* Format "<prefix> <text>\n", ASCII-sanitized on the fly by prefixing. */
-    char ascii[480];
-    ui_ascii_copy(ascii, sizeof(ascii), text);
+    /* Format "<prefix> <text>\n"; the text is sanitized against the CJK font
+     * (UTF-8 preserved, undrawable codepoints -> '?'). */
+    char clean[480];
+    ui_text_copy(clean, sizeof(clean), text);
     char rendering[512];
     if (prefix && prefix[0]) {
-        snprintf(rendering, sizeof(rendering), "%s %s\n", prefix, ascii);
+        snprintf(rendering, sizeof(rendering), "%s %s\n", prefix, clean);
     } else {
-        snprintf(rendering, sizeof(rendering), "%s\n", ascii);
+        snprintf(rendering, sizeof(rendering), "%s\n", clean);
     }
     const size_t rlen = strlen(rendering);
 
@@ -207,23 +197,28 @@ static void ui_append_line(const char *prefix, const char *text)
 static void ui_reset_to_exchange(const char *user, const char *reply)
 {
     if (user != NULL && user[0] != '\0') {
-        char uascii[320];
-        ui_ascii_copy(uascii, sizeof(uascii), user);
-        snprintf(s_transcript, sizeof(s_transcript), "> %s\n", uascii);
+        char u_clean[480];
+        ui_text_copy(u_clean, sizeof(u_clean), user);
+        snprintf(s_transcript, sizeof(s_transcript), "> %s\n", u_clean);
     } else {
         s_transcript[0] = '\0';
     }
-    char rascii[UI_TRANSCRIPT_CAP];
-    ui_ascii_copy(rascii, sizeof(rascii), reply);
-    strlcat(s_transcript, rascii, sizeof(s_transcript));
+    char r_clean[UI_TRANSCRIPT_CAP];
+    ui_text_copy(r_clean, sizeof(r_clean), reply);
+    strlcat(s_transcript, r_clean, sizeof(s_transcript));
     const size_t len = strlen(s_transcript);
     if (len > UI_TRANSCRIPT_CAP) {
         if (s_chunked) {
-            /* keep the newest (the chunk being read), drop the head */
-            memmove(s_transcript, s_transcript + (len - UI_TRANSCRIPT_CAP),
-                    UI_TRANSCRIPT_CAP + 1);
+            /* keep the newest (the chunk being read), drop the head; snap the
+             * drop point to a codepoint boundary so CJK text stays intact */
+            size_t off = robodog_utf8_next_boundary(s_transcript,
+                                                    len - UI_TRANSCRIPT_CAP);
+            memmove(s_transcript, s_transcript + off, len - off + 1);
         } else {
-            s_transcript[UI_TRANSCRIPT_CAP] = '\0'; /* keep the head */
+            /* keep the head, cut on a codepoint boundary */
+            const size_t keep =
+                robodog_utf8_prev_boundary(s_transcript, UI_TRANSCRIPT_CAP);
+            s_transcript[keep] = '\0';
         }
     }
 }
@@ -258,7 +253,7 @@ static esp_err_t ui_build_screen(void)
     lv_obj_set_style_bg_color(s_status_label, lv_color_white(), 0);
     lv_obj_set_style_bg_opa(s_status_label, LV_OPA_COVER, 0);
     lv_obj_set_style_text_color(s_status_label, lv_color_black(), 0);
-    lv_obj_set_style_text_font(s_status_label, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_font(s_status_label, &robodog_font_tc_16, 0);
     ui_refresh_status_locked();
 
     /* Centered conversation-session name / short id (top-middle, between the
@@ -273,7 +268,7 @@ static esp_err_t ui_build_screen(void)
     lv_obj_set_style_bg_color(s_session_label, lv_color_white(), 0);
     lv_obj_set_style_bg_opa(s_session_label, LV_OPA_COVER, 0);
     lv_obj_set_style_text_color(s_session_label, lv_color_black(), 0);
-    lv_obj_set_style_text_font(s_session_label, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_font(s_session_label, &robodog_font_tc_16, 0);
     lv_label_set_text(s_session_label, "\u2026");
 
     /* Right-aligned live voice/agent state indicator (idle / listening /
@@ -287,7 +282,7 @@ static esp_err_t ui_build_screen(void)
     lv_obj_set_style_bg_color(s_state_label, lv_color_white(), 0);
     lv_obj_set_style_bg_opa(s_state_label, LV_OPA_COVER, 0);
     lv_obj_set_style_text_color(s_state_label, lv_color_black(), 0);
-    lv_obj_set_style_text_font(s_state_label, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_font(s_state_label, &robodog_font_tc_16, 0);
     lv_label_set_text(s_state_label, "idle");
 
     /* Separator under the status bar. */
@@ -326,7 +321,7 @@ static esp_err_t ui_build_screen(void)
     lv_obj_set_style_bg_color(s_body_label, lv_color_white(), 0);
     lv_obj_set_style_bg_opa(s_body_label, LV_OPA_COVER, 0);
     lv_obj_set_style_text_color(s_body_label, lv_color_black(), 0);
-    lv_obj_set_style_text_font(s_body_label, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_font(s_body_label, &robodog_font_tc_16, 0);
     lv_obj_set_style_text_line_space(s_body_label, 2, 0);
     lv_label_set_long_mode(s_body_label, LV_LABEL_LONG_WRAP);
     lv_label_set_text(s_body_label, s_transcript);
@@ -397,7 +392,7 @@ static void ui_process_cmd(const ui_cmd_t *cmd)
     }
     switch (cmd->type) {
     case UI_CMD_USER:
-        ui_ascii_copy(s_last_user, sizeof(s_last_user), cmd->text);
+        ui_text_copy(s_last_user, sizeof(s_last_user), cmd->text);
         s_assistant[0] = '\0'; /* a fresh turn starts: no reply accumulated yet */
         s_chunked = false;     /* not chunked until the voice queue appends */
         ui_append_line(">", cmd->text);
@@ -431,7 +426,7 @@ static void ui_process_cmd(const ui_cmd_t *cmd)
         ui_reset_to_exchange(s_last_user, s_assistant);
         break;
     case UI_CMD_STATE:
-        ui_ascii_copy(s_agent_state, sizeof(s_agent_state), cmd->state);
+        ui_text_copy(s_agent_state, sizeof(s_agent_state), cmd->state);
         /* State transitions are part of the console contract: a gate (and a
          * human) can see exactly when the panel claimed each state, which is
          * how a "panel still says idle during a listen" report is attributed
@@ -439,7 +434,7 @@ static void ui_process_cmd(const ui_cmd_t *cmd)
         ESP_LOGI(TAG, "state -> %s", s_agent_state);
         break;
     case UI_CMD_SESSION:
-        ui_ascii_copy(s_session_text, sizeof(s_session_text), cmd->text);
+        ui_text_copy(s_session_text, sizeof(s_session_text), cmd->text);
         break;
     }
     ui_refresh_status_locked();
@@ -523,7 +518,14 @@ static void ui_enqueue(ui_cmd_type_t type, const char *text, const char *state)
         .state = {0},
     };
     if (text != NULL) {
-        strlcpy(cmd.text, text, sizeof(cmd.text));
+        /* Truncate on a UTF-8 codepoint boundary: a CJK chunk must never be
+         * cut mid-character by the command field's byte size. */
+        size_t n = strlen(text);
+        if (n >= sizeof(cmd.text)) {
+            n = robodog_utf8_prev_boundary(text, sizeof(cmd.text) - 1);
+        }
+        memcpy(cmd.text, text, n);
+        cmd.text[n] = '\0';
     }
     if (state != NULL) {
         strlcpy(cmd.state, state, sizeof(cmd.state));

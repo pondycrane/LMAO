@@ -48,11 +48,11 @@ void robodog_http_rx_free(robodog_http_rx_t *rx);
 
 /**
  * @brief Reset an accumulator for reuse WITHOUT freeing/reallocating: keeps
- *        buf/cap, resets len/status and NUL-terminates.  The double-buffer
- *        slot reuse path (one-step TTS lookahead prefetch, robodog_voice.c)
- *        calls this between chunks so a 1.5 MB SPIRAM slot is reused in
- *        place — never freed/allocated per chunk (the DESIGN.md R7 tlsf
- *        panic site stays untouched).
+ *        buf/cap, resets len/status and NUL-terminates.  The TTS pipeline's
+ *        slot reuse path (voice_pipeline.c / robodog_voice.c) calls this
+ *        before every fetch so a slot's SPIRAM buffer is reused in place —
+ *        never freed/allocated per chunk (the DESIGN.md R7 tlsf panic site
+ *        stays untouched).
  */
 void robodog_http_rx_reset(robodog_http_rx_t *rx);
 

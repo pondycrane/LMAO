@@ -31,6 +31,11 @@ class TestSubjectSelection:
     def test_juliet_picks_pokemon_pool(self):
         assert cps.pick_subject("juliet", "tennis", "uid1") in cps.POKE_SUBJECTS
 
+    def test_juliet_varies_across_events_not_always_pikachu(self):
+        picked = {cps.pick_subject("juliet", "tennis", f"uid{i}") for i in range(40)}
+        assert len(picked) > 3
+        assert picked != {"pikachu"}
+
     def test_wesley_ice_skating_is_limbed_not_legless(self):
         # a legless fish/dolphin must NOT be picked for ice skating; PAW dogs ok
         for i in range(60):
@@ -42,6 +47,15 @@ class TestSubjectSelection:
         for i in range(30):
             s = cps.pick_subject("wesley", "swimming", f"uid{i}")
             assert s in cps.SEA_SUBJECTS or s in cps.PAW_SUBJECTS
+
+    def test_wesley_theme_alternates_paw_and_sea(self):
+        # the old bug pinned every event to the sea-animal theme
+        themes = {cps.pick_theme("wesley", "tennis", f"uid{i}")[0]
+                  for i in range(40)}
+        assert themes == {"sea animal", "paw patrol"}
+        paw = {cps.pick_subject("wesley", "tennis", f"uid{i}") for i in range(40)
+               if cps.pick_theme("wesley", "tennis", f"uid{i}")[0] == "paw patrol"}
+        assert len(paw) > 1  # a random PAW character, not always one dog
 
     def test_seeded_choice_is_deterministic_per_uid(self):
         assert cps._seeded_choice(cps.POKE_SUBJECTS, "abc") == \
@@ -77,20 +91,49 @@ class TestCombo:
         monkeypatch.delenv("LMAO_IMAGE_LLM_MODEL", raising=False)
 
     def test_wesley_ice_skating_query_is_coherent(self):
-        q = cps.build_combo("W ice skating 1:30", "wesley", "uid1")
-        assert q[0].endswith("ice skating")
-        lead = q[0].rsplit(" ice skating", 1)[0]  # subject; may be multi-word
-        assert lead in cps.SEA_COHERENT["ice skating"] or lead in cps.PAW_SUBJECTS
+        c = cps.build_combo("W ice skating 1:30", "wesley", "uid1")
+        assert c["queries"][0].endswith("ice skating")
+        assert c["subject"] in cps.SEA_COHERENT["ice skating"] or \
+            c["subject"] in cps.PAW_SUBJECTS
+        assert c["theme"] in ("sea animal", "paw patrol")
 
     def test_juliet_tennis_query_pairs_subject_and_action(self):
-        q = cps.build_combo("J tennis 4pm Mon", "juliet", "uid2")
-        assert q[0].endswith("tennis")
-        assert q[0].split()[0] in cps.POKE_SUBJECTS
+        c = cps.build_combo("J tennis 4pm Mon", "juliet", "uid2")
+        assert c["theme"] == "pokemon"
+        assert c["queries"][0].endswith("tennis")
+        assert c["queries"][0].startswith(c["subject"])
+        assert c["subject"] in cps.POKE_SUBJECTS
 
     def test_primary_in_queries(self):
-        q = cps.build_combo("Swim meet", "wesley", "uid3")
-        assert q[0].endswith("swimming")
-        assert q[0] in q
+        c = cps.build_combo("Swim meet", "wesley", "uid3")
+        assert c["queries"][0].endswith("swimming")
+        assert c["queries"][0] in c["queries"]
+
+    def test_llm_cannot_override_the_chosen_subject(self, monkeypatch):
+        """The model used to answer 'pikachu' for every pokemon event; the
+        seeded subject must win and queries for other characters be dropped."""
+        subject = cps.pick_subject("juliet", "tennis", "uid2")
+        monkeypatch.setenv("LMAO_IMAGE_LLM_URL", "http://llm.invalid/v1")
+        monkeypatch.setattr(cps, "_llm_combo", lambda *a, **k: {
+            "subject": "pikachu", "action": "tennis",
+            "queries": ["pikachu tennis", f"{subject} playing tennis"],
+        })
+        c = cps.build_combo("J tennis 4pm Mon", "juliet", "uid2")
+        assert c["subject"] == subject
+        assert all(cps._norm_title(subject) in cps._norm_title(q)
+                   for q in c["queries"])
+        assert "pikachu tennis" not in [q.lower() for q in c["queries"]]
+
+    def test_llm_action_refines_the_primary_query(self, monkeypatch):
+        monkeypatch.setenv("LMAO_IMAGE_LLM_URL", "http://llm.invalid/v1")
+        subject = cps.pick_subject("wesley", "tennis", "uid9")
+        monkeypatch.setattr(cps, "_llm_combo", lambda *a, **k: {
+            "action": "playing tennis", "queries": [f"{subject} playing tennis"],
+        })
+        c = cps.build_combo("W tennis 4pm", "wesley", "uid9")
+        assert c["subject"] == subject
+        assert c["action"] == "playing tennis"
+        assert c["queries"][0] == f"{subject} playing tennis"
 
 
 class TestExtractJsonArray:
@@ -198,3 +241,147 @@ class TestGenPrompt:
     def test_pokemon_theme_and_no_action(self):
         p = cps.build_gen_prompt("pikachu", "pokemon", "")
         assert "pikachu" in p and "fun activity" in p
+
+    def test_pokemon_prompt_names_the_character_type(self):
+        # a bare name ("goldeen") reads as a random word to the generator
+        p = cps.build_gen_prompt("goldeen", "pokemon", "tennis")
+        assert "pokemon" in p.lower() and "goldeen" in p
+
+    def test_paw_prompt_names_the_show(self):
+        p = cps.build_gen_prompt("marshall", "paw patrol", "swimming")
+        assert "PAW Patrol" in p and "marshall" in p
+
+    def test_sea_prompt_stays_bare(self):
+        assert "pokemon" not in cps.build_gen_prompt("seal", "sea animal", "").lower()
+
+
+class TestBackfillWindow:
+    def test_since_days_zero_is_future_only(self):
+        import time
+
+        cal = _FakeCal([])
+        cps.kid_events_needing_pics(cal, _FakePics([]), force=True, since_days=0)
+        cutoff = cal.queries[-1][1][0]
+        # future-only cutoff is "now" (allow the call's own elapsed time)
+        assert abs(cutoff - time.time() * 1000) < 5000
+
+    def test_since_days_includes_recent_past(self):
+        import time
+
+        cal = _FakeCal([])
+        cps.kid_events_needing_pics(cal, _FakePics([]), force=True, since_days=14)
+        cutoff = cal.queries[-1][1][0]
+        assert abs(cutoff - (time.time() - 14 * 86400) * 1000) < 5000
+
+    def test_force_ignores_already_stored_keys(self):
+        rows = [("u1", "J tennis", "ev_1", ["juliet"]),
+                ("u2", "W swim", "ev_2", ["wesley"])]
+        pics = _FakePics(["ev_1"])
+        assert cps.kid_events_needing_pics(_FakeCal(rows), pics) == [rows[1]]
+        assert cps.kid_events_needing_pics(_FakeCal(rows), pics, force=True) == rows
+
+    def test_limit_caps_the_batch(self):
+        rows = [(f"u{i}", f"event {i}", f"ev_{i}", ["juliet"]) for i in range(5)]
+        got = cps.kid_events_needing_pics(_FakeCal(rows), _FakePics([]),
+                                          force=True, limit=2)
+        assert got == rows[:2]
+
+
+class _FakeCursor:
+    def __init__(self, rows, queries):
+        self._rows, self._queries = rows, queries
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def execute(self, sql, params=None):
+        self._queries.append((sql, params))
+
+    def fetchall(self):
+        return self._rows
+
+
+class _FakeCal:
+    def __init__(self, rows):
+        import threading
+
+        self._lock, self._conn, self.queries = threading.Lock(), self, []
+        self._rows = rows
+
+    def cursor(self):
+        return _FakeCursor(self._rows, self.queries)
+
+    def close(self):
+        pass
+
+
+class _FakePics:
+    def __init__(self, keys):
+        self._keys = keys
+
+    def keys(self):
+        return self._keys
+
+    def close(self):
+        pass
+
+
+class TestVerifyPrompt:
+    """The gate must be theme-level for pokemon, or valid renders get rejected
+    and the retry loop collapses onto whichever character happens to pass."""
+
+    def test_pokemon_accepts_any_pokemon_not_just_the_named_one(self):
+        p = cps.build_verify_prompt("charmander", "pokemon", accept=cps.POKE_SUBJECTS)
+        assert "Pokémon character" in p
+        assert "any Pokémon character is acceptable" in p
+        assert "'charmander'" in p          # names the seeded pick as a hint
+        assert "photograph" in p and "costume" in p   # keeps cosplay photos out
+
+    def test_pokemon_prompt_is_theme_level_even_with_a_pool(self):
+        # the pool must not narrow it back to name-exact matching
+        a = cps.build_verify_prompt("goldeen", "pokemon", accept=["goldeen"])
+        assert "any Pokémon character is acceptable" in a
+
+    def test_paw_prompt_lists_the_dogs(self):
+        p = cps.build_verify_prompt("marshall", "paw patrol", accept=cps.PAW_SUBJECTS)
+        assert "PAW Patrol" in p
+        for dog in ("marshall", "chase", "skye", "rubble", "zuma"):
+            assert dog in p
+        assert "real dog photo" in p
+
+    def test_sea_prompt_uses_the_coherent_pool(self):
+        pool = cps.SEA_COHERENT["ice skating"]
+        p = cps.build_verify_prompt("seal", "sea animal", accept=pool)
+        assert "sea animals" in p
+        for name in pool:
+            assert name in p
+        assert "dolphin" not in p   # legless animals stay out of ice skating
+
+    def test_sea_prompt_defaults_to_the_full_pool(self):
+        p = cps.build_verify_prompt("octopus", "sea animal")
+        assert "octopus" in p and "whale" in p
+
+
+class TestParseVerdict:
+    def test_true_with_character(self):
+        assert cps._parse_verdict('{"match": true, "character": "Psyduck"}') == (True, "Psyduck")
+
+    def test_false_with_character(self):
+        assert cps._parse_verdict('{"match": false, "character": "unknown"}') == (False, "unknown")
+
+    def test_string_truthy(self):
+        assert cps._parse_verdict('{"match": "yes"}') == (True, "")
+
+    def test_garbage_is_unparseable(self):
+        assert cps._parse_verdict("no verdict here") == (None, "")
+
+    def test_parse_match_still_returns_a_bool(self):
+        assert cps._parse_match('{"match": true}') is True
+        assert cps._parse_match("nope") is None
+
+
+if __name__ == "__main__":
+    sys.exit(pytest.main([__file__] + sys.argv[1:]))

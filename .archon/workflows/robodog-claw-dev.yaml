@@ -6,7 +6,7 @@ description: |
   (robodog_client/esp-claw/, self-built from the pinned upstream + the LMAO
   overlay: text-only UI + deterministic RD_SHOT + the Phase 2 native voice loop
   rd_listen -> ASR -> agent -> TTS -> speaker). The board calls ALL model
-  endpoints (Whisper / LLM / Kokoro) on its own over LAN; no voice_bridge, no
+  endpoints (Whisper / LLM / Qwen3-TTS) on its own over LAN; no voice_bridge, no
   Hermes. Input: Feature description in natural language, or path to a PRD file.
   Output: PR ready for merge with comprehensive review + the robodog-claw-e2e
   voice-loop evidence (device console ASR transcript + agent reply + TTS + RLCD
@@ -51,7 +51,7 @@ description: |
   (robodog-hermes-dev) — the RLCD board hosts only one firmware image at a
   time; never run two board workflows at once.
 
-  Models: archon tiers (large/medium/small) resolved from ~/.archon/config.yaml (today all map to gx10 DeepSeek V4 Flash — edit config.yaml once to reroute when the local model is down) for
+  Models: archon tiers (large/medium/small) resolved from ~/.archon/config.yaml (today the create-plan/plan node runs on the medium tier, which prefers kimi-coding/k3 on the 'pi' provider; the large/small agent tiers map to local gx10 DeepSeek V4 Flash. archon binds one provider+model per tier, so the gx10 backup is a one-line reroute in ~/.archon/config.yaml when the primary model is down) for
   the agent. The RD_SHOT vision readback and the ring re-ASR inside
   robodog-claw-e2e are fixed pipelines, not the agent model. No Claude anywhere.
 
@@ -73,7 +73,7 @@ nodes:
   - id: create-plan
     command: lmao-create-plan
     context: fresh
-    model: large
+    model: medium
     effort: high
 
   # ═══════════════════════════════════════════════════════════════════

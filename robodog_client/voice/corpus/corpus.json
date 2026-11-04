@@ -2,36 +2,46 @@
   "time": {
     "transcript": "what time is it",
     "wav": "time.wav",
-    "sha256": "6d77e84cf5244835fa6f8a740f2d9c5f5e26a38d53a38c3135f56ea483e59414",
-    "voice": "af_heart",
-    "model": "kokoro-82m"
+    "sha256": "c9778e4bb1ba0e2ab325156eaf568fe74784213ad98c153536b973d9a4427935",
+    "voice": "aiden",
+    "model": "qwen3-tts"
   },
   "joke": {
     "transcript": "tell me a joke",
     "wav": "joke.wav",
-    "sha256": "9792e0829e6ddde2a64cbe1007ad7b9af9dbd9da4a4d5833c2d4024cfa772689",
-    "voice": "af_heart",
-    "model": "kokoro-82m"
+    "sha256": "635a92e7f6e1fa41b8554325cc56f7d9b713d6313cbaaff6b7cf3e86a31c9958",
+    "voice": "aiden",
+    "model": "qwen3-tts"
   },
   "greeting": {
     "transcript": "how are you today",
     "wav": "greeting.wav",
-    "sha256": "f89e0d5d34e4e648d55796a5d4ce6fa0e527c8f8fb38751ff9a42ddec9ae7d61",
-    "voice": "af_heart",
-    "model": "kokoro-82m"
+    "sha256": "486f841bb10486e22ecaaeec0469ac137b82c4ad399a47ff4a229204fce52ad6",
+    "voice": "aiden",
+    "model": "qwen3-tts"
   },
   "capabilities": {
     "transcript": "what can you do",
     "wav": "capabilities.wav",
-    "sha256": "0885739f35d5173116a7de11976823caa917c29b6b5296f7314b349f05d8a495",
-    "voice": "af_heart",
-    "model": "kokoro-82m"
+    "sha256": "441168511ee794974874c6a8d4213034e8fdbbcd538d48af92f2312e0e80486a",
+    "voice": "aiden",
+    "model": "qwen3-tts"
   },
   "count": {
     "transcript": "count slowly from twenty to thirty",
     "wav": "count.wav",
-    "sha256": "a442da622ec0ddaa005249bf0183a4aad724894c1a308741fd8d35d83199316d",
-    "voice": "af_heart",
-    "model": "kokoro-82m"
+    "sha256": "377cff2193718840850c6246d33087c8e7637358e61cc77d54a6a3363e823333",
+    "voice": "aiden",
+    "model": "qwen3-tts"
+  },
+  "zh_hello": {
+    "transcript": "\u4f60\u597d\u4e16\u754c\u4eca\u5929\u5f88\u597d",
+    "wav": "zh_hello.wav",
+    "sha256": "e0bafd98ce24b8164d69dfe612409eb7fcaf588b7551820b27e6bf821eec5ceb",
+    "voice": "serena",
+    "language": "chinese",
+    "speed": 0.7,
+    "play_vol": 0.9,
+    "model": "qwen3-tts"
   }
 }

@@ -232,7 +232,7 @@ archon workflow run robodog-hermes-review "review PR #NNN"
 # edge_agent (robodog_client/esp-claw/, self-built from the pinned upstream +
 # the LMAO overlay: text-only UI + RD_SHOT + the Phase 2 native voice loop
 # rd_listen -> ASR -> agent -> TTS -> speaker; the board calls Whisper/LLM/
-# Kokoro on its own, no bridge). Verification is VOICE-LOOP-DRIVEN:
+# Qwen3-TTS on its own, no bridge). Verification is VOICE-LOOP-DRIVEN:
 # robodog-claw-e2e (serial-console asserts + test-mic ring re-ASR + RD_SHOT
 # subtitle readback) + robodog-claw-voice-verify (the CHUNKED reply is read out
 # to its END — every `voice chunk i/n` TTS-bracketed on the console + mic

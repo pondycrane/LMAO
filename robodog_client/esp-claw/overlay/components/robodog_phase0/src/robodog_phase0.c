@@ -7,7 +7,7 @@
  *     the hermes/calendar firmwares' capture hooks).
  *   - Device-initiated HTTP round-trips to the user's model endpoints:
  *         rd_asr   device -> Whisper   (/v1/audio/transcriptions, multipart)
- *         rd_tts   device -> Kokoro    (/v1/audio/speech, JSON -> WAV)
+ *         rd_tts   device -> Qwen3-TTS  (/v1/audio/speech, JSON -> WAV)
  *         rd_chat  device -> LLM agent (native claw_agent_mgr per-turn seam —
  *                    the exact chat-injection API webim uses; Phase 2 wires
  *                    ASR text into it for the full voice loop).
@@ -203,25 +203,27 @@ static int cmd_rd_asr(int argc, char **argv)
     ESP_LOGI(TAG, "rd_asr: POST %s (%u samples @%lu Hz) ...",
              CONFIG_ROBODOG_ASR_URL, (unsigned)samples,
              (unsigned long)src_rate);
-    char *text = robodog_voice_asr(pcm, samples);
+    robodog_asr_meta_t meta;
+    char *text = robodog_voice_asr(pcm, samples, &meta);
     if (text == NULL) {
         ESP_LOGE(TAG, "rd_asr: Whisper round-trip failed");
         return 1;
     }
-    /* robodog_voice_asr already logged `ASR text=...` (the E2E hook); keep the
-     * probe's own one-line summary too. */
-    ESP_LOGI(TAG, "rd_asr: round-trip ok: text=\"%.160s\"", text);
+    /* robodog_voice_asr already logged `ASR text=...` + `ASR language=...`
+     * (the E2E hooks); keep the probe's own one-line summary too. */
+    ESP_LOGI(TAG, "rd_asr: round-trip ok: text=\"%.160s\" lang=%s prob=%.2f",
+             text, meta.language[0] ? meta.language : "?", meta.probability);
     free(text);
     return 0;
 }
 
-/* ── rd_tts: device -> Kokoro TTS round-trip ────────────────────────────── */
+/* ── rd_tts: device -> Qwen3-TTS round-trip ────────────────────────────── */
 
 static int cmd_rd_tts(int argc, char **argv)
 {
     (void)argc;
     (void)argv;
-    /* Reuse the voice loop's Kokoro client (single copy of the request body +
+    /* Reuse the voice loop's Qwen3-TTS client (single copy of the request body +
      * buffering — DRY) and report the blob WITHOUT playing it, so the probe
      * isolates the endpoint round-trip from the speaker path. */
     robodog_http_rx_t rx;
@@ -233,7 +235,7 @@ static int cmd_rd_tts(int argc, char **argv)
     const esp_err_t err = robodog_voice_tts_fetch(
         "RoboDog claw phase zero TTS round trip.", &rx);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "rd_tts: Kokoro round-trip failed: %s",
+        ESP_LOGE(TAG, "rd_tts: Qwen3-TTS round-trip failed: %s",
                  esp_err_to_name(err));
         robodog_http_rx_free(&rx);
         return 1;
@@ -330,7 +332,7 @@ static void robodog_register_commands(void)
          .help = "device->Whisper round-trip: POST the embedded corpus WAV",
          .func = &cmd_rd_asr},
         {.command = "rd_tts",
-         .help = "device->Kokoro round-trip: POST JSON, receive WAV",
+         .help = "device->Qwen3-TTS round-trip: POST JSON, receive WAV",
          .func = &cmd_rd_tts},
         {.command = "rd_chat",
          .help = "device->agent->LLM round-trip via the native injection seam",

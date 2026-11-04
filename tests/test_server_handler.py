@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import sys
+import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -360,6 +361,28 @@ class TestHandleLXMFDelivery:
         server.router.handle_outbound.assert_not_called()
 
 
+def _real_calendar_bundle():
+    """The REAL CalendarBundle message class, loaded from the generated stubs.
+
+    conftest mocks proto/lma_core wholesale for handler tests; the shared
+    assembler (lma_core.calendar_bundle) must hold a real message class or
+    `cal_env.calendar.CopyFrom(bundle)` cannot copy it.  Install it on the
+    assembler module for the duration of a test.
+    """
+    import importlib.util
+    import os
+
+    import lma_core.calendar_bundle as cb
+
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    spec = importlib.util.spec_from_file_location(
+        "_real_lma_messages_pb2", os.path.join(root, "proto", "lma_messages_pb2.py"))
+    real_pb2 = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(real_pb2)
+    cb.CalendarBundle = real_pb2.CalendarBundle
+    return real_pb2
+
+
 class TestCalendarReply:
     """A request.calendar envelope is answered with a CalendarBundle built
     from the Postgres CalendarStore (read-only sync, lma_core/calendar_pg)."""
@@ -372,17 +395,23 @@ class TestCalendarReply:
         import lmao_server.server as server_mod
 
         fake_store = MagicMock()
+        # A full fetch (since_ms == 0) returns the UPCOMING snapshot, so the
+        # fixture must be relative to now (a fixed 2023 row reads as ended).
+        now_ms = int(time.time() * 1000)
         fake_store.sync.return_value = (
             [
                 {
                     "uid": "u1", "calendar_id": "family", "title": "Swim class",
-                    "notes": "bring towel", "start_ms": 1700000000001,
-                    "end_ms": 1700000000061, "deleted": False, "pic": "swim",
+                    "notes": "bring towel", "start_ms": now_ms + 60_000,
+                    "end_ms": now_ms + 3_660_000, "deleted": False, "pic": "swim",
                 },
             ],
             999,
         )
         server_mod.CALENDAR = fake_store
+        real_pb2 = _real_calendar_bundle()
+        saved_bundle_cls = __import__("lma_core.calendar_bundle",
+                                      fromlist=["CalendarBundle"]).CalendarBundle
 
         # Reconfigure mock: envelope carries request.calendar
         mock_envelope = MagicMock()
@@ -392,6 +421,7 @@ class TestCalendarReply:
         mock_envelope.request.calendar.calendar_id = "family"
         mock_envelope.request.calendar.since_ms = 0
         mock_envelope.request.calendar.max_events = 0
+        mock_envelope.request.calendar.participant = ""
         mock_envelope.request_ack = False
         sys.modules["lma_core"].LMAOEnvelope.return_value = mock_envelope
 
@@ -403,23 +433,31 @@ class TestCalendarReply:
 
         server.handle_lxmf_delivery(msg)
 
-        # The store saw the sync request with resolved defaults; one CalendarBundle
+        # The store saw the sync request with resolved defaults (participant is
+        # passed explicitly now: one shared assembler serves gRPC/TCP/LXMF, so
+        # every transport sends the same keyword set); one CalendarBundle
         # outbound whose envelope carries the store's row + watermark.
         fake_store.sync.assert_called_once_with(
-            calendar_id="family", since_ms=0, max_events=0
+            calendar_id="family", since_ms=0, max_events=0, participant=""
         )
         server.router.handle_outbound.assert_called_once()
         call_kwargs = sys.modules["LXMF"].LXMessage.call_args.kwargs
         assert call_kwargs["title"] == "p:Envelope"
         assert call_kwargs["destination"] is msg.get_source.return_value
         assert call_kwargs["content"] == b"calendar-bundle-bytes"
-        assert mock_envelope.calendar.format == 1
-        assert mock_envelope.calendar.calendar_id == "family"
-        assert mock_envelope.calendar.watermark_ms == 999
-        assert mock_envelope.calendar.events.add.call_count == 1
-        entry = mock_envelope.calendar.events.add.return_value
-        assert entry.uid == "u1"
-        assert entry.pic == "swim"
+        # The reply envelope receives the REAL bundle assembled by the shared
+        # helper (lma_core.calendar_bundle.build_bundle), so assert on the
+        # copied message rather than on per-field assignments to a mock.
+        bundle = mock_envelope.calendar.CopyFrom.call_args.args[0]
+        assert isinstance(bundle, real_pb2.CalendarBundle)
+        assert bundle.format == 1
+        assert bundle.calendar_id == "family"
+        assert bundle.watermark_ms == 999
+        assert len(bundle.events) == 1
+        assert bundle.events[0].uid == "u1"
+        assert bundle.events[0].pic == "swim"
+        __import__("lma_core.calendar_bundle",
+                   fromlist=["CalendarBundle"]).CalendarBundle = saved_bundle_cls
 
     def test_calendar_request_carries_weather(self, server_with_mocks):
         """The LXMF calendar reply carries the same weather as gRPC/TCP: the
@@ -429,24 +467,22 @@ class TestCalendarReply:
         outbound LXMF message."""
         server = server_with_mocks
 
-        import importlib.util
-        import os
-
         import lmao_server.server as server_mod
         from lma_core.weather import WeatherProvider
 
-        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        spec = importlib.util.spec_from_file_location(
-            "_real_lma_messages_pb2", os.path.join(root, "proto", "lma_messages_pb2.py"))
-        real_pb2 = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(real_pb2)
+        real_pb2 = _real_calendar_bundle()
+        saved_bundle_cls = __import__("lma_core.calendar_bundle",
+                                      fromlist=["CalendarBundle"]).CalendarBundle
 
+        # Now-relative: a full fetch returns the UPCOMING snapshot, and the
+        # forecast bucket must contain the event's start hour.
+        start_ms = (int(time.time() * 1000) // 3_600_000 + 1) * 3_600_000
         fake_store = MagicMock()
         fake_store.sync.return_value = (
             [{
                 "uid": "u1", "calendar_id": "family", "title": "Swim class",
-                "notes": "", "start_ms": 1793530800000,
-                "end_ms": 1793534400000, "deleted": False, "pic": "",
+                "notes": "", "start_ms": start_ms,
+                "end_ms": start_ms + 3_600_000, "deleted": False, "pic": "",
             }],
             999,
         )
@@ -460,7 +496,7 @@ class TestCalendarReply:
             40.6834, -74.4427,
             fetch=lambda url, timeout: {
                 "current": {"temperature_2m": 6.7, "weather_code": 0},
-                "hourly": {"time": [1793530800],
+                "hourly": {"time": [start_ms // 1000],
                            "temperature_2m": [1.9], "weather_code": [71]},
             },
         )
@@ -489,6 +525,8 @@ class TestCalendarReply:
         finally:
             server_mod.LMAOEnvelope = saved_envelope
             server_mod.CALENDAR = saved_calendar
+            __import__("lma_core.calendar_bundle",
+                       fromlist=["CalendarBundle"]).CalendarBundle = saved_bundle_cls
             server_mod.WEATHER = saved_weather
 
     def test_calendar_request_no_reply_without_store(self, server_with_mocks, caplog):
@@ -504,6 +542,7 @@ class TestCalendarReply:
         mock_envelope.request.calendar.calendar_id = "family"
         mock_envelope.request.calendar.since_ms = 0
         mock_envelope.request.calendar.max_events = 0
+        mock_envelope.request.calendar.participant = ""
         mock_envelope.request_ack = False
         sys.modules["lma_core"].LMAOEnvelope.return_value = mock_envelope
 

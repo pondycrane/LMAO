@@ -553,8 +553,9 @@ WiFi/TCP-only (the calendar bundle is multi-frame and not suited to LoRa).
 The optional `pic` field on each event is a line-drawing pack key (e.g.
 `swim`, `birthday`, `dentist`; `""` = none). The drawings themselves are
 **1-bit black & white tiles** — formatted for the 4.2" RLCD calendar display
-(300×400 portrait) at a default 144×144 so the screen still has room for the
-title rows — generated and stored in Postgres (`cal_pics` table) by the
+(400×300 landscape canvas) at a default 176×176 so the headline drawing fills
+the left of the panel while the right column keeps the title, time range and
+forecast — generated and stored in Postgres (`cal_pics` table) by the
 **line-drawing skill** for agent use (see
 `.archon/skills/line-drawing/SKILL.md`) via `bazel run //tools:calendar_pics --
 --key <key>` — either from a pack SVG or a small line drawing found online and
@@ -584,6 +585,14 @@ unconditional `ON CONFLICT DO UPDATE` makes `lmao_cal_touch_trg` stamp every
 in-window row each run, which is what re-delivers each event with a fresh
 forecast as its date approaches. Stopping the job freezes per-event weather.
 
+**One reply assembler.** All three transports (gRPC `GetCalendar`, framed TCP
+:4247 and the LXMF envelope) build their `CalendarBundle` through
+`lma_core.calendar_bundle.build_bundle`, so the full-fetch rule (the
+**upcoming snapshot**: events that have not ended, ordered by start, tombstones
+dropped), the single-headline `pic_data` rule and the weather attach rule are
+identical everywhere.  A delta fetch keeps the store's `updated_ms` ordering
+and its tombstones (that is what the watermark contract requires).
+
 `temp_c10` stays in tenths of a degree **Celsius** on the wire so the panel
 does the °F conversion with no float and no locale; the WMO code is passed
 through raw and each display maps it to its own label. An absent `Weather`
@@ -599,13 +608,22 @@ server, so older clients are unaffected.
 (4.2" 300×400 reflective **ST7305** LCD, ESP32-S3 N16R8). It uses the board's
 **factory stack** (native ESP-IDF, u8g2 ST7305 driver — no MicroPython) and
 **skips RNS/LXMF entirely**: it joins the family LAN over WiFi and reads the
-calendar over the **gRPC `GetCalendar` RPC on :50051** (same
+calendar over the server's **framed-TCP calendar service on :4247** (same
 `CalendarRequest`/`CalendarBundle` messages as every other data path):
 
 ```
-client ──(HTTP/2: GET /lma.LMAO/GetCalendar + DATA CalendarRequest)──▶ 192.168.50.67:50051
-server ──(DATA: gRPC-framed CalendarBundle)──────────────────────────▶ client
+client ──(TCP: [u32 BE len][CalendarRequest])─────────────▶ tp4:4247
+server ──(TCP: [u32 BE len][CalendarBundle])──────────────▶ client
 ```
+
+The board previously spoke a hand-rolled HTTP/2 + gRPC client on `:50051`.
+That was retired: one unary RPC does not justify HTTP/2 on an MCU, the client
+could not decode response HEADERS (so `grpc-status != 0` looked like an empty
+reply), and any proxy/server change would break it silently.  Both transports
+now assemble the reply with the SAME shared helper
+(`lma_core/calendar_bundle.build_bundle`), so the full-fetch tombstone rule,
+the single-headline `pic_data` rule and the weather attach rule cannot drift
+between gRPC, framed TCP and LXMF.
 
 The device sends `since_ms` = the last `watermark_ms` it saw and merges the
 delta into its NVS cache (and its header clock is derived from the bundle's
@@ -639,12 +657,14 @@ WiFi/server credentials and `RD_SYNC_INTERVAL_SECONDS` are NVS-backed
 (non-empty = kid panel; empty/absent = family). Writing NVS WIPES the whole
 24 KB partition (event cache + any NVS keys). Build-time defaults come from
 `main/local_secrets.h` + `config.h` (both gitignored, never commit). On a
-reachable 2.4 GHz LAN the device joins and gRPC-syncs the live family calendar
+reachable 2.4 GHz LAN the device joins and syncs the live family calendar over
+framed TCP (:4247)
 — header date and rows verified on hardware.
 
 Status:
-- The server gRPC `GetCalendar` (:50051) is live in-cluster (verified from the
-  board); the device syncs real events (header clock + live rows).
+- The framed-TCP calendar service (:4247) is live in-cluster (verified from the
+  board); the device syncs real events (header clock + live rows).  The gRPC
+  `GetCalendar` (:50051) remains available for pod consumers.
 - Render is validated pixel-for-pixel against the physical panel (§7d.1).
 - An earlier LVGL 9 XML rendering attempt was retired — this u8g2 native
   build is the single board client.
@@ -661,7 +681,7 @@ about the render:
 ```bash
 bash robodog_client/build.sh            # normal build already includes capture
 bash robodog_client/flash.sh --port /dev/ttyACM0
-# capture after a reset — keep --n/--timeout wide enough for WiFi+gRPC sync:
+# capture after a reset — keep --n/--timeout wide enough for WiFi+calendar sync:
 python3 robodog_client/capture.py --port /dev/ttyACM0 --reset --n 4 \
     --timeout 100 --describe
 ```
@@ -680,20 +700,27 @@ Outputs in `robodog_client/shots/` (gitignored):
 | `frameN_analysis.txt` | vision-model transcription (`--describe`) |
 
 **Reading the state** (validate feature + device state):
-- Header date/time present → gRPC sync healthy; **BLANK** → not connected yet
+- Header date/time present → calendar sync healthy; **BLANK** → not connected yet
   or offline (the "no wifi" hint appears beside the first row).
 - `stale` hint → connected but last sync failed (showing cache); no hint →
   fresh data.
 - Rows show live served events (or the exact cached set) — compare against
-  Postgres/`GetCalendar` to confirm a data-path change. Note the panel caps at
-  5 event rows by design (headline picture + 4 compact text rows; 6th+
-  dropped), so a shorter set is not a data-path error unless a hint says so.
+  Postgres/`CalendarBundle` to confirm a data-path change. Note the panel caps
+  at 5 event rows by design (headline 176×176 picture + up to 4 compact
+  `9x15B` rows; 6th+ dropped), so a shorter set is not a data-path error
+  unless a hint says so.
   On a kid panel the header shows the kid name LEFT + `YYYY-MM-DD HH:MM`
   RIGHT (no divider); family keeps the centered clock.
+- Layout: the render uses the panel's full **400×300 landscape** canvas — a
+  **176×176** headline tile at its native size on the LEFT, a 200 px text
+  column to its right (wrapped `helvB18` title, then `HH:MM-HH:MM` range meta,
+  then the forecast), and the compact rows below.  Geometry lives in one block,
+  `robodog_client/main/rd_layout.h`; the title-line and row counts are computed
+  from measured font metrics, not assumed.
 - **Weather**: with the server's `LMAO_WEATHER_LAT/LON` set, a status line
   sits under the header (baseline 46) reading `now 44°F clear` on the LEFT and
   the `stale`/`no wifi` hint on the RIGHT, and the headline event's forecast
-  prints in the info column under its range meta (`27°F snow`). Both come from
+  prints in the text column below its range meta (`27°F snow`). Both come from
   the reply's `Weather` slots; when the server sends none, neither line is
   drawn (never a placeholder `0°F`). Forecasts are Fahrenheit, rounded.
 - Row meta reads `HH:MM-HH:MM` (start–end range) right-aligned on every row;
@@ -733,8 +760,9 @@ Voice loop (all local): the board streams Opus over WebSocket to the
 `robodog_client/voice/`, ops copy at `~/xiaozhi`), which ASRs with
 faster-whisper, submits each utterance to the board's **Hermes session**
 (hermes-gateway's xiaozhi platform plugin, stable board identity
-`~/xiaozhi/device_id`), and streams the reply back as 24 kHz Kokoro TTS
-(`spark-5307:8004`, voice `af_heart`) to the board speaker + subtitle on the
+`~/xiaozhi/device_id`), and streams the reply back as 24 kHz Qwen3-TTS
+(`spark-5307:8004`, empty voice = native speaker of the reply's language) to the
+board speaker + subtitle on the
 RLCD. `capture.py --listen` opens a session ad hoc. The TTS reply is streamed
 in **real time** at ~97% play-rate (`DOWNLINK_PACE`, default 58.2 ms/frame) so
 the board's fixed ~2.5 s decode/playback pipeline never overflows — the full
@@ -862,14 +890,14 @@ when running in Docker):
 | `LMAO_RNS_TRANSPORT_PATH` | unset (temp dir) | Reticulum state dir; set = persistent configdir (PVC: `/data/transport`) |
 | `LMAO_AUTOIFACE_DEVICES` | unset (all interfaces) | Comma-separated interface allowlist for AutoInterface (e.g. `wlan0`) |
 | `LMAO_TCP_PORT` | `4246` | Server's RNS `TCPServerInterface` listen port (hostNetwork) — the deterministic home-network transport for wifi/human clients (multicast AutoInterface is unreliable through the home AP) |
-| `LMAO_CAL_TCP_PORT` | `4247` | Framed-TCP family-calendar read service (RoboDog native client, no RNS): 4-byte-length-prefixed `CalendarRequest`→`CalendarBundle` |
+| `LMAO_CAL_TCP_PORT` | `4247` | Framed-TCP family-calendar read service (the RoboDog native client's transport, no RNS): 4-byte-length-prefixed `CalendarRequest`→`CalendarBundle`. Assembled by the same `lma_core.calendar_bundle.build_bundle` as the gRPC and LXMF paths, so it serves the headline `pic_data` too. |
 | `LMAO_WEATHER_LAT` / `LMAO_WEATHER_LON` | unset (weather off) | Household coordinates for the Open-Meteo forecast the server rides on every calendar reply (`CalendarBundle.current` + `CalEvent.weather`). Unset ⇒ no `Weather` message, i.e. byte-identical pre-weather replies. |
 | `LMAO_WEATHER_TTL_S` | `900` | Server-side forecast cache TTL. The panel syncs every 30 min, so a sync almost always triggers a refresh. |
 | `LMAO_WEATHER_URL` | Open-Meteo | Override for a self-hosted forecast endpoint. |
 | `LMAO_GCAL_TOKEN` | `~/.hermes/google_token.json` | **Deploy-time only** (never in a pod env): the Google authorized-user token `install_all` copies into the `lmao-gcal-token` Secret for the calendar-sync CronJob. |
 | `LMAO_TCP_BIND` | `0.0.0.0` | Server's RNS TCP bind IP |
 | `LMAO_ANNOUNCE_INTERVAL` | `0` (off) | Seconds between server re-announces over non-LoRa interfaces so fresh wifi clients can resolve the server's delivery identity |
-| `LMAO_SERVER_HOST` | `192.168.50.67` | Client-side: RNS `TCPClientInterface` target (the LMAO server's IP); overrides with `LMAO_SERVER_PORT` |
+| `LMAO_SERVER_HOST` | `tp4` | Client-side: RNS `TCPClientInterface` target — the LMAO server's **LAN hostname** (`tp4`). Never a LAN IP: the node's `wlan0` is DHCP and has moved before. Overrides with `LMAO_SERVER_PORT` |
 | `LMAO_MQTT_HOST` | `localhost` | MQTT broker hostname (IoT ingest) |
 | `LMAO_MQTT_PORT` | `1883` | MQTT broker port |
 | `LMAO_INGEST_DUCKDB_PATH` | `/data/sensors.db` | DuckDB file path (IoT ingest) |
@@ -1228,7 +1256,8 @@ LMAO_RNODE_PORT=/dev/ttyACM0 bazel run //human_client:client
 
 The Human Client starts with WiFi AutoInterface (no RNode required), plus a
 `TCPClientInterface` to the LMAO server (`LMAO_SERVER_HOST`, default
-`192.168.50.67:4246`) — the deterministic home-network transport that also
+`tp4:4246` — a LAN hostname, never an IP, since the node's `wlan0` is DHCP) —
+the deterministic home-network transport that also
 carries the server's delivery-identity announces.
 If an RNode is connected, LoRa messaging is available.
 
@@ -1375,8 +1404,10 @@ The registry is configured via environment variables:
 ├── lma_core/                          # Shared Python wrapper library
 │   ├── BUILD                          # Bazel: py_library target
 │   ├── __init__.py                    # Re-exports generated protobuf stubs
+│   ├── calendar_bundle.py             # ONE calendar-reply assembler (gRPC + framed TCP + LXMF)
 │   ├── calendar_pg.py                 # Postgres family-calendar store (read-only sync)
 │   ├── calendar_pics.py               # Postgres pic store + RLCD tile helpers (agent skill)
+│   ├── calendar_tcp_api.py            # Framed-TCP calendar read service (:4247, RoboDog)
 │   ├── config_utils.py                # RNode port resolution + INI generation helpers
 │   ├── message_utils.py               # Shared LXMF message decoding (decode_lmao_message)
 │   ├── query_api.py                   # Embedded HTTP query API (aiohttp) + SQL guard
@@ -1448,9 +1479,10 @@ The registry is configured via environment variables:
 ├── assets/calendar-icons/             # Family-calendar line-drawing pack (SVG, 20 keys)
 │
 ├── robodog_client/                    # Waveshare ESP32-S3 RLCD-4.2 display client (canonical)
-│   ├── main/                          # u8g2 ST7305 render + gRPC GetCalendar core (ESP-IDF)
+│   ├── main/                          # ESP-IDF: app loop + rd_store/rd_net/rd_render/rd_layout
 │   ├── components/                    # u8g2 wrapper (fetched csrc, never vendored) + u8g2_st7305 driver
-│   ├── build.sh / flash.sh            # Docker ESP-IDF build; host esptool flash
+│   ├── build.sh / flash.sh            # Docker ESP-IDF build; host esptool flash (flash_common.sh)
+│   ├── e2e_rig.py                     # shared board/audio/console scaffolding for both voice gates
 │   ├── capture.py                     # real-pixel screenshot + vision readback (§7d.1)
 │   └── shots/                         # captured frames/PNGs (gitignored)
 │

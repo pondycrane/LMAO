@@ -1,11 +1,6 @@
 #!/usr/bin/env bash
-# Flash robodog_client to the Waveshare ESP32-S3 RLCD, button-free.
-#
-# IMPORTANT: this runs esptool on the HOST, not in Docker.  Docker's ttyACM
-# passthrough drops the RTS/DTR modem-control ioctls (EPROTO on open), which
-# breaks esptool's reset into download mode — so the button-free
-# `--before default_reset` auto-reset only works when esptool runs directly on
-# the host.  Requires host `python3 -m esptool`.
+# Flash robodog_client (the family-calendar firmware) to the Waveshare
+# ESP32-S3 RLCD, button-free.
 #
 #   bazel run //robodog_client:flash_firmware [-- --port /dev/ttyACM0]
 #   bazel run //robodog_client:flash_firmware -- --port /dev/ttyACM0 --kid-name juliet
@@ -19,40 +14,25 @@
 # writes an EMPTY NVS image (wipes the partition, no kid_name key) -> clears a
 # previously-assigned board back to family mode.  No `--kid-name` flag at all
 # leaves NVS untouched (fresh board family via the pinned RD_KID_NAME_DEFAULT).
+#
+# Host esptool (Docker's ttyACM RTS passthrough breaks the button-free reset);
+# the shared plumbing lives in flash_common.sh.
 set -euo pipefail
-if [ -n "${BUILD_WORKSPACE_DIRECTORY:-}" ]; then
-    APP="$BUILD_WORKSPACE_DIRECTORY/robodog_client"
-else
-    APP="$(cd "$(dirname "$0")" && pwd)"
-fi
-PORT="${FLASH_PORT:-/dev/ttyACM0}"
-BAUD="${FLASH_BAUD:-460800}"
-IDF_IMG="${IDF_IMG:-espressif/idf:v5.3.1}"
+. "$(cd "$(dirname "$0")" && pwd)/flash_common.sh"
+rd_flash_init "$(cd "$(dirname "$0")" && pwd)"
+
 KID=""
 KID_FLAG=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --port)
-            # A missing/option-shaped value is an ERROR, not a silent default:
-            # `--port` with no value used to fall back to ${2:-$PORT} and then
-            # `shift 2 || true` never advanced on a trailing flag, spinning
-            # forever with no error (code-review repro).
-            if [ $# -lt 2 ] || [[ "$2" == -* ]]; then
-                echo "error: --port requires a value (default: /dev/ttyACM0)" >&2
-                exit 2
-            fi
-            PORT="$2"
+            rd_need_value "--port" $# "${2:-}" "default: /dev/ttyACM0"
+            RD_PORT="$2"
             shift 2
             ;;
         --kid-name)
-            # A missing/option-shaped value is an ERROR, not an implicit wipe:
-            # only an explicit `--kid-name ""` clears the board back to family.
-            # Previously `--kid-name` (trailing typo) aliased onto the explicit
-            # empty string and hit the DESTRUCTIVE empty-NVS wipe branch.
-            if [ $# -lt 2 ] || [[ "$2" == -* ]]; then
-                echo 'error: --kid-name requires a value (use --kid-name "" to clear to family)' >&2
-                exit 2
-            fi
+            # Only an explicit `--kid-name ""` clears the board back to family.
+            rd_need_value "--kid-name" $# "${2:-}" 'use --kid-name "" to clear to family'
             KID="$2"; KID_FLAG=1; shift 2
             ;;
         *)
@@ -61,19 +41,8 @@ while [ $# -gt 0 ]; do
             ;;
     esac
 done
-if ! python3 -c "import esptool" >/dev/null 2>&1; then
-    echo "host esptool is required (button-free reset can't run in Docker):" >&2
-    echo "  python3 -m pip install --target=\$HOME/.local/lib python esptool" >&2
-    exit 1
-fi
 
-NVS_WORK=""
-cleanup() {
-    if [ -n "$NVS_WORK" ] && [ -d "$NVS_WORK" ]; then
-        rm -rf "$NVS_WORK"
-    fi
-}
-trap cleanup EXIT
+rd_require_host_esptool
 
 NVS_ARGS=()
 if [ -n "$KID" ]; then
@@ -82,23 +51,17 @@ if [ -n "$KID" ]; then
     echo " (event cache + any NVS keys).  Network config falls back to the"
     echo " local_secrets.h defines, so this is safe for the RoboDog boards."
     echo "======================================================================"
-    NVS_WORK="$(mktemp -d /tmp/robodog_nvs.XXXXXX)"
-    # Namespace must be "robodog" (NVS_NS in robodog.c) for config_load() to
-    # read key "kid_name".  The plan sketch used "kid_name" as the namespace
-    # name which would NOT match the firmware reader — corrected here.
-    cat > "$NVS_WORK/kid_nvs.csv" <<EOF
+    rd_nvs_tmpdir
+    # Namespace must be "robodog" (RD_NVS_NAMESPACE in rd_store.h) for the
+    # firmware's config_load() to read key "kid_name".
+    cat > "$RD_NVS_WORK/kid_nvs.csv" <<EOF
 key,type,encoding,value
 robodog,namespace,,
 kid_name,data,string,$KID
 EOF
     echo "generating NVS image (kid_name='$KID') via IDF nvs_partition_gen.py"
-    docker run --rm \
-        -v "$APP:/workspace" -w /workspace \
-        -v "$NVS_WORK:/nvs" \
-        "$IDF_IMG" \
-        python3 /opt/esp/idf/components/nvs_flash/nvs_partition_generator/nvs_partition_gen.py \
-            generate /nvs/kid_nvs.csv /nvs/nvs.bin 0x6000
-    NVS_ARGS=(0x9000 "$NVS_WORK/nvs.bin")
+    rd_nvs_generate "$RD_NVS_WORK/kid_nvs.csv" "$RD_NVS_WORK/nvs.bin"
+    NVS_ARGS=(0x9000 "$RD_NVS_WORK/nvs.bin")
 elif [ "$KID_FLAG" -eq 1 ]; then
     # Explicit empty --kid-name "": wipe the partition back to family mode by
     # writing an NVS image with the namespace but no kid_name key.
@@ -106,29 +69,23 @@ elif [ "$KID_FLAG" -eq 1 ]; then
     echo " DANGER: writing an EMPTY NVS at 0x9000 WIPES the whole 24 KB"
     echo " partition (clears kid_name + event cache -> back to family mode)."
     echo "======================================================================"
-    NVS_WORK="$(mktemp -d /tmp/robodog_nvs.XXXXXX)"
-    printf 'key,type,encoding,value\nrobodog,namespace,,\n' > "$NVS_WORK/kid_nvs.csv"
+    rd_nvs_tmpdir
+    printf 'key,type,encoding,value\nrobodog,namespace,,\n' > "$RD_NVS_WORK/kid_nvs.csv"
     echo "generating EMPTY NVS image (family mode) via IDF nvs_partition_gen.py"
-    docker run --rm \
-        -v "$APP:/workspace" -w /workspace \
-        -v "$NVS_WORK:/nvs" \
-        "$IDF_IMG" \
-        python3 /opt/esp/idf/components/nvs_flash/nvs_partition_generator/nvs_partition_gen.py \
-            generate /nvs/kid_nvs.csv /nvs/nvs.bin 0x6000
-    NVS_ARGS=(0x9000 "$NVS_WORK/nvs.bin")
+    rd_nvs_generate "$RD_NVS_WORK/kid_nvs.csv" "$RD_NVS_WORK/nvs.bin"
+    NVS_ARGS=(0x9000 "$RD_NVS_WORK/nvs.bin")
 fi
 
-cd "$APP/build"
 echo "flashing app + partition table from @flash_args ..."
 if [ "${#NVS_ARGS[@]}" -eq 0 ]; then
-    exec python3 -m esptool --chip esp32s3 -p "$PORT" -b "$BAUD" \
+    # exec: the esptool process becomes this script (no trailing shell).
+    cd "$RD_APP/build"
+    exec python3 -m esptool --chip esp32s3 -p "$RD_PORT" -b "$RD_BAUD" \
         --before default_reset --after hard_reset write_flash @flash_args
 fi
-python3 -m esptool --chip esp32s3 -p "$PORT" -b "$BAUD" \
-    --before default_reset --after hard_reset write_flash \
-    @flash_args "${NVS_ARGS[@]}"
+rd_flash_write "$RD_APP/build" "${NVS_ARGS[@]}"
 if [ -n "$KID" ]; then
-    echo "==== board $PORT assigned kid_name='$KID' (NVS written at 0x9000) ===="
+    echo "==== board $RD_PORT assigned kid_name='$KID' (NVS written at 0x9000) ===="
 else
-    echo "==== board $PORT NVS cleared to family mode (empty NVS at 0x9000) ===="
+    echo "==== board $RD_PORT NVS cleared to family mode (empty NVS at 0x9000) ===="
 fi

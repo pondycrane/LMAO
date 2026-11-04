@@ -12,6 +12,30 @@
 #include <stdint.h>
 #include <string.h>
 
+/* UTF-8 boundary helpers.  The clip and both wrap back-off loops used to
+ * carry their own copies of this walk (the comments admitted they "mirror"
+ * each other); one pair of helpers means a boundary fix lands everywhere. */
+
+/* Largest valid boundary <= i: step back over continuation bytes
+ * (0b10xxxxxx).  A lead byte or ASCII byte is a boundary. */
+size_t rd_prev_utf8_boundary(const char *s, size_t i)
+{
+    while (i > 0 && ((uint8_t)s[i] & 0xC0u) == 0x80u) {
+        i--;
+    }
+    return i;
+}
+
+/* Smallest valid boundary > i: step forward over continuation bytes. */
+size_t rd_next_utf8_boundary(const char *s, size_t i, size_t n)
+{
+    i++;
+    while (i < n && ((uint8_t)s[i] & 0xC0u) == 0x80u) {
+        i++;
+    }
+    return i;
+}
+
 size_t rd_clip_prefix(const char *s, size_t n, int max_px, int ell_w,
                       rd_width_fn width, void *ctx)
 {
@@ -42,10 +66,7 @@ size_t rd_clip_prefix(const char *s, size_t n, int max_px, int ell_w,
         if (width(tmp, ctx) + ell_w <= max_px) {
             return c;                 /* longest prefix (+ ellipsis) that fits */
         }
-        c--;                          /* drop one whole glyph... */
-        while (c > 0 && ((uint8_t)s[c] & 0xC0) == 0x80) {
-            c--;                      /* ...without splitting a UTF-8 sequence */
-        }
+        c = rd_prev_utf8_boundary(s, c - 1);   /* drop one whole glyph */
     }
     /* Even a single glyph + ellipsis cannot fit: fail closed (0 == drop). */
     return 0;
@@ -154,21 +175,13 @@ size_t rd_wrap_lines(const char *s, size_t n, int max_px,
                 if (width(tmp, ctx) <= max_px) {
                     break;
                 }
-                cc--;                     /* drop one whole glyph... */
-                while (cc > 0 &&
-                       ((uint8_t)s[tok + c + cc] & 0xC0) == 0x80) {
-                    cc--;                 /* ...without splitting UTF-8 */
-                }
+                cc = rd_prev_utf8_boundary(s + tok + c, cc - 1);
             }
             if (cc == 0) {
                 /* Degenerate budget: even one glyph is over width.  Best
                  * effort -- emit that single glyph alone so no bytes are
                  * dropped (unreachable at the production 218 px budget). */
-                cc = 1;
-                while (c + cc < toklen &&
-                       ((uint8_t)s[tok + c + cc] & 0xC0) == 0x80) {
-                    cc++;
-                }
+                cc = rd_next_utf8_boundary(s + tok + c, 0, toklen);
             }
             nlines = rd_wrap_emit(out, out_cap, nlines, tok + c, cc);
             c += cc;

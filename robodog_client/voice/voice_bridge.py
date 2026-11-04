@@ -7,7 +7,7 @@ flashed XiaoZhi voice firmware a fully-local conversation loop:
 
   board --Opus/WebSocket--> bridge --PCM--> faster-whisper (ASR local)
                                 --text--> Hermes session (xiaozhi platform: memory/tools)
-                                --text--> Kokoro-82M TTS (spark-5307:8004)
+                                --text--> Qwen3-TTS (spark-5307:8004)
   bridge --Opus frames--> board speaker
 
 The brain is a first-class Hermes platform: the bridge speaks a tiny WebSocket
@@ -15,15 +15,15 @@ protocol to the xiaozhi platform plugin running inside the hermes-gateway
 (HERMES_BRAIN_URL, default ws://127.0.0.1:8101/xiaozhi/brain). Each utterance is
 submitted to the board's Hermes session (identity = board Device-Id/MAC) so the
 board gets sessions, multi-turn memory, tools/skills and allow-lists. Hermes
-auto-TTS (tts.provider: openai -> our Kokoro) returns the spoken reply as audio
+auto-TTS (tts.provider: openai -> our Qwen3-TTS) returns the spoken reply as audio
 (`voice` frame); when auto-TTS is off/fails the final text returns as a `reply`
-frame and the bridge synthesizes it with Kokoro itself. If the brain is
+frame and the bridge synthesizes it with Qwen3-TTS itself. If the brain is
 unreachable the bridge falls back to the old stateless gx10 call (call_llm) so
 the board keeps working.
 
 Also serves the OTA JSON the board fetches to learn our WebSocket URL, so no
 xiaozhi.me dependency. This is glue for the LMAO network only; all upstream
-sources (whisper, Kokoro/CosyVoice) are fetched, never vendored.
+sources (whisper, Qwen3-TTS/CosyVoice) are fetched, never vendored.
 
 Env overrides:
   BRIDGE_HOST      (default 0.0.0.0)
@@ -87,22 +87,29 @@ LLM_MODEL = os.environ.get("LLM_MODEL", "deepseek-ai/DeepSeek-V4-Flash-0731")
 LLM_SYSTEM = os.environ.get(
     "LLM_SYSTEM",
     "You are RoboDog, a friendly voice assistant living on an ESP32 desk display. "
-    "Keep answers short and natural for spoken output (1-3 sentences).",
+    "Keep answers short and natural for spoken output (1-3 sentences). "
+    "Answer in Mandarin Chinese (繁體中文, 標準華語) when the user speaks Chinese "
+    "and in English when they speak English; never use Cantonese/粵語 vocabulary "
+    "(唔、係、嘅、咗、佢、嗰、咁、啲、冇、睇、嚟、攰、喇) even if the user does.",
 )
 TTS_BASE_URL = os.environ.get("TTS_BASE_URL", "http://127.0.0.1:50000").rstrip("/")
 TTS_SPK_ID = os.environ.get("TTS_SPK_ID", "中文女")
 # Speech backend override envs (the shipped config is in
-# lmao-robodog-voice.service: local ASR + Kokoro TTS on spark-5307:8004;
+# lmao-robodog-voice.service: local ASR + Qwen3-TTS on spark-5307:8004;
 # spark-5307:8002 CosyVoice is disabled there — it emits non-speech because
 # its torch/transformers dep versions don't match on the ARM64 GB10 host):
 #   ASR_BASE_URL   OpenAI-compatible base for /v1/audio/transcriptions
 #                  (e.g. http://spark-eebf:PORT) — unset = local faster-whisper
 #   ASR_API_KEY / ASR_MODEL
 #   TTS_BASE_URL   base for OpenAI-compatible TTS (/v1/audio/speech),
-#                  e.g. http://spark-5307:8004 (Kokoro-82M) or a CosyVoice copy
+#                  e.g. http://spark-5307:8004 (Qwen3-TTS) or a CosyVoice copy
 #   TTS_MODE       "openai" (audio file from /v1/audio/speech) or
 #                  "cosyvoice" (stock CosyVoice FastAPI /inference_sft pcm)
 #   TTS_MODEL / TTS_VOICE / TTS_RESPONSE_FORMAT
+#                  TTS_VOICE empty = the server picks a native speaker from
+#                  the reply text's script (Qwen3-TTS timbres have a native
+#                  language baked in; a Chinese-native timbre reading English
+#                  carries a Chinese accent).
 ASR_BASE_URL = os.environ.get("ASR_BASE_URL", "").rstrip("/")
 ASR_API_KEY = os.environ.get("ASR_API_KEY", "dummy-local-noauth")
 ASR_MODEL = os.environ.get("ASR_MODEL", "base")
@@ -525,9 +532,9 @@ async def hermes_turn(session_id: str, device_id: str, text: str):
     """Send one utterance to the board's Hermes session; wait for its reply.
 
     Returns ``("voice", pcm_bytes)`` when Hermes auto-TTS produced the spoken
-    reply (Kokoro WAV -> 24 kHz PCM), else ``("reply", text)`` when the reply
+    reply (Qwen3-TTS WAV -> 24 kHz PCM), else ``("reply", text)`` when the reply
     came back as text (auto-TTS off/failed) for the bridge to synthesize with
-    the same Kokoro voice. Raises on error/timeout so the caller can fall back.
+    the same voice. Raises on error/timeout so the caller can fall back.
     """
     if not HERMES_BRAIN_URL:
         raise RuntimeError("HERMES_BRAIN_URL is not set")
@@ -685,7 +692,7 @@ async def speak_audio_to(ws: WebSocket, session_id: str, pcm_buf: bytes,
 
 
 async def speak_text_to(ws: WebSocket, session_id: str, reply: str) -> None:
-    """Turn text into Kokoro audio and stream it to the board session."""
+    """Turn text into Qwen3-TTS audio and stream it to the board session."""
     if not await ws_send(ws, {"session_id": session_id, "type": "tts", "state": "start"}):
         return
     if not await ws_send(ws, {
@@ -789,7 +796,7 @@ async def handle_conversation(ws: WebSocket, session_id: str):
         Brain: the utterance goes to the board's Hermes session (xiaozhi platform,
         device-id keyed) so sessions/memory/tools apply. Hermes auto-TTS returns the
         spoken reply as audio ("voice"), or the reply as text ("reply") which the
-        bridge speaks with the same Kokoro voice. On any brain failure we fall back
+        bridge speaks with the same voice. On any brain failure we fall back
         to the stateless gx10 call so the board never goes mute.
         """
         nonlocal pcm, processing, had_speech, silence_ms

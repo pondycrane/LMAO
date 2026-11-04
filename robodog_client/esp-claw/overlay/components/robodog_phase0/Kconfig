@@ -30,7 +30,7 @@ menu "RoboDog Phase 0 probes"
             POSTs captured speech to.  The user's own Whisper endpoint;
             overridden per-build via the robodog sdkconfig fragment
             (CLAW_ASR_URL env) so LAN IPs never need committing.
-            spark-5307 (Whisper :8001 + Kokoro :8004) is on the board's own
+            spark-5307 (Whisper :8001 + Qwen3-TTS :8004) is on the board's own
             192.168.50.0/24 subnet, so the device reaches it DIRECTLY — no
             host socat forward.  (When it lived on 192.168.10.0/24 the host
             forwarded 11801/11804; that is no longer needed.)
@@ -44,21 +44,32 @@ menu "RoboDog Phase 0 probes"
         default 4096
 
     config ROBODOG_TTS_URL
-        string "Kokoro TTS endpoint (device-facing)"
+        string "Qwen3-TTS endpoint (device-facing)"
         default "http://192.168.50.27:8004/v1/audio/speech"
         help
             OpenAI-compatible /v1/audio/speech endpoint the device POSTs JSON
-            to.  Overridden per-build via CLAW_TTS_URL env.  Kokoro
+            to.  Overridden per-build via CLAW_TTS_URL env.  Qwen3-TTS
             (spark-5307) is on the board's own 192.168.50.0/24 subnet, so the
             device reaches it directly.
 
     config ROBODOG_TTS_MODEL
         string "TTS model name in the request JSON"
-        default "kokoro-82m"
+        default "qwen3-tts"
 
     config ROBODOG_TTS_VOICE
-        string "TTS voice in the request JSON"
-        default "af_heart"
+        string "TTS voice in the request JSON (empty = pick by language)"
+        default ""
+        help
+            Empty means "let the server choose".  Qwen3-TTS timbres have a
+            native language baked in — aiden/ryan are English-native,
+            serena/vivian/uncle_fu/dylan/eric Chinese-native, ono_anna
+            Japanese, sohee Korean — and a Chinese-native timbre reading an
+            English reply carries a Chinese accent (instruct cannot remove
+            it).  With an empty voice the server infers the spoken language
+            from the reply text's script and picks a native speaker, so the
+            board sounds native in English and in Chinese without any
+            language plumbing in the firmware.  Name a timbre to pin one
+            voice for every reply.
 
     config ROBODOG_LLM_TIMEOUT_MS
         int "Timeout for the rd_chat agent round-trip (ms)"
@@ -143,38 +154,160 @@ menu "RoboDog Phase 2 voice loop"
             is a runtime input after boot; holding it during reset still enters
             ROM download mode, as on any ESP32-S3.)
 
+    config ROBODOG_VOICE_TTS_SLOTS
+        int "Number of TTS chunk buffers in the playback pipeline"
+        default 5
+        range 2 8
+        help
+            The chunk queue plays back-to-back while a background task
+            synthesizes AHEAD of the speaker.  Qwen3-TTS returns each chunk's
+            WAV whole (no streaming: time-to-first-byte == total) and its
+            synthesis runs at roughly real time, so a one-step lookahead is
+            not enough — when one fetch is slower than the previous chunk's
+            playback the reply stalls between sentences.  This many slot
+            buffers let the fetch worker stay several sentences ahead, which is
+            what makes the read-out sound continuous.  Memory: SLOTS x
+            TTS_MAX_RESPONSE bytes of PSRAM, allocated ONCE for the firmware's
+            lifetime (never per turn / per chunk).  Keep the product comfortably
+            below the free PSRAM (measured ~3.2 MB) — the capture buffer, ASR
+            response and LVGL share the same heap.  5 slots x 384 KB (~1.9 MB)
+            is the tuned default: it allows 3 fetches ahead (LOOKAHEAD), i.e.
+            ~19 s of synthesized audio buffered in front of the speaker, which
+            is what absorbs a slow/busy endpoint.  2 disables the deep pipeline
+            and only keeps the synchronous fallback slot.
+
+    config ROBODOG_VOICE_TTS_LOOKAHEAD
+        int "Background TTS fetches kept in flight ahead of playback"
+        default 3
+        range 1 7
+        help
+            How many chunk fetches the pipeline keeps armed ahead of the
+            speaker — and the number of CONCURRENT fetch workers, one per armed
+            chunk.  Concurrency matters because the endpoint serializes
+            synthesis but each request still costs the board a fixed ~0.5 s of
+            HTTP setup + WAV download: with ONE worker that overhead lands
+            between requests, the server idles while the board reads, and the
+            measured device-side synthesis rate fell to ~1.1x real time —
+            slower than playback, which opens the seam gaps.  Overlapping
+            fetches hide the transfer under the server's next synthesis.  This
+            is also the lookahead depth that absorbs a busy GPU host.  Clamped
+            to SLOTS-2 by the firmware, so one slot always stays free for the
+            synchronous fallback fetch (which is what keeps a failed fetch from
+            ever skipping or reordering a chunk).
+
     config ROBODOG_VOICE_TTS_MAX_RESPONSE
         int "Maximum TTS response body to buffer per chunk (bytes)"
-        default 1572864
+        default 393216
         help
-            Kokoro returns a 24 kHz s16 WAV (~48 KB/s).  1.5 MB covers a ~32 s
-            chunk (the per-chunk MAX_CHARS script is ~15-20 s).  Buffers are
-            allocated per chunk and freed after playback, so this bounds only
-            one sentence group, not the whole reply.  With the passthrough
-            playback path the WAV is written straight to the mixer (no copy),
-            so this is the only TTS-side allocation.
+            Qwen3-TTS returns a 24 kHz s16 WAV (~48 KB/s), so 384 KB covers a
+            ~8 s chunk.  This is PER SLOT: with SLOTS buffers the pipeline
+            holds SLOTS x this many bytes for the firmware's lifetime.  Keep
+            MAX_CHARS in sync: a chunk whose WAV exceeds this would grow the
+            slot buffer on the fly (the accumulator reallocs), which is exactly
+            the heap churn this bound exists to avoid.  At ~15 chars/s of
+            English speech, 96 bytes ~ 6.4 s ~ 307 KB; a CJK chunk of 96 bytes
+            (~32 characters) is ~6.4 s ~ 307 KB.  Both fit with margin, and the
+            5-slot pipeline (5 x 384 KB ~ 1.9 MB) leaves the rest of PSRAM to
+            the capture buffer / ASR / LVGL.
 
     config ROBODOG_VOICE_TTS_MAX_CHARS
-        int "Max characters per spoken sentence chunk"
-        default 240
+        int "Max bytes per spoken sentence chunk"
+        default 96
         range 1 479
         help
             The esp-claw root agent is verbose by default (a full "what can
             you do" dump is 60+ s of speech), so the FULL reply is split into
-            sentence-bounded chunks of at most this many characters (240 chars
-            ~ 15-20 s of audio) and each chunk is queued, spoken and appended
-            to the on-screen reply in order — the whole reply is read out and
-            rendered, not truncated to the first chunk.  A chunk is cut at the
-            first ".!?;"-or-newline break within the cap, else the last space,
-            else a hard cutoff.  A shorter value gives snappier hermes-style
-            per-sentence pacing.
+            SENTENCE-ALIGNED chunks and each chunk is queued, spoken and
+            appended to the on-screen reply in order — the whole reply is read
+            out and rendered, not truncated to the first chunk.
+
+            This is a PREFERRED budget, not a hard cap.  The cut lands after
+            the last ".!?;" (or CJK 。！？；…) inside it; when the window ends
+            mid-sentence the splitter runs on to the NEXT sentence ender, up
+            to the RLCD command-field ceiling (479 bytes).  That is what keeps
+            a seam from landing mid-sentence ("...and the blinds are" |
+            "closed, so..."), which made the read-out sound broken even though
+            every word was spoken.  A newline is only a WEAK fallback, used
+            when the reply carries no sentence punctuation at all.  Cuts are
+            always on a UTF-8 codepoint boundary, so CJK text is never split
+            mid-character.  A shorter value gives snappier per-sentence
+            pacing.
             Range 1..479: a chunk is rendered on the RLCD THROUGH the same
             UI command field that carries every on-screen line (robodog_ui
             text[480]), so a spoken chunk must ALWAYS fit that field or the
-            panel would show a shorter "sentence" than the one the voice is
+            panel would show a shorter "sentence" than the voice is
             reading (on-screen != spoken).  robodog_ui._Static_assert enforces
             this pairing at build time; keep the two bound definitions in
             sync.
+            A smaller value shortens the wait before each sentence is spoken
+            (synthesis is ~real time, so a chunk is heard about as long after
+            it was queued as its own duration), while a larger value gives the
+            TTS model more context for natural prosody.  96 bytes is the
+            balance: ~6.4 s of speech per chunk, comfortably inside one
+            pipeline slot, and — because Qwen3-TTS synthesizes at ~1.0x real
+            time and serializes requests — near-UNIFORM chunk lengths are what
+            keep the seams gapless (see TTS_FIRST_CHARS).  Sentence alignment
+            makes lengths vary slightly (a long sentence overflows to its own
+            end); the deep pipeline absorbs that.
+
+    config ROBODOG_VOICE_TTS_OVERFLOW_CHARS
+        int "Bytes a chunk may run past TTS_MAX_CHARS to finish a sentence"
+        default 24
+        range 0 383
+        help
+            Sentence alignment lets a chunk run past the preferred budget to
+            reach its sentence ender, but the overflow has to stay inside the
+            per-slot WAV buffer (CONFIG_ROBODOG_VOICE_TTS_MAX_RESPONSE, 384 KB
+            = ~8.2 s of 24 kHz s16 audio).  96 + 24 = 120 bytes is ~8 s of
+            Chinese (~4.5 chars/s at 3 bytes/char) or ~7 s of English, so the
+            WAV always fits one slot.  Measured failure without a bound: a
+            479-byte sentence produced a ~30 s WAV and the fetch failed with
+            `response buffer grow failed` (394886 B), which dropped chunks.
+            A sentence that cannot finish inside budget+overflow falls back to
+            the last CLAUSE break (, ， 、 ： :), then a space, then a hard cut
+            at the budget — a comma is a natural pause, a word cut is not.
+
+    config ROBODOG_VOICE_TTS_FIRST_CHARS
+        int "Max bytes for the FIRST spoken chunk"
+        default 96
+        range 1 479
+        help
+            The first chunk's synthesis is the entire time-to-first-audio, so a
+            smaller budget starts the reply sooner — but a SHORT first chunk
+            opens a gap at the first seam: the fetch worker cannot start
+            chunk 2 before chunk 1 is synthesized, and when chunk 2's
+            synthesis (proportional to its own length) is longer than chunk 1's
+            playback, the speaker has nothing to say until it finishes.
+            Measured on this endpoint (device-side RTF ~1.0, requests
+            serialized): a 96-byte first chunk followed by 144-byte chunks
+            produced a 7 s silence at the first seam, while UNIFORM chunks
+            produced ~0 ms seams.  Keep this EQUAL to TTS_MAX_CHARS unless you
+            deliberately trade first-audio latency against a first-seam gap.
+            With sentence-aligned chunks a shorter first chunk is no longer a
+            safe latency win: the NEXT chunk may be the long one that overflows
+            to its sentence end, and that is exactly the first-seam gap above.
+
+    config ROBODOG_VOICE_TTS_LEAD_KEEP_MS
+        int "Leading silence kept at the start of every chunk (ms)"
+        default 40
+        range 0 1000
+        help
+            Qwen3-TTS pads every chunk's WAV with silence (measured ~90 ms
+            lead-in, ~130 ms tail on this endpoint).  Played verbatim, each
+            seam doubles that padding and the reply sounds like separate clips.
+            The lead-in is trimmed down to this short budget: enough to keep a
+            soft onset (a breathy "h", a "t") intact, little enough that the
+            sentence starts right where the previous one ended.
+
+    config ROBODOG_VOICE_TTS_TAIL_KEEP_MS
+        int "Trailing silence kept at the end of every chunk (ms)"
+        default 40
+        range 0 1000
+        help
+            Trailing silence is trimmed to this short tail on EVERY chunk so a
+            final plosive or breath is never clipped while the padding that
+            would otherwise double up at the next sentence boundary is removed
+            (measured ~130 ms of tail padding per chunk on this endpoint).
 
     config ROBODOG_VOICE_TTS_MAX_CHUNKS
         int "Maximum number of spoken sentence chunks per turn"

@@ -1,5 +1,5 @@
 [Unit]
-Description=LMAO RoboDog local XiaoZhi voice bridge (Hermes xiaozhi brain + Kokoro TTS)
+Description=LMAO RoboDog local XiaoZhi voice bridge (Hermes xiaozhi brain + Qwen3-TTS)
 After=network-online.target
 Wants=network-online.target
 
@@ -12,23 +12,31 @@ Environment=LAN_IP=192.168.50.153
 # orchestrator tails this file instead of hammering journalctl.
 Environment=BRIDGE_LOG_FILE=%h/xiaozhi/voice_bridge.log
 # ASR: local faster-whisper base (spark-5307:8001 does not return compute to
-# this host today despite reachable routing; flip ASR_BASE_URL when it does)
+# this host today despite reachable routing; flip ASR_BASE_URL when it does).
+# WHISPER_LANG is intentionally unset: faster-whisper auto-detects, and the
+# remote endpoint now auto-detects too instead of forcing English — a forced
+# "en" turned every Chinese utterance into a plausible English sentence.
 Environment=WHISPER_MODEL=base
 #Environment=ASR_BASE_URL=http://spark-5307:8001
 #Environment=ASR_MODEL=small
 #Environment=ASR_API_KEY=dummy-local-noauth
-# TTS: Kokoro-82M served on spark-5307:8004 (cs: CosyVoice-8002 is broken —
-# torch/transformers skew vs the ARM64 GB10 env). Kokoro outputs 24k mono,
-# which is exactly the board downlink rate (no resample).
+# TTS: Qwen3-TTS served on spark-5307:8004 (24 kHz mono WAV, exactly the board
+# downlink rate — no resample). TTS_VOICE is EMPTY on purpose: Qwen3-TTS
+# timbres have a native language baked in (aiden/ryan English,
+# serena/vivian/… Chinese) and a Chinese-native timbre reading an English
+# reply carries a Chinese accent that `instruct` cannot remove. With no voice
+# the server infers the language from the reply text's script and picks a
+# native speaker, so a Chinese reply is voiced by a Chinese-native timbre and
+# an English one by an English-native timbre. Set TTS_VOICE=<timbre> to pin.
 Environment=TTS_MODE=openai
 Environment=TTS_BASE_URL=http://spark-5307:8004
-Environment=TTS_MODEL=kokoro-82m
-Environment=TTS_VOICE=af_heart
+Environment=TTS_MODEL=qwen3-tts
+Environment=TTS_VOICE=
 Environment=TTS_RESPONSE_FORMAT=wav
 Environment=TTS_API_KEY=dummy-local-noauth
 # Hermes brain: the board's Hermes session lives in the hermes-gateway process.
 # The bridge connects to the xiaozhi platform's brain WebSocket and submits each
-# utterance as a session message; replies come back as auto-TTS (Kokoro) audio.
+# utterance as a session message; replies come back as auto-TTS (Qwen3-TTS) audio.
 # HERMES_BRAIN_URL defaults to ws://127.0.0.1:8101/xiaozhi/brain.
 # DEVICE_ID: stable board identity for the Hermes session (MAC preferred); when
 # unset the bridge uses the XiaoZhi hello device_id/mac or a persisted uuid.

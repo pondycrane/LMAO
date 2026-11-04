@@ -2,6 +2,7 @@
 
 import asyncio
 import sys
+import time
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -36,25 +37,29 @@ def grpc_service_with_mocks():
 
 @pytest.fixture
 def real_calendar_bundle(grpc_service_with_mocks):
-    """Patch ``server.CalendarBundle`` to the REAL generated class for the
-    weather tests (conftest mocks proto types for import isolation, and a
-    mocked bundle cannot carry real Weather fields).  Restores on teardown."""
+    """Patch the SHARED assembler's ``CalendarBundle`` to the REAL generated
+    class for the weather tests (conftest mocks proto types for import
+    isolation, and a mocked bundle cannot carry real Weather fields).
+    Restores on teardown.
+
+    The class lives in ``lma_core.calendar_bundle`` (the one assembler behind
+    gRPC, framed TCP and LXMF), not in ``lmao_server.server``."""
     import importlib.util
     import os
 
-    import lmao_server.server as server_mod
+    import lma_core.calendar_bundle as cb
 
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     spec = importlib.util.spec_from_file_location(
         "_real_lma_messages_pb2", os.path.join(root, "proto", "lma_messages_pb2.py"))
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
-    saved = server_mod.CalendarBundle
-    server_mod.CalendarBundle = mod.CalendarBundle
+    saved = cb.CalendarBundle
+    cb.CalendarBundle = mod.CalendarBundle
     try:
         yield mod.CalendarBundle
     finally:
-        server_mod.CalendarBundle = saved
+        cb.CalendarBundle = saved
 
 
 class TestLMAOGrpcService:
@@ -263,10 +268,13 @@ class TestLMAOGrpcService:
         import lmao_server.server as server_mod
         from lma_core.weather import WeatherProvider
 
+        # Now-relative: a full fetch returns the UPCOMING snapshot, and the
+        # forecast bucket must contain the event's start hour.
+        start_ms = (int(time.time() * 1000) // 3_600_000 + 1) * 3_600_000
         fake = MagicMock()
         fake.sync.return_value = ([{
             "uid": "u1", "calendar_id": "family", "title": "Swim class",
-            "notes": "", "start_ms": 1793530800000, "end_ms": 1793534400000,
+            "notes": "", "start_ms": start_ms, "end_ms": start_ms + 3_600_000,
             "deleted": False, "pic": "",
         }], 1000)
         server_mod.CALENDAR = fake
@@ -275,7 +283,7 @@ class TestLMAOGrpcService:
             fetch=lambda url, timeout: {
                 "current": {"temperature_2m": 6.7, "weather_code": 0},
                 "hourly": {
-                    "time": [1793530800],
+                    "time": [start_ms // 1000],
                     "temperature_2m": [1.9],
                     "weather_code": [71],
                 },
@@ -307,10 +315,13 @@ class TestLMAOGrpcService:
 
         import lmao_server.server as server_mod
 
+        # Now-relative: a full fetch returns the UPCOMING snapshot, and the
+        # forecast bucket must contain the event's start hour.
+        start_ms = (int(time.time() * 1000) // 3_600_000 + 1) * 3_600_000
         fake = MagicMock()
         fake.sync.return_value = ([{
             "uid": "u1", "calendar_id": "family", "title": "Swim class",
-            "notes": "", "start_ms": 1793530800000, "end_ms": 1793534400000,
+            "notes": "", "start_ms": start_ms, "end_ms": start_ms + 3_600_000,
             "deleted": False, "pic": "",
         }], 1000)
         server_mod.CALENDAR = fake

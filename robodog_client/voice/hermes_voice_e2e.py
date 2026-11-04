@@ -70,6 +70,7 @@ sys.path.insert(0, str(REPO))
 
 # Components that must live in the same interpreter (faster-whisper etc.).
 import capture  # noqa: E402  (RD_SHOT decode + vision readback)
+import e2e_rig  # noqa: E402  (shared rig: board/audio/ASR scaffolding)
 from e2e_readout import (  # noqa: E402  (issue #274 read-out metrics, stdlib)
     active_play_span,
     energy_burst_window,
@@ -79,7 +80,8 @@ from e2e_readout import (  # noqa: E402  (issue #274 read-out metrics, stdlib)
 )
 from voice_bridge import call_asr  # noqa: E402
 
-BOARD_VID, BOARD_PID = 0x303A, 0x1001
+# The board fingerprint now lives in e2e_rig (shared with the claw gate).
+BOARD_VID, BOARD_PID = e2e_rig.BOARD_VID, e2e_rig.BOARD_PID
 SOUND_CARD = os.environ.get("RD_SOUND_CARD", "Device")
 PLAY_VOL = float(os.environ.get("RD_PLAY_VOL", "0.7"))
 BRIDGE_OTA_PORT = int(os.environ.get("BRIDGE_OTA_PORT", "8003"))
@@ -110,41 +112,22 @@ BETWEEN_LOOP_SETTLE = float(os.environ.get("RD_BETWEEN_LOOP_SETTLE", "3"))
 # reply is streamed during the inject call — so the test-mic capture starts
 # BEFORE it, with this fixed window covering a ~6-8 s reply plus tail.
 MIC_INJECT_CAP = float(os.environ.get("RD_INJECT_CAP_SECS", "20"))
-SILENCE = os.environ.get("E2E_AUDIO_SG", "sg audio -c")
 
 
-def log(msg):
-    print(f"[e2e] {time.strftime('%H:%M:%S')} {msg}", flush=True)
-
-
-def shell_run(cmd, timeout=120):
-    return subprocess.run(cmd, shell=True, capture_output=True, text=True,
-                         timeout=timeout)
+log = e2e_rig.log
+shell_run = e2e_rig.shell_run
 
 
 # ---------------------------------------------------------------------------
-# Rig preflight
+# Rig preflight (shared with the claw gate: robodog_client/e2e_rig.py)
 # ---------------------------------------------------------------------------
 def detect_board_port():
-    port = os.environ.get("ROBODOG_PORT", "")
-    if port:
-        return port
-    import serial.tools.list_ports
-    for p in serial.tools.list_ports.comports():
-        if p.vid == BOARD_VID and p.pid == BOARD_PID:
-            return p.device
-    return None
+    return e2e_rig.detect_board_port()
 
 
 def detect_sound_card():
-    """Configured ALSA card id, else the first USB audio card with both a
-    playback and a capture PCM."""
-    for line in Path("/proc/asound/cards").read_text().splitlines():
-        if "USB-Audio" in line and "[" in line:
-            card = line.split("[", 1)[1].split("]", 1)[0].strip()
-            if card:
-                return card
-    return SOUND_CARD
+    """Configured ALSA card id, else the first USB audio card."""
+    return e2e_rig.detect_sound_card(SOUND_CARD)
 
 
 def bridge_health():
@@ -163,37 +146,24 @@ def bridge_health():
 #   `sg audio` runs the command with the `audio` group (no re-login needed).
 # ---------------------------------------------------------------------------
 def play_wav(path: Path, volume: float = PLAY_VOL):
-    cmd = (f"{SILENCE} 'ffmpeg -hide_banner -loglevel error -re -i {path} "
-           f"-af volume={volume:.2f} -ac 1 -ar 16000 -f alsa "
-           f"plughw:{SOUND_CARD},0 -y'")
-    shell_run(cmd, timeout=120)
+    e2e_rig.play_wav(path, f"plughw:{SOUND_CARD},0", volume=volume,
+                     channels=1, rate=16000)
 
 
 def capture_mic(path: Path, seconds: float):
-    cmd = (f"{SILENCE} 'ffmpeg -hide_banner -loglevel error -f alsa "
-           f"-i plughw:{SOUND_CARD},0 -t {seconds:.1f} -ac 1 -ar 16000 {path} -y'")
-    shell_run(cmd, timeout=int(seconds) + 20)
+    e2e_rig.capture_mic(path, f"plughw:{SOUND_CARD},0", seconds,
+                        channels=1, rate=16000)
     return path
 
 
 def trim_wav(path: Path, start: float, end: float, out: Path):
-    cmd = (f"{SILENCE} 'ffmpeg -hide_banner -loglevel error -i {path} "
-           f"-ss {start:.2f} -t {max(0.1, end - start):.2f} -ac 1 -ar 16000 "
-           f"{out} -y'")
-    shell_run(cmd, timeout=30)
+    e2e_rig.trim_wav(path, start, end, out)
 
 
 def send_rd_listen(port: str):
-    import serial
-    s = serial.Serial(port, 115200, timeout=1)
-    try:
-        time.sleep(1.0)          # arm USB-Serial/JTAG RX after open
-        s.reset_input_buffer()
-        s.write(b"RD_LISTEN\r\n")
-        s.flush()
-        time.sleep(0.4)
-    finally:
-        s.close()
+    # Shared arm+write helper (settle before writing: USB-Serial/JTAG arms RX
+    # only after the CDC port is open and settled).
+    e2e_rig.arm_and_send(port, "RD_LISTEN", settle=1.0, after=0.4)
 
 
 def inject_text(text: str, session_id: str | None = None):

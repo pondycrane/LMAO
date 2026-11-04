@@ -3,9 +3,10 @@
 Generates a **1-bit black & white line drawing** for the family calendar and
 stores it in the in-cluster Postgres `cal_pics` table, keyed by the
 `CalEvent.pic` field. Designed for the 4.2" RLCD calendar display
-(300×400 portrait): the picture is a content *tile* (default **144×144** —
-about half the 300 px width) so the screen still has room for the
-title/time/date rows.
+(**400×300 landscape** logical canvas on the panel's 300×400 memory): the
+picture is the *headline* tile (default **176×176**) drawn at native size on
+the left, leaving the right column for the title, time range and forecast
+and the band below for the compact event rows.
 
 ## Prerequisites (once)
 
@@ -58,9 +59,11 @@ The `cal_pics` table is created on first use; rerunning a key overwrites
 ## Output contract
 
 - **format**: PNG, 1-bit, two colors only (line = `0` ink, background `255`).
-- **size**: default `144x144`; clamped to never exceed the RLCD tile area
+- **size**: default `176x176` (the panel's headline slot on the 400×300
+  landscape canvas); clamped to never exceed the RLCD tile area
   (`pick_tile_size()`).
-- **reference**: 144×144 line art ≈ 400–600 bytes (e.g. `swim` = 572 B).
+- **reference**: 176×176 line art ≈ 500–900 bytes (the headline slot's native
+  size; the extra resolution over the old 144×144 costs a few hundred bytes).
 - store schema: `cal_pics(pic_key PK, width, height, mime, bytes, created_ms, updated_ms)`.
 
 ## Procedure for the agent

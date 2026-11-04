@@ -6,11 +6,17 @@
  * the contract.  Portable: no strlcat (a plain host toolchain need not provide
  * the BSD/glibc extension), only strlen / memcpy / memmove.
  *
+ * UTF-8: the buffer holds CJK text, so neither the tail truncation (buffer
+ * full) nor the drop-oldest head trim may cut a multi-byte sequence — both
+ * are snapped to codepoint boundaries.
+ *
  * SPDX-License-Identifier: Apache-2.0
  */
 #include "voice_transcript.h"
 
 #include <string.h>
+
+#include "robodog_utf8.h"
 
 void robodog_transcript_append_chunk(char *buf, size_t buf_size,
                                      size_t keep_cap, const char *chunk)
@@ -31,16 +37,20 @@ void robodog_transcript_append_chunk(char *buf, size_t buf_size,
     }
     /* Append the chunk, bounded by buf_size-1. */
     const size_t room = buf_size - 1 - len;
-    const size_t take = clen < room ? clen : room;
+    size_t take = clen < room ? clen : room;
+    if (take < clen) {
+        take = robodog_utf8_prev_boundary(chunk, take); /* never split a char */
+    }
     memcpy(buf + len, chunk, take);
     len += take;
     buf[len] = '\0';
 
-    /* drop-oldest: keep only the most-recent keep_cap chars so a monster
+    /* drop-oldest: keep only the most-recent keep_cap bytes so a monster
      * reply can never roll the chunk being read off the buffer. */
     if (len > keep_cap) {
-        const size_t off = len - keep_cap;
-        memmove(buf, buf + off, keep_cap);
-        buf[keep_cap] = '\0';
+        size_t off = robodog_utf8_next_boundary(buf, len - keep_cap);
+        const size_t kept = len - off;
+        memmove(buf, buf + off, kept);
+        buf[kept] = '\0';
     }
 }

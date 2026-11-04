@@ -2,7 +2,7 @@ name: robodog-hermes-review
 description: |
   Review-entry twin of robodog-hermes-dev for the LMAO RoboDog **hermes voice
   device** (Waveshare ESP32-S3 RLCD-4.2 / ST7305, robodog_client/voice XiaoZhi
-  voice firmware + bridge ASR -> Hermes brain -> Kokoro TTS + the acoustic
+  voice firmware + bridge ASR -> Hermes brain -> Qwen3-TTS + the acoustic
   voice-loop E2E). It starts AT the code review of an EXISTING PR — create the
   PR manually first (e.g. `gh pr create` from the feature branch), then run
   this. On first node it re-points the (isolated) worktree at the PR's head
@@ -33,7 +33,7 @@ description: |
   (smart-irrigation-dev), or the RoboDog *calendar* firmware (robodog-client-dev
   — same board, mutually exclusive flashes; never run both at once).
 
-  Models: archon tiers (large/medium/small) resolved from ~/.archon/config.yaml (today all map to gx10 DeepSeek V4 Flash — edit config.yaml once to reroute when the local model is down) for
+  Models: archon tiers (large/medium/small) resolved from ~/.archon/config.yaml (today the create-plan/plan node runs on the medium tier, which prefers kimi-coding/k3 on the 'pi' provider; the large/small agent tiers map to local gx10 DeepSeek V4 Flash. archon binds one provider+model per tier, so the gx10 backup is a one-line reroute in ~/.archon/config.yaml when the primary model is down) for
   the agent; the screen-capture/vision READBACK and ASR re-read are fixed
   pipelines. No Claude anywhere.
 

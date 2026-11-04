@@ -94,7 +94,10 @@ there is no live panel to health-check:
 
 ## Phase 2: SERVER CHECK — The Calendar Source
 
-The panel's data comes from the LMAO server's `lma.LMAO/GetCalendar` gRPC.
+The panel's data comes from the LMAO server's framed-TCP calendar service
+(:4247, `LMAO_CAL_TCP_PORT`).  The gRPC `GetCalendar` (:50051) returns the SAME
+bundle (one shared assembler, `lma_core.calendar_bundle.build_bundle`), so the
+gRPC probe below is a valid health proxy for the panel's data path.
 If the server is reachable from this host (`LMAO_SERVER_HOST:RD_CAL_GRPC_PORT`,
 default `50051`), do a lightweight probe with a short timeout; otherwise record
 UNVERIFIABLE. Also try the in-cluster server when kubectl is available
