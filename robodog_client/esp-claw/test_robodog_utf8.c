@@ -157,8 +157,9 @@ void test_splitter_utf8_cjk(void)
     size_t rebuilt = 0;
     for (size_t i = 0; i < n; i++) {
         const char *ch = arena + offsets[i];
-        CHECK(strlen(ch) <= cap, "chunk %zu is %zu bytes (cap=%zu)", i,
-              strlen(ch), cap);
+        CHECK(strlen(ch) <= ROBODOG_VOICE_SPLIT_MAX_BYTES,
+              "chunk %zu is %zu bytes (ceiling=%d)", i, strlen(ch),
+              ROBODOG_VOICE_SPLIT_MAX_BYTES);
         CHECK(utf8_valid(ch), "chunk %zu is not valid UTF-8: '%s'", i, ch);
         rebuilt += strlen(ch);
     }

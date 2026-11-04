@@ -10,11 +10,12 @@ argument-hint: (no arguments - detects the board + test audio, drives the autono
 ## What this gate proves
 
 The response audio is **not truncated**: the full LLM reply is split into
-sentence-bounded chunks (each ≤
-`CONFIG_ROBODOG_VOICE_TTS_MAX_CHARS`, default 240), queued in order, rendered
-progressively on the RLCD (`robodog_ui_append_assistant`) and spoken
-(`voice_split_reply` + per-chunk `voice_speak`) — the voice reaches the LAST
-word of the reply.
+SENTENCE-ALIGNED chunks (`CONFIG_ROBODOG_VOICE_TTS_MAX_CHARS`, default 96, is
+a preferred budget — a chunk overflows it to finish a longer sentence, up to
+the 479-byte RLCD field ceiling), queued in order, rendered progressively on
+the RLCD (`robodog_ui_append_assistant`) and spoken (`voice_split_reply` +
+per-chunk `voice_speak`) — the voice reaches the LAST word of the reply, and
+every seam is a sentence end rather than a mid-clause cut.
 
 Two evidence legs:
 

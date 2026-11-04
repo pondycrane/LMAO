@@ -217,16 +217,21 @@ menu "RoboDog Phase 2 voice loop"
         help
             The esp-claw root agent is verbose by default (a full "what can
             you do" dump is 60+ s of speech), so the FULL reply is split into
-            sentence-bounded chunks of at most this many BYTES (240 bytes
-            ~ 15-20 s of English audio; for a Chinese reply ~80 characters,
-            since each CJK codepoint is 3 UTF-8 bytes) and each chunk is
-            queued, spoken and appended to the on-screen reply in order — the
-            whole reply is read out and rendered, not truncated to the first
-            chunk.  A chunk is cut after the last ".!?;"-or-newline break (or
-            a CJK 。！？；…) within the budget, else before the last space,
-            else a hard cutoff — always on a UTF-8 codepoint boundary, so CJK
-            text is never split mid-character.  A shorter value gives snappier
-            hermes-style per-sentence pacing.
+            SENTENCE-ALIGNED chunks and each chunk is queued, spoken and
+            appended to the on-screen reply in order — the whole reply is read
+            out and rendered, not truncated to the first chunk.
+
+            This is a PREFERRED budget, not a hard cap.  The cut lands after
+            the last ".!?;" (or CJK 。！？；…) inside it; when the window ends
+            mid-sentence the splitter runs on to the NEXT sentence ender, up
+            to the RLCD command-field ceiling (479 bytes).  That is what keeps
+            a seam from landing mid-sentence ("...and the blinds are" |
+            "closed, so..."), which made the read-out sound broken even though
+            every word was spoken.  A newline is only a WEAK fallback, used
+            when the reply carries no sentence punctuation at all.  Cuts are
+            always on a UTF-8 codepoint boundary, so CJK text is never split
+            mid-character.  A shorter value gives snappier per-sentence
+            pacing.
             Range 1..479: a chunk is rendered on the RLCD THROUGH the same
             UI command field that carries every on-screen line (robodog_ui
             text[480]), so a spoken chunk must ALWAYS fit that field or the
@@ -240,8 +245,10 @@ menu "RoboDog Phase 2 voice loop"
             TTS model more context for natural prosody.  96 bytes is the
             balance: ~6.4 s of speech per chunk, comfortably inside one
             pipeline slot, and — because Qwen3-TTS synthesizes at ~1.0x real
-            time and serializes requests — UNIFORM chunk lengths are what keeps
-            the seams gapless (see TTS_FIRST_CHARS).
+            time and serializes requests — near-UNIFORM chunk lengths are what
+            keep the seams gapless (see TTS_FIRST_CHARS).  Sentence alignment
+            makes lengths vary slightly (a long sentence overflows to its own
+            end); the deep pipeline absorbs that.
 
     config ROBODOG_VOICE_TTS_FIRST_CHARS
         int "Max bytes for the FIRST spoken chunk"
@@ -259,6 +266,9 @@ menu "RoboDog Phase 2 voice loop"
             produced a 7 s silence at the first seam, while UNIFORM chunks
             produced ~0 ms seams.  Keep this EQUAL to TTS_MAX_CHARS unless you
             deliberately trade first-audio latency against a first-seam gap.
+            With sentence-aligned chunks a shorter first chunk is no longer a
+            safe latency win: the NEXT chunk may be the long one that overflows
+            to its sentence end, and that is exactly the first-seam gap above.
 
     config ROBODOG_VOICE_TTS_LEAD_KEEP_MS
         int "Leading silence kept at the start of every chunk (ms)"

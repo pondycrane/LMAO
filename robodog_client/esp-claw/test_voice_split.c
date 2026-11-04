@@ -106,7 +106,21 @@ static void test_splitter_lossless_ordered(void)
         const char *ch = arena + offsets[i];
         const size_t l = strlen(ch);
         CHECK(l >= 1, "chunk %zu is empty", i);
-        CHECK(l <= cap, "chunk %zu is %zu chars (cap=%zu)", i, l, cap);
+        /* `cap` is a PREFERRED budget: a chunk may run past it to reach a
+         * sentence ender, but never past the UI field ceiling. */
+        CHECK(l <= ROBODOG_VOICE_SPLIT_MAX_BYTES,
+              "chunk %zu is %zu bytes (ceiling=%d)", i, l,
+              ROBODOG_VOICE_SPLIT_MAX_BYTES);
+    }
+
+    /* SENTENCE ALIGNMENT: every seam here is a real sentence ender, so no
+     * chunk may end mid-sentence (the reported "cuts mid-sentence, voice
+     * sounds weird" defect). */
+    for (size_t i = 0; i + 1 < n; i++) {
+        const char *ch = arena + offsets[i];
+        const char last = ch[strlen(ch) - 1];
+        CHECK(last == '.' || last == '!' || last == '?' || last == ';',
+              "chunk %zu ends mid-sentence: '%s'", i, ch);
     }
 }
 
@@ -130,9 +144,16 @@ static void test_splitter_edge_cases(void)
         CHECK(!truncated, "break-at-cap must not be flagged truncated");
         CHECK(n >= 1, "break-at-cap must produce at least one chunk");
         for (size_t i = 0; i < n; i++) {
-            CHECK(strlen(arena + offsets[i]) <= 40,
-                  "chunk %zu exceeds the cap (40)", i);
+            CHECK(strlen(arena + offsets[i]) <= ROBODOG_VOICE_SPLIT_MAX_BYTES,
+                  "chunk %zu exceeds the ceiling (%d)", i,
+                  ROBODOG_VOICE_SPLIT_MAX_BYTES);
         }
+        /* The '.' sits one byte past the preferred budget, so the splitter
+         * must run on to it rather than cut mid-word at 40. */
+        CHECK(n == 1 && strlen(arena + offsets[0]) == 41,
+              "break just past cap is taken (n=%zu len=%zu)", n,
+              n ? strlen(arena + offsets[0]) : 0);
+        CHECK(arena[offsets[0] + 40] == '.', "chunk keeps its sentence ender");
         strip_ws(a, sizeof(a), reply);
         strip_ws(b, sizeof(b), rebuild);
         CHECK(strcmp(a, b) == 0, "break-at-cap must be lossless");
@@ -178,6 +199,62 @@ static void test_splitter_edge_cases(void)
         const size_t n = split_all("", 40, arena, sizeof(arena), offsets, 64,
                                    &truncated, rebuild, sizeof(rebuild));
         CHECK(n == 0 && !truncated, "empty reply: 0 chunks, got %zu", n);
+    }
+}
+
+/* The reported defect: a sentence longer than the preferred budget used to be
+ * cut at a space, so the speaker stopped mid-sentence and resumed mid-sentence
+ * in the next chunk.  The splitter now runs to the sentence ender instead. */
+static void test_splitter_sentence_alignment(void)
+{
+    char arena[8192];
+    size_t offsets[128];
+    bool truncated = false;
+
+    const char *reply =
+        "The living room lamp is currently off, and the blinds are closed, so "
+        "the room is fairly dark and you will want more light. "
+        "I have turned the lamp on for you. "
+        "Your first meeting today is at nine thirty in the morning.";
+
+    const size_t n = robodog_voice_split_reply(reply, 96, 96, arena,
+                                               sizeof(arena), offsets, 64,
+                                               &truncated);
+    CHECK(!truncated, "reply fits (n=%zu)", n);
+    CHECK(n >= 2, "long sentences still span chunks (n=%zu)", n);
+    for (size_t i = 0; i < n; i++) {
+        const char *ch = arena + offsets[i];
+        const size_t l = strlen(ch);
+        CHECK(l <= ROBODOG_VOICE_SPLIT_MAX_BYTES,
+              "chunk %zu is %zu bytes (ceiling=%d)", i, l,
+              ROBODOG_VOICE_SPLIT_MAX_BYTES);
+        if (i + 1 < n) {
+            const char last = ch[l - 1];
+            CHECK(last == '.' || last == '!' || last == '?' || last == ';',
+                  "chunk %zu ends mid-sentence: '%s'", i, ch);
+        }
+    }
+    /* The 150-byte opening sentence exceeds cap=96, so chunk 1 must be the
+     * WHOLE sentence (sentence ender included), not a 96-byte word cut. */
+    CHECK(strlen(arena + offsets[0]) > 96,
+          "chunk 1 overflows cap to finish its sentence (len=%zu)",
+          strlen(arena + offsets[0]));
+    CHECK(arena[offsets[0] + strlen(arena + offsets[0]) - 1] == '.',
+          "chunk 1 ends at the period");
+
+    /* Chinese: 。 is a sentence ender too, so no seam lands mid-sentence. */
+    const char *zh =
+        "今天天氣很好。我們可以去公園散步，然後一起吃午餐。"
+        "下午可能會下雨，記得帶傘。晚上我們在家看電影。";
+    const size_t k = robodog_voice_split_reply(zh, 40, 40, arena,
+                                               sizeof(arena), offsets, 64,
+                                               &truncated);
+    CHECK(!truncated && k >= 2, "CJK reply spans chunks (k=%zu)", k);
+    for (size_t i = 0; i + 1 < k; i++) {
+        const char *ch = arena + offsets[i];
+        const size_t l = strlen(ch);
+        CHECK(l >= 3 && strcmp(ch + l - 3, "。") == 0,
+              "CJK chunk %zu does not end at 。: '%s'", i, ch);
     }
 }
 
@@ -384,6 +461,7 @@ int main(void)
 {
     test_splitter_lossless_ordered();
     test_splitter_edge_cases();
+    test_splitter_sentence_alignment();
     test_splitter_truncation_flag();
     test_transcript_join();
     test_transcript_cap_keep();

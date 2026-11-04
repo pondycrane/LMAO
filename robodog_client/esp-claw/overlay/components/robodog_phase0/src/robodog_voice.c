@@ -1432,7 +1432,8 @@ static void voice_turn(void)
             /* Speak the WHOLE reply, not a truncated script.  The esp-claw root
              * agent is verbose by default (a full "what can you do" dump is ~60 s
              * of speech), so the reply is split at sentence/line breaks into
-             * chunks of <= TTS_MAX_CHARS (the voice-splitter queue) and each
+             * sentence-aligned chunks (<= TTS_MAX_CHARS preferred, up to the
+             * UI field when a sentence runs long) and each
              * chunk is rendered on the RLCD (progressively growing the full reply
              * via robodog_ui_append_assistant) then spoken, in order.  The
              * read-out voice finishes every word of the reply — the adversarial
@@ -1447,7 +1448,11 @@ static void voice_turn(void)
              * the reply start speaking seconds sooner while the later chunks
              * stay large enough to carry natural prosody. */
             const size_t first_cap = CONFIG_ROBODOG_VOICE_TTS_FIRST_CHARS;
-            const size_t arena_cap = max_chunks * (cap + 1) + 1;
+            /* Chunks are sentence-aligned: a chunk may exceed `cap` to reach
+             * a sentence ender, so the arena is sized from the ABSOLUTE
+             * ceiling (the RLCD command field), not from `cap`. */
+            const size_t arena_cap =
+                max_chunks * (ROBODOG_VOICE_SPLIT_MAX_BYTES + 1) + 1;
             char *arena = heap_caps_malloc(arena_cap,
                                            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
             size_t *offs = NULL;
