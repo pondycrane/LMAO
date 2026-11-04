@@ -15,7 +15,10 @@
 /* ------------------------- tiny hand-serializer for the fixture ------------------------ */
 
 typedef struct {
-    uint8_t b[1024];
+    /* Large enough for a whole reply: 16 events at their text caps plus the
+     * headline 176x176 tile (3872 B) -- the fixture must hold what the wire
+     * holds, or a tile fixture silently overruns it. */
+    uint8_t b[16384];
     size_t n;
 } wbuf;
 
@@ -50,6 +53,14 @@ static void wfield_ld(wbuf *w, uint32_t fld, const char *s)
     wvar(w, slen);
     memcpy(w->b + w->n, s, slen);
     w->n += slen;
+}
+
+static void wfield_bytes(wbuf *w, uint32_t fld, const uint8_t *data, size_t n)
+{
+    wvar(w, ((uint64_t)fld << 3) | 2u);
+    wvar(w, n);
+    memcpy(w->b + w->n, data, n);
+    w->n += n;
 }
 
 static void emit_unknown_fixed32(wbuf *w, uint32_t fld)
@@ -294,6 +305,172 @@ static int test_weather_decode(void)
     return 0;
 }
 
+/* The headline tile (CalEvent.pic_data) is decoded into the BUNDLE, not the
+ * event: the server serves exactly one tile per reply, and 16 per-event
+ * 3872-byte slots would waste RAM on bytes that can never arrive. */
+static int test_pic_tile_decode(void)
+{
+    int passed = 0;
+    wbuf ev1 = {{0}, 0}, ev2 = {{0}, 0}, w = {{0}, 0};
+    uint8_t tile[LMA_PB_PIC_TILE_BYTES];
+
+    for (size_t i = 0; i < sizeof(tile); i++) {
+        tile[i] = (uint8_t)(i * 7u + 1u);
+    }
+
+    wfield_ld(&ev1, LMA_PB_EV_UID, "hl-uid");
+    wfield_ld(&ev1, LMA_PB_EV_TITLE, "Headline");
+    wfield_var(&ev1, LMA_PB_EV_START, 1700000000000ULL);
+    wfield_bytes(&ev1, LMA_PB_EV_PICDATA, tile, sizeof(tile));
+    wfield_ld(&ev2, LMA_PB_EV_UID, "plain-uid");
+    wfield_ld(&ev2, LMA_PB_EV_TITLE, "No picture");
+
+    wfield_var(&w, LMA_PB_BUNDLE_FORMAT, 1);
+    wfield_msg(&w, LMA_PB_BUNDLE_EVENT, &ev1);
+    wfield_msg(&w, LMA_PB_BUNDLE_EVENT, &ev2);
+
+    lma_cal_bundle_t b;
+    CHECK(lma_proto_bundle_decode(w.b, w.n, &b) == 1);
+    CHECK(b.event_count == 2);
+    CHECK(b.pic_data_len == sizeof(tile));
+    CHECK(memcmp(b.pic_data, tile, sizeof(tile)) == 0);
+    CHECK(strcmp(b.pic_uid, "hl-uid") == 0);
+
+    /* An oversize tile is capped at the contract size (never an overflow),
+     * and still binds to its event. */
+    {
+        uint8_t big[LMA_PB_PIC_TILE_BYTES + 64];
+        memset(big, 0xA5, sizeof(big));
+        wbuf ev3 = {{0}, 0}, w3 = {{0}, 0};
+        wfield_ld(&ev3, LMA_PB_EV_UID, "big-uid");
+        wfield_bytes(&ev3, LMA_PB_EV_PICDATA, big, sizeof(big));
+        wfield_msg(&w3, LMA_PB_BUNDLE_EVENT, &ev3);
+        lma_cal_bundle_t b3;
+        CHECK(lma_proto_bundle_decode(w3.b, w3.n, &b3) == 1);
+        CHECK(b3.pic_data_len == LMA_PB_PIC_TILE_BYTES);
+        CHECK(strcmp(b3.pic_uid, "big-uid") == 0);
+    }
+
+    /* No tile served -> no tile, and pic_uid stays empty so a stale drawing
+     * can never be paired with a different event. */
+    {
+        wbuf w4 = {{0}, 0};
+        wfield_msg(&w4, LMA_PB_BUNDLE_EVENT, &ev2);
+        lma_cal_bundle_t b4;
+        CHECK(lma_proto_bundle_decode(w4.b, w4.n, &b4) == 1);
+        CHECK(b4.pic_data_len == 0);
+        CHECK(b4.pic_uid[0] == '\0');
+    }
+
+    /* Every prefix decodes without faulting (tile bytes included). */
+    for (size_t cut = 0; cut <= w.n; cut++) {
+        lma_cal_bundle_t t;
+        (void)lma_proto_bundle_decode(w.b, cut, &t);
+    }
+
+    printf("test_pic_tile_decode: %d checks passed\n", passed);
+    return 0;
+}
+
+/* Encode/decode round-trip through the PRODUCTION encoder.  The fixtures
+ * above are hand-serialized (they pin the field numbers independently), but a
+ * hand-written serializer cannot prove the production encode matches the
+ * decode -- the two could drift together and stay green. */
+static int test_encode_roundtrip(void)
+{
+    int passed = 0;
+    lma_cal_bundle_t b;
+    lma_proto_bundle_init(&b);
+    b.format = 1;
+    snprintf(b.calendar_id, sizeof(b.calendar_id), "family");
+    b.watermark_ms = 1705000000000ULL;
+
+    /* event 0: the headline, with a served tile and a forecast. */
+    snprintf(b.events[0].uid, sizeof(b.events[0].uid), "hl-uid");
+    snprintf(b.events[0].title, sizeof(b.events[0].title), "Swim class");
+    snprintf(b.events[0].notes, sizeof(b.events[0].notes), "bring towel");
+    b.events[0].start_ms = 1700000000000ULL;
+    b.events[0].end_ms = 1700003600000ULL;
+    snprintf(b.events[0].pic, sizeof(b.events[0].pic), "swim");
+    b.events[0].weather.present = true;
+    b.events[0].weather.temp_c10 = -25;      /* zigzag negative */
+    b.events[0].weather.code = 71;
+
+    /* event 1: a tombstone, no weather, no pic. */
+    snprintf(b.events[1].uid, sizeof(b.events[1].uid), "gone-uid");
+    snprintf(b.events[1].title, sizeof(b.events[1].title), "Dentist");
+    b.events[1].start_ms = 1700000000000ULL;
+    b.events[1].deleted = true;
+    b.event_count = 2;
+
+    for (size_t i = 0; i < LMA_PB_PIC_TILE_BYTES; i++) {
+        b.pic_data[i] = (uint8_t)(i * 3u + 7u);
+    }
+    b.pic_data_len = LMA_PB_PIC_TILE_BYTES;
+    snprintf(b.pic_uid, sizeof(b.pic_uid), "hl-uid");
+
+    b.current.present = true;
+    b.current.temp_c10 = 46;
+    b.current.code = 0;
+
+    static uint8_t wire[LMA_PB_MAX_FRAME];
+    const int n = lma_proto_bundle_encode(&b, wire, sizeof(wire));
+    CHECK(n > 0);
+    CHECK((size_t)n < sizeof(wire));
+
+    lma_cal_bundle_t out;
+    CHECK(lma_proto_bundle_decode(wire, (size_t)n, &out) == 1);
+    CHECK(out.format == 1);
+    CHECK(strcmp(out.calendar_id, "family") == 0);
+    CHECK(out.watermark_ms == b.watermark_ms);
+    CHECK(out.event_count == 2);
+
+    CHECK(strcmp(out.events[0].uid, "hl-uid") == 0);
+    CHECK(strcmp(out.events[0].title, "Swim class") == 0);
+    CHECK(strcmp(out.events[0].notes, "bring towel") == 0);
+    CHECK(out.events[0].start_ms == 1700000000000ULL);
+    CHECK(out.events[0].end_ms == 1700003600000ULL);
+    CHECK(out.events[0].deleted == false);
+    CHECK(strcmp(out.events[0].pic, "swim") == 0);
+    CHECK(out.events[0].weather.present == true);
+    CHECK(out.events[0].weather.temp_c10 == -25);
+    CHECK(out.events[0].weather.code == 71);
+
+    CHECK(out.events[1].deleted == true);
+    CHECK(out.events[1].weather.present == false);
+
+    /* The tile lands at bundle level, bound to the headline uid. */
+    CHECK(out.pic_data_len == LMA_PB_PIC_TILE_BYTES);
+    CHECK(memcmp(out.pic_data, b.pic_data, LMA_PB_PIC_TILE_BYTES) == 0);
+    CHECK(strcmp(out.pic_uid, "hl-uid") == 0);
+
+    CHECK(out.current.present == true);
+    CHECK(out.current.temp_c10 == 46);
+    CHECK(out.current.code == 0);
+
+    /* Encoding is deterministic: same input -> same bytes. */
+    static uint8_t wire2[LMA_PB_MAX_FRAME];
+    const int n2 = lma_proto_bundle_encode(&b, wire2, sizeof(wire2));
+    CHECK(n2 == n);
+    CHECK(memcmp(wire, wire2, (size_t)n) == 0);
+
+    /* A too-small buffer fails closed (never a truncated message). */
+    CHECK(lma_proto_bundle_encode(&b, wire, 32) == -1);
+
+    /* Empty bundle encodes to just the format + calendar + watermark. */
+    lma_cal_bundle_t e;
+    lma_proto_bundle_init(&e);
+    const int en = lma_proto_bundle_encode(&e, wire, sizeof(wire));
+    CHECK(en > 0);
+    lma_cal_bundle_t eout;
+    CHECK(lma_proto_bundle_decode(wire, (size_t)en, &eout) == 1);
+    CHECK(eout.event_count == 0);
+    CHECK(eout.pic_data_len == 0);
+
+    printf("test_encode_roundtrip: %d checks passed\n", passed);
+    return 0;
+}
+
 static int test_robustness(void)
 {
     int passed = 0;
@@ -375,6 +552,8 @@ int main(void)
     if (test_req_roundtrip() != 0 ||
         test_bundle_decode() != 0 ||
         test_weather_decode() != 0 ||
+        test_pic_tile_decode() != 0 ||
+        test_encode_roundtrip() != 0 ||
         test_robustness() != 0) {
         printf("RESULT: FAIL\n");
         return 1;

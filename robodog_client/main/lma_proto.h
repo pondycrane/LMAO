@@ -11,6 +11,7 @@
  *                     uint64 start_ms = 4;  uint64 end_ms = 5;
  *                     bool deleted = 6;  string pic = 7;
  *                     bytes pic_data = 8;  Weather weather = 9; }
+ *                     (pic_data is decoded into the bundle-level tile)
  *   CalendarBundle  { uint32 format = 1;  string calendar_id = 2;
  *                     repeated CalEvent events = 3;  uint64 watermark_ms = 4;
  *                     Weather current = 5; }
@@ -63,11 +64,15 @@ extern "C" {
 #define LMA_PB_WX_TEMP 1u /* Weather.temp_c10 sint32 (zigzag) tenths of degC */
 #define LMA_PB_WX_CODE 2u /* Weather.code     uint32 WMO 4677 weather code   */
 
-/* RLCD image contract (see lma_core/calendar_pics.py): 144x144 1-bit (the
- * whole line drawing), row-major, MSB first, bit 1 = ink.  2592 bytes.  The
- * server attaches pic_data only to the single headline event per reply, so
- * one image at a time is on the wire despite the per-event buffer. */
-#define LMA_PB_PIC_TILE       144u
+/* RLCD image contract (see lma_core/calendar_pics.py): 176x176 1-bit (the
+ * whole line drawing), row-major, MSB first, bit 1 = ink.  3872 bytes.
+ *
+ * The server attaches pic_data ONLY to the single headline event per reply
+ * (lma_core.calendar_bundle.pick_headline_idx), so the decoder keeps exactly
+ * ONE tile at bundle level (lma_cal_bundle_t.pic_data / pic_uid) instead of a
+ * per-event 3872-byte slot: 16 events x 3872 B would waste 60 KB of RAM on
+ * bytes that can never arrive. */
+#define LMA_PB_PIC_TILE       176u
 #define LMA_PB_PIC_TILE_BYTES (LMA_PB_PIC_TILE * LMA_PB_PIC_TILE / 8u)
 
 /* Fixed-buffer sizes (character byte caps, NUL not counted in these macros). */
@@ -89,12 +94,12 @@ extern "C" {
 
 /*
  * Largest payload frame this build accepts from the server.  The server caps
- * frames at 1 MiB; a family delta is small, but each event may carry a 512 B
- * 64x64 pic tile, so the receive buffer must hold LMA_PB_EVENT_MAX tiles
- * (16 x 512 = 8 KiB) plus text.  16 KiB is generous on the PSRAM S3 and keeps
- * the buffer static.
+ * frames at 1 MiB; a family reply is small, but a FULL fetch can carry up to
+ * LMA_PB_EVENT_MAX events at their text caps (~570 B each) plus the single
+ * headline 176x176 tile (3872 B): ~13 KiB worst case.  20 KiB leaves headroom
+ * for one more field without silently truncating a reply.
  */
-#define LMA_PB_MAX_FRAME 16384u
+#define LMA_PB_MAX_FRAME 20480u
 
 typedef struct {
     char calendar_id[LMA_PB_CAL_ID_MAX + 1];
@@ -123,8 +128,6 @@ typedef struct {
     uint64_t end_ms;      /* epoch ms UTC */
     bool deleted;         /* tombstone: client must drop this uid */
     char pic[LMA_PB_EVENT_PIC_MAX + 1]; /* icon-pack key, "" = none */
-    uint8_t pic_data[LMA_PB_PIC_TILE_BYTES]; /* 1bpp 144x144 image (XBM) */
-    size_t pic_data_len;  /* 0 = no image served */
     lma_weather_t weather; /* forecast at start_ms (present == false -> none) */
 } lma_cal_event_t;
 
@@ -135,6 +138,13 @@ typedef struct {
     size_t event_count;
     uint64_t watermark_ms; /* server pre-read watermark; use as next since_ms */
     lma_weather_t current; /* conditions at reply time (present == false -> none) */
+    /* The single headline tile the server serves (CalEvent.pic_data on the
+     * headline event).  pic_uid is the event it belongs to; the renderer draws
+     * it only while that uid is still the headline, so a stale tile can never
+     * end up beside a different event's title. */
+    char pic_uid[LMA_PB_EVENT_UID_MAX + 1];
+    uint8_t pic_data[LMA_PB_PIC_TILE_BYTES]; /* 1bpp 176x176 image */
+    size_t pic_data_len;                     /* 0 = no image served */
 } lma_cal_bundle_t;
 
 /* Build an all-default request: "" calendar_id, since 0, max 0, i.e. the
@@ -156,6 +166,15 @@ void lma_proto_bundle_init(lma_cal_bundle_t *out);
  * truncated input.  Unknown fields (including wire types fixed32/fixed64) are
  * skipped; groups (deprecated) are rejected. */
 int lma_proto_bundle_decode(const uint8_t *data, size_t len, lma_cal_bundle_t *out);
+
+/* Serialize a CalendarBundle (format, calendar_id, events, watermark, current,
+ * plus the headline tile on the event whose uid == bundle->pic_uid).  Returns
+ * bytes written, or -1 when it does not fit `cap`.  This is the production
+ * encoder, used by the host self-test to prove encode/decode agree instead of
+ * the test re-implementing the wire format (a test serializer that drifts
+ * from the production encode stays green while the firmware is broken). */
+int lma_proto_bundle_encode(const lma_cal_bundle_t *bundle, uint8_t *buf,
+                            size_t cap);
 
 #ifdef __cplusplus
 }

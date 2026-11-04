@@ -1,10 +1,10 @@
 /*
  * config.h -- build-time board / network configuration for robodog_client.
  *
- * All values in here are defaults; the three network strings below can be
- * overridden at runtime from NVS keys:
- *   "wifi_ssid" (string), "wifi_pass" (string), "server_host" (string)
- * If a key is absent the corresponding #define is used.
+ * All values in here are defaults; the network strings below can be overridden
+ * at runtime from NVS keys.  The key NAMES have one definition --
+ * rd_store.h (RD_NVS_KEY_*) -- shared with the flash scripts, so a rename
+ * cannot leave one reader behind.  If a key is absent the #define is used.
  */
 #ifndef ROBODOG_CONFIG_H
 #define ROBODOG_CONFIG_H
@@ -17,8 +17,8 @@
        #define RD_WIFI_PASS_DEFAULT     "secret"
        #define RD_SERVER_HOST_DEFAULT   "192.168.10.19"
    It is gitignored; the value-settings below are guarded so the file may
-   pre-set them.  NVS keys ("wifi_ssid"/"wifi_pass"/"server_host") still win
-   over all of these at runtime. */
+   pre-set them.  NVS keys (rd_store.h) still win over all of these at
+   runtime. */
 #if __has_include("local_secrets.h")
 #include "local_secrets.h"
 #endif
@@ -39,20 +39,20 @@
 #define RD_WIFI_PASS_DEFAULT ""
 #endif
 
-/* ---- LMAO calendar sync (synchronous gRPC GetCalendar on the lmao server) ---- */
+/* ---- LMAO calendar sync (framed-TCP calendar read on the lmao server) ---- */
 /* Hostname, not an IP: tp4's wlan0 is DHCP and its address has already moved
  * once (.67 -> .68), which silently stranded the panel.  The router's DNS
  * resolves the node names, and the ESP32 uses the DHCP-provided resolver. */
 #ifndef RD_SERVER_HOST_DEFAULT
 #define RD_SERVER_HOST_DEFAULT "tp4"
 #endif
-#ifndef RD_CAL_GRPC_PORT
-#define RD_CAL_GRPC_PORT       50051u /* lma.LMAO.GetCalendar (gRPC) on 50051 */
+#ifndef RD_CAL_TCP_PORT
+#define RD_CAL_TCP_PORT        4247u  /* framed-TCP CalendarRequest/Bundle */
 #endif
 /* Server-side live calendar id; empty request == server default "family". */
 #define RD_CALENDAR_ID         "family"
 
-/* ---- Per-board kid assignment (NVS "kid_name" wins at runtime) ----
+/* ---- Per-board kid assignment (NVS RD_NVS_KEY_KID wins at runtime) ----
    A non-empty value makes this board a kid-dedicated panel: the request
    carries `participant=<kid>` (server filters to that kid's events) and the
    header shows the kid name left + live clock right.  "" = family mode
@@ -62,31 +62,31 @@
 #define RD_KID_NAME_DEFAULT ""
 #endif
 
-/* ---- SNTP (best-effort; the esp_sntp component is not in the espressif/idf
-   :v5.3.1 build image, so it is off — guarded by RD_SNTP_ENABLED). ---- */
-#define RD_SNTP_ENABLED       0
-#ifndef RD_SNTP_SERVER
-#define RD_SNTP_SERVER        "pool.ntp.org"
-#endif
-
 /* ---- Timing / robustness ---- */
 #define RD_SYNC_INTERVAL_SECONDS   1800u /* active hold between syncs */
 #define RD_WIFI_CONNECT_TIMEOUT_S  15u
+/* Separate budgets: connect (non-blocking + select) and the WHOLE reply read
+ * (SO_RCVTIMEO per recv plus a total deadline).  One shared value let a
+ * slow-drip server stall a full sync cycle. */
 #define RD_TCP_CONNECT_TIMEOUT_MS  5000
-#define RD_TCP_FRAME_TIMEOUT_MS    5000
-/* Display clock/calendar timezone: minutes east of UTC.
+#define RD_TCP_READ_TIMEOUT_MS     5000
+/* Task watchdog: the hold loop resets it every chunk; a wedged sync (or any
+ * blocking call that never returns) reboots the board instead of leaving a
+ * frozen panel until someone power-cycles it.  Must exceed the worst-case
+ * sync (connect + read + render + shot dump) with margin. */
+#define RD_WDT_TIMEOUT_S           60u
+/* Display clock/calendar timezone: minutes east of UTC.  The esp_sntp
+ * component is not in the espressif/idf:v5.3.1 build image, so there is no
+ * SNTP: the clock is derived from the server's epoch-ms watermark and advanced
+ * by esp_timer (rd_render.c).
  * . -300 = US Eastern Standard (EST, winter) — correct now (DST ended
  *          2026-11-01, the first Sunday of November)
  * . -240 = US Eastern Daylight (EDT, spring/summer)
- * The device has no RTC/SNTP (esp_sntp absent from the IDF image), so the
- * clock is derived from the server's epoch-ms watermark and shown in this
- * offset.  A fixed offset cannot follow DST by itself: flip this value and
+ * A fixed offset cannot follow DST by itself: flip this value and
  * reflash at each transition (EDT starts the 2nd Sunday of March, EST the
  * 1st Sunday of November).  The server-side `cal_events` times are absolute
  * epoch ms, so only the DISPLAYED clock and the day qualifiers move. */
 #ifndef RD_TZ_OFFSET_MINUTES
 #define RD_TZ_OFFSET_MINUTES (-300)
 #endif
-#define RD_SNTP_WAIT_MAX_MS        3000u
-
 #endif /* ROBODOG_CONFIG_H */

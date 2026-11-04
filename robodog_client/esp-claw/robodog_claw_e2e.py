@@ -39,6 +39,7 @@ sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(HERE))
 
 import capture  # noqa: E402  (RD_SHOT decode + vision readback)
+import e2e_rig  # noqa: E402  (shared rig: board/audio/ASR/console scaffolding)
 
 BOARD_VID, BOARD_PID = 0x303A, 0x1001
 SOUND_CARD = os.environ.get("RD_SOUND_CARD", "Device")
@@ -71,123 +72,26 @@ RING_CAP_SECS = float(os.environ.get("RD_RING_CAP_SECS", "15"))
 # can total 60+ s of speech from the verbose es-claw root agent), so the mic
 # must stay recording from the first `TTS start` until the last `TTS stop`.
 VOICE_CAP_SECS = float(os.environ.get("RD_VOICE_CAP_SECS", "240"))
-SILENCE = os.environ.get("E2E_AUDIO_SG", "sg audio -c")
 
 
-def log(msg):
-    print(f"[e2e] {time.strftime('%H:%M:%S')} {msg}", flush=True)
-
-
-# ---------------------------------------------------------------------------
-# Board reset/panic sentinels (NO_RESET leg)
-# ---------------------------------------------------------------------------
-# Any console line matching these marks a board reset or heap/panic fault.  The
-# console drain thread (ConsoleTail) feeds every line through note_panic(), so
-# a mid-run reboot (rst:0x / Guru Meditation / the DESIGN.md R7 tlsf heap
-# corruption) is NAMED by the NO_RESET leg instead of only failing whichever
-# leg was mid-wait — and it is seen even while the host is busy with audio.
-PANIC_RE = re.compile(
-    r"rst:0x|Guru Meditation|assert failed|Backtrace|abort\\(\\)|tlsf|"
-    r"heap.corr|CORRUPT|StoreProhibited|LoadProhibited|Rebooting"
-)
-
-# Per-run accumulator: run_loop clears it at the start of every session and
-# converts it into the NO_RESET assert at the end.
-RUN_RESET_LINES = []
-
-
-def note_panic(ln):
-    if PANIC_RE.search(ln):
-        RUN_RESET_LINES.append(ln)
-        log(f"PANIC SENTINEL: {ln[:160]}")
-
-
-def set_no_reset(res):
-    if RUN_RESET_LINES:
-        res["asserts"]["NO_RESET"] = "FAIL " + RUN_RESET_LINES[0]
-    else:
-        res["asserts"]["NO_RESET"] = "PASS (no reset/panic markers)"
-    return res
-
-
-def shell_run(cmd, timeout=120):
-    return subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
+log = e2e_rig.log
+shell_run = e2e_rig.shell_run
 
 
 # ---------------------------------------------------------------------------
-# Rig preflight
+# Rig preflight (shared with the hermes gate: robodog_client/e2e_rig.py)
 # ---------------------------------------------------------------------------
 def detect_board_port():
-    port = os.environ.get("ROBODOG_PORT", "")
-    if port == "AUTO":
-        port = ""
-    if port:
-        return port
-    import glob
-
-    cands = []
-    for dev in glob.glob("/dev/serial/by-id/*"):
-        if "USB-Serial" in dev or "JTAG" in dev:
-            cands.append(os.path.realpath(dev))
-    for cand in sorted(set(cands)):
-        if Path(cand).exists():
-            return cand
-    for cand in glob.glob("/dev/ttyACM*"):
-        if Path(cand).exists():
-            return cand
-    return None
+    return e2e_rig.detect_board_port()
 
 
 def detect_sound_card():
-    if SOUND_CARD:
-        return SOUND_CARD
-    try:
-        out = subprocess.run(["aplay", "-L"], capture_output=True, text=True)
-        for line in out.stdout.splitlines():
-            line = line.strip()
-            if line and "default" not in line and line != "null":
-                return line
-    except Exception:
-        pass
-    return None
+    return e2e_rig.detect_sound_card(SOUND_CARD)
 
 
 def remote_asr(wav_path):
     """Transcribe a WAV via the OpenAI-compatible Whisper endpoint."""
-    boundary = "--lmao-ring-" + os.urandom(8).hex()
-    wav = Path(wav_path).read_bytes()
-    fields = [
-        f"--{boundary}\r\n"
-        'Content-Disposition: form-data; name="model"\r\n\r\n'
-        f"{ASR_MODEL}\r\n"
-        f"--{boundary}\r\n"
-        'Content-Disposition: form-data; name="file"; '
-        'filename="ring.wav"\r\n'
-        "Content-Type: audio/wav\r\n\r\n"
-    ]
-    body = ("".join(fields)).encode() + wav + f"\r\n--{boundary}--\r\n".encode()
-    import urllib.request
-
-    req = urllib.request.Request(
-        ASR_URL, data=body, headers={"Content-Type": f"multipart/form-data; boundary={boundary}"}
-    )
-    with urllib.request.urlopen(req, timeout=300) as resp:
-        return json.load(resp)["text"]
-
-
-# ---------------------------------------------------------------------------
-# Host-side audio drive (test speaker -> board mic) + capture (board speaker)
-# ---------------------------------------------------------------------------
-def _audio_cmd(core):
-    """Wrap a raw ffmpeg command for the test-rig audio device.  Normally the
-    rig runs behind `sg audio -c '<cmd>'` (the ALSA nodes are audio-group).
-    When E2E_AUDIO_SG is empty the operator runs as root / a group member
-    directly — then emit the BARE command: prefixing an empty string would
-    leave ` 'ffmpeg ...' `, which the shell reads as a single space-containing
-    COMMAND NAME and fails with 127, silently killing playback/capture."""
-    if SILENCE:
-        return f"{SILENCE} '{core}'"
-    return core
+    return e2e_rig.remote_asr(wav_path, ASR_URL, ASR_MODEL)
 
 
 def shell_ok(cmd, timeout):
@@ -202,145 +106,22 @@ def play_wav(path: Path, volume: float = PLAY_VOL):
     # The board's mic sits far from the test speaker (marginal coupling, the
     # documented RING PASS-WEAK rig): stream the corpus TWICE back-to-back at
     # realtime so the energy-VAD and Whisper get a clear, repeatable signal.
-    core = (
-        f"ffmpeg -hide_banner -loglevel error -re -stream_loop 2 -i {path} "
-        f"-af volume={volume} -ac 2 -f alsa {ALSA_DEV}"
-    )
-    shell_ok(_audio_cmd(core), 120)
+    e2e_rig.play_wav(path, ALSA_DEV, volume=volume, loop=2, channels=2,
+                     rate=None, sg=e2e_rig.SILENCE)
 
 
 def capture_mic(path: Path, seconds: float):
-    core = (
-        f"ffmpeg -hide_banner -loglevel error -f alsa "
-        f"-i {ALSA_DEV} -t {seconds} -ac 1 -ar 16000 {path}"
-    )
-    shell_ok(_audio_cmd(core), int(seconds) + 30)
+    e2e_rig.capture_mic(path, ALSA_DEV, seconds, channels=1, rate=16000,
+                        sg=e2e_rig.SILENCE)
     return path
 
 
 def trim_loudest_window(path: Path, out: Path, seconds: float):
-    """Find the loudest ~3 s window (RMS of 0.5 s buckets) of a mic capture."""
-    import wave as _w
-
-    with _w.open(str(path), "rb") as w:
-        n = w.getnframes()
-        rate = w.getframerate()
-        ch = w.getnchannels()
-        sw = w.getsampwidth()
-        frames = w.readframes(n)
-    import array
-
-    if sw != 2:
-        return None
-    samples = array.array("h", frames)
-    if ch > 1:
-        samples = array.array("h", samples[::ch])  # take left channel
-    fs = rate
-    bucket = int(fs // 2)  # 0.5 s
-    wins = []
-    for i in range(0, max(len(samples) - bucket, 1), bucket):
-        chunk = samples[i : i + bucket]
-        if not chunk:
-            break
-        rms = sum(abs(s) for s in chunk) / len(chunk)
-        wins.append((rms, i / fs))
-    if not wins:
-        return None
-    _, best_start = max(wins)
-    dur = min(seconds, len(samples) / fs - best_start)
-    if dur < 1.0:
-        dur = min(seconds, len(samples) / fs)
-        best_start = 0.0
-    start_s = int(best_start)
-    start_f = start_s * rate * ch * 2
-    end_f = min(int((best_start + dur) * rate * ch * 2), len(frames))
-    with _w.open(str(path), "rb") as w:
-        src = w.readframes(w.getnframes())
-    burst = src[start_f:end_f]
-    with _w.open(str(out), "wb") as w2:
-        w2.setnchannels(1)
-        w2.setsampwidth(2)
-        w2.setframerate(rate)
-        w2.writeframes(burst)
-    return best_start
+    """Cut the loudest window out of the mic capture (shared rig helper)."""
+    return e2e_rig.trim_loudest_window(path, out, seconds)
 
 
-# ---------------------------------------------------------------------------
-# Device console (serial) tail
-# ---------------------------------------------------------------------------
-class ConsoleTail:
-    """Owns the device console and drains it CONTINUOUSLY.
-
-    The console is the single assert source for this gate, so a line may never
-    be lost.  Reading only while a `wait_for_log` runs loses lines whenever the
-    host blocks elsewhere: `play_wav` (~10 s) and the remote re-ASR (tens of
-    seconds) leave the USB-Serial/JTAG buffer unread while the device keeps
-    printing (the RD_SHOT self-tick alone is ~7 KB/s), so the ASR/reply/TTS
-    lines of the NEXT session are dropped — the gate then reports a false
-    "session ended before ASR" on a board that actually worked.  A background
-    thread therefore reads the port for the whole session and every scanner is
-    a cursor over the accumulated lines (start = an index, not a byte offset),
-    so no consumer can consume or discard another's lines.
-
-    Also drains the console during host-side audio work, which keeps the
-    device's blocking `printf` cheap instead of stalling its tasks on a full
-    CDC FIFO."""
-
-    def __init__(self, port):
-        self.s = serial.Serial(port, CONSOLE_BAUD, timeout=0.2)
-        time.sleep(1.0)  # let USB-Serial/JTAG enumeration settle
-        self.s.reset_input_buffer()
-        self._cond = threading.Condition()
-        self._lines = []
-        self._closed = False
-        self._thread = threading.Thread(target=self._drain, daemon=True)
-        self._thread.start()
-
-    def _drain(self):
-        acc = b""
-        while not self._closed:
-            try:
-                data = self.s.read(8192)
-            except Exception:  # noqa: BLE001 — port vanished: stop draining
-                break
-            if not data:
-                continue
-            acc += data
-            while b"\n" in acc:
-                raw, acc = acc.split(b"\n", 1)
-                ln = raw.decode("utf-8", "replace").strip()
-                note_panic(ln)  # NO_RESET: reset/panic sentinel scan
-                with self._cond:
-                    self._lines.append(ln)
-                    self._cond.notify_all()
-
-    def write(self, cmd):
-        self.s.write(f"{cmd}\r\n".encode())
-        self.s.flush()
-
-    def mark(self):
-        """Cursor for "everything from now on"."""
-        with self._cond:
-            return len(self._lines)
-
-    def take(self, start, timeout):
-        """Block until lines past `start` exist or `timeout` elapses.
-        Returns (lines_from_start, new_cursor)."""
-        deadline = time.time() + timeout
-        with self._cond:
-            while len(self._lines) == start and not self._closed:
-                remaining = deadline - time.time()
-                if remaining <= 0:
-                    break
-                self._cond.wait(min(remaining, 1.0))
-            return self._lines[start:], len(self._lines)
-
-    def close(self):
-        self._closed = True
-        with self._cond:
-            self._cond.notify_all()
-        self._thread.join(timeout=2.0)
-        self.s.close()
+ConsoleTail = e2e_rig.ConsoleTail
 
 
 # ---------------------------------------------------------------------------
@@ -596,42 +377,22 @@ def tail_tokens(text, k=12):
 
 
 def read_shot_frame(tail, timeout=30, validate=True, start=None):
-    """Scan the drained console from `start` for an RD_SHOT_BEGIN..RD_SHOT_END
-    block; return (raw bytes, (w,h,len), cursor).  With validate=True, keeps
-    scanning past truncated frames (the forced `rdshot` frame races the
-    self-tick dump) until a complete bufsize-length frame is seen."""
+    """Scan the drained console from `start` for a complete RD_SHOT frame;
+    return (raw bytes, (bufsize,w,h), cursor).
+
+    Uses capture.ShotAssembler (the ONE RD_SHOT parser, shared with
+    capture.py's serial reader) instead of this file's own copy of the state
+    machine."""
+    assembler = capture.ShotAssembler(validate=validate)
     deadline = time.time() + timeout
     pos = tail.mark() if start is None else start
-    in_shot = False
-    want = 0
-    w = h = 0
-    hex_acc = []
     while True:
         lines, pos = tail.take(pos, max(0.0, deadline - time.time()))
         for ln in lines:
-            if not in_shot:
-                m = re.search(r"RD_SHOT_BEGIN\s+bufsize=(\d+)\s+w=(\d+)\s+h=(\d+)", ln)
-                if m:
-                    in_shot = True
-                    want = int(m.group(1))
-                    w, h = int(m.group(2)), int(m.group(3))
-                    hex_acc = []
-            else:
-                if "RD_SHOT_END" in ln:
-                    data = bytes.fromhex("".join(hex_acc))
-                    # The forced `rdshot` frame often races the self-tick dump
-                    # and arrives truncated (< bufsize).  Keep scanning for a
-                    # complete frame — the self-tick guarantees a full one
-                    # within the timeout — instead of failing on the first
-                    # partial.  validate==False callers accept any frame.
-                    if validate and len(data) == want:
-                        return data, (want, w, h), pos
-                    if not validate:
-                        return data, (want, w, h), pos
-                    in_shot = False
-                    hex_acc = []
-                elif re.match(r"^[0-9a-fA-F]+$", ln):
-                    hex_acc.append(ln)
+            got = assembler.feed(ln)
+            if got is not None:
+                data, want, w, h = got
+                return data, (want, w, h), pos
         if time.time() >= deadline:
             return None, (0, 0, 0), pos
 
@@ -671,7 +432,7 @@ def run_loop(n, instr, artifacts, voice_verify):
     target_txt = instr["transcript"]
     target_wav = HERE.parent / "voice" / "corpus" / instr["wav"]
 
-    tail = ConsoleTail(DETECTED_PORT)
+    tail = ConsoleTail(DETECTED_PORT, on_line=note_panic)
     try:
         # ---- OPEN_SESSION: trigger + confirm listen ------
         tail.write("rd_listen")

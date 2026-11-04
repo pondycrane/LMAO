@@ -4,6 +4,7 @@ py_library(
     name = "lma_core",
     srcs = [
         "__init__.py",
+        "calendar_bundle.py",
         "calendar_pg.py",
         "calendar_pics.py",
         "calendar_tcp_api.py",

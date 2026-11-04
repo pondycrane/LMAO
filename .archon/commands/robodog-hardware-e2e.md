@@ -210,8 +210,8 @@ python3 robodog_client/capture.py --port "$PORT" --reset --n 4 --timeout 120 \
 ```
 
 - `--reset` reboots the app (fresh frame dumps); `--n 4 --timeout 120` is wide
-  enough that the WiFi connect + first gRPC sync land (~40 s post-boot) — so the
-  later frames show the synced state, while frame 0 is the pre-sync boot.
+  enough that the WiFi connect + first calendar sync land (~40 s post-boot) — so
+  the later frames show the synced state, while frame 0 is the pre-sync boot.
 - Outputs per frame: `frameN.i1` (raw 15200-byte buffer), `panel_raw_portrait.png`
   (300×400), `panel_landscape.png` (400×300, orientation auto-detected by OCR so
   the clock reads upright), `frameN_analysis.txt` (vision transcription when
@@ -234,7 +234,8 @@ The transcription looks like:
 ```
 
 **Reading the device state from the screenshot (README):**
-- Header `YYYY-MM-DD HH:MM` present → WiFi up + gRPC sync healthy.
+- Header `YYYY-MM-DD HH:MM` present → WiFi up + calendar (framed-TCP :4247)
+  sync healthy.
 - Header **BLANK** + `no wifi` beside the first row → not connected yet:
   pre-sync boot frame, or WiFi/AP unreachable.
 - `stale` → connected but the last sync failed (showing the NVS cache).
@@ -245,11 +246,13 @@ The transcription looks like:
    header means no sync → PASS? NO: FAIL (unless the change under test is
    explicitly about the no-sync state, in which case assert the intended hint).
 2. **ROWS_RENDERED** — at least one calendar row is transcribed (real
-   `GetCalendar` data reaches the panel).
+   `CalendarBundle` data reaches the panel).
 3. **NO_UNEXPECTED_STATUS** — the final frame does not show `no wifi`/`stale`
    (again, unless that status IS the feature under test — then assert exactly that).
 4. **ROW_MATCH (best effort)** — cross-check the transcribed titles against the
-   LMAO server's `CalendarBundle`. Try the gRPC ground truth:
+   LMAO server's `CalendarBundle`. The panel speaks framed TCP (:4247); the gRPC
+   `GetCalendar` (:50051) serves the SAME bundle (one shared assembler), so it is
+   the convenient ground truth:
    ```bash
    # needs the generated stubs + a reachable server; else mark UNVERIFIABLE.
    python3 - <<'EOF' 2>/dev/null || echo "ROW_MATCH=UNVERIFIABLE (server CalendarBundle unreachable)"

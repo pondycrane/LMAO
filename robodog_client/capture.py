@@ -57,6 +57,55 @@ SHOT_RE = re.compile(r"RD_SHOT_BEGIN\s+bufsize=(\d+)\s+w=(\d+)\s+h=(\d+)")
 HEX_RE = re.compile(r"^[0-9a-fA-F]+$")
 
 
+class ShotAssembler:
+    """Incremental RD_SHOT parser: feed console lines, get frames back.
+
+    ONE implementation of the frame protocol.  `capture.py`'s serial reader and
+    the ESP-Claw E2E (which scans a drained console) previously each had their
+    own copy of the BEGIN/hex/END state machine; they had already drifted (only
+    the claw copy handled truncated frames).  With `validate=True` a truncated
+    dump is discarded and scanning continues for the next complete frame (the
+    forced `rdshot` dump races the firmware's self-tick dump, so the first
+    frame after a trigger is often short).
+    """
+
+    def __init__(self, validate=True):
+        self.validate = validate
+        self._in_shot = False
+        self._want = 0
+        self._w = self._h = 0
+        self._hex = []
+
+    def feed(self, line):
+        """Consume one console line; return (data, bufsize, w, h) on a frame.
+
+        `bufsize` is the size the header announced, so a caller can tell a
+        complete dump from a truncated one (with validate=False)."""
+        if not self._in_shot:
+            m = SHOT_RE.search(line)
+            if not m:
+                return None
+            self._in_shot = True
+            self._want = int(m.group(1))
+            self._w, self._h = int(m.group(2)), int(m.group(3))
+            self._hex = []
+            return None
+        if "RD_SHOT_END" in line:
+            data = bytes.fromhex("".join(self._hex))
+            self._in_shot = False
+            self._hex = []
+            if self.validate and len(data) != self._want:
+                return None      # truncated: keep scanning
+            return data, self._want, self._w, self._h
+        if HEX_RE.match(line):
+            self._hex.append(line)
+        return None
+
+    @property
+    def in_shot(self):
+        return self._in_shot
+
+
 def decode_hermes(buf):
     """XiaoZhi DispBuffer -> the 400x300 logical screen (bit=0 black, 1 white).
 
@@ -163,42 +212,56 @@ def ocr_score(im):
     return (len(HOUR_RE.findall(txt)), len(DATE_RE.findall(txt)), txt)
 
 
+def wait_for_port(port, timeout=15.0):
+    """Block until `port` exists again after a reset.
+
+    esptool's hard reset re-enumerates the USB-Serial/JTAG interface, so the
+    node disappears for a moment; opening it immediately races the kernel and
+    yields ENOENT.  The same re-enumeration can also invalidate an already-open
+    handle mid-capture (the CDC interface is torn down under the reader)."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if Path(port).exists():
+            return True
+        time.sleep(0.2)
+    return Path(port).exists()
+
+
 def read_frames(port, n=1, timeout=30):
     frames = []
+    wait_for_port(port)
     s = serial.Serial(port, 115200, timeout=1)
     try:
         deadline = time.time() + timeout
-        in_shot = False
-        want = 0
-        hex_acc = []
+        assembler = ShotAssembler(validate=False)
         while len(frames) < n and time.time() < deadline:
             # 16 KiB chunks keep up with the ~11.5 KB/s RD_SHOT dump rate
             # (a 4096-byte read onto the USB-JTAG CDC buffer overran and
             # shortened frames during the boot-log + dump burst).
-            chunk = s.read(16384)
+            try:
+                chunk = s.read(16384)
+            except serial.SerialException:
+                # The device re-enumerated (USB-Serial/JTAG tears the CDC
+                # interface down on reset/reboot).  Keep the frames already
+                # parsed instead of aborting the whole run — a reset-triggered
+                # capture ALWAYS races this, and the boot frames are the ones
+                # the caller wants.
+                print(f"serial interface dropped after {len(frames)} frame(s) "
+                      f"(device re-enumerated) — using what was captured",
+                      file=sys.stderr)
+                break
             if not chunk:
                 continue
             for line in chunk.split(b"\n"):
                 ln = line.decode("utf-8", "replace").strip()
-                if not in_shot:
-                    m = SHOT_RE.search(ln)
-                    if m:
-                        in_shot = True
-                        want = int(m.group(1))
-                        w = int(m.group(2))
-                        h = int(m.group(3))
-                        hex_acc = []
-                else:
-                    if "RD_SHOT_END" in ln:
-                        body = "".join(hex_acc)
-                        data = bytes.fromhex(body)
-                        frames.append((data, want, w, h))
-                        in_shot = False
-                        print(f"captured frame {len(frames)} "
-                              f"({len(data)} bytes, {w}x{h})",
-                              file=sys.stderr)
-                    elif HEX_RE.match(ln):
-                        hex_acc.append(ln)
+                got = assembler.feed(ln)
+                if got is None:
+                    continue
+                data, want, w, h = got
+                frames.append((data, want, w, h))
+                print(f"captured frame {len(frames)} "
+                      f"({len(data)} bytes, {w}x{h})",
+                      file=sys.stderr)
     finally:
         s.close()
     return frames
@@ -253,17 +316,9 @@ def main():
         if args.listen:
             print(f"sending RD_LISTEN to {args.port} (software button) ...",
                   file=sys.stderr)
-            s = serial.Serial(args.port, 115200, timeout=1)
-            try:
-                # USB-Serial/JTAG arms RX only after the CDC port is open+settled;
-                # writing immediately races enumeration and the byte is lost.
-                time.sleep(1.0)
-                s.reset_input_buffer()
-                s.write(b"RD_LISTEN\r\n")
-                s.flush()
-                time.sleep(0.2)
-            finally:
-                s.close()
+            from e2e_rig import arm_and_send  # noqa: PLC0415
+
+            arm_and_send(args.port, "RD_LISTEN", settle=1.0, after=0.2)
             time.sleep(1)
         frames = read_frames(args.port, n=args.n, timeout=args.timeout)
         if not frames:

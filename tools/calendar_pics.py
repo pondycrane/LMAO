@@ -17,7 +17,7 @@ Usage (agent-facing; see .archon/skills/line-drawing/SKILL.md):
     PYTHONPATH=<repo-root> python3 tools/calendar_pics.py --key robodog \\
         --source https://commons.wikimedia.org/wiki/Special:FilePath/Dog.svg
     PYTHONPATH=<repo-root> python3 tools/calendar_pics.py --key shopping \\
-        --source my-art.svg --size 144x144 --out check.png
+        --source my-art.svg --size 176x176 --out check.png
 
 Host prerequisites (pip, outside the pod — nothing runs in-cluster here):
     python3 -m pip install --break-system-packages Pillow cairosvg 'psycopg[binary]'
@@ -190,7 +190,9 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--key", help="CalEvent.pic key to store under (upsert)")
     parser.add_argument("--source", help="SVG or PNG source — local path or http(s) URL; defaults to assets/calendar-icons/<key>.svg")
-    parser.add_argument("--size", default="144x144", help="tile WxH (RLCD 300x400 panel); default 144x144")
+    parser.add_argument("--size", default="176x176",
+                        help="tile WxH (RLCD 400x300 landscape headline slot); "
+                             "default 176x176")
     parser.add_argument("--threshold", type=int, default=128, help="B&W threshold 0-255 (default 128)")
     parser.add_argument("--out", help="also write the PNG locally (always on missing-DB fallback)")
     parser.add_argument("--list", action="store_true", help="list stored picture keys and exit")
@@ -219,7 +221,7 @@ def main(argv: list[str] | None = None) -> int:
         width_s, height_s = args.size.lower().split("x")
         width, height = int(width_s), int(height_s)
     except (ValueError, AttributeError):
-        parser.error("--size must be WxH, e.g. 144x144")
+        parser.error("--size must be WxH, e.g. 176x176")
 
     source = args.source or _default_source(args.key)
     if not source:

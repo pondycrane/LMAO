@@ -12,8 +12,9 @@ Storage contract (RLCD display constraints)
 - Target display: 4.2" reflective LCD, 300x400 portrait.
 - A picture is a content tile, deliberately smaller than the full panel so
   the screen still has room for the title/time/date rows:
-  :func:`pick_tile_size` defaults to 144x144 (≈ half the panel width).
-- Format: 1-bit PNG (``mode '1'``).  At 144x144 a compact line drawing is a
+  :func:`pick_tile_size` defaults to 176x176 (the headline drawing, drawn at
+  native size in the panel's 400x300 landscape layout).
+- Format: 1-bit PNG (``mode '1'``).  At 176x176 a compact line drawing is a
   few hundred bytes; 1-bit renders crisply on a reflective panel.
 
 Schema: ``cal_pics`` (keyed by the same ``pic`` string ``cal_events`` refers
@@ -41,17 +42,17 @@ except ImportError:  # pragma: no cover - dev/test envs without Postgres
 # Contract values for the RLCD tile size (see module docstring).
 SCREEN_W = 300
 SCREEN_H = 400
-DEFAULT_TILE_W = 144
-DEFAULT_TILE_H = 144
+DEFAULT_TILE_W = 176
+DEFAULT_TILE_H = 176
 
 
 def pick_tile_size(screen_w: int = SCREEN_W, screen_h: int = SCREEN_H) -> tuple[int, int]:
     """Return (width, height) for a calendar picture on the 4.2" RLCD panel.
 
     The picture is a tile inside the event row: it must leave room for the
-    title/time/date text.  Defaults to a 144x144 square (half the 300px
-    width); smaller of the two dimensions governs so the tile never exceeds
-    the panel.
+    title/time/date text.  Defaults to a 176x176 square (the headline slot in
+    the 400x300 landscape layout, RD_PIC_TILE in rd_layout.h); the smaller of
+    the two dimensions governs so the tile never exceeds the panel.
     """
     return (min(DEFAULT_TILE_W, screen_w - 20), min(DEFAULT_TILE_H, screen_h - 20))
 
@@ -77,7 +78,7 @@ CREATE TABLE IF NOT EXISTS cal_pics (
     height     SMALLINT NOT NULL,
     mime       TEXT NOT NULL DEFAULT 'image/png',
     bytes      BYTEA NOT NULL,
-    tile_1bpp  BYTEA,                   -- 144x144 1-bit row-major image (2592 B),
+    tile_1bpp  BYTEA,                   -- 176x176 1-bit row-major image (3872 B),
                                         -- MSB-first, 1 = ink; panel headline pic
     created_ms BIGINT NOT NULL,
     updated_ms BIGINT NOT NULL
@@ -181,12 +182,13 @@ FROM cal_pics WHERE pic_key = %s
 """
 
 # RLCD image contract shared with robodog_client (lma_proto.h) and the server
-# (CalEvent.pic_data = field 8).  144x144, row-major, MSB-first, 1 = ink.
+# (CalEvent.pic_data = field 8).  176x176, row-major, MSB-first, 1 = ink.
 # The RoboDog panel shows this (the whole line drawing) only for the first
 # ongoing/future event, so the payload stays one image per reply.  Keep
-# TILE_W/H in lockstep with lma_proto.h LMA_PB_PIC_TILE.
-TILE_W = 144
-TILE_H = 144
+# TILE_W/H in lockstep with lma_proto.h LMA_PB_PIC_TILE and rd_layout.h
+# RD_PIC_TILE.
+TILE_W = 176
+TILE_H = 176
 TILE_1BPP_SIZE = (TILE_W * TILE_H + 7) // 8  # 2592
 
 

@@ -343,6 +343,31 @@ py_test(
 )
 
 py_test(
+    name = "test_robodog_flash",
+    srcs = ["test_robodog_flash.py"],
+    deps = ["@lmao_pip//pytest"],
+)
+
+py_test(
+    name = "test_robodog_capture",
+    srcs = ["test_robodog_capture.py"],
+    deps = [
+        "//robodog_client:capture_lib",
+        "//robodog_client:e2e_rig_lib",
+        "@lmao_pip//pytest",
+    ],
+)
+
+py_test(
+    name = "test_calendar_bundle",
+    srcs = ["test_calendar_bundle.py"],
+    deps = [
+        "//lma_core",
+        "@lmao_pip//pytest",
+    ],
+)
+
+py_test(
     name = "test_calendar_tcp_api",
     srcs = ["test_calendar_tcp_api.py"],
     deps = [

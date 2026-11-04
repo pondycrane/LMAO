@@ -27,7 +27,8 @@ import time
 
 from google.protobuf.message import DecodeError
 
-from lma_core import CalendarBundle, LMAOEnvelope
+from lma_core import LMAOEnvelope
+from lma_core.calendar_bundle import build_bundle
 from lma_core.calendar_pg import CalendarStore, open_calendar_store
 from lma_core.calendar_pics import open_pic_store
 from lma_core.contact_book import ContactBook
@@ -41,7 +42,7 @@ from lma_core.rns_di import LXMF, RNS
 from lma_core.rns_init import init_rns_and_lxmf as _shared_init
 from lma_core.rns_init import warn_if_rnode_missing
 from lma_core.sprout_history import SproutHistory
-from lma_core.weather import WeatherProvider, apply_weather
+from lma_core.weather import WeatherProvider
 from lma_core.weather import from_env as weather_from_env
 
 # Local imports
@@ -135,6 +136,13 @@ _CONTACTS_LOCK = threading.Lock()
 # out-of-band with direct SQL).  Initialized in async_main() next to the
 # contact book; ``None`` means calendar syncs get no data reply.
 CALENDAR: "CalendarStore | None" = None  # noqa: F841 — assigned in async_main()
+
+# Calendar picture store (CalEvent.pic -> 1-bit RLCD tile served as pic_data).
+# Initialized in async_main() beside the calendar store; ``None`` means replies
+# carry no picture.  Declared at module level because the LXMF reply path reads
+# it too (it used to exist only after async_main had run, so any other entry
+# point — the unit tests included — hit NameError on a calendar request).
+PIC_STORE = None  # noqa: F841 — assigned in async_main()
 
 # Weather for the calendar replies (current conditions + per-event forecast).
 # Opt-in per deployment via LMAO_WEATHER_LAT/LON; ``None`` means every calendar
@@ -519,41 +527,18 @@ class Server:
                 )
             else:
                 try:
-                    events, watermark = store.sync(
-                        calendar_id=treq.calendar_id or "family",
-                        since_ms=treq.since_ms,
-                        max_events=treq.max_events,
+                    bundle = build_bundle(
+                        store,
+                        treq,
+                        pic_store=PIC_STORE,
+                        weather=WEATHER.snapshot() if WEATHER is not None else None,
                     )
-                    if treq.since_ms == 0:
-                        # Full fetch = snapshot of live events; tombstones only
-                        # matter to delta clients that already hold the events.
-                        events = [e for e in events if not e["deleted"]]
                     cal_env = LMAOEnvelope()
-                    cal_env.calendar.format = 1
-                    cal_env.calendar.calendar_id = treq.calendar_id or "family"
-                    headline = _pick_headline_idx(
-                        events, int(time.time() * 1000))
-                    for i, ev in enumerate(events):
-                        entry = cal_env.calendar.events.add()
-                        entry.uid = ev["uid"]
-                        entry.title = ev["title"]
-                        entry.notes = ev["notes"]
-                        entry.start_ms = ev["start_ms"]
-                        entry.end_ms = ev["end_ms"]
-                        entry.deleted = ev["deleted"]
-                        entry.pic = ev["pic"]
-                        if i == headline:
-                            _fill_pic_data(PIC_STORE, ev["pic"], entry)
-                    cal_env.calendar.watermark_ms = watermark
-                    if WEATHER is not None:
-                        filled = apply_weather(cal_env.calendar,
-                                               WEATHER.snapshot())
-                        logger.debug("Calendar reply carries %d weather slots.",
-                                     filled)
+                    cal_env.calendar.CopyFrom(bundle)
                     send(cal_env)
                     logger.info(
                         "Calendar reply sent (%d events, watermark %d).",
-                        len(events), watermark,
+                        len(bundle.events), bundle.watermark_ms,
                     )
                 except Exception as e:
                     logger.error("Calendar sync failed: %s", e, exc_info=True)
@@ -795,36 +780,6 @@ class Server:
 # gRPC Service Implementation
 # ──────────────────────────────────────────────────────────────
 
-def _pick_headline_idx(events: list[dict], now_ms: int) -> int | None:
-    """Index of the single event whose picture the panel shows.
-
-    The RoboDog panel draws an image only for its first visible (non-  tombstoned,
-    ongoing-or-future) row, so the server attaches pic_data for just that one —
-    one 144x144 image per calendar reply, never one per event.  Returns the
-    index of the earliest-starting such event in ``events``, or None.
-    """
-    best: int | None = None
-    for i, ev in enumerate(events):
-        if ev["deleted"] or (ev.get("end_ms") or 0) < now_ms:
-            continue
-        if best is None or ev["start_ms"] < events[best]["start_ms"]:
-            best = i
-    return best
-
-
-def _fill_pic_data(pic_store, pic_key, cal_entry) -> None:
-    """Attach the 1-bit RLCD tile for an event's pic key (CalEvent.pic_data,
-    field 8) when the picture store has one.  No-op otherwise."""
-    if not pic_key or pic_store is None:
-        return
-    try:
-        rec = pic_store.get(pic_key)
-    except Exception:
-        return
-    tile = rec.get("tile_1bpp") if rec else None
-    if tile:
-        cal_entry.pic_data = tile
-
 if GRPC_AVAILABLE:
 
     class LMAOGrpcService(LMAOServicer):
@@ -942,46 +897,25 @@ if GRPC_AVAILABLE:
                 await context.abort(grpc.StatusCode.UNAVAILABLE,
                                     "Calendar store not available")
             try:
-                events, watermark = store.sync(
-                    calendar_id=request.calendar_id or "family",
-                    since_ms=request.since_ms,
-                    max_events=request.max_events,
-                    participant=request.participant or "",
+                # asnapshot() runs the blocking Open-Meteo GET off the event
+                # loop; the provider serves its 15-min cache in the meantime.
+                weather = await WEATHER.asnapshot() if WEATHER is not None else None
+                bundle = build_bundle(
+                    store,
+                    request,
+                    pic_store=PIC_STORE,
+                    weather=weather,
                 )
             except Exception as e:
                 logger.error("GetCalendar sync failed: %s", e, exc_info=True)
                 await context.abort(grpc.StatusCode.INTERNAL,
                                     f"Calendar sync failed: {e}")
             logger.info(
-                "GetCalendar participant='%s' events=%d",
+                "GetCalendar participant='%s' events=%d headline_pic=%s",
                 request.participant or "",
-                len(events),
+                len(bundle.events),
+                "yes" if any(ev.pic_data for ev in bundle.events) else "no",
             )
-            if request.since_ms == 0:
-                # Full fetch = snapshot of live events; tombstones only matter
-                # to delta clients that already hold the events.
-                events = [e for e in events if not e["deleted"]]
-            bundle = CalendarBundle()
-            bundle.format = 1
-            bundle.calendar_id = request.calendar_id or "family"
-            headline = _pick_headline_idx(events, int(time.time() * 1000))
-            for i, ev in enumerate(events):
-                entry = bundle.events.add()
-                entry.uid = ev["uid"]
-                entry.title = ev["title"]
-                entry.notes = ev["notes"]
-                entry.start_ms = ev["start_ms"]
-                entry.end_ms = ev["end_ms"]
-                entry.deleted = ev["deleted"]
-                entry.pic = ev["pic"]
-                if i == headline:
-                    _fill_pic_data(PIC_STORE, ev["pic"], entry)
-            bundle.watermark_ms = watermark
-            if WEATHER is not None:
-                # asnapshot() runs the blocking Open-Meteo GET off the event
-                # loop; the provider serves its 15-min cache in the meantime.
-                filled = apply_weather(bundle, await WEATHER.asnapshot())
-                logger.info("GetCalendar weather slots=%d", filled)
             return bundle
 
 
@@ -1190,6 +1124,7 @@ async def async_main():
             cal_tcp_server = await start_calendar_tcp_server(
                 CALENDAR,
                 port=int(os.environ.get("LMAO_CAL_TCP_PORT", "4247")),
+                pic_store=PIC_STORE,
                 weather=WEATHER,
             )
         except Exception as e:

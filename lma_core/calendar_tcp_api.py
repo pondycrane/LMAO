@@ -12,9 +12,14 @@ on-device CalEvent shape is identical to the RNS path:
       [4-byte big-endian length][CalendarBundle protobuf bytes]
 
 Framing is plain length-prefixing (no HTTP/2, no gRPC), so the ESP-IDF side is
-a lwIP socket + a ~150-line protobuf decoder.  Read-only against the same
-CalendarStore the RNS path uses; the trust model is the family LAN, like the
-contacts/query APIs (no auth on purpose).
+a lwIP socket + a protobuf decoder.  Read-only against the same CalendarStore
+the RNS path uses; the trust model is the family LAN, like the contacts/query
+APIs (no auth on purpose).
+
+Bundle assembly is NOT duplicated here: ``lma_core.calendar_bundle.build_bundle``
+is the single assembler shared with the gRPC and LXMF paths, so the full-fetch
+tombstone rule, the single-headline ``pic_data`` rule and the weather attach
+rule cannot drift between transports.
 """
 
 from __future__ import annotations
@@ -24,8 +29,8 @@ import contextlib
 import logging
 from typing import Any
 
-from lma_core import CalendarBundle, CalendarRequest
-from lma_core.weather import apply_weather
+from lma_core import CalendarRequest
+from lma_core.calendar_bundle import build_bundle
 
 _logger = logging.getLogger(__name__)
 
@@ -50,43 +55,27 @@ async def _read_frame(reader: asyncio.StreamReader) -> bytes:
     return await reader.readexactly(length)
 
 
-def _sync_to_bundle(
-    store: Any, calendar_id: str, since_ms: int, max_events: int,
-    participant: str = "", weather: Any = None,
+async def _sync_to_bundle(
+    store: Any,
+    request: CalendarRequest,
+    pic_store: Any = None,
+    weather: Any = None,
 ) -> bytes:
     """Run a delta sync and serialize a CalendarBundle reply frame payload.
 
     ``weather`` is a ``lma_core.weather.WeatherProvider`` (or None when the
-    deployment has no location configured): it fills ``bundle.current`` and
-    each event's ``weather`` forecast.  Weather is attached by the SYNC path
-    (not per-request), so a delta reply carries it exactly like a full one.
+    deployment has no location configured); its blocking snapshot is fetched
+    off the event loop, and the reply carries the same slots as gRPC/LXMF.
     """
-    events, watermark = store.sync(
-        calendar_id=calendar_id or "family",
-        since_ms=since_ms,
-        max_events=max_events,
-        participant=participant or "",
-    )
-    bundle = CalendarBundle()
-    bundle.format = 1
-    bundle.calendar_id = calendar_id or "family"
-    for ev in events:
-        e = bundle.events.add()
-        e.uid = ev["uid"]
-        e.title = ev["title"]
-        e.notes = ev["notes"]
-        e.start_ms = ev["start_ms"]
-        e.end_ms = ev["end_ms"]
-        e.deleted = ev["deleted"]
-        e.pic = ev["pic"]
-    bundle.watermark_ms = watermark
-    if weather is not None:
-        apply_weather(bundle, weather.snapshot())
+    snapshot = await weather.asnapshot() if weather is not None else None
+    bundle = build_bundle(store, request, pic_store=pic_store,
+                          weather=snapshot)
     return bundle.SerializeToString()
 
 
 async def _handle_conn(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
-                       store: Any, weather: Any = None) -> None:
+                       store: Any, pic_store: Any = None,
+                       weather: Any = None) -> None:
     peer = writer.get_extra_info("peername")
     try:
         _logger.debug("calendar TCP client connected: %s", peer)
@@ -94,14 +83,7 @@ async def _handle_conn(reader: asyncio.StreamReader, writer: asyncio.StreamWrite
         req = CalendarRequest()
         if data:
             req.ParseFromString(data)
-        payload = _sync_to_bundle(
-            store,
-            calendar_id=req.calendar_id or "family",
-            since_ms=req.since_ms,
-            max_events=req.max_events,
-            participant=req.participant or "",
-            weather=weather,
-        )
+        payload = await _sync_to_bundle(store, req, pic_store, weather)
         writer.write(_frame(payload))
         await writer.drain()
         _logger.debug("calendar TCP reply (%d event-bytes) → %s", len(payload), peer)
@@ -119,16 +101,19 @@ async def start_calendar_tcp_server(
     store: Any,
     host: str = "0.0.0.0",
     port: int = 4247,
+    pic_store: Any = None,
     weather: Any = None,
 ) -> asyncio.AbstractServer:
     """Start the framed-TCP calendar read service. Returns the `Server`.
 
-    ``weather`` (a ``lma_core.weather.WeatherProvider``) attaches the current
-    conditions + per-event forecast to every reply; None leaves the bundle
-    weather-free, byte-identical to a pre-weather server.
+    ``pic_store`` attaches the headline event's 1-bit RLCD tile (the same
+    ``CalEvent.pic_data`` the gRPC path serves); ``weather`` (a
+    ``lma_core.weather.WeatherProvider``) attaches the current conditions +
+    per-event forecast to every reply.  Both None leaves the reply
+    byte-identical to a pre-weather/pre-picture server.
     """
     server = await asyncio.start_server(
-        lambda r, w: _handle_conn(r, w, store, weather),
+        lambda r, w: _handle_conn(r, w, store, pic_store, weather),
         host,
         port,
     )

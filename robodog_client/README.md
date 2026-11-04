@@ -3,17 +3,28 @@
 Native **ESP-IDF** firmware for the **RoboDog** family-calendar display:
 a Waveshare **ESP32-S3** dev board driving the Waveshare **RLCD-4.2**
 (**ST7305**, 400×300 reflective 1-bit B&W LCD).  No RNS/LXMF here: the device
-reads the family calendar from a synchronous gRPC call on the LMAO server
-and renders it in 1-bit B&W on the ST7305.
+reads the family calendar over the server's **framed-TCP calendar service
+(:4247)** and renders it in 1-bit B&W on the ST7305.
 
 ```
-┌─ LMAO server (lma.LMAO/GetCalendar gRPC, :50051) ───────┐
-│   HTTP/2 unary: CalendarRequest -> CalendarBundle       │
+┌─ LMAO server (framed-TCP calendar read, :4247) ─────────┐
+│  [u32 BE len][CalendarRequest] -> [u32 BE len][Bundle]  │
 └──────────────────────────────────────────────────────────┘
-            ▲ gRPC/HTTP2, single request/reply per sync
+            ▲ plain lwIP socket, one request/reply per sync
 ESP32-S3 ───┘   → decode → merge δ into NVS cache → render ST7305
-                → light-sleep ~30 min → repeat
+                → hold the frame ~30 min (redraw the clock every 30 s) → repeat
 ```
+
+**Transport decision.** An earlier build spoke a hand-rolled HTTP/2 + gRPC
+client for `lma.LMAO/GetCalendar` on `:50051`.  That bought nothing for one
+unary RPC and could not decode response HEADERS, so a non-zero `grpc-status`
+was indistinguishable from an empty reply; any proxy or server-side HTTP/2
+change would have broken it silently.  The framed-TCP service carries the same
+protobuf messages with a 4-byte length prefix, and the server assembles the
+reply with the SAME shared helper as the gRPC and LXMF paths
+(`lma_core/calendar_bundle.build_bundle`) — so the transports cannot drift
+(the old TCP copy had no full-fetch tombstone filter and never attached
+`pic_data`).
 
 ## Board & wiring
 
@@ -62,21 +73,29 @@ and set them once at runtime in NVS:
 | `server_host`(string) | LMAO server host/IP (fallback: `RD_SERVER_HOST_DEFAULT`, `192.168.50.67`) |
 | `kid_name`   (string) | Per-board kid assignment (fallback: `RD_KID_NAME_DEFAULT`, `""` = family).  Non-empty → kid-dedicated panel: the request carries `participant=<kid>`, the server returns only that kid's events, and the header shows the kid name LEFT + live clock RIGHT.  Set at flash time with `--kid-name` — see below. |
 
-Other knobs (`RD_CAL_GRPC_PORT`, `RD_SYNC_INTERVAL_SECONDS`,
-`RD_SNTP_SERVER`, timeouts) are build-time macros in `main/config.h`.
+The NVS key names have ONE definition (`main/rd_store.h`), shared with the
+flash scripts.  Other knobs (`RD_CAL_TCP_PORT`, `RD_SYNC_INTERVAL_SECONDS`,
+`RD_SNTP_SERVER`, `RD_TCP_CONNECT_TIMEOUT_MS`/`RD_TCP_READ_TIMEOUT_MS`,
+`RD_WDT_TIMEOUT_S`) are build-time macros in `main/config.h`.
 
 ## Wire contract (implemented exactly)
 
-Synchronous gRPC unary `lma.LMAO/GetCalendar(CalendarRequest) returns
-(CalendarBundle)` over HTTP/2 to `LMAO_SERVER_HOST:RD_CAL_GRPC_PORT`
-(default `50051` — the LMAO server's gRPC port; `192.168.10.19` LAN).
+Framed-TCP to `LMAO_SERVER_HOST:RD_CAL_TCP_PORT` (default `4247`, the server's
+`LMAO_CAL_TCP_PORT`; host is a LAN hostname, never an IP — tp4's wlan0 is
+DHCP and has moved):
 
-The ESP32 client implements a minimal HTTP/2 + gRPC transport for this single
-RPC: connection preface, SETTINGS/ACK, a constant HPACK header block (literal
-without indexing), and a DATA frame carrying the gRPC-framed `CalendarRequest`
-(1-byte compression flag + 4-byte BE length + protobuf).  The reply DATA is
-stripped of its gRPC header and the `CalendarBundle` decoded by `lma_proto`.
-The wire format is verified live against the LMAO server.
+```
+client -> server   [u32 BE length][CalendarRequest protobuf]
+server -> client   [u32 BE length][CalendarBundle protobuf]
+```
+
+A 0-length request frame is the documented defaults (`calendar_id:"family"`,
+`since_ms:0`).  Connect and read budgets are separate
+(`RD_TCP_CONNECT_TIMEOUT_MS` for a non-blocking connect + `select`;
+`RD_TCP_READ_TIMEOUT_MS` as both the per-recv socket timeout and a total
+deadline), so a slow-drip server cannot stall a whole cycle, and a task
+watchdog (`RD_WDT_TIMEOUT_S`, default 60 s) reboots a wedged board instead of
+leaving a frozen panel.
 
 - **Client → server** payload = serialized `CalendarRequest` protobuf
   (`calendar_id=1` string, `since_ms=2` varint u64, `max_events=3` varint u32,
@@ -88,8 +107,10 @@ The wire format is verified live against the LMAO server.
   `CalEvent`, `watermark_ms=4` varint u64, `current=5` `Weather`).
 - `CalEvent`: `uid=1` string, `title=2` string, `notes=3` string,
   `start_ms=4` varint u64, `end_ms=5` varint u64, `deleted=6` varint bool,
-  `pic=7` string, `pic_data=8` bytes (1bpp 144×144 tile), `weather=9`
-  `Weather`.
+  `pic=7` string, `pic_data=8` bytes (1bpp **176×176** tile, 3872 B),
+  `weather=9` `Weather`.  `pic_data` is served on the single headline event
+  only; the decoder keeps ONE tile at bundle level (`pic_uid` binds it to its
+  event) instead of a per-event 3872-byte slot.
 - `Weather`: `temp_c10=1` **sint32** (zigzag; tenths of a degree Celsius, so
   −2.5 °C is `-25`) and `code=2` varint u32 (WMO 4677 weather code).
   `CalendarBundle.current` is the conditions now; `CalEvent.weather` is the
@@ -438,31 +459,49 @@ robodog_client/
 │   └── u8g2_st7305/          vendored Waveshare ST7305 driver (verbatim)
 └── main/
     ├── main.c                app_main shim → robodog_app_main()
-    ├── robodog.c             wifi/tcp/sleep loop + u8g2 rendering
+    ├── robodog.c             app loop: sync → merge → render → hold (WDT-armed)
     ├── lma_proto.c/.h        dependency-free protobuf codec (wire layer)
     ├── lma_proto_selftest.c  host-only self-test binary
     ├── config.h              pins, wifi/server/sync configuration
+    ├── rd_store.c/.h         NVS config + schema-versioned event cache
+    ├── rd_net.c/.h           WiFi + framed-TCP calendar transport
+    ├── rd_render.c/.h        ST7305 render + RD_SHOT capture
+    ├── rd_layout.c/.h        panel geometry + fit arithmetic (host-tested)
+    ├── rd_clip_selftest.c    host-only clip/wrap test
+    ├── rd_layout_selftest.c  host-only layout test
     └── CMakeLists.txt        component registration
 ```
 
 ## Status
 
 Hardware-validated on the Waveshare RLCD-4.2 (built in the ESP-IDF Docker
-image, flashed to `/dev/ttyACM0`, gRPC-synced live data, and the render
+image, flashed to `/dev/ttyACM0`, framed-TCP-synced live data, and the render
 confirmed **pixel-exact** against the physical panel via `capture.py` — the
 captured frame matched what the user sees on the RLCD exactly, orientation and
 polarity included).  The header shows the live date once synced; rows are real
-`GetCalendar` events.
+calendar events.
+
+**Layout (400×300 landscape canvas).** Geometry lives in ONE block
+(`main/rd_layout.h`) and is drawn at those positions only:
+
+| Band | Content |
+|---|---|
+| header (baseline 24) | kid name LEFT + live clock RIGHT (family: centered clock) |
+| status (baseline 46) | `now 44°F clear` LEFT, `stale`/`no wifi` RIGHT |
+| headline | 176×176 served tile at x=6/y=52; right column (200 px): wrapped `helvB18` title block, `HH:MM-HH:MM` range meta, forecast |
+| compact rows | `9x15B` rows from baseline 246, stride 16, up to 4 rows (headline + 4 = 5 events) |
+
+The number of title lines and compact rows is COMPUTED from the measured font
+metrics (`rd_layout_title_lines` / `rd_layout_rows`, host-tested by
+`rd_layout_selftest.c`), so a font or geometry change cannot silently push text
+off the panel.
 
 Still environment-dependent / worth a look on real air:
 - **WiFi**: credentials are NVS/built-in (`wifi_ssid`/`wifi_pass`); the board
   is 2.4 GHz-only, so the AP must be 2.4 GHz and reachable from the node.
-- **Frame/width tuning**: title clipping and the icon boxes are tuned for the
-  current data — adjust with the screenshot loop below. The wrapped headline
-  band (top margin / meta gap) is tuned via `TITLE_TOP_MARGIN` /
-  `TITLE_META_GAP` in `render_screen`. (Row count is a fixed cap: the
-  headline picture + 4 compact text rows = 5 event rows at `RD_MAX_EVENT_ROWS`,
-  capture-tuned yy=214 / row_stride=20.)
+- **Frame/width tuning**: title clipping is measured under the active font
+  (`rd_clip`), so a clipped title always fits its budget; adjust the bands in
+  `rd_layout.h` and re-capture.
 - **Per-board delta-safety**: the NVS event cache and watermark are owned by
   the kid the board last synced under (`wm_kid`).  Re-flashing with a
   different `--kid-name` (or set↔family) clears the cache on boot so a
@@ -497,7 +536,7 @@ bazel run //robodog_client:flash_firmware -- --port /dev/ttyACM1 --kid-name wesl
 #   defines), but do not store anything else in this board's NVS.
 
 # capture: reset the board, then read frames; make --n/--timeout wide enough
-# that WiFi connect + first gRPC sync happen (sync landed ~40s post-boot here)
+# that WiFi connect + first calendar sync happen (sync landed ~40s post-boot here)
 python3 capture.py --port /dev/ttyACM0 --reset --n 4 --timeout 100 --describe
 #   shots/frameN.i1                raw 15200-byte u8g2 buffer (panel memory)
 #   shots/panel_raw_portrait.png   panel-native 300×400
@@ -506,7 +545,7 @@ python3 capture.py --port /dev/ttyACM0 --reset --n 4 --timeout 100 --describe
 ```
 
 **Reading the device state from the screenshot:**
-- Header (family): centered `YYYY-MM-DD HH:MM` present → WiFi up + gRPC sync
+- Header (family): centered `YYYY-MM-DD HH:MM` present → WiFi up + TCP sync
   healthy.  Header (kid panel): kid name LEFT + `YYYY-MM-DD HH:MM` RIGHT on the
   same row — same health signals.  (No divider under the header.)
 - Header **BLANK** + `no wifi` hint beside the first row → not connected yet:
@@ -517,15 +556,15 @@ python3 capture.py --port /dev/ttyACM0 --reset --n 4 --timeout 100 --describe
   the info column below its range meta. **Neither line is drawn** when the
   server sent no `Weather` (weather disabled / no sync yet), so a blank band is
   "no forecast", not "0°F".
-- Row set == Postgres/`GetCalendar` output → data path live; a stale/different
+- Row set == Postgres/`CalendarBundle` output → data path live; a stale/different
   set means the cache is being shown (compare timestamps against the header).
-- At most 5 event rows are drawn: the headline (big picture, LEFT;
+- At most 5 event rows are drawn: the headline (176×176 picture, LEFT;
   word-wrapped `helvB18` title block + right-aligned `HH:MM-HH:MM` range meta
-  beside it) plus 4 compact text rows, each title-clipped left with a
-  measured,
-  right-aligned `HH:MM-HH:MM` range meta; a 6th+ visible event is dropped by
-  design (`RD_MAX_EVENT_ROWS` in `render_screen`) — a shorter row set is not a
-  data-path error unless the header hints (`stale`/`no wifi`) say otherwise.
+  beside it) plus up to 4 compact `9x15B` rows, each title-clipped left with a
+  measured, right-aligned `HH:MM-HH:MM` range meta; a 6th+ visible event is
+  dropped by design (`RD_MAX_EVENT_ROWS` in `rd_layout.h`) — a shorter row set
+  is not a data-path error unless the header hints (`stale`/`no wifi`) say
+  otherwise.
 - Non-today events prefix their right-hand meta with a day qualifier so the
   family panel reads unambiguously: `tomorrow` for the next civil day,
   `MM/DD` for a later day in the same civil year, `YYYY/MM/DD` for a later
