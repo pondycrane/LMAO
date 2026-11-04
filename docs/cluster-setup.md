@@ -324,7 +324,7 @@ Two stages per run, matching the old script:
 
 1. `tools/calendar_sync.py --window-days 14` — Google Calendar → `cal_events`
    (Postgres), upsert keyed by event `uid`.
-2. `tools/calendar_pics_sync.py` — themed art → 1-bit 144×144 RLCD tiles in
+2. `tools/calendar_pics_sync.py` — themed art → 1-bit 176×176 RLCD tiles in
    `cal_pics`.
 
 **Why hourly matters beyond data freshness:** the RoboDog panel syncs by delta

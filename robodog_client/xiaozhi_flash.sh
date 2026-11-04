@@ -8,41 +8,30 @@
 #
 #   bazel run //robodog_client:flash_robodog_hermes [-- --port /dev/ttyACM0]
 #
-# IMPORTANT: runs esptool on the HOST, not in Docker — Docker's ttyACM RTS
-# passthrough drops the RTS/DTR modem-control ioctls (EPROTO on open), which
-# breaks esptool's reset into download mode — so the button-free
-# `--before default_reset` auto-reset only works when esptool runs directly on
-# the host. Requires host `python3 -m esptool`.
+# Host esptool (Docker's ttyACM RTS passthrough breaks the button-free reset);
+# the shared plumbing lives in flash_common.sh.
 set -euo pipefail
-if [ -n "${BUILD_WORKSPACE_DIRECTORY:-}" ]; then
-    APP="$BUILD_WORKSPACE_DIRECTORY/robodog_client"
-else
-    APP="$(cd "$(dirname "$0")" && pwd)"
-fi
-PORT="${FLASH_PORT:-/dev/ttyACM0}"
-BAUD="${FLASH_BAUD:-460800}"
+APP="$(cd "$(dirname "$0")" && pwd)"
+. "$APP/flash_common.sh"
+rd_flash_init "$APP"
+
 while [ $# -gt 0 ]; do
     case "$1" in
-        --port) PORT="${2:?missing port}"; shift 2 ;;
+        --port)
+            rd_need_value "--port" $# "${2:-}" "default: /dev/ttyACM0"
+            RD_PORT="$2"; shift 2 ;;
         *) echo "unknown arg: $1" >&2; exit 2 ;;
     esac
 done
 
-if ! python3 -c "import esptool" >/dev/null 2>&1; then
-    echo "host esptool is required (button-free reset can't run in Docker):" >&2
-    echo "  python3 -m pip install esptool" >&2
-    exit 2
-fi
+rd_require_host_esptool
 
 # Build the capture firmware first if the image isn't staged yet.
-if [ ! -f "$APP/.xiaozhi/build/xiaozhi.bin" ]; then
+if [ ! -f "$RD_APP/.xiaozhi/build/xiaozhi.bin" ]; then
     echo "no built hermes image — building (Docker ESP-IDF, first build takes a while) ..."
-    "$APP/voice/build_xiaozhi.sh" "$APP"
+    "$RD_APP/voice/build_xiaozhi.sh" "$RD_APP"
 fi
 
-echo "flashing hermes (XiaoZhi + capture hook) to $PORT ..."
-cd "$APP/.xiaozhi/build"
-python3 -m esptool --chip esp32s3 -p "$PORT" -b "$BAUD" \
-    --before default_reset --after hard_reset write_flash \
-    @flash_args
+echo "flashing hermes (XiaoZhi + capture hook) to $RD_PORT ..."
+rd_flash_write "$RD_APP/.xiaozhi/build"
 echo "flashed; board resets into XiaoZhi voice firmware (capture compiled in)"

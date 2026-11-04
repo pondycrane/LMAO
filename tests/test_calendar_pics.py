@@ -44,9 +44,9 @@ class TestHelpers:
 
     def test_pick_tile_size_stays_below_panel(self):
         w, h = pick_tile_size()
-        assert (w, h) == (144, 144)
+        assert (w, h) == (176, 176)
         # never overflow a smaller panel
-        assert pick_tile_size(screen_w=100, screen_h=200) == (80, 144)
+        assert pick_tile_size(screen_w=100, screen_h=200) == (80, 176)
 
 
 # ---------------------------------------------------------------------------
@@ -127,15 +127,15 @@ class TestPicStore:
         store = PicStore("postgresql://lmao:pw@pg:5432/lmao")
         cursor = make_cursor()
         cursor.fetchone_value = (
-            "swim", 144, 144, "image/png", TINY_PNG, None,
+            "swim", 176, 176, "image/png", TINY_PNG, None,
             1700000000000, 1700000000000,
         )
         store._conn.cursor = staticmethod(lambda: cursor)
 
-        rec = store.put("swim", TINY_PNG, 144, 144)
+        rec = store.put("swim", TINY_PNG, 176, 176)
 
         assert rec["pic_key"] == "swim"
-        assert rec["width"] == 144 and rec["height"] == 144
+        assert rec["width"] == 176 and rec["height"] == 176
         assert rec["mime"] == "image/png"
         assert rec["bytes"] == TINY_PNG
         # upsert carries ON CONFLICT

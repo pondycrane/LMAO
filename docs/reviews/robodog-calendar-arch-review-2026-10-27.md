@@ -116,3 +116,80 @@ If gRPC stays (A), the HTTP/2 client at minimum needs grpc-status handling.
 *Method: two parallel read-only code scouts + first-hand verification of the
 transport, schema, and drift claims against `lmao_server/server.py`,
 `lma_core/calendar_tcp_api.py`, and `proto/lma_messages.proto`.*
+
+---
+
+## Resolution (2026-11-03)
+
+Every finding above was addressed in one pass; the review stays as the record
+of what was found, this section records what changed.
+
+**P1 — transport fork: option B, with one shared assembler.**
+The firmware is back on the framed-TCP service (`:4247`); the hand-rolled
+HTTP/2+gRPC client is deleted.  Bundle assembly moved to
+`lma_core/calendar_bundle.py::build_bundle`, called by gRPC, framed TCP **and**
+LXMF, so the full-fetch tombstone rule, the single-headline `pic_data` rule and
+the weather attach rule cannot drift.  The TCP path now serves `pic_data`
+(previously it never did) and applies the tombstone filter.  Stale comments in
+`robodog.c`/`lma_proto.h`/README/proto are fixed.
+
+*Found while fixing it:* a full fetch returned the store's `updated_ms`-ordered
+window, so a calendar with months of past rows filled the client's fixed 16-event
+array and pushed upcoming events off the wire (observed live: 27 live rows, 16
+delivered, 1 upcoming).  A full fetch is now the **upcoming snapshot** — not
+ended, ordered by start, capped by `max_events` — which is what a display can
+show; deltas keep the watermark ordering.
+
+**P2 — DRY.**
+1. `robodog_client/flash_common.sh` — one preamble/arg validation/esptool
+   check/NVS-image generator for the three flash scripts; the "option-shaped
+   value is an ERROR" rule now applies to all three.
+2. RD_SHOT parsing: one `capture.ShotAssembler` used by `capture.py` and the
+   claw E2E (truncated-frame handling included).
+3. `robodog_client/e2e_rig.py` — board/sound-card detection, ALSA drive/capture,
+   re-ASR, console tail, arm+send, journal/log wait; both gates now import it.
+4. The wire selftest no longer re-implements the encoder: `lma_proto_bundle_encode`
+   is production code and the selftest round-trips through it.
+5. `read_var()`/`read_ld()` replaced the ~15 decode-case copies (and every
+   submessage decodes over its own slice).
+6. NVS key names: one definition in `main/rd_store.h`, shared with `flash.sh`.
+7. Tile size: one contract (176×176, 3872 B) in the proto, `lma_proto.h`,
+   `calendar_pics.py` and the pics tooling.
+8. `rd_prev_utf8_boundary`/`rd_next_utf8_boundary` replaced the three back-off
+   loops.
+9. `robodog_client/BUILD`: one `firmware_tool` macro (`firmware_tools.bzl`),
+   a `claw_e2e` run target, and the claw E2E depends on `:voice_corpus`.
+10. Both host selftests (plus new clip/layout tests) are Bazel `cc_test`s.
+
+**P3 — risks.**
+- Task watchdog (`RD_WDT_TIMEOUT_S`, fed in the hold loop) + separate connect
+  (`select`-bounded non-blocking) and read budgets with a total read deadline.
+- Full fetch scoped to the upcoming snapshot (above); boot still refetches
+  because NVS stores no picture.
+- NVS cache carries a schema version (`sch`); a layout change clears it.
+- `cache_key()` writes into the caller's buffer (no shared static).
+- HTTP/2 assumptions gone with the transport.
+- `--kid-name` still wipes the 24 KB NVS partition (documented, desired for
+  delta-safety).
+
+**Structure.** `robodog.c` (1269 lines) is now a ~200-line app loop over
+`rd_store.c` (NVS config + cache), `rd_net.c` (WiFi + framed TCP),
+`rd_render.c` (ST7305 + RD_SHOT) and the pure `rd_layout.c` (geometry/fit
+arithmetic, host-tested).  All panel geometry lives in `rd_layout.h`.
+
+**Resolution.** The calendar render was moved to the panel's full **400×300
+landscape** canvas (the claw firmware's canvas): a **176×176** headline tile at
+its native size on the left (was 144×144 on a 300-wide portrait layout), with a
+200 px text column (wrapped `helvB18` title, range meta, forecast) and up to
+four compact `9x15B` rows below.  Font metrics are measured in the ALL-mode
+reference height, and the number of title lines/rows is computed from those
+measurements, so a font change cannot push text off the panel.  Server tile
+generation (`calendar_pics.py`, `tools/calendar_pics*.py`, the line-drawing
+skill) moved to 176×176 in lockstep.
+
+**Verification.** Bazel `cc_test`s (proto encode/decode round-trip incl. the
+tile, clip/wrap UTF-8 invariants, layout fit, weather/date formatting) and the
+Python calendar/server tests pass; the firmware builds in the ESP-IDF image and
+was flashed to the board.  A live framed-TCP probe returns 12 upcoming events
+with the headline's 3872-byte tile; the captured panel shows the new landscape
+layout with header, weather, headline (title/meta/forecast) and four rows.

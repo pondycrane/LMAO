@@ -91,6 +91,19 @@ size_t rd_wrap_lines(const char *s, size_t n, int max_px,
                      rd_width_fn width, void *ctx,
                      rd_wrap_line_t *out, size_t out_cap);
 
+/* ---- UTF-8 boundary helpers ----
+ * Shared by the clip walk and both wrap back-off paths so the "never split a
+ * multi-byte sequence" rule has ONE implementation (it was three copies of
+ * the same loop, each with a comment pointing at the others). */
+
+/* Largest valid boundary <= i (steps back over 0b10xxxxxx continuation
+ * bytes); 0 when everything before i is a continuation byte. */
+size_t rd_prev_utf8_boundary(const char *s, size_t i);
+
+/* Smallest valid boundary > i (steps forward over continuation bytes), or n
+ * when the sequence runs to the end of the buffer. */
+size_t rd_next_utf8_boundary(const char *s, size_t i, size_t n);
+
 /* Largest byte length lo <= n such that:
  *   - lo is a valid UTF-8 boundary (never splits a multi-byte sequence), and
  *   - width(s[0:lo]) + ell_w <= max_px.

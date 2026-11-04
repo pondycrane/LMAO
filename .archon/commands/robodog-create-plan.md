@@ -44,7 +44,7 @@ argument-hint: <feature description | path/to/prd.md>
   host-tested via `lma_proto_selftest.c`), the picture pipeline
   (`lma_core/calendar_pics.py` + `tools/calendar_pics.py`, covered by
   `tests/test_calendar_pics.py`), and the calendar data path
-  (`lmao_server` gRPC `lma.LMAO/GetCalendar`).
+  (`lmao_server` framed-TCP calendar read :4247 — same `CalendarBundle` as gRPC).
 
 **Build rules:**
 - **Bazel is the canonical build** (v7.4.1 via bazelisk). Every new `*.py` in
@@ -129,9 +129,9 @@ verification tasks:
 | Slice | Touches | Primary verification |
 |-------|---------|---------------------|
 | **Renderer/UI** | `robodog_client/main/robodog.c`, `config.h`, fonts, u8g2 usage | Panel capture + vision readback (mandatory) |
-| **Wire/proto** | `robodog_client/main/lma_proto.{c,h}` | Host `lma_proto_selftest` + live gRPC round-trip |
+| **Wire/proto** | `robodog_client/main/lma_proto.{c,h}` | Host `lma_proto_selftest` + live framed-TCP round-trip |
 | **Pictures** | `lma_core/calendar_pics.py`, `tools/calendar_pics.py` | `tests/test_calendar_pics.py` + panel capture |
-| **Server/data** | `lmao_server/*`, `lma_core/*` (GetCalendar, calendar storage) | Unit tests + robodog gate capture row set |
+| **Server/data** | `lmao_server/*`, `lma_core/*` (calendar bundle, storage) | Unit tests + robodog gate capture row set |
 | **Pins/board** | `main/config.h`, `main/CMakeLists.txt`, `components/**` | Panel capture confirms display still drives |
 
 Record the slice(s) in the plan — they decide which gate checks are load-bearing.

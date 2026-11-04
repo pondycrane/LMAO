@@ -6,7 +6,7 @@ not yet in ``cal_pics``, this stage:
 
 1. reasons about the best SEARCH QUERIES for that event (seeded per event),
 2. searches one or more image sources (Wikimedia Commons, optional Google),
-3. thresholds the best normal image to a 1-bit black-and-white 144x144 tile,
+3. thresholds the best normal image to a 1-bit black-and-white 176x176 tile,
 4. stores it under the event's ``pic`` key.
 
 Subjects are paired with the event's ACTION and are kept physically coherent
@@ -102,7 +102,9 @@ ACTIVITY_ACTIONS: dict[str, str] = {
 }
 
 _UA = "LMAO-calendar-pics/1.0 (family calendar)"
-_TILE_W, _TILE_H = 144, 144
+# Kept in lockstep with lma_core.calendar_pics.TILE_W/H (the panel's headline
+# slot); the module's pick_tile_size() is the authority at run time.
+_TILE_W, _TILE_H = 176, 176
 _THRESHOLD = 140  # generous white so photos don't go fully black
 
 # Local Qwen-VL vision box for subject cropping. Default is the ML endpoint IP
@@ -640,7 +642,7 @@ def build_verify_prompt(subject: str, theme: str,
     """Gate prompt for *theme* — theme-level, not name-exact, for pokemon.
 
     The old prompt demanded the image resemble the EXACT chosen character
-    ("a pokemon resembling 'charmander'").  At 144 px the vision model cannot
+    ("a pokemon resembling 'charmander'").  At tile size the vision model cannot
     reliably name a specific Pokémon, so valid renders (charmander, poliwag,
     goldeen, magikarp, slowpoke) were rejected and the retry loop walked the
     pool until something passed — which landed on Gengar over and over.
