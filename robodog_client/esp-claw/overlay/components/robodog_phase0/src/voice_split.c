@@ -49,6 +49,16 @@ static bool is_sentence_break(uint32_t cp)
            cp == 0x2026;   /* … ellipsis (Chinese sentences often end so) */
 }
 
+/* A CLAUSE break: a pause a speaker naturally takes.  Used when a sentence is
+ * too long to fit one chunk, so the seam is still a pause rather than a
+ * mid-clause cut. */
+static bool is_clause_break(uint32_t cp)
+{
+    return cp == ',' || cp == 0xFF0C || /* ， fullwidth comma */
+           cp == 0x3001 ||              /* 、 ideographic comma */
+           cp == 0xFF1A || cp == ':';   /* ： fullwidth colon / ASCII */
+}
+
 /* A newline is only a WEAK break.  Treating it as a sentence end (as this
  * module used to) cut replies at the agent's line wrapping — "I can tell you
  * the time, the weather,\n" became one chunk and "or a joke." the next, i.e.
@@ -61,9 +71,10 @@ static bool is_line_break(uint32_t cp)
 }
 
 size_t robodog_voice_split_reply(const char *reply, size_t cap,
-                                 size_t first_cap, char *arena,
-                                 size_t arena_cap, size_t *offsets,
-                                 size_t max_chunks, bool *truncated)
+                                 size_t ceiling, size_t first_cap,
+                                 char *arena, size_t arena_cap,
+                                 size_t *offsets, size_t max_chunks,
+                                 bool *truncated)
 {
     const size_t len = strlen(reply);
     size_t pos = 0, n = 0, aoff = 0;
@@ -82,9 +93,11 @@ size_t robodog_voice_split_reply(const char *reply, size_t cap,
         if (budget == 0) {
             budget = 1;
         }
-        /* The ceiling is the UI text field: a chunk may exceed the preferred
-         * budget to reach a sentence ender, but never the field. */
-        size_t ceiling = ROBODOG_VOICE_SPLIT_MAX_BYTES;
+        /* The caller's ceiling bounds one chunk (slot buffer / UI field); a
+         * chunk may exceed the preferred budget, never the ceiling. */
+        if (ceiling > ROBODOG_VOICE_SPLIT_MAX_BYTES) {
+            ceiling = ROBODOG_VOICE_SPLIT_MAX_BYTES;
+        }
         if (budget > ceiling) {
             budget = ceiling;
         }
@@ -101,6 +114,8 @@ size_t robodog_voice_split_reply(const char *reply, size_t cap,
         size_t end_budget = 0; /* last codepoint boundary at/below budget */
         size_t last_break = 0; /* last sentence ender inside the budget */
         size_t next_break = 0; /* first sentence ender past the budget */
+        size_t last_clause = 0; /* last clause break inside the budget */
+        size_t next_clause = 0; /* first clause break past the budget */
         size_t last_line = 0;  /* last newline inside the budget (weak) */
         size_t last_space = 0;
         while (end < ceiling) {
@@ -117,11 +132,26 @@ size_t robodog_voice_split_reply(const char *reply, size_t cap,
             if (end <= budget) {
                 end_budget = end;
             }
-            if (is_sentence_break(cp)) {
+            /* A '.' between two digits is a decimal point ("RLCD-4.2",
+             * "3.5"), not a sentence end — treating it as one cut a reply in
+             * the middle of a version number. */
+            const bool decimal = cp == '.' && end >= 2 &&
+                                 end < ceiling + 1 &&
+                                 reply[pos + end - 2] >= '0' &&
+                                 reply[pos + end - 2] <= '9' &&
+                                 reply[pos + end] >= '0' &&
+                                 reply[pos + end] <= '9';
+            if (is_sentence_break(cp) && !decimal) {
                 if (end <= budget) {
                     last_break = end;
                 } else if (next_break == 0) {
                     next_break = end;
+                }
+            } else if (is_clause_break(cp) && !decimal) {
+                if (end <= budget) {
+                    last_clause = end;
+                } else if (next_clause == 0) {
+                    next_clause = end;
                 }
             } else if (is_line_break(cp)) {
                 if (end <= budget) {
@@ -157,6 +187,10 @@ size_t robodog_voice_split_reply(const char *reply, size_t cap,
             cut = last_break;
         } else if (next_break != 0) {
             cut = next_break;
+        } else if (last_clause != 0) {
+            cut = last_clause;
+        } else if (next_clause != 0) {
+            cut = next_clause;
         } else if (last_line != 0) {
             cut = last_line;
         } else if (last_space != 0) {

@@ -1449,10 +1449,12 @@ static void voice_turn(void)
              * stay large enough to carry natural prosody. */
             const size_t first_cap = CONFIG_ROBODOG_VOICE_TTS_FIRST_CHARS;
             /* Chunks are sentence-aligned: a chunk may exceed `cap` to reach
-             * a sentence ender, so the arena is sized from the ABSOLUTE
-             * ceiling (the RLCD command field), not from `cap`. */
-            const size_t arena_cap =
-                max_chunks * (ROBODOG_VOICE_SPLIT_MAX_BYTES + 1) + 1;
+             * a sentence ender, bounded by OVERFLOW_CHARS so its WAV still
+             * fits one pipeline slot (384 KB = ~8.2 s).  The arena is sized
+             * from that ceiling, not from `cap`. */
+            const size_t overflow = CONFIG_ROBODOG_VOICE_TTS_OVERFLOW_CHARS;
+            const size_t chunk_ceiling = cap + overflow;
+            const size_t arena_cap = max_chunks * (chunk_ceiling + 1) + 1;
             char *arena = heap_caps_malloc(arena_cap,
                                            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
             size_t *offs = NULL;
@@ -1476,8 +1478,8 @@ static void voice_turn(void)
                 robodog_ui_set_agent_state("error");
             } else {
                 const size_t n = robodog_voice_split_reply(
-                    speech, cap, first_cap, arena, arena_cap, offs,
-                    max_chunks, &truncated);
+                    speech, cap, chunk_ceiling, first_cap, arena, arena_cap,
+                    offs, max_chunks, &truncated);
                 if (n == 0) {
                     /* Blank reply: nothing speakable; render it, stay idle. */
                     robodog_ui_show_assistant(speech);
