@@ -1254,18 +1254,33 @@ static const char *const VOICE_STYLE_EN =
     "[This is a spoken voice conversation. Reply in ENGLISH, in plain prose "
     "with no markdown formatting: no asterisks, no # headings, no bullet "
     "lists, no code blocks.] ";
+/* Mandarin ONLY.  The model mirrors the input's register: a Cantonese (or
+ * Cantonese-flavoured) utterance made it answer in Cantonese (唔/係/嘅/咗/佢/
+ * 嗰/咁/啲/冇/睇/嚟/攰/喇) about half the time, and the TTS then voiced those
+ * characters — the board sounded like it switched dialect mid-conversation.
+ * The vocabulary has to be named explicitly; "繁體中文" alone does not exclude
+ * 粵語, and "reply in the user's language" actively invites it. */
 static const char *const VOICE_STYLE_ZH =
-    "[這是一段語音對話。請用繁體中文（台灣用語）以口語化的完整句子回答，"
+    "[這是一段語音對話。請一律用標準華語（台灣國語）的繁體中文口語回答，"
+    "絕對不要使用粵語／廣東話的詞彙或語法（例如唔、係、嘅、咗、佢、嗰、咁、"
+    "啲、冇、睇、嚟、攰、喇、喺），即使使用者用粵語說話也一樣；"
     "只使用繁體字，絕對不要出現任何簡體字。不要使用任何 markdown 格式："
     "不要星號、不要 # 標題、不要項目符號、不要程式碼區塊。] ";
 
 /* Chinese turn?  The endpoint's detected language tag is authoritative; fall
- * back to the transcript's script when an older endpoint omits it. */
+ * back to the transcript's script when an older endpoint omits it.
+ *
+ * Cantonese matters here: faster-whisper can tag it "yue", and a Cantonese
+ * utterance is still Chinese — answering it in English (the non-Chinese
+ * branch) was a real failure mode. "cmn" is Mandarin under the same ISO-639-3
+ * scheme. The reply directive then pins Mandarin, never 粵語. */
 static bool voice_turn_is_chinese(const robodog_asr_meta_t *meta,
                                   const char *text)
 {
     if (meta->language[0] != '\0') {
-        return strncmp(meta->language, "zh", 2) == 0;
+        return strncmp(meta->language, "zh", 2) == 0
+            || strncmp(meta->language, "yue", 3) == 0
+            || strncmp(meta->language, "cmn", 3) == 0;
     }
     return robodog_utf8_has_cjk(text);
 }
@@ -1417,7 +1432,8 @@ static void voice_turn(void)
             /* Speak the WHOLE reply, not a truncated script.  The esp-claw root
              * agent is verbose by default (a full "what can you do" dump is ~60 s
              * of speech), so the reply is split at sentence/line breaks into
-             * chunks of <= TTS_MAX_CHARS (the voice-splitter queue) and each
+             * sentence-aligned chunks (<= TTS_MAX_CHARS preferred, up to the
+             * UI field when a sentence runs long) and each
              * chunk is rendered on the RLCD (progressively growing the full reply
              * via robodog_ui_append_assistant) then spoken, in order.  The
              * read-out voice finishes every word of the reply — the adversarial
@@ -1432,7 +1448,13 @@ static void voice_turn(void)
              * the reply start speaking seconds sooner while the later chunks
              * stay large enough to carry natural prosody. */
             const size_t first_cap = CONFIG_ROBODOG_VOICE_TTS_FIRST_CHARS;
-            const size_t arena_cap = max_chunks * (cap + 1) + 1;
+            /* Chunks are sentence-aligned: a chunk may exceed `cap` to reach
+             * a sentence ender, bounded by OVERFLOW_CHARS so its WAV still
+             * fits one pipeline slot (384 KB = ~8.2 s).  The arena is sized
+             * from that ceiling, not from `cap`. */
+            const size_t overflow = CONFIG_ROBODOG_VOICE_TTS_OVERFLOW_CHARS;
+            const size_t chunk_ceiling = cap + overflow;
+            const size_t arena_cap = max_chunks * (chunk_ceiling + 1) + 1;
             char *arena = heap_caps_malloc(arena_cap,
                                            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
             size_t *offs = NULL;
@@ -1456,8 +1478,8 @@ static void voice_turn(void)
                 robodog_ui_set_agent_state("error");
             } else {
                 const size_t n = robodog_voice_split_reply(
-                    speech, cap, first_cap, arena, arena_cap, offs,
-                    max_chunks, &truncated);
+                    speech, cap, chunk_ceiling, first_cap, arena, arena_cap,
+                    offs, max_chunks, &truncated);
                 if (n == 0) {
                     /* Blank reply: nothing speakable; render it, stay idle. */
                     robodog_ui_show_assistant(speech);

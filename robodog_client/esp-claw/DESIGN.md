@@ -355,7 +355,37 @@ Model configuration (NVS, namespace `app`):
   remains accepted as an alias, but see "Voice selection" — it now resolves
   to a **Chinese-native** timbre and gives English replies a Chinese accent.
 
-### Voice selection — native English and native Chinese (2026-11-02)
+### Voice selection — one voice, Mandarin-first (2026-11-03)
+
+**Production pins a single timbre.** `qwen3-tts.service` runs with
+`QWEN_TTS_VOICE=serena`, so every reply — Mandarin or English — is the same
+female speaker. Per-language timbre switching was rejected: it makes the board
+sound like a different person from turn to turn (a short English-only reply
+such as "Okay." was voiced by `aiden` in the middle of a Mandarin
+conversation). Measured speaker-embedding cosine across English, Mandarin and
+mixed replies for the pinned voice: 0.97–0.99, i.e. one identity.
+
+The trade-off is explicit: no Qwen3-TTS timbre is native in both languages, so
+pinning one voice means English replies carry a light Mandarin accent. The
+alternative (native accents in both) requires two speakers and was declined.
+An explicit `voice` in the request still overrides the pin, and the voice-design
+service (:8005) remains the escape hatch for a described voice.
+
+**Replies are Mandarin, never Cantonese.** The model mirrors the input's
+register: a Cantonese (or Cantonese-flavoured) utterance made it answer in
+Cantonese (唔/係/嘅/咗/佢/嗰/咁/啲/冇/睇/嚟/攰/喇) about half the time, and the
+TTS then voiced those characters — the board appeared to switch dialect
+mid-conversation. Both reply directives now name the vocabulary explicitly
+(firmware `VOICE_STYLE_ZH`, Hermes `platform_hint`), because "繁體中文" alone
+does not exclude 粵語 and "reply in the user's language" actively invites it.
+Verified over 6 samples with a Cantonese utterance: all Mandarin, no 粵語
+particles.
+
+`voice_turn_is_chinese()` also accepts `yue`/`cmn` tags, not just `zh`:
+faster-whisper can tag Cantonese as `yue`, and the non-Chinese branch would
+have answered a Cantonese utterance in English.
+
+### Voice selection history — native English and native Chinese (2026-11-02)
 
 Qwen3-TTS-1.7B-CustomVoice has 9 fixed timbres whose native language is baked
 in: `aiden`/`ryan` are English-native; `serena`/`vivian`/`uncle_fu`/`dylan`/
@@ -366,12 +396,12 @@ native American-English reference, `instruct: "neutral American English
 accent"` on Serena moved its spectral envelope by 0.09 (13.618 -> 13.704,
 i.e. no change). So voice choice must follow the language.
 
-The board sends `"voice":""`. The server then infers the spoken language from
-the **reply text's script** and picks that language's native timbre: English
--> `aiden`, Chinese -> `serena`, Japanese -> `ono_anna`, Korean -> `sohee`.
-An explicit `language` field still wins, and naming a timbre pins it. Nothing
-about this needs language plumbing in the firmware: the LLM already answers in
-the user's language, so the reply text is the authoritative signal.
+The board sends `"voice":""`, and the server infers the spoken language from
+the **reply text's script** so pronunciation is right (kana -> Japanese,
+hangul -> Korean, any >=2 CJK chars -> Chinese, else English). The timbre is
+pinned separately by `QWEN_TTS_VOICE` — see "Voice selection" below. An
+explicit `language` field still wins, and naming a timbre in `voice` pins it.
+Nothing about this needs language plumbing in the firmware.
 
 The mixed-script rule is deliberately asymmetric: **any** real Chinese clause
 (>= 2 CJK chars) selects Chinese even when Latin letters outnumber it, because
@@ -757,12 +787,17 @@ Chinese reply (the vision prompt forbids translation).
 - **The reply is CHUNKED at sentence breaks and queued, not truncated.** The
   esp-claw root agent is verbose by default (a full "what can you do" dump is
   60+ s of speech), so `voice_turn()` splits the FULL reply via
-  `voice_split_reply()` into sentence-bounded chunks of at most
-  `CONFIG_ROBODOG_VOICE_TTS_MAX_CHARS` (default 240, `range 1 479` so a
-  spoken chunk always fits the RLCD command field — the on-screen sentence is
-  the same text the voice reads, R5) — cut at the first
-  `.!?;`/newline break within the window, else the last space, else a hard
-  cutoff — and each chunk is queued in order: appended to the on-screen reply
+  `voice_split_reply()` into SENTENCE-ALIGNED chunks of
+  `CONFIG_ROBODOG_VOICE_TTS_MAX_CHARS` bytes preferred (default 96) — the cut
+  lands at the last `.!?;`/`。！？；…` inside the budget; when the window ends
+  mid-sentence the splitter runs on to the NEXT sentence ender, bounded by
+  `CONFIG_ROBODOG_VOICE_TTS_OVERFLOW_CHARS` (default 24), so a chunk still
+  fits one pipeline slot's WAV buffer (384 KB = ~8.2 s). A sentence too long
+  for that window falls back to the last CLAUSE break (`,` `，` `、` `：`) —
+  a natural pause, not a word cut — then a space, then a hard cut at the
+  budget. A newline is only a weak fallback for unpunctuated text. Chunks also
+  never exceed the 479-byte RLCD command field (R5: on-screen == spoken).
+  Each chunk is queued in order: appended to the on-screen reply
   (`robodog_ui_append_assistant`, so the whole reply accumulates on the RLCD)
   then spoken (`voice_speak` per chunk; `CONFIG_ROBODOG_VOICE_TTS_MAX_CHUNKS`
   bounds the queue).  The read-out voice therefore finishes EVERY word of the
@@ -857,8 +892,23 @@ Chinese reply (the vision prompt forbids translation).
     seam doubles that padding.  Leading silence is trimmed entirely on every
     chunk after the first (`TTS_LEAD_KEEP_MS` keeps the opening breath), and
     trailing silence is trimmed to `TTS_TAIL_KEEP_MS` on all of them.
-  - **UNIFORM chunk lengths** (`TTS_FIRST_CHARS == TTS_MAX_CHARS == 96 bytes`,
-    ~6.4 s of speech).  This one is counter-intuitive and was measured: the
+  - **SENTENCE-ALIGNED, near-uniform chunk lengths** (`TTS_FIRST_CHARS ==
+    TTS_MAX_CHARS == 96 bytes`, ~6.4 s of speech; a chunk overflows the budget
+    only by OVERFLOW_CHARS=24 to finish a sentence).  The reported "cuts in
+    mid-sentence, voice sounds weird" defect came from `cap` being treated as a
+    HARD limit: a sentence longer than 96 bytes was cut at the last space, so
+    the speaker stopped mid-clause and resumed mid-clause.  `cap` is now a
+    preferred budget: the seam is a sentence end whenever one fits the bounded
+    window, else a clause break (comma), else a space.  Newlines are a WEAK
+    fallback only — treating them as sentence ends cut at the agent's line
+    wrapping, which produced the same defect.
+
+    The overflow bound is not cosmetic: without it a 479-byte sentence became
+    a ~30 s WAV and the fetch failed with `response buffer grow failed`
+    (394886 B > the 384 KB slot buffer), dropping chunks.  Measured on the
+    board after bounding: 4 chunks, every seam a sentence/clause end, no
+    buffer failures.  Length variance is absorbed by the deep pipeline: with
+    RTF ~1.0 and
     endpoint serializes requests and synthesizes at ~1.0x real time on the
     board, so the fetch worker cannot start chunk 2 until chunk 1 is done.
     The seam gap at chunk k+1 is `Σ synth(2..k+1) - Σ play(1..k)`, which is
@@ -866,7 +916,9 @@ Chinese reply (the vision prompt forbids translation).
     chunk — a 96-byte opener followed by 144-byte chunks produced a measured
     7 s silence at the first seam, while uniform 96-byte chunks produced ~0 ms
     seams.  A tighter first budget only buys first-audio latency at the price
-    of that gap; keep the two equal.
+    of that gap; keep the two equal.  Sentence alignment does not change this
+    rule: a long sentence overflows to its own end, so the first chunk must
+    not be shorter than the budget or the first seam is exposed.
 
   Memory invariants: the slots are `SLOTS x TTS_MAX_RESPONSE` (5 x 384 KB ≈
   1.9 MB of PSRAM), allocated ONCE for the firmware's lifetime and reset in
