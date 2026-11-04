@@ -110,24 +110,31 @@ Assertions (PASS/FAIL/SKIP, verbatim evidence written back to the artifact):
    Chinese utterance (the Traditional-Chinese reply directive) and `en`
    otherwise. This is the dual-language wiring's own evidence, independent of
    what the model happens to answer.
-5. **REPLY** — device `agent reply: <text>` non-empty (native agent + LLM);
+5. **TTS_POLICY** — device `TTS request language=<lang> voice=<timbre>
+   seed=<n>` matches the turn: Chinese → `language=chinese voice=dylan
+   seed=8`, English → `language=english voice=aiden seed=8`. This is the
+   console proof that every chunk carries the explicit language/timbre/fixed
+   seed (not the server's per-chunk script inference), so a chunked reply
+   cannot switch accent mid-readout.
+6. **REPLY** — device `agent reply: <text>` non-empty (native agent + LLM);
    for a Chinese corpus it MUST contain CJK (an English answer despite the
    zh-TW directive is a FAIL), and for an English corpus it MUST be
    Latin-dominant (a Chinese-dominant answer — the session-memory carry-over
    that the explicit "reply in English" directive fixes — is a FAIL).
-6. **TTS** — device `TTS start` then `TTS stop` (ES8311 playback leg).
-7. **RING** — test mic captured the board speaker; host re-ASR (same Whisper
+7. **TTS** — device `TTS start` then `TTS stop` (ES8311 playback leg).
+8. **RING** — test mic captured the board speaker; host re-ASR (same Whisper
    endpoint) overlaps the reply (or audible-only → PASS-WEAK).
-8. **SUBTITLE** — RD_SHOT frame -> `capture.decode_hermes` -> Qwen2.5-VL
+9. **SUBTITLE** — RD_SHOT frame -> `capture.decode_hermes` -> Qwen2.5-VL
    readback carries >= 2 distinct reply tokens (the reply renders on the RLCD);
    CJK is transcribed as CJK (the vision prompt forbids translation).
 
 Chinese leg: `--corpus zh_hello` drives the pinned `你好世界` fixture
-(`serena`, `language: chinese`). Its characters are identical in Simplified and
-Traditional because faster-whisper may emit either script; a script-dependent
-phrase would make ASR_MATCH flap. The *reply* is Traditional (the directive),
-rendered by the generated Noto Sans CJK TC font and spoken by the Chinese-native
-timbre the TTS server picks from the reply's script.
+(`serena`, `language: chinese` — the input fixture is unrelated to the reply
+timbre). Its characters are identical in Simplified and Traditional because
+faster-whisper may emit either script; a script-dependent phrase would make
+ASR_MATCH flap. The *reply* is Traditional (the directive), rendered by the
+generated Noto Sans CJK TC font and spoken by the Beijing-native `dylan`
+timbre with the Beijing instruct and fixed seed.
 
 Write `$ARTIFACTS_DIR/robodog-claw-e2e/robodog-claw-e2e.md` (under the run
 subdir where the verbatim transcripts also live), plus a top-level

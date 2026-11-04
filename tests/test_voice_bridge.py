@@ -242,6 +242,48 @@ def test_resolve_downlink_pace_rejects_invalid(monkeypatch, bad):
         vb._resolve_downlink_pace()
 
 
+# ---------------------------------------------------------------------------
+# TTS request policy: explicit language + per-language native timbre + fixed
+# seed + standard-Mandarin instruct (robodog-claw drift fix)
+# ---------------------------------------------------------------------------
+
+
+def test_infer_tts_language_by_script():
+    assert vb.infer_tts_language("Hello there") == "english"
+    assert vb.infer_tts_language("你好，今天天氣很好。") == "chinese"
+    # Asymmetric on purpose: any real Chinese clause wins over Latin letters.
+    assert vb.infer_tts_language("好的，turn on the lights please.") == "chinese"
+    assert vb.infer_tts_language("こんにちは") == "japanese"
+    assert vb.infer_tts_language("안녕하세요") == "korean"
+
+
+def test_tts_request_english_uses_english_native_timbre(monkeypatch):
+    monkeypatch.setattr(vb, "TTS_VOICE", "")
+    monkeypatch.setattr(vb, "TTS_VOICE_EN", "aiden")
+    req = vb.tts_request("Hello, how are you today?")
+    assert req["language"] == "english"
+    assert req["voice"] == "aiden"  # NOT serena (Chinese-native accent)
+    assert req["seed"] == vb.TTS_SEED
+    assert req["instruct"] == vb.TTS_INSTRUCT_EN
+
+
+def test_tts_request_chinese_pins_beijing_timbre_and_instruct(monkeypatch):
+    monkeypatch.setattr(vb, "TTS_VOICE", "")
+    monkeypatch.setattr(vb, "TTS_VOICE_ZH", "dylan")
+    req = vb.tts_request("你好，今天天氣很好。")
+    assert req["language"] == "chinese"
+    assert req["voice"] == "dylan"
+    assert req["seed"] == vb.TTS_SEED
+    assert req["instruct"] == vb.TTS_INSTRUCT_ZH
+    assert "北京" in req["instruct"]
+
+
+def test_tts_request_global_voice_pin_overrides_per_language(monkeypatch):
+    monkeypatch.setattr(vb, "TTS_VOICE", "vivian")
+    assert vb.tts_request("Hello")["voice"] == "vivian"
+    assert vb.tts_request("你好")["voice"] == "vivian"
+
+
 if __name__ == "__main__":
     # Bazel py_test executes the file directly; the repo convention (see
     # test_lma_encoder.py) is to invoke pytest explicitly so the tests actually run.

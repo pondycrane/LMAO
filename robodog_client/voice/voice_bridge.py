@@ -106,16 +106,28 @@ TTS_SPK_ID = os.environ.get("TTS_SPK_ID", "中文女")
 #   TTS_MODE       "openai" (audio file from /v1/audio/speech) or
 #                  "cosyvoice" (stock CosyVoice FastAPI /inference_sft pcm)
 #   TTS_MODEL / TTS_VOICE / TTS_RESPONSE_FORMAT
-#                  TTS_VOICE empty = the server picks a native speaker from
-#                  the reply text's script (Qwen3-TTS timbres have a native
-#                  language baked in; a Chinese-native timbre reading English
-#                  carries a Chinese accent).
+#                  TTS_VOICE empty = per-language timbre (English -> aiden,
+#                  Chinese -> dylan); a non-empty value pins one voice.
+#   TTS_SEED       fixed sampler seed sent with every request (default 8)
+#   TTS_VOICE_EN / TTS_VOICE_ZH  per-language timbres
+#   TTS_INSTRUCT_ZH / TTS_INSTRUCT_EN  per-language `instruct`; the Chinese
+#                  default names the Beijing accent (Taiwan has several
+#                  Mandarin varieties, so a generic instruction drifted)
 ASR_BASE_URL = os.environ.get("ASR_BASE_URL", "").rstrip("/")
 ASR_API_KEY = os.environ.get("ASR_API_KEY", "dummy-local-noauth")
 ASR_MODEL = os.environ.get("ASR_MODEL", "base")
 TTS_MODE = os.environ.get("TTS_MODE", "openai")  # openai (spark) | cosyvoice (stock)
 TTS_MODEL = os.environ.get("TTS_MODEL", "cosyvoice2")
-TTS_VOICE = os.environ.get("TTS_VOICE", TTS_SPK_ID)
+TTS_VOICE = os.environ.get("TTS_VOICE", "")
+TTS_VOICE_EN = os.environ.get("TTS_VOICE_EN", "aiden")
+TTS_VOICE_ZH = os.environ.get("TTS_VOICE_ZH", "dylan")
+TTS_SEED = int(os.environ.get("TTS_SEED", "8"))
+TTS_INSTRUCT_ZH = os.environ.get(
+    "TTS_INSTRUCT_ZH",
+    "請用標準北京腔的普通話說話，發音清晰，語調自然，語速適中，"
+    "不要帶台灣腔、粵語或南方口音。",
+)
+TTS_INSTRUCT_EN = os.environ.get("TTS_INSTRUCT_EN", "")
 TTS_RESPONSE_FORMAT = os.environ.get("TTS_RESPONSE_FORMAT", "wav")
 TTS_API_KEY = os.environ.get("TTS_API_KEY", "dummy-local-noauth")
 
@@ -314,6 +326,65 @@ def decode_audio_to_pcm24k(audio: bytes) -> bytes:
     return pcm
 
 
+def infer_tts_language(text: str) -> str:
+    """Pick the spoken language from the reply text's script.
+
+    Mirrors the TTS server's ``infer_language`` so the bridge and the board
+    (which sends its ASR-derived language explicitly) make the same choice.
+    Hangul/kana are unambiguous; between Chinese and English any real Chinese
+    clause (>= 2 CJK chars) wins even when Latin letters outnumber it, because
+    a Chinese-native timbre reads an embedded English clause cleanly while an
+    English-native timbre mangles Chinese.
+    """
+    hangul = sum(1 for c in text if "\uac00" <= c <= "\ud7af")
+    kana = sum(1 for c in text if "\u3040" <= c <= "\u30ff")
+    cjk = sum(1 for c in text if "\u4e00" <= c <= "\u9fff")
+    latin = sum(1 for c in text if c.isascii() and c.isalpha())
+    if hangul and hangul >= max(kana, cjk, latin):
+        return "korean"
+    if kana and kana >= max(cjk, latin):
+        return "japanese"
+    if cjk >= 2:
+        return "chinese"
+    return "english"
+
+
+def tts_request(text: str) -> dict:
+    """Build the OpenAI-shaped TTS request for `text`.
+
+    The language is explicit (not left to the server's per-request script
+    inference) and carries a fixed seed + the language's instruct, so the
+    same reply is one voice/register across calls.  A global ``TTS_VOICE``
+    pins one timbre; otherwise English -> aiden and Chinese -> dylan (the
+    model's Beijing-native timbre).
+    """
+    language = infer_tts_language(text)
+    voice = TTS_VOICE
+    if not voice:
+        voice = {
+            "chinese": TTS_VOICE_ZH,
+            "english": TTS_VOICE_EN,
+            "japanese": "ono_anna",
+            "korean": "sohee",
+        }.get(language, "")
+    if language == "chinese":
+        instruct = TTS_INSTRUCT_ZH
+    elif language == "english":
+        instruct = TTS_INSTRUCT_EN
+    else:
+        instruct = ""
+    return {
+        "model": TTS_MODEL,
+        "input": text,
+        "voice": voice,
+        "language": language,
+        "seed": TTS_SEED,
+        "instruct": instruct,
+        "response_format": TTS_RESPONSE_FORMAT,
+        "speed": 1.0,
+    }
+
+
 def call_tts(text: str) -> bytes:
     """TTS -> s16le PCM @24 kHz.
 
@@ -326,13 +397,7 @@ def call_tts(text: str) -> bytes:
         base = TTS_BASE_URL.rstrip("/")
         if not base.endswith("/v1"):
             base += "/v1"
-        body = json.dumps({
-            "model": TTS_MODEL,
-            "input": text,
-            "voice": TTS_VOICE,
-            "response_format": TTS_RESPONSE_FORMAT,
-            "speed": 1.0,
-        }).encode()
+        body = json.dumps(tts_request(text)).encode()
         req = urllib.request.Request(
             base + "/audio/speech", data=body,
             headers={"Content-Type": "application/json",

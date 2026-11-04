@@ -27,7 +27,10 @@
 #
 #   bazel run //robodog_client:flash_robodog_claw [-- --port /dev/ttyACM0]
 set -euo pipefail
-APP="$(cd "$(dirname "$0")/.." && pwd)"
+# `bazel run` execs the bazel-bin symlink, whose dirname is NOT the source
+# package dir — resolve the source tree from BUILD_WORKSPACE_DIRECTORY first.
+APP="${BUILD_WORKSPACE_DIRECTORY:+$BUILD_WORKSPACE_DIRECTORY/robodog_client}"
+APP="${APP:-$(cd "$(dirname "$0")/.." && pwd)}"
 . "$APP/flash_common.sh"
 rd_flash_init "$APP"
 RD_IDF_IMG="${CLAW_IDF_IMG:-espressif/idf:v5.5.4}"

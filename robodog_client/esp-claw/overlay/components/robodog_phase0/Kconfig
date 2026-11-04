@@ -57,19 +57,61 @@ menu "RoboDog Phase 0 probes"
         default "qwen3-tts"
 
     config ROBODOG_TTS_VOICE
-        string "TTS voice in the request JSON (empty = pick by language)"
+        string "Global TTS voice override (empty = per-language)"
         default ""
         help
-            Empty means "let the server choose".  Qwen3-TTS timbres have a
-            native language baked in — aiden/ryan are English-native,
-            serena/vivian/uncle_fu/dylan/eric Chinese-native, ono_anna
-            Japanese, sohee Korean — and a Chinese-native timbre reading an
-            English reply carries a Chinese accent (instruct cannot remove
-            it).  With an empty voice the server infers the spoken language
-            from the reply text's script and picks a native speaker, so the
-            board sounds native in English and in Chinese without any
-            language plumbing in the firmware.  Name a timbre to pin one
-            voice for every reply.
+            Empty (the default) means per-language voices: English replies use
+            CONFIG_ROBODOG_TTS_VOICE_EN (aiden, English-native) and Chinese
+            replies use CONFIG_ROBODOG_TTS_VOICE_ZH (serena,
+            Mandarin-native).  A non-empty value pins ONE timbre for every
+            reply, overriding the per-language pair.
+
+    config ROBODOG_TTS_VOICE_EN
+        string "English TTS timbre"
+        default "aiden"
+        help
+            English-native Qwen3-TTS timbre (aiden/ryan).  An English reply
+            read by a Chinese-native timbre (serena/vivian/...) carries a
+            Chinese accent that `instruct` cannot remove, so the English
+            branch names a native timbre explicitly.
+
+    config ROBODOG_TTS_VOICE_ZH
+        string "Chinese TTS timbre"
+        default "dylan"
+        help
+            The model's Beijing-native Chinese timbre.  `serena`'s Mandarin
+            drifted between mainland- and Hong-Kong-flavoured run to run, and
+            Taiwan has several Mandarin varieties, so a named Beijing-native
+            speaker is the one fixed accent.  Used for every Chinese reply,
+            and pinned in the request so the server's global pin cannot
+            override it.
+
+    config ROBODOG_TTS_SEED
+        int "Fixed sampler seed sent with every TTS request"
+        default 8
+        help
+            Qwen3-TTS samples codec tokens, so prosody (and the perceived
+            accent) drifts between calls unless the sampler is seeded.  Every
+            request sends this seed, so the same text reproduces the same WAV
+            and a chunked reply keeps one voice across its sentences.
+
+    config ROBODOG_TTS_INSTRUCT_ZH
+        string "Chinese TTS delivery instruction"
+        default "請用標準北京腔的普通話說話，發音清晰，語調自然，語速適中，不要帶台灣腔、粵語或南方口音。"
+        help
+            Sent as the request's `instruct` for every Chinese chunk (when
+            the caller does not override it).  It names the Beijing accent
+            explicitly: Taiwan has several Mandarin varieties, so a generic
+            "standard Mandarin" instruction still let the model drift between
+            sections.
+
+    config ROBODOG_TTS_INSTRUCT_EN
+        string "English TTS delivery instruction"
+        default ""
+        help
+            Sent as the request's `instruct` for every English chunk.  Empty
+            by default: the English-native timbre needs no accent
+            instruction.
 
     config ROBODOG_LLM_TIMEOUT_MS
         int "Timeout for the rd_chat agent round-trip (ms)"

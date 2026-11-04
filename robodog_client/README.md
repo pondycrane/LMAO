@@ -281,7 +281,7 @@ voice_bridge <--voice/reply frames--WS:8101-- xiaozhi adapter <--send()/send_voi
 ```
 
 - **Identity / sessions**: the board's session and chat key is its stable Device-Id/MAC; reconnects (bridge restart, board reattach) reuse it, so the conversation history and memory survive.
-- **Spoken replies**: inbound turns are VOICE-type, so Hermes auto-TTS fires by default for this platform (adapter-local `_should_auto_tts_for_chat` — the global `voice.auto_tts` stays off so telegram/matrix/signal are unaffected). `tts.provider: openai` points Hermes' TTS at **our Qwen3-TTS** (`~/.hermes/config.yaml` `tts.openai.base_url: http://spark-5307:8004/v1`, `model: qwen3-tts`, `voice: ""`) — the same server the board calls. An empty voice makes the server pick a **native speaker of the reply's language** (English → `aiden`, Chinese → `serena`); Qwen3-TTS timbres have a native language baked in, so `af_heart`/`serena` reading English carries a Chinese accent that `instruct` cannot remove. The reply audio returns to the bridge as a `voice` frame and is streamed to the board.
+- **Spoken replies**: inbound turns are VOICE-type, so Hermes auto-TTS fires by default for this platform (adapter-local `_should_auto_tts_for_chat` — the global `voice.auto_tts` stays off so telegram/matrix/signal are unaffected). `tts.provider: openai` points Hermes' TTS at **our Qwen3-TTS** (`~/.hermes/config.yaml` `tts.openai.base_url: http://spark-5307:8004/v1`, `model: qwen3-tts`, `voice: ""`) — the same server the board calls. An empty voice makes the server pick a **native speaker of the reply's language** (English → `aiden`, Chinese → `dylan`, the Beijing-native timbre); Qwen3-TTS timbres have a native language baked in, so `af_heart`/`serena` reading English carries a Chinese accent that `instruct` cannot remove; `dylan` keeps Chinese on one fixed Beijing accent. The reply audio returns to the bridge as a `voice` frame and is streamed to the board.
 - **Fallback**: if the brain is unreachable the bridge synthesizes the `reply` text itself with Qwen3-TTS (stateless; no memory/tools). Last-resort it calls gx10 directly.
 - **Config / deploy**: enable the platform in `~/.hermes/config.yaml` under `gateway.platforms.xiaozhi.enabled: true` + `plugins.enabled` (`platforms/xiaozhi`), set `XIAOZHI_ALLOW_ALL_USERS=true` (LAN device; `XIAOZHI_ALLOWED_USERS` for a device-id allow-list), then `systemctl --user restart hermes-gateway`. The board then appears in `hermes gateway status` (or the `Platforms:` line of `hermes status`) as **XiaoZhi Voice Companion**. The plugin's source of truth lives in the repo under `robodog_client/voice/hermes-platform/xiaozhi/`; deploy by copying it to `~/.hermes/plugins/platforms/xiaozhi/`.
 - **Latency**: measured first-audio ~6.5 s after VAD finalize on the Hermes path (ASR + agent turn + auto-TTS), vs ~3–4 s for the thin stateless path. Accepted per the issue: the Hermes path earns sessions, multi-turn memory and tools; the stateless gx10 path stays as the fallback.
@@ -325,10 +325,13 @@ bash robodog_client/esp-claw/fetch_esp_claw.sh
 # Qwen3-TTS, spark-73dd = 192.168.50.3 for qwen3.8-flash-next); all three are on
 # the board's own subnet, so no host socat forward is needed. Override with
 # CLAW_ASR_URL / CLAW_TTS_URL / CLAW_LLM_BASE_URL / CLAW_LLM_MODEL if they move.
-# CLAW_TTS_VOICE defaults to EMPTY: the server then picks a native speaker of
-# the reply's language (English -> aiden, Chinese -> serena), so the board
-# speaks native English and native Chinese with no language plumbing here.
-# Set CLAW_TTS_VOICE=<timbre> only to pin one voice for every reply.
+# CLAW_TTS_VOICE defaults to EMPTY: per-language native timbres
+# (English -> aiden, Chinese -> dylan, the Beijing-native timbre), so the
+# board does not read English with a Chinese accent. Every TTS request carries
+# CLAW_TTS_SEED (default 8) and the Beijing instruct (CLAW_TTS_INSTRUCT_ZH),
+# so a chunked reply keeps one voice/accent across its sentences.
+# Override with CLAW_TTS_VOICE_EN / CLAW_TTS_VOICE_ZH (per language) or
+# CLAW_TTS_VOICE=<timbre> (pin one voice for every reply).
 CLAW_IDF_IMG=espressif/idf:v5.5.4 bash robodog_client/esp-claw/build_esp_claw.sh
 
 # flash (host esptool — the board's sanctioned path) + provision NVS
@@ -392,11 +395,18 @@ through an English model. The voice turn then:
 3. renders the reply with the generated Noto Sans CJK TC font (UTF-8 is kept
    byte-for-byte; only emoji/exotic scripts become `?`), and the chunk
    splitter never cuts a CJK character in half;
-4. speaks it through Qwen3-TTS with an **empty `voice`**: the server picks the
-   native timbre of the reply's script (`serena` for Chinese, `aiden` for
-   English) — Qwen3-TTS timbres have a native language baked in, so a
-   Chinese-native voice reading English carries an accent. Pin
-   `CLAW_TTS_VOICE=<timbre>` only if one voice must serve every reply.
+4. speaks it through Qwen3-TTS with the turn's **explicit language and
+   per-language native timbre** (`dylan`, Beijing-native, for Chinese;
+   `aiden` for English), plus a **fixed seed** (default 8) and the Beijing
+   `instruct`. The server would otherwise infer each chunk independently and
+   re-sample prosody per call: a short English-only chunk inside a Chinese
+   reply could flip timbre, and the same Chinese reply re-realized its accent
+   on every chunk. Taiwan has several Mandarin varieties, so the instruct
+   names the Beijing accent rather than a generic "standard Mandarin". The
+   turn sets the language once from the ASR result
+   (`TTS request language=<lang> voice=<timbre> seed=<n>`) and every chunk
+   carries it. Pin `CLAW_TTS_VOICE=<timbre>` only if one voice must serve
+   every reply.
 
 The session title (top-middle label) is built CJK-aware (9 Han chars fit the
 170 px label, 18 Latin), so a Chinese first question titles the session instead

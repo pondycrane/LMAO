@@ -36,7 +36,7 @@ firmware_tool(
         "build/flash_args",
         "build/robodog_client.bin",
         "build/nvs.bin",
-    ]),
+    ]) + ["flash_common.sh"],
 )
 
 # ── Voice-AI firmware (XiaoZhi) — built from source, never vendored ───────
@@ -66,6 +66,7 @@ firmware_tool(
         ".xiaozhi/build/partition_table/partition-table.bin",
         ".xiaozhi/build/xiaozhi.bin",
     ]) + [
+        "flash_common.sh",
         "voice/build_xiaozhi.sh",
         "voice/fetch_xiaozhi.sh",
         "voice/robodog_hermes_capture.patch",
@@ -139,6 +140,7 @@ firmware_tool(
         ".esp-claw/application/edge_agent/build/edge_agent.bin",
         ".esp-claw/application/edge_agent/build/ota_data_initial.bin",
     ]) + [
+        "flash_common.sh",
         "esp-claw/build_esp_claw.sh",
         "esp-claw/fetch_esp_claw.sh",
     ],

@@ -129,6 +129,16 @@ static EventGroupHandle_t s_voice_evts;
 static TaskHandle_t s_voice_task;
 static volatile bool s_turn_active;
 
+/* The language of the TTS requests for the CURRENT turn.  The endpoint would
+ * otherwise infer each chunk independently from its script, so a short
+ * English-only chunk inside a Chinese reply could flip to the English-native
+ * timbre mid-readout ("different accent in different sections").  The turn
+ * sets this once from the ASR language; probes use TTS_LANG_AUTO. */
+#define TTS_LANG_AUTO 0
+#define TTS_LANG_EN   1
+#define TTS_LANG_ZH   2
+static volatile int s_tts_lang = TTS_LANG_AUTO;
+
 /* TTS chunk pipeline: persistent slot buffers + ONE background fetch task.
  *
  * The task is the ONLY writer of a slot's rx.  It never touches the turn's
@@ -836,36 +846,95 @@ static size_t resample_to_rate(const int16_t *in, size_t in_n,
 
 /* ── TTS playback: reply text -> WAV -> device 16 kHz -> ES8311 ──────────── */
 
+/* The voice/language/instruct triple for a TTS request.  The per-language
+ * voices are named explicitly (not left to the server's global pin) so an
+ * English reply is never read by a Chinese-native timbre — the accent is a
+ * property of the timbre and `instruct` cannot remove it.  An empty global
+ * CONFIG_ROBODOG_TTS_VOICE means "per-language"; a non-empty one pins every
+ * reply to that timbre. */
+static const char *tts_voice_for(int lang)
+{
+    if (CONFIG_ROBODOG_TTS_VOICE[0] != '\0') {
+        return CONFIG_ROBODOG_TTS_VOICE;
+    }
+    if (lang == TTS_LANG_ZH) {
+        return CONFIG_ROBODOG_TTS_VOICE_ZH;
+    }
+    if (lang == TTS_LANG_EN) {
+        return CONFIG_ROBODOG_TTS_VOICE_EN;
+    }
+    return ""; /* auto: let the endpoint pick the native speaker */
+}
+
+static const char *tts_language_for(int lang)
+{
+    if (lang == TTS_LANG_ZH) {
+        return "chinese";
+    }
+    if (lang == TTS_LANG_EN) {
+        return "english";
+    }
+    return "auto";
+}
+
+static const char *tts_instruct_for(int lang)
+{
+    if (lang == TTS_LANG_ZH) {
+        return CONFIG_ROBODOG_TTS_INSTRUCT_ZH;
+    }
+    if (lang == TTS_LANG_EN) {
+        return CONFIG_ROBODOG_TTS_INSTRUCT_EN;
+    }
+    return "";
+}
+
 /* POST `reply` to the Qwen3-TTS endpoint and buffer the returned WAV in `rx`
  * WITHOUT playing it.  The single copy of the TTS request (JSON-escape body,
  * the set_post_field-pointer-alive UAF fix, error mapping) shared by
  * voice_speak and the `rd_tts` probe.  `rx` MUST already be initialised and
- * stays owned by the caller on every return. */
-esp_err_t robodog_voice_tts_fetch(const char *reply, robodog_http_rx_t *rx)
+ * stays owned by the caller on every return.
+ *
+ * `lang` is the turn's explicit language (TTS_LANG_AUTO for probes).  The
+ * request always carries the fixed seed and the language's instruct, so every
+ * chunk of a chunked reply is synthesized under the same voice/register
+ * instead of the server re-inferring and re-sampling each sentence. */
+static esp_err_t tts_fetch_lang(const char *reply, robodog_http_rx_t *rx,
+                                int lang)
 {
     if (rx == NULL || rx->buf == NULL) {
         ESP_LOGE(TAG, "TTS: no response buffer");
         return ESP_ERR_NO_MEM;
     }
     char *esc = robodog_json_escape(reply);
-    if (esc == NULL) {
+    char *ins = robodog_json_escape(tts_instruct_for(lang));
+    if (esc == NULL || ins == NULL) {
         ESP_LOGE(TAG, "TTS: json_escape failed");
+        free(esc);
+        free(ins);
         return ESP_ERR_NO_MEM;
     }
+    const char *voice = tts_voice_for(lang);
+    const char *language = tts_language_for(lang);
     char *json = NULL;
-    const int json_len = snprintf(NULL, 0,
-                                  "{\"model\":\"%s\",\"input\":\"%s\",\"voice\":\"%s\"}",
-                                  CONFIG_ROBODOG_TTS_MODEL, esc,
-                                  CONFIG_ROBODOG_TTS_VOICE);
+    const int json_len = snprintf(
+        NULL, 0,
+        "{\"model\":\"%s\",\"input\":\"%s\",\"voice\":\"%s\","
+        "\"language\":\"%s\",\"seed\":%d,\"instruct\":\"%s\"}",
+        CONFIG_ROBODOG_TTS_MODEL, esc, voice, language,
+        CONFIG_ROBODOG_TTS_SEED, ins);
     if (json_len > 0) {
         json = malloc((size_t)json_len + 1);
         if (json != NULL) {
-            snprintf(json, (size_t)json_len + 1,
-                     "{\"model\":\"%s\",\"input\":\"%s\",\"voice\":\"%s\"}",
-                     CONFIG_ROBODOG_TTS_MODEL, esc, CONFIG_ROBODOG_TTS_VOICE);
+            snprintf(
+                json, (size_t)json_len + 1,
+                "{\"model\":\"%s\",\"input\":\"%s\",\"voice\":\"%s\","
+                "\"language\":\"%s\",\"seed\":%d,\"instruct\":\"%s\"}",
+                CONFIG_ROBODOG_TTS_MODEL, esc, voice, language,
+                CONFIG_ROBODOG_TTS_SEED, ins);
         }
     }
     free(esc);
+    free(ins);
     if (json == NULL) {
         ESP_LOGE(TAG, "TTS: no memory for request JSON");
         return ESP_ERR_NO_MEM;
@@ -907,6 +976,14 @@ esp_err_t robodog_voice_tts_fetch(const char *reply, robodog_http_rx_t *rx)
     return ESP_OK;
 }
 
+/* Public probe/legacy entry point: language auto (the endpoint infers it from
+ * the text).  The voice turn uses tts_fetch_lang() with its explicit language
+ * through voice_speak_fetch_sync(). */
+esp_err_t robodog_voice_tts_fetch(const char *reply, robodog_http_rx_t *rx)
+{
+    return tts_fetch_lang(reply, rx, TTS_LANG_AUTO);
+}
+
 /* Split robodog_voice_speak into a FETCH phase and a PLAY phase so the turn
  * loop can overlap chunk i+1's fetch with chunk i's playback (one-step TTS
  * pipeline, voice_pipeline.[ch]).  The pieces the play loop uses below. */
@@ -919,7 +996,7 @@ esp_err_t robodog_voice_tts_fetch(const char *reply, robodog_http_rx_t *rx)
 static esp_err_t voice_speak_fetch_sync(const char *chunk, robodog_http_rx_t *rx)
 {
     robodog_http_rx_reset(rx);
-    const esp_err_t err = robodog_voice_tts_fetch(chunk, rx);
+    const esp_err_t err = tts_fetch_lang(chunk, rx, s_tts_lang);
     if (err != ESP_OK) {
         return err; /* robodog_voice_tts_fetch already logged the round-trip */
     }
@@ -1292,6 +1369,10 @@ static void voice_turn(void)
         return;
     }
     s_turn_active = true;
+    /* Probes/legacy callers see auto; the turn overrides this once the ASR
+     * language is known.  Resetting here keeps a failed early turn from
+     * leaving the previous turn's language in effect. */
+    s_tts_lang = TTS_LANG_AUTO;
 
     wifi_manager_status_t ws;
     wifi_manager_get_status(&ws);
@@ -1365,9 +1446,15 @@ static void voice_turn(void)
      * render so it never appears on the RLCD. */
     const bool chinese = voice_turn_is_chinese(&meta, text);
     const char *const directive = chinese ? VOICE_STYLE_ZH : VOICE_STYLE_EN;
+    s_tts_lang = chinese ? TTS_LANG_ZH : TTS_LANG_EN;
     ESP_LOGI(TAG, "voice reply language=%s (asr=%s)",
              chinese ? "zh-TW" : "en",
              meta.language[0] ? meta.language : "?");
+    /* Console evidence of the exact TTS request policy this turn applies —
+     * the host gates assert the per-language timbre + fixed seed. */
+    ESP_LOGI(TAG, "TTS request language=%s voice=%s seed=%d",
+             tts_language_for(s_tts_lang), tts_voice_for(s_tts_lang),
+             CONFIG_ROBODOG_TTS_SEED);
     const size_t vlen = strlen(directive);
     const size_t tlen = strlen(text);
     char *agent_input = malloc(vlen + tlen + 1);

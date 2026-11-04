@@ -11,7 +11,10 @@
 # Host esptool (Docker's ttyACM RTS passthrough breaks the button-free reset);
 # the shared plumbing lives in flash_common.sh.
 set -euo pipefail
-APP="$(cd "$(dirname "$0")" && pwd)"
+# `bazel run` execs the bazel-bin symlink, whose dirname is NOT the source
+# package dir — resolve the source tree from BUILD_WORKSPACE_DIRECTORY first.
+APP="${BUILD_WORKSPACE_DIRECTORY:+$BUILD_WORKSPACE_DIRECTORY/robodog_client}"
+APP="${APP:-$(cd "$(dirname "$0")" && pwd)}"
 . "$APP/flash_common.sh"
 rd_flash_init "$APP"
 

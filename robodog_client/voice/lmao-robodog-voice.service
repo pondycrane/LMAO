@@ -21,17 +21,22 @@ Environment=WHISPER_MODEL=base
 #Environment=ASR_MODEL=small
 #Environment=ASR_API_KEY=dummy-local-noauth
 # TTS: Qwen3-TTS served on spark-5307:8004 (24 kHz mono WAV, exactly the board
-# downlink rate — no resample). TTS_VOICE is EMPTY on purpose: Qwen3-TTS
-# timbres have a native language baked in (aiden/ryan English,
-# serena/vivian/… Chinese) and a Chinese-native timbre reading an English
-# reply carries a Chinese accent that `instruct` cannot remove. With no voice
-# the server infers the language from the reply text's script and picks a
-# native speaker, so a Chinese reply is voiced by a Chinese-native timbre and
-# an English one by an English-native timbre. Set TTS_VOICE=<timbre> to pin.
+# downlink rate — no resample).  TTS_VOICE is EMPTY on purpose: the bridge
+# sends the reply's language explicitly (same script rule as the board) and
+# names the per-language native timbre — English -> aiden, Chinese -> dylan
+# (the model's Beijing-native timbre).  Taiwan has several Mandarin varieties,
+# so the Chinese instruct names the Beijing accent explicitly; TTS_SEED pins
+# the sampler so the same reply is one voice/register across calls.  Set
+# TTS_VOICE=<timbre> to pin one voice for every reply.
 Environment=TTS_MODE=openai
 Environment=TTS_BASE_URL=http://spark-5307:8004
 Environment=TTS_MODEL=qwen3-tts
 Environment=TTS_VOICE=
+Environment=TTS_VOICE_EN=aiden
+Environment=TTS_VOICE_ZH=dylan
+Environment=TTS_SEED=8
+Environment="TTS_INSTRUCT_ZH=請用標準北京腔的普通話說話，發音清晰，語調自然，語速適中，不要帶台灣腔、粵語或南方口音。"
+Environment=TTS_INSTRUCT_EN=
 Environment=TTS_RESPONSE_FORMAT=wav
 Environment=TTS_API_KEY=dummy-local-noauth
 # Hermes brain: the board's Hermes session lives in the hermes-gateway process.

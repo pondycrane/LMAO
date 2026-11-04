@@ -89,8 +89,11 @@ esp_err_t robodog_voice_speak(const char *reply);
  *        `rx` WITHOUT playing it (the `rd_tts` probe's endpoint round-trip,
  *        no speaker needed — isolates ASR/TTS HTTP from the audio path).
  *        Single copy of the Qwen3-TTS request body + retry/error handling shared
- *        with robodog_voice_speak.  `rx` MUST already be initialised; the
- *        caller owns it on every return.
+ *        with robodog_voice_speak.  This entry point sends language="auto"
+ *        (the endpoint infers it from the text); the voice turn uses its
+ *        ASR-derived language instead, with the per-language timbre, the
+ *        fixed seed and the language's `instruct`.
+ *        `rx` MUST already be initialised; the caller owns it on every return.
  */
 esp_err_t robodog_voice_tts_fetch(const char *reply, robodog_http_rx_t *rx);
 

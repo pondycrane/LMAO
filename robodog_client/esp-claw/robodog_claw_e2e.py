@@ -25,13 +25,10 @@ import contextlib
 import json
 import os
 import re
-import subprocess
 import sys
 import threading
 import time
 from pathlib import Path
-
-import serial
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
@@ -76,6 +73,38 @@ VOICE_CAP_SECS = float(os.environ.get("RD_VOICE_CAP_SECS", "240"))
 
 log = e2e_rig.log
 shell_run = e2e_rig.shell_run
+
+
+# ---------------------------------------------------------------------------
+# Board reset/panic sentinels (NO_RESET leg)
+# ---------------------------------------------------------------------------
+# Any console line matching these marks a board reset or heap/panic fault.  The
+# console drain thread (ConsoleTail) feeds every line through note_panic(), so
+# a mid-run reboot (rst:0x / Guru Meditation / the DESIGN.md R7 tlsf heap
+# corruption) is NAMED by the NO_RESET leg instead of only failing whichever
+# leg was mid-wait — and it is seen even while the host is busy with audio.
+PANIC_RE = re.compile(
+    r"rst:0x|Guru Meditation|assert failed|Backtrace|abort\(\)|tlsf|"
+    r"heap.corr|CORRUPT|StoreProhibited|LoadProhibited|Rebooting"
+)
+
+# Per-run accumulator: run_loop clears it at the start of every session and
+# converts it into the NO_RESET assert at the end.
+RUN_RESET_LINES: list[str] = []
+
+
+def note_panic(ln):
+    if PANIC_RE.search(ln):
+        RUN_RESET_LINES.append(ln)
+        log(f"PANIC SENTINEL: {ln[:160]}")
+
+
+def set_no_reset(res):
+    if RUN_RESET_LINES:
+        res["asserts"]["NO_RESET"] = "FAIL " + RUN_RESET_LINES[0]
+    else:
+        res["asserts"]["NO_RESET"] = "PASS (no reset/panic markers)"
+    return res
 
 
 # ---------------------------------------------------------------------------
@@ -540,14 +569,43 @@ def run_loop(n, instr, artifacts, voice_verify):
                 "FAIL (no `voice reply language=` on console)"
             )
 
+        # ---- TTS_POLICY: explicit language + native timbre + fixed seed ----
+        # Console evidence that every chunk is synthesized under the turn's
+        # language, not the server's per-chunk script inference: Chinese must
+        # use dylan + the Beijing instruct, English must use aiden.
+        want_tts_lang = "chinese" if want_lang == "zh" else "english"
+        want_voice = "dylan" if want_lang == "zh" else "aiden"
+        m_pol, cur = wait_for_log(
+            tail, [r"TTS request language=(\S+) voice=(\S+) seed=(\d+)"],
+            timeout=10, label="TTS_POLICY", start=asr_start
+        )
+        if m_pol:
+            got_tts_lang, got_voice, got_seed = m_pol.groups()
+            res["artifacts"]["tts_policy"] = (
+                f"language={got_tts_lang} voice={got_voice} seed={got_seed}")
+            ok = (got_tts_lang == want_tts_lang and got_voice == want_voice
+                  and int(got_seed) == 8)
+            res["asserts"]["TTS_POLICY"] = (
+                f"PASS language={got_tts_lang} voice={got_voice} seed={got_seed}"
+                if ok else
+                f"FAIL language={got_tts_lang} voice={got_voice} "
+                f"seed={got_seed}; want language={want_tts_lang} "
+                f"voice={want_voice} seed=8"
+            )
+        else:
+            res["asserts"]["TTS_POLICY"] = (
+                "FAIL (no `TTS request language=` on console — the firmware "
+                "does not pin the TTS language/timbre/seed)"
+            )
+
         # Fail fast: no ASR means no agent run / TTS / subtitle in this turn —
         # waiting for the reply would just burn the full 180 s REPLY_TIMEOUT.
         if not asr_txt:
             skip = (
-                ("REPLY", "TTS", "CHUNKED_QUEUE", "PIPELINE_AHEAD",
-                 "GAP_VERIFY", "FULL_READOUT")
+                ("REPLY", "TTS_POLICY", "TTS", "CHUNKED_QUEUE",
+                 "PIPELINE_AHEAD", "GAP_VERIFY", "FULL_READOUT")
                 if voice_verify
-                else ("REPLY", "TTS", "RING", "SUBTITLE")
+                else ("REPLY", "TTS_POLICY", "TTS", "RING", "SUBTITLE")
             )
             for k in skip:
                 res["asserts"][k] = "SKIP (no ASR -> no turn)"
@@ -978,11 +1036,12 @@ def main():
         return v is not None and (v.startswith("PASS") or v.startswith("SKIP"))
 
     keys = (
-        ("OPEN_SESSION", "ASR_MATCH", "ASR_LANG", "REPLY_LANG", "REPLY", "TTS",
-         "CHUNKED_QUEUE", "PIPELINE_AHEAD", "FULL_READOUT", "NO_RESET")
+        ("OPEN_SESSION", "ASR_MATCH", "ASR_LANG", "REPLY_LANG", "TTS_POLICY",
+         "REPLY", "TTS", "CHUNKED_QUEUE", "PIPELINE_AHEAD", "FULL_READOUT",
+         "NO_RESET")
         if voice_verify
-        else ("OPEN_SESSION", "ASR_MATCH", "ASR_LANG", "REPLY_LANG", "REPLY",
-              "TTS", "RING", "SUBTITLE", "NO_RESET")
+        else ("OPEN_SESSION", "ASR_MATCH", "ASR_LANG", "REPLY_LANG",
+              "TTS_POLICY", "REPLY", "TTS", "RING", "SUBTITLE", "NO_RESET")
     )
 
     def passed(r):

@@ -39,8 +39,8 @@ mic/speaker is off-device, and the board is a dumb audio terminal.
        ▼               │ /v1/chat/completions    ▼
  Whisper endpoint  OpenAI-style LLM       Qwen3-TTS endpoint
  (user's own,      endpoint (gx10 vLLM    (user's own,
-  LAN, URL build-  or cloud key,          spark-5307:8004, voice empty =
-  time Kconfig)    NVS-cfg)               server picks by language;
+  LAN, URL build-  or cloud key,          spark-5307:8004, explicit
+  time Kconfig)    NVS-cfg)               language + native timbre;
                                           URL build-time Kconfig)
 ```
 
@@ -344,32 +344,59 @@ Model configuration (NVS, namespace `app`):
   `http://192.168.50.27:8001/v1/audio/transcriptions`).
 - **TTS engine is Qwen3-TTS on `:8004` (2026-11-02 cutover).** Same
   OpenAI-shaped contract the firmware speaks (POST `/v1/audio/speech`
-  `{model,input,voice}` -> 24 kHz mono s16 WAV), so the firmware needed no
-  code change — only `CLAW_TTS_MODEL` (`qwen3-tts`) and `CLAW_TTS_VOICE`
-  (**empty**) in the sdkconfig fragment. Warm, a 2-4 s sentence chunk takes
-  ~1.5-5 s (measured 1.2-1.3 s for a 1.2 s utterance up to ~5 s for 5 s of
-  audio, i.e. RTF ≈ 1) — and the endpoint returns the WAV whole, so the
-  pipeline keeps several chunks synthesized ahead instead of a one-step
-  lookahead. Under load (a busy GPU host) a single chunk was measured at
-  14-54 s, which is exactly the case the N-slot pipeline absorbs. Kokoro's `af_heart`
-  remains accepted as an alias, but see "Voice selection" — it now resolves
-  to a **Chinese-native** timbre and gives English replies a Chinese accent.
+  `{model,input,voice,...}` -> 24 kHz mono s16 WAV). The firmware now sends
+  `language`, `voice`, `seed` and `instruct` per request (see "Voice
+  selection" below): `CLAW_TTS_MODEL` (`qwen3-tts`), per-language
+  `CLAW_TTS_VOICE_EN`/`CLAW_TTS_VOICE_ZH`, `CLAW_TTS_SEED`,
+  `CLAW_TTS_INSTRUCT_ZH`, and `CLAW_TTS_VOICE` only as a global pin. Warm, a
+  2-4 s sentence chunk takes ~1.5-5 s (measured 1.2-1.3 s for a 1.2 s
+  utterance up to ~5 s for 5 s of audio, i.e. RTF ≈ 1) — and the endpoint
+  returns the WAV whole, so the pipeline keeps several chunks synthesized
+  ahead instead of a one-step lookahead. Under load (a busy GPU host) a
+  single chunk was measured at 14-54 s, which is exactly the case the N-slot
+  pipeline absorbs. Kokoro's `af_heart` remains accepted as an alias, but it
+  resolves to a **Chinese-native** timbre and gives English replies a Chinese
+  accent; the explicit per-language timbre avoids it.
 
-### Voice selection — one voice, Mandarin-first (2026-11-03)
+### Voice selection — per-language native timbres, fixed seed (2026-11-04)
 
-**Production pins a single timbre.** `qwen3-tts.service` runs with
-`QWEN_TTS_VOICE=serena`, so every reply — Mandarin or English — is the same
-female speaker. Per-language timbre switching was rejected: it makes the board
-sound like a different person from turn to turn (a short English-only reply
-such as "Okay." was voiced by `aiden` in the middle of a Mandarin
-conversation). Measured speaker-embedding cosine across English, Mandarin and
-mixed replies for the pinned voice: 0.97–0.99, i.e. one identity.
+**The board and the bridge name the language and the timbre explicitly.**
+Qwen3-TTS timbres have their native language baked in: `aiden`/`ryan` are
+English-native, `serena`/`vivian`/`uncle_fu`/`dylan`/`eric` Chinese-native
+(`dylan` Beijing, `eric` Chengdu). `instruct` cannot remove that accent —
+measured, Serena with `instruct: "neutral American English accent"` moved its
+spectral envelope by 0.09 (13.618 -> 13.704, i.e. no change). The previous
+one-voice pin (`QWEN_TTS_VOICE=serena` for every reply) made **English replies
+carry a heavy Mandarin accent**, so it is gone: the server runs unpinned and
+the callers send the explicit language + timbre. English -> `aiden`, Chinese
+-> `dylan` (Beijing-native).
 
-The trade-off is explicit: no Qwen3-TTS timbre is native in both languages, so
-pinning one voice means English replies carry a light Mandarin accent. The
-alternative (native accents in both) requires two speakers and was declined.
-An explicit `voice` in the request still overrides the pin, and the voice-design
-service (:8005) remains the escape hatch for a described voice.
+**Chinese uses one fixed Beijing-native speaker.** Taiwan has several Mandarin
+varieties, so a generic "standard Mandarin" instruction still let the voice
+drift between sections. `dylan` is the model's Beijing-native timbre and the
+request names the Beijing register explicitly in `instruct`
+(請用標準北京腔的普通話說話…不要帶台灣腔、粵語或南方口音). There is no
+"accent parameter" on CustomVoice — the timbre *is* the accent.
+
+The explicit `language` also fixes per-chunk drift: the server would otherwise
+infer each sentence independently, so a short English-only chunk inside a
+Chinese reply could flip to the English-native timbre mid-readout. The turn
+sets the language once from the ASR result and every chunk carries it.
+
+**A fixed seed makes synthesis deterministic.** Every request carries
+`seed: 8` (firmware `CONFIG_ROBODOG_TTS_SEED`, bridge `TTS_SEED`). Qwen3-TTS
+samples codec tokens, so without a seed the same text re-realized prosody on
+every call. Measured: the same request now returns a **byte-identical WAV**
+(md5 equal across calls), and the same speaker (`dylan`) is used for every
+Chinese sentence. Note what a seed does and does not do: it pins the sampler
+for a given token sequence, so identical text is identical audio; different
+sentences still differ (different text = different tokens), but they are all
+the same fixed speaker with the same named accent — that is what stops the
+"different accent in different sections" drift.
+
+An explicit `voice` in a request still overrides the per-language choice, and
+the voice-design service (:8005) remains the escape hatch for a described
+voice (it is not deployed: its briefs drifted Cantonese/Hong-Kong-flavoured).
 
 **Replies are Mandarin, never Cantonese.** The model mirrors the input's
 register: a Cantonese (or Cantonese-flavoured) utterance made it answer in
@@ -396,12 +423,11 @@ native American-English reference, `instruct: "neutral American English
 accent"` on Serena moved its spectral envelope by 0.09 (13.618 -> 13.704,
 i.e. no change). So voice choice must follow the language.
 
-The board sends `"voice":""`, and the server infers the spoken language from
-the **reply text's script** so pronunciation is right (kana -> Japanese,
-hangul -> Korean, any >=2 CJK chars -> Chinese, else English). The timbre is
-pinned separately by `QWEN_TTS_VOICE` — see "Voice selection" below. An
-explicit `language` field still wins, and naming a timbre in `voice` pins it.
-Nothing about this needs language plumbing in the firmware.
+The server infers the spoken language from the **reply text's script** so
+pronunciation is right (kana -> Japanese, hangul -> Korean, any >=2 CJK chars
+-> Chinese, else English). The board and the bridge now send an explicit
+`language` + timbre instead of relying on that inference; an explicit
+`language` field wins, and naming a timbre in `voice` pins it.
 
 The mixed-script rule is deliberately asymmetric: **any** real Chinese clause
 (>= 2 CJK chars) selects Chinese even when Latin letters outnumber it, because
@@ -476,8 +502,9 @@ tox-Free fixtures confirm the endpoint shapes).
 
 - `rd_asr`/`rd_tts` prove the endpoint shapes: Whisper takes a multipart
   `file`+`model=whisper-1` POST to `/v1/audio/transcriptions`; Qwen3-TTS
-  takes JSON `{model, voice, input}` to `/v1/audio/speech` and streams WAV.
-  `voice` may be empty — the server then chooses a native speaker (below).
+  takes JSON `{model, input, voice, language, seed, instruct}` to
+  `/v1/audio/speech` and streams WAV. The voice turn sends the explicit
+  language + native timbre + fixed seed (see "Voice selection").
 - ES8311 + ES7210 audio devices initialize on boot (board port, no
   extra work) — good groundwork for Phase 2's native voice loop.
 - The board boots the RoboDog **text-only chat UI** (Phase 1) directly —
@@ -599,16 +626,25 @@ through an English decode. The device surfaces that detection as
   byte-for-byte (`robodog_utf8.c`; only emoji/exotic scripts become `?`), and
   the chunk splitter cuts at CJK sentence breaks (。！？；…) on codepoint
   boundaries, so no Chinese character is ever split between TTS chunks.
-- speaks it through Qwen3-TTS with an **empty `voice`**: the server picks the
-  native timbre of the reply's script (`serena` for Chinese, `aiden` for
-  English). Qwen3-TTS timbres have a native language baked in, so pinning one
-  voice for both languages would read one of them with a foreign accent.
+- speaks it through Qwen3-TTS with the turn's **explicit language and
+  per-language native timbre** (`dylan`, Beijing-native, for Chinese;
+  `aiden` for English), plus a **fixed seed** and the Beijing `instruct`. The
+  server would otherwise infer each chunk independently and re-sample prosody
+  per call; a short English-only chunk in a Chinese reply could flip timbre,
+  and the same Chinese reply re-realized its accent on every chunk. Taiwan has
+  several Mandarin varieties, so the instruct names the Beijing accent rather
+  than a generic "standard Mandarin". The turn sets the language once from the
+  ASR result (logged as
+  `TTS request language=<lang> voice=<timbre> seed=<n>`) and every chunk
+  carries it, so the read-out is one voice from start to end.
 - titles the session CJK-aware (9 Han chars ≈ 18 Latin widths in the 170 px
   top-middle label) instead of falling back to `S#<id>` on a Chinese first
   question.
 
-Gate: `robodog_claw_e2e.py --corpus zh_hello` (pinned `你好世界`, `serena`,
-`language: chinese`). The phrase uses only characters identical in Simplified
+Gate: `robodog_claw_e2e.py --corpus zh_hello` (pinned `你好世界`, spoken by
+`serena` in the input fixture, `language: chinese`; the fixture timbre is
+unrelated to the reply timbre, which is `dylan`). The phrase uses only
+characters identical in Simplified
 and Traditional because faster-whisper may emit either script; a
 script-dependent phrase would make ASR_MATCH flap. Asserts: `ASR_LANG=zh`,
 `REPLY_LANG=zh-TW`, `REPLY` contains CJK, `SUBTITLE` readback contains the
