@@ -20,11 +20,16 @@
 #include <stdbool.h>
 #include <stddef.h>
 
-/* Absolute byte ceiling for ONE chunk.  The RLCD UI command field is
- * `char text[480]` (robodog_ui.c), so a chunk plus its NUL must never exceed
- * 479 bytes or the on-screen sentence would be truncated relative to the one
- * the voice reads (R5).  `cap` is a PREFERRED budget, not a hard one: the
- * splitter may run past it to reach a sentence ender, but never past this. */
+/* Absolute byte ceiling for ONE chunk.  Two independent bounds meet here:
+ *   - the RLCD UI command field is `char text[480]` (robodog_ui.c), so a chunk
+ *     plus its NUL must never exceed 479 bytes or the on-screen sentence would
+ *     be truncated relative to the one the voice reads (R5);
+ *   - the per-slot TTS response buffer (CONFIG_ROBODOG_VOICE_TTS_MAX_RESPONSE,
+ *     384 KB = ~8.2 s of 24 kHz s16) must hold the whole WAV, so a chunk must
+ *     stay well under ~8 s of speech — the caller passes that tighter ceiling
+ *     as `cap + overflow`.
+ * `cap` is a PREFERRED budget, not a hard one: the splitter may run past it to
+ * reach a sentence ender, but never past the ceiling it is given. */
 #define ROBODOG_VOICE_SPLIT_MAX_BYTES 479
 
 #ifdef __cplusplus
@@ -34,12 +39,15 @@ extern "C" {
 /**
  * @brief Split `reply` into sentence-bounded chunks for the TTS queue.
  *
- * Cuts are SENTENCE-ALIGNED.  `cap` is a preferred budget: the cut lands
- * after the last `.`/`!`/`?`/`;` — or a CJK sentence break (。！？；…) — that
- * fits inside it.  When the window ends mid-sentence the splitter runs on to
- * the FIRST sentence ender past `cap`, up to
- * `ROBODOG_VOICE_SPLIT_MAX_BYTES` (the UI field), so a seam is never in the
- * middle of a sentence just because the sentence is longer than the budget.
+ * Cuts are SENTENCE-ALIGNED within a bounded overflow.  `cap` is a preferred
+ * budget: the cut lands after the last `.`/`!`/`?`/`;` — or a CJK sentence
+ * break (。！？；…) — that fits inside it.  When the window ends mid-sentence
+ * the splitter runs on to the FIRST sentence ender past `cap`, but only up to
+ * `ROBODOG_VOICE_SPLIT_MAX_BYTES` — in practice the caller passes the
+ * per-slot WAV buffer bound, so a chunk always fits one slot.  A sentence that
+ * cannot finish inside that window falls back to a CLAUSE break (`,` `，` `、`
+ * `：` `:`), which is a natural pause rather than a mid-clause cut, then to a
+ * space, then to a hard cut at `cap`.
  * A newline is only a WEAK break: it is used when the reply carries no
  * sentence punctuation at all (a stripped bullet list), never in preference
  * to a real sentence end — treating it as one cut replies at the agent's
@@ -57,8 +65,11 @@ extern "C" {
  *
  * @param[in]  reply       the full agent reply (NUL-terminated)
  * @param[in]  cap         PREFERRED bytes per chunk (soft: a chunk may run
- *                         past it to reach a sentence ender, never past
- *                         ROBODOG_VOICE_SPLIT_MAX_BYTES)
+ *                         past it to reach a sentence ender)
+ * @param[in]  ceiling     HARD byte limit for one chunk — the caller passes
+ *                         `cap + overflow`, sized so the chunk's WAV fits one
+ *                         TTS pipeline slot (and never above
+ *                         ROBODOG_VOICE_SPLIT_MAX_BYTES, the RLCD field)
  * @param[in]  first_cap   preferred bytes for the FIRST chunk only (0 = use
  *                         `cap`).  The first chunk's synthesis is the whole
  *                         time-to-first-audio, so a smaller first budget makes
@@ -78,9 +89,10 @@ extern "C" {
  *         n is 0 and nothing is written.
  */
 size_t robodog_voice_split_reply(const char *reply, size_t cap,
-                                 size_t first_cap, char *arena,
-                                 size_t arena_cap, size_t *offsets,
-                                 size_t max_chunks, bool *truncated);
+                                 size_t ceiling, size_t first_cap,
+                                 char *arena, size_t arena_cap,
+                                 size_t *offsets, size_t max_chunks,
+                                 bool *truncated);
 
 #ifdef __cplusplus
 }

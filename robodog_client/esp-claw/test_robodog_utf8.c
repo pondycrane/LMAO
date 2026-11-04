@@ -149,9 +149,9 @@ void test_splitter_utf8_cjk(void)
         "今天天氣很好。我們可以去公園散步，然後一起吃午餐。"
         "下午可能會下雨，記得帶傘。晚上我們在家看電影。";
     const size_t cap = 40;
-    const size_t n = robodog_voice_split_reply(reply, cap, 0, arena,
-                                               sizeof(arena), offsets, 64,
-                                               &truncated);
+    const size_t n = robodog_voice_split_reply(
+        reply, cap, ROBODOG_VOICE_SPLIT_MAX_BYTES, 0, arena, sizeof(arena),
+        offsets, 64, &truncated);
     CHECK(!truncated, "CJK reply fits 64 chunks (n=%zu)", n);
     CHECK(n > 1, "CJK reply with cap=40 spans multiple chunks (n=%zu)", n);
     size_t rebuilt = 0;
@@ -172,7 +172,7 @@ void test_splitter_utf8_cjk(void)
     /* A CJK sentence break is preferred over a hard byte cutoff. */
     {
         const char *r = "第一句。第二句。第三句。";
-        const size_t k = robodog_voice_split_reply(r, 12, 0, arena,
+        const size_t k = robodog_voice_split_reply(r, 12, ROBODOG_VOICE_SPLIT_MAX_BYTES, 0, arena,
                                                    sizeof(arena), offsets, 8,
                                                    &truncated);
         CHECK(k == 3, "three 。-terminated sentences -> 3 chunks (got %zu)", k);
@@ -186,7 +186,7 @@ void test_splitter_utf8_cjk(void)
     /* Cap smaller than one CJK character: the splitter must still advance
      * (emit the codepoint whole) instead of looping. */
     {
-        const size_t k = robodog_voice_split_reply("你好", 2, 0, arena,
+        const size_t k = robodog_voice_split_reply("你好", 2, ROBODOG_VOICE_SPLIT_MAX_BYTES, 0, arena,
                                                    sizeof(arena), offsets, 8,
                                                    &truncated);
         CHECK(k == 2 && !truncated, "cap<codepoint emits whole chars (k=%zu)",

@@ -250,6 +250,23 @@ menu "RoboDog Phase 2 voice loop"
             makes lengths vary slightly (a long sentence overflows to its own
             end); the deep pipeline absorbs that.
 
+    config ROBODOG_VOICE_TTS_OVERFLOW_CHARS
+        int "Bytes a chunk may run past TTS_MAX_CHARS to finish a sentence"
+        default 24
+        range 0 383
+        help
+            Sentence alignment lets a chunk run past the preferred budget to
+            reach its sentence ender, but the overflow has to stay inside the
+            per-slot WAV buffer (CONFIG_ROBODOG_VOICE_TTS_MAX_RESPONSE, 384 KB
+            = ~8.2 s of 24 kHz s16 audio).  96 + 24 = 120 bytes is ~8 s of
+            Chinese (~4.5 chars/s at 3 bytes/char) or ~7 s of English, so the
+            WAV always fits one slot.  Measured failure without a bound: a
+            479-byte sentence produced a ~30 s WAV and the fetch failed with
+            `response buffer grow failed` (394886 B), which dropped chunks.
+            A sentence that cannot finish inside budget+overflow falls back to
+            the last CLAUSE break (, ， 、 ： :), then a space, then a hard cut
+            at the budget — a comma is a natural pause, a word cut is not.
+
     config ROBODOG_VOICE_TTS_FIRST_CHARS
         int "Max bytes for the FIRST spoken chunk"
         default 96
