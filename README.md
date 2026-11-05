@@ -855,10 +855,11 @@ firmware for the Waveshare ESP32-S3 RLCD-4.2 (ST7305) board: it reads its
 over the same Reticulum TCP interface every `RH_INTERVAL_SECONDS` (default
 60 s), requests the air history, and draws **its own temp/humidity history as
 a chart** on the panel (device name + latest reading in the header, temp trace
-solid with °C min/max, humidity trace dotted with % min/max, `oldest … now`
-footer).  Its identity is pinned per device at build time from
-`~/.local/share/lmao_client/devs/<name>/identity`, so the delivery hash never
-drifts.
+solid with °C min/max, humidity trace dotted with % min/max, each line
+labelled with its current value at its end — `30.4°C` / `43%` — and an x-axis
+clock under the left/middle/right ticks).  Its identity is pinned per device at build time
+from `~/.local/share/lmao_client/devs/<name>/identity`, so the delivery hash
+never drifts.
 
 ```bash
 # build: only the server hash + pinned identity + cadence are baked in

@@ -79,7 +79,16 @@ every RH_INTERVAL_SECONDS:
 Panel layout (400×300 landscape): device name + latest `22.6C 55%` on the top
 row, status/sample-count under it, a framed plot with the temperature trace
 (solid, own min/max on the left in °C) and the humidity trace (dotted, own
-min/max on the right in %), and `oldest … now` on the footer.  The chart is
+min/max on the right in %), with an **x-axis clock**: tick marks under the
+left edge, the middle sample and the right edge, each labelled with that
+sample's local `HH:MM` (derived from `ChartBundle.start_ms + i*period_ms`,
+offset by `RH_TZ_OFFSET_MINUTES`; `--:--` when the board has no clock rather
+than a fake `00:00`).  Each line also
+carries **its current value at its own end** (`30.4°C` above the temperature
+endpoint, `43%` below the humidity one) — the two traces cross, so the unit is
+what identifies a line at a glance.  Those labels are drawn on a
+paper-coloured knockout box, so a trace cannot strike through the digits, and
+they are pushed apart when the two endpoints nearly coincide.  The chart is
 drawn from `ChartBundle` values (`temp` tenths of °C, `hum` %); an empty reply
 renders `waiting for data...` rather than a placeholder curve.
 

@@ -71,6 +71,15 @@
 /* ---- Chart history depth (matches the server's env ring) ---- */
 #define RH_HISTORY_MAX 30
 
+/* ---- Display timezone for the chart's x-axis clock ---- */
+/* Minutes east of UTC.  There is no tz database on the device: flip this at
+ * each DST transition and reflash.
+ *   -300 = US Eastern Standard (EST, winter; DST ended 2026-11-01)
+ *   -240 = US Eastern Daylight (EDT, spring/summer) */
+#ifndef RH_TZ_OFFSET_MINUTES
+#define RH_TZ_OFFSET_MINUTES (-300)
+#endif
+
 /* ---- Timing / robustness ---- */
 #define RH_WIFI_CONNECT_TIMEOUT_S 30u
 #define RH_WDT_TIMEOUT_S          120u
