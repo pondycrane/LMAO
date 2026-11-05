@@ -123,3 +123,23 @@ def test_api_register_and_find(tmp_path):
     import asyncio
 
     asyncio.run(run())
+
+
+def test_auto_learn_does_not_downgrade_an_operator_set_type(tmp_path):
+    """The learn path always reports type 'device'; it must not erase a real
+    type the operator set via POST /contacts."""
+    b = _book(tmp_path)
+    b.register(
+        delivery_hash="81aae19de81066b491f437d0e9820618",
+        device_type="robodog_home",
+        device_name="main bedroom",
+    )
+    b.register(
+        delivery_hash="81aae19de81066b491f437d0e9820618",
+        device_type="device",
+        device_name="main bedroom",
+    )
+    e = b.find(delivery_hash="81aae19de81066b491f437d0e9820618")[0]
+    assert e["device_type"] == "robodog_home"
+    assert e["device_name"] == "main bedroom"
+    b.close()

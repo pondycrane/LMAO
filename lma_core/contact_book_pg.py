@@ -91,7 +91,12 @@ class PostgresContactBook:
                                            THEN contacts.device_name   -- auto default: keep operator-set name
                                            ELSE excluded.device_name   -- custom: honor the friendly name
                                            END,
-                        device_type = excluded.device_type,
+                        -- The auto-learn path reports the generic 'device' type;
+                        -- it must not overwrite an operator-set type.
+                        device_type = CASE WHEN excluded.device_type = 'device'
+                                           THEN contacts.device_type
+                                           ELSE excluded.device_type
+                                           END,
                         pubkey_hex = COALESCE(excluded.pubkey_hex, contacts.pubkey_hex),
                         identity_hash = COALESCE(excluded.identity_hash, contacts.identity_hash),
                         last_seen = excluded.last_seen

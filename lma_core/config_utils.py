@@ -90,7 +90,15 @@ class RnsConfig:
         CONFIG_CONTENT = _cfg.CONFIG_CONTENT
     """
 
-    def __init__(self, transport_path, tempdir_prefix="lmao_rns_", persist_state=False, role="client"):
+    def __init__(
+        self,
+        transport_path,
+        tempdir_prefix="lmao_rns_",
+        persist_state=False,
+        role="client",
+        tcp_host=None,
+        tcp_port=None,
+    ):
         self._transport_path = transport_path
         self._tempdir_prefix = tempdir_prefix
         self._persist_state = persist_state
@@ -100,6 +108,29 @@ class RnsConfig:
             "logging": {"loglevel": 4},
             "transport": {"path": transport_path},
         }
+
+        # Deterministic home-network transport.  Scoped multicast (AutoInterface)
+        # is unreliable on this home wifi (AP multicast/MLD filtering silently
+        # drops the RNS group frames for the server — verified), while unicast
+        # TCP to the server works.  The server listens (TCPServerInterface,
+        # port 4246 default) and wifi/human clients connect (TCPClientInterface)
+        # to LMAO_SERVER_HOST.  Role "server" => listening side; role
+        # "tcp-client" => TCP only (no RNode/AutoInterface), for host-side
+        # clients that deliberately use just the Reticulum TCP interface.
+        if role == "tcp-client":
+            self._interfaces = {}
+            tcp_host = (tcp_host or os.environ.get("LMAO_SERVER_HOST", "tp4")).strip()
+            tcp_port = int(tcp_port or os.environ.get("LMAO_SERVER_PORT", "4246"))
+            if tcp_host:
+                self._interfaces["Home network TCP"] = {
+                    "type": "TCPClientInterface",
+                    "target_host": tcp_host,
+                    "target_port": tcp_port,
+                    "enabled": True,
+                }
+            self.CONFIG_CONTENT = dict_to_ini(self._sections, self._interfaces)
+            return
+
         # AutoInterface normally binds every multicast-capable interface.
         # On K8s nodes that includes flannel/veth CNI interfaces, producing
         # "No multicast echoes" errors and leaking announces into the pod
@@ -129,12 +160,6 @@ class RnsConfig:
             "WiFi": wifi_interface,
         }
 
-        # Deterministic home-network transport.  Scoped multicast (AutoInterface)
-        # is unreliable on this home wifi (AP multicast/MLD filtering silently
-        # drops the RNS group frames for the server — verified), while unicast
-        # TCP to the server works.  The server listens (TCPServerInterface,
-        # port 4246 default) and wifi/human clients connect (TCPClientInterface)
-        # to LMAO_SERVER_HOST.  Role "server" => listening side.
         if role == "server":
             self._interfaces["Home network TCP"] = {
                 "type": "TCPServerInterface",
@@ -145,12 +170,13 @@ class RnsConfig:
         else:
             # Prefer the LAN hostname: tp4's wlan0 is DHCP and its address has
             # moved (it broke clients when it did).  See docs/cluster-setup.md.
-            tcp_host = os.environ.get("LMAO_SERVER_HOST", "tp4").strip()
+            tcp_host = (tcp_host or os.environ.get("LMAO_SERVER_HOST", "tp4")).strip()
+            tcp_port = int(tcp_port or os.environ.get("LMAO_SERVER_PORT", "4246"))
             if tcp_host:
                 self._interfaces["Home network TCP"] = {
                     "type": "TCPClientInterface",
                     "target_host": tcp_host,
-                    "target_port": int(os.environ.get("LMAO_SERVER_PORT", "4246")),
+                    "target_port": tcp_port,
                     "enabled": True,
                 }
         self.CONFIG_CONTENT = dict_to_ini(self._sections, self._interfaces)

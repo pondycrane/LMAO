@@ -14,6 +14,7 @@ py_library(
         "contact_book_pg.py",
         "contacts_api.py",
         "device_detect.py",
+        "env_history.py",
         "grpc_types.py",
         "message_utils.py",
         "query_api.py",

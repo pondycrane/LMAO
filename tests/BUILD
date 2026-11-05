@@ -185,6 +185,43 @@ py_test(
     ],
 )
 
+# All-node air temperature/humidity ring (home-client queries).
+py_test(
+    name = "test_env_history",
+    srcs = ["test_env_history.py"],
+    deps = [
+        "//lma_core",
+        "@lmao_pip//protobuf",
+        "@lmao_pip//pytest",
+    ],
+)
+
+# RoboDog home client: TCP-only config, air-series wire helpers, and the
+# request/reply round trip against a fake RNS/LXMF.
+py_test(
+    name = "test_robodog_home_client",
+    srcs = ["test_robodog_home_client.py"],
+    deps = [
+        "//robodog_home_client:home_client_lib",
+        "//lma_core",
+        "@lmao_pip//protobuf",
+        "@lmao_pip//rns",
+        "@lmao_pip//pytest",
+    ],
+)
+
+# Server-side air-only HistoryRequest routing (real protobuf + buffers).
+py_test(
+    name = "test_server_env_reply",
+    srcs = ["test_server_env_reply.py"],
+    deps = [
+        "//lmao_server:server_lib",
+        "//lma_core",
+        "@lmao_pip//protobuf",
+        "@lmao_pip//pytest",
+    ],
+)
+
 py_test(
     name = "test_sensors",
     srcs = ["test_sensors.py"],
