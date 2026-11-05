@@ -1,0 +1,35 @@
+# RoboDog home client — ESP32-S3 + RLCD-4.2 (ST7305) env reporter/display.
+CONFIG_IDF_TARGET="esp32s3"
+CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# Octal PSRAM: the u8g2 full-frame tile buffer lives outside internal SRAM.
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+
+# Console over native USB-Serial-JTAG: esptool/idf.py flash + the RD_SHOT
+# capture (robodog_client/capture.py) read /dev/ttyACM0.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+
+# RTReticulum needs C++ exceptions (Bytes bounds checks throw) and these
+# mbedTLS algorithms (HKDF is used by the RNS crypto layer).
+CONFIG_COMPILER_CXX_EXCEPTIONS=y
+CONFIG_COMPILER_CXX_EXCEPTIONS_EMG_POOL_SIZE=0
+CONFIG_MBEDTLS_HARDWARE_AES=y
+CONFIG_MBEDTLS_HARDWARE_SHA=y
+CONFIG_MBEDTLS_HKDF_C=y
+
+CONFIG_FREERTOS_USE_TIMERS=y
+CONFIG_FREERTOS_HZ=1000
+CONFIG_ESP_WIFI_ENABLED=y
+
+# The main task runs WiFi, the Reticulum TCP sync, the SHTC3 read and the
+# 15200-byte RD_SHOT dump; the IDF default stack overflows that chain.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+
+# -Os keeps the 1090-file u8g2 build inside the app partition.
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y

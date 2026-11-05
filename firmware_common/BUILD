@@ -20,6 +20,16 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+# ── Host-testable: air-series history request + ChartBundle decoder ──
+cc_library(
+    name = "lma_chart",
+    srcs = ["lma_common/lma_chart.cpp"],
+    hdrs = ["lma_common/lma_chart.h"],
+    strip_include_prefix = "lma_common",
+    deps = ["@rtreticulum//:rtreticulum"],
+    visibility = ["//visibility:public"],
+)
+
 # ── Host-testable: send-only LXMF (RTReticulum-dependent) ──
 cc_library(
     name = "lxmf_send",

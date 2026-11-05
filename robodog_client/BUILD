@@ -9,6 +9,28 @@
 load("@rules_python//python:defs.bzl", "py_library")
 load(":firmware_tools.bzl", "firmware_tool")
 
+# Reusable by the RoboDog home client firmware (//robodog_home_client), which
+# stages the same fetched u8g2 csrc + panel driver components.
+exports_files([
+    "u8g2_prepare.sh",
+    "components/u8g2/CMakeLists.txt",
+    "components/u8g2_st7305/CMakeLists.txt",
+    "components/u8g2_st7305/u8g2_st7305.c",
+    "components/u8g2_st7305/u8g2_st7305.h",
+])
+
+filegroup(
+    name = "u8g2_components",
+    srcs = [
+        "components/u8g2/CMakeLists.txt",
+        "components/u8g2_st7305/CMakeLists.txt",
+        "components/u8g2_st7305/u8g2_st7305.c",
+        "components/u8g2_st7305/u8g2_st7305.h",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+
 firmware_tool(
     name = "build_firmware",
     script = "build.sh",

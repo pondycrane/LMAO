@@ -655,10 +655,13 @@ WiFi/server credentials and `RD_SYNC_INTERVAL_SECONDS` are NVS-backed
 (namespace `robodog`, keys `wifi_ssid`/`wifi_pass`/`server_host`/`kid_name`);
 `kid_name` is set per board at flash time with `flash_firmware --kid-name <kid>`
 (non-empty = kid panel; empty/absent = family). Writing NVS WIPES the whole
-24 KB partition (event cache + any NVS keys). Build-time defaults come from
-`main/local_secrets.h` + `config.h` (both gitignored, never commit). On a
-reachable 2.4 GHz LAN the device joins and syncs the live family calendar over
-framed TCP (:4247)
+24 KB partition (event cache + any NVS keys), so the flash image always carries
+the credentials too — they are provisioned from
+`--wifi-ssid`/`--wifi-pass`, `LMAO_WIFI_SSID`/`LMAO_WIFI_PASS`, or a local
+(gitignored) `main/local_secrets.h`, and are **never compiled in or committed**.
+Build-time defaults live in `config.h`; `main/local_secrets.h` is an optional
+local fallback only. On a reachable 2.4 GHz LAN the device joins and syncs the
+live family calendar over framed TCP (:4247)
 — header date and rows verified on hardware.
 
 Status:
@@ -804,6 +807,88 @@ the documented reachable proxy. `E2E_STT_TEXT=<canned>` switches to the
 bridge's `POST /xiaozhi/inject` fallback (skips only the mic leg). Loud-skip
 when the board (`0x303A:0x1001`) or the test audio card is absent; gate
 reference: `.archon/commands/robodog-voice-e2e.md`.
+
+### 7e. RoboDog home client — air temperature/humidity over Reticulum TCP
+
+A host-side (laptop / Pi) client that reads **air temperature and humidity**
+off the LMAO server over its **Reticulum TCP interface** — no RNode, no LoRa,
+no AutoInterface (`RnsConfig(role="tcp-client")`, one `TCPClientInterface` to
+`LMAO_SERVER_HOST:LMAO_SERVER_PORT`, default `tp4:4246`):
+
+```
+client ──RNS TCP──▶ lmao-server
+   LMAOEnvelope{ request.history, series = AIR_TEMP + AIR_HUMIDITY }
+   ◀── LMAOEnvelope{ chart }   (ChartBundle: temp tenths °C, hum %)
+```
+
+```bash
+bazel run //robodog_home_client:home_client                      # one fetch
+bazel run //robodog_home_client:home_client -- --json --count 5  # machine-readable
+bazel run //robodog_home_client:home_client -- --interval 300    # poll 5 min
+```
+
+```
+LMAO env — node e824ad2d
+  temperature: 22.6 °C (72.7 °F)
+  humidity:    55 %
+```
+
+It discovers the server's `lxmf.delivery` destination from its periodic
+announce (matched by the `lmao-server` LXMF display name, or pinned with
+`--dest-hash`/`LMAO_DEST_HASH`) and needs its own delivery hash in
+`LMAO_ALLOWED_CLIENTS` — it is printed at startup and persisted at
+`~/.local/share/lmao_home_client/lxmf` (stable across runs).
+
+**Server side:** air-only `HistoryRequest`s are answered from
+`lma_core/env_history.py`, an all-node air buffer that folds **every**
+`SensorReport`'s ambient temperature/humidity (`sensor_id` 3/2) and falls back
+to die temperature (`sensor_id` 1) when no ambient reading is present.  The
+reply is scoped to the **requester's own** node (contact-book name, else the
+name it reports in `SensorReport.node_id`, else its announce display name), so
+each device charts its own history; an unknown requester gets the newest
+reporting node.  `SproutHistory` is unchanged, so `SOIL` requests still get
+the soil chart.
+
+**The board that feeds it.** `robodog_home_client/firmware/` is the ESP-IDF
+firmware for the Waveshare ESP32-S3 RLCD-4.2 (ST7305) board: it reads its
+**SHTC3** sensor, reports `SensorReport{3: temp, 2: humidity}` to the server
+over the same Reticulum TCP interface every `RH_INTERVAL_SECONDS` (default
+60 s), requests the air history, and draws **its own temp/humidity history as
+a chart** on the panel (device name + latest reading in the header, temp trace
+solid with °C min/max, humidity trace dotted with % min/max, each line
+labelled with its current value at its end — `30.4°C` / `43%` — and an x-axis
+clock under the left/middle/right ticks).  Its identity is pinned per device at build time
+from `~/.local/share/lmao_client/devs/<name>/identity`, so the delivery hash
+never drifts.
+
+```bash
+# build: only the server hash + pinned identity + cadence are baked in
+RH_DEST_HASH_HEX=<server delivery hash> RH_NODE_IDENTITY_HEX=<64-byte key hex> \
+RH_DEVICE_NAME="main bedroom" RH_INTERVAL_SECONDS=60 \
+bazel run //robodog_home_client:build_firmware
+
+# flash + provision NVS — WiFi credentials come from the ENVIRONMENT, never
+# from source (flash.sh refuses to run without them)
+LMAO_WIFI_SSID=... LMAO_WIFI_PASS=... \
+bazel run //robodog_home_client:flash_firmware -- \
+    --device-name "main bedroom" --server-host tp4 --port /dev/ttyACM0
+```
+
+WiFi SSID/passphrase, server host/port and the device name live **only** in
+the NVS partition written at flash time; nothing is compiled in (the flashed
+`.bin` contains no credentials).  The board announces its delivery destination
+with the LXMF display name = device name, and the server names its contact
+from the `SensorReport.node_id` on the first report — retype it with
+`POST :8081/contacts {"name":"main bedroom","type":"robodog_home",…}`.
+Because replies are scoped to the requester's own node, each board charts
+**its own** series.  Verify the render with the same pixel capture as the
+calendar client:
+
+```bash
+python3 robodog_client/capture.py --port /dev/ttyACM0 --reset --n 2 --describe
+```
+
+See [`robodog_home_client/README.md`](robodog_home_client/README.md).
 
 ### 8. Docker Image
 
@@ -1485,6 +1570,13 @@ The registry is configured via environment variables:
 │   ├── e2e_rig.py                     # shared board/audio/console scaffolding for both voice gates
 │   ├── capture.py                     # real-pixel screenshot + vision readback (§7d.1)
 │   └── shots/                         # captured frames/PNGs (gitignored)
+│
+├── robodog_home_client/               # Home env client: host CLI + RLCD board firmware (§7e)
+│   ├── client.py                      # announce discovery + HistoryRequest → ChartBundle
+│   ├── config.py                      # RnsConfig(role="tcp-client"): one TCPClientInterface
+│   └── firmware/                      # ESP-IDF: SHTC3 report + own-history chart (ST7305)
+│       ├── main/                      # main.cpp, env_net, shtc3, ui, rd_chart (host-tested)
+│       └── build.sh / flash.sh        # Docker ESP-IDF build; host esptool + NVS provisioning
 │
 └── rnode_firmware/                    # Documentation only
     └── README.md                      # Step-by-step ESP32 RNode flashing guide

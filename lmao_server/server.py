@@ -27,7 +27,7 @@ import time
 
 from google.protobuf.message import DecodeError
 
-from lma_core import LMAOEnvelope
+from lma_core import LMAOEnvelope, Series
 from lma_core.calendar_bundle import build_bundle
 from lma_core.calendar_pg import CalendarStore, open_calendar_store
 from lma_core.calendar_pics import open_pic_store
@@ -37,6 +37,7 @@ from lma_core.contact_book_pg import (
     compose_postgres_dsn,
     open_contact_book,
 )
+from lma_core.env_history import EnvHistory
 from lma_core.message_utils import decode_lmao_message
 from lma_core.rns_di import LXMF, RNS
 from lma_core.rns_init import init_rns_and_lxmf as _shared_init
@@ -125,6 +126,74 @@ ALLOWED_CLIENTS = _build_allowed_clients()
 # the ingest pod owns DuckDB, and the chart needs no extra airtime because the
 # client already round-trips a message every interval.
 SPROUT_HISTORY = SproutHistory()
+# Air temperature/humidity from ANY node (home-client queries).  Kept separate
+# from the Sprout chart buffer so the soil-chart ownership rule is untouched.
+ENV_HISTORY = EnvHistory()
+
+# LXMF announce display names, keyed by lxmf/delivery hash.  Devices announce
+# their delivery destination with the LXMF peer data (msgpack) carrying a
+# human name; recording it lets the contact book name a device automatically
+# AND lets an air-history request be answered from THAT device's own series
+# (multi-device mesh: each board charts its own history, not whichever node
+# reported last).
+ANNOUNCED_NAMES: dict[str, str] = {}
+# Names a device reports itself under (SensorReport.node_id), keyed by its
+# lxmf/delivery hash.  Authoritative for both the contact book and air-history
+# scoping: it arrives with the first report, independent of announce timing.
+REPORT_NAMES: dict[str, str] = {}
+
+
+class _AnnounceNameHandler:
+    """RNS announce handler: remember each lxmf.delivery announce's name."""
+
+    aspect_filter = "lxmf.delivery"
+    receive_path_responses = True
+
+    def received_announce(self, destination_hash, announced_identity, app_data,
+                          announce_packet_hash=None, is_path_response=False):
+        if not app_data:
+            return
+        try:
+            import RNS.vendor.umsgpack as umsgpack
+
+            peer_data = umsgpack.unpackb(app_data)
+            name = peer_data[0]
+            if isinstance(name, bytes):
+                name = name.decode("utf-8", "replace")
+            if name:
+                ANNOUNCED_NAMES[RNS.hexrep(destination_hash, delimit=False).lower()] = name
+        except Exception:
+            return
+
+
+def _node_name_for(delivery_hash: str) -> str | None:
+    """The device name a requester reports under, if known.
+
+    The contact book is authoritative (an operator-set name wins); then the
+    name the device put in its own SensorReport.node_id; then the announce
+    display name (for a device that has announced but not yet reported).
+    """
+    delivery_hash = (delivery_hash or "").lower()
+    book = CONTACTS
+    if book is not None:
+        try:
+            found = book.find(delivery_hash=delivery_hash)
+            if found:
+                return found[0].get("device_name") or None
+        except Exception:
+            pass
+    return REPORT_NAMES.get(delivery_hash) or ANNOUNCED_NAMES.get(delivery_hash)
+
+
+def _requester_node_name(source_dest) -> str | None:
+    """Resolve the requester's device name from its reply destination."""
+    if source_dest is None:
+        return None
+    try:
+        return _node_name_for(RNS.hexrep(source_dest.hash, delimit=False))
+    except Exception:
+        return None
+
 
 # Central contact book (receiver directory).  Initialized in serve(); the
 # downlink sends to a known contact even if its ``caps`` broadcast never lands
@@ -171,19 +240,20 @@ def _learn_contact(source_hash: str) -> None:
                 pubkey_hex = known[1].hex()
         except Exception:
             pubkey_hex = None
-        if not book.is_known(delivery_hash):
-            try:
-                book.register(
-                    delivery_hash=delivery_hash,
-                    device_type="device",
-                    pubkey_hex=pubkey_hex,
-                )
-                logger.info("Contact book: learned new device %s", delivery_hash[:12])
-            except Exception as e:
-                logger.warning("Contact book: register failed for %s: %s",
-                               delivery_hash[:12], e)
-        else:
-            book.touch(delivery_hash)
+        # Always upsert: register() keeps an operator-set name, but replaces the
+        # auto `<type>-<last4>` placeholder with the name the device reports
+        # (SensorReport.node_id) or announces — so a device learned before it
+        # was named gets renamed automatically.
+        known_before = book.is_known(delivery_hash)
+        book.register(
+            delivery_hash=delivery_hash,
+            device_type="device",
+            device_name=REPORT_NAMES.get(delivery_hash)
+            or ANNOUNCED_NAMES.get(delivery_hash),
+            pubkey_hex=pubkey_hex,
+        )
+        if not known_before:
+            logger.info("Contact book: learned new device %s", delivery_hash[:12])
     except Exception as e:  # the directory must never break delivery
         logger.warning("Contact book update failed for %s: %s", source_hash[:12], e)
 
@@ -506,14 +576,49 @@ class Server:
         has_request = envelope.HasField("request")
         if has_request and envelope.request.HasField("history"):
             hist = envelope.request.history
-            chart = SPROUT_HISTORY.chart_bundle(
-                count=hist.count, since_ms=hist.since_ms, series=set(hist.series)
-            )
+            requested_series = set(hist.series)
+            air_only = bool(requested_series) and requested_series <= {
+                Series.AIR_TEMP,
+                Series.AIR_HUMIDITY,
+            }
+
+            if air_only:
+                # Home-client query: the Sprout chart buffer only holds
+                # soil-bearing reports, so answer from the all-node air buffer,
+                # scoped to the REQUESTER's own node when its name is known —
+                # a multi-device mesh must chart each board's own history.
+                chart = ENV_HISTORY.chart_bundle(
+                    count=hist.count,
+                    since_ms=hist.since_ms,
+                    series=requested_series,
+                    node_id=_requester_node_name(source_dest),
+                )
+            else:
+                chart = SPROUT_HISTORY.chart_bundle(
+                    count=hist.count,
+                    since_ms=hist.since_ms,
+                    series=requested_series,
+                )
+                if chart is None and (
+                    Series.AIR_TEMP in requested_series
+                    or Series.AIR_HUMIDITY in requested_series
+                ):
+                    chart = ENV_HISTORY.chart_bundle(
+                        count=hist.count,
+                        since_ms=hist.since_ms,
+                        series=requested_series,
+                    )
+
             if chart is not None:
                 chart_env = LMAOEnvelope()
                 chart_env.chart.CopyFrom(chart)
                 send(chart_env)
-                logger.info("Reply sent (ChartBundle, %d samples).", len(chart.soil))
+                logger.info(
+                    "Reply sent (ChartBundle, soil=%d temp=%d hum=%d).",
+                    len(chart.soil),
+                    len(chart.temp),
+                    len(chart.hum),
+                )
                 replied = True
             else:
                 logger.info("No chart history matches the request — no chart reply.")
@@ -594,7 +699,8 @@ class Server:
             # ── Contact book (issue #151): remember this device so the server
             # can send it downlinks even before / without a caps broadcast. The
             # book is the source of truth for "who is on the LMAO network".
-            _learn_contact(source_hash)
+            # Learned AFTER the sensor fold below, so a SensorReport's node_id
+            # names the entry on its very first report.
             content_bytes = message.content if hasattr(message, "content") else b""
             title = message.title_as_string() if hasattr(message, "title_as_string") else ""
 
@@ -613,8 +719,18 @@ class Server:
                 envelope.ParseFromString(content_bytes)
                 if envelope.WhichOneof("payload") == "sensor":
                     SPROUT_HISTORY.update(envelope.sensor)
+                    ENV_HISTORY.update(envelope.sensor)
+                    # A reporting device names itself in SensorReport.node_id.
+                    # That is the authoritative name for BOTH the contact book
+                    # entry and the air-history scoping (the announce app_data
+                    # may not have arrived yet on a fresh boot).
+                    report_node = (envelope.sensor.node_id or "").strip()
+                    if report_node:
+                        REPORT_NAMES[source_hash.lower()] = report_node
             except Exception:
                 logger.debug("No SensorReport in this message — chart buffer unchanged")
+
+            _learn_contact(source_hash)
 
             # Decode content (protobuf first, UTF-8 fallback, byte-count placeholder)
             decode_lmao_message(content_bytes)
@@ -1043,6 +1159,17 @@ async def async_main():
         _announce_delivery_destinations(router)
     except Exception as e:
         logger.warning("Server announce failed (LoRa may be unavailable): %s", e)
+
+    # ── Device names from announces ──────────────────────────────
+    # Every LMAO client announces its lxmf/delivery destination with the LXMF
+    # peer data carrying a display name.  Recording it names the device in the
+    # contact book automatically and lets air-history replies be scoped to the
+    # requester's own series (multi-device mesh).
+    try:
+        RNS.Transport.register_announce_handler(_AnnounceNameHandler())
+        logger.info("Announce-name handler registered (device names).")
+    except Exception as e:
+        logger.warning("Could not register announce-name handler: %s", e)
 
     # ── Periodic WiFi-only re-announce (AutoInterface) ───────────
     # Fresh wifi AutoInterface clients cannot resolve the server's delivery
