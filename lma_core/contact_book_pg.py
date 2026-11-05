@@ -34,9 +34,18 @@ CREATE TABLE IF NOT EXISTS contacts (
     pubkey_hex    TEXT,
     identity_hash TEXT,
     first_seen    DOUBLE PRECISION NOT NULL,
-    last_seen     DOUBLE PRECISION NOT NULL
+    last_seen     DOUBLE PRECISION NOT NULL,
+    -- Who owns device_name: 'operator' (POST /contacts), 'device' (the name
+    -- the node reports in SensorReport.node_id / its announce), or 'auto'
+    -- (the <type>-<last4> placeholder).  Precedence operator > device > auto,
+    -- so an operator rename is never undone by the next report.
+    name_source   TEXT NOT NULL DEFAULT 'auto'
 )
 """
+
+# Columns in table order, for the positional row reader below.
+_COLUMNS = ("device_name", "device_type", "delivery_hash", "pubkey_hex",
+            "identity_hash", "first_seen", "last_seen", "name_source")
 
 
 def is_postgres_url(source: str) -> bool:
@@ -45,9 +54,7 @@ def is_postgres_url(source: str) -> bool:
 
 def _row_to_dict(row: tuple) -> dict[str, Any]:
     # psycopg rows are plain tuples; read columns positionally in schema order.
-    names = ("device_name", "device_type", "delivery_hash", "pubkey_hex",
-             "identity_hash", "first_seen", "last_seen")
-    return dict(zip(names, row))
+    return dict(zip(_COLUMNS, row))
 
 
 class PostgresContactBook:
@@ -65,6 +72,24 @@ class PostgresContactBook:
         with self._lock:
             with self._conn.cursor() as cur:
                 cur.execute(_SCHEMA)
+                self._migrate_name_source(cur)
+
+    @staticmethod
+    def _migrate_name_source(cur) -> None:
+        """Add ``name_source`` to a contacts table created before it existed.
+
+        A pre-existing custom name (anything that is not the auto
+        ``<type>-<last4>`` placeholder) is treated as operator-owned, so the
+        learn path cannot rename a device that was already named by hand.
+        """
+        cur.execute(
+            "ALTER TABLE contacts ADD COLUMN IF NOT EXISTS "
+            "name_source TEXT NOT NULL DEFAULT 'auto'"
+        )
+        cur.execute(
+            "UPDATE contacts SET name_source = 'operator' "
+            "WHERE name_source = 'auto' AND device_name NOT LIKE device_type || '-%'"
+        )
 
     def register(
         self,
@@ -73,9 +98,12 @@ class PostgresContactBook:
         device_name: str | None = None,
         pubkey_hex: str | None = None,
         identity_hash: str | None = None,
+        name_source: str = "auto",
     ) -> dict[str, Any]:
         """Upsert a contact (same semantics as the SQLite ContactBook)."""
         name = device_name or f"{device_type}-{delivery_hash[-4:]}"
+        if not device_name:
+            name_source = "auto"
         now = time.time()
         with self._lock:
             with self._conn.cursor() as cur:
@@ -83,14 +111,27 @@ class PostgresContactBook:
                     """
                     INSERT INTO contacts(
                         device_name, device_type, delivery_hash,
-                        pubkey_hex, identity_hash, first_seen, last_seen
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        pubkey_hex, identity_hash, first_seen, last_seen,
+                        name_source
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT(delivery_hash) DO UPDATE SET
-                        device_name = CASE WHEN excluded.device_name
-                                            LIKE excluded.device_type || '-%%'
-                                           THEN contacts.device_name   -- auto default: keep operator-set name
-                                           ELSE excluded.device_name   -- custom: honor the friendly name
-                                           END,
+                        device_name = CASE
+                            WHEN contacts.name_source = 'operator'
+                                 THEN contacts.device_name      -- operator rename wins
+                            WHEN excluded.name_source = 'operator'
+                                 THEN excluded.device_name      -- operator (re)names it
+                            WHEN contacts.name_source = 'device'
+                                 AND excluded.name_source = 'auto'
+                                 THEN contacts.device_name      -- keep the device's own name
+                            ELSE excluded.device_name           -- device name / placeholder
+                            END,
+                        name_source = CASE
+                            WHEN contacts.name_source = 'operator' THEN 'operator'
+                            WHEN excluded.name_source = 'operator' THEN 'operator'
+                            WHEN contacts.name_source = 'device'
+                                 AND excluded.name_source = 'auto' THEN 'device'
+                            ELSE excluded.name_source
+                            END,
                         -- The auto-learn path reports the generic 'device' type;
                         -- it must not overwrite an operator-set type.
                         device_type = CASE WHEN excluded.device_type = 'device'
@@ -101,7 +142,8 @@ class PostgresContactBook:
                         identity_hash = COALESCE(excluded.identity_hash, contacts.identity_hash),
                         last_seen = excluded.last_seen
                     """,
-                    (name, device_type, delivery_hash, pubkey_hex, identity_hash, now, now),
+                    (name, device_type, delivery_hash, pubkey_hex, identity_hash,
+                     now, now, name_source),
                 )
                 cur.execute(
                     "SELECT * FROM contacts WHERE delivery_hash = %s", (delivery_hash,)
@@ -205,11 +247,13 @@ def backfill_sqlite_to_pg(sqlite_path: str, dsn: str) -> int:
                     """
                     INSERT INTO contacts(
                         device_name, device_type, delivery_hash,
-                        pubkey_hex, identity_hash, first_seen, last_seen
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        pubkey_hex, identity_hash, first_seen, last_seen,
+                        name_source
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT(delivery_hash) DO UPDATE SET
                         device_name = excluded.device_name,
                         device_type = excluded.device_type,
+                        name_source = excluded.name_source,
                         pubkey_hex = COALESCE(excluded.pubkey_hex, contacts.pubkey_hex),
                         identity_hash = COALESCE(excluded.identity_hash, contacts.identity_hash),
                         first_seen = excluded.first_seen,
@@ -223,6 +267,14 @@ def backfill_sqlite_to_pg(sqlite_path: str, dsn: str) -> int:
                         row["identity_hash"],
                         row["first_seen"] or time.time(),
                         row["last_seen"] or time.time(),
+                        # Legacy rows predate name ownership: keep an existing
+                        # custom name (operator-owned) rather than letting the
+                        # next device report rename it.
+                        (row["name_source"] if "name_source" in row.keys()
+                         else ("operator" if (row["device_name"] or "")
+                               and not (row["device_name"] or "").startswith(
+                                   (row["device_type"] or "device") + "-")
+                               else "auto")),
                     ),
                 )
                 n += 1

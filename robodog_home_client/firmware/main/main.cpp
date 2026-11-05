@@ -156,7 +156,7 @@ void app_main(void) {
     ESP_LOGI(TAG, "wifi %s", wifi_ok ? "up" : "FAILED (tcp layer retries)");
     ui::render(s_cfg.name, nullptr, false, false, wifi_ok ? "wifi up" : "no wifi");
 
-    auto tcp = RhTcp::TcpInterface::create(s_cfg.host, s_cfg.port);
+    auto tcp = lma_tcp::TcpInterface::create(s_cfg.host, s_cfg.port);
     tcp->start();
     Transport::register_interface(tcp);
 

@@ -166,14 +166,30 @@ class _AnnounceNameHandler:
             return
 
 
-def _node_name_for(delivery_hash: str) -> str | None:
-    """The device name a requester reports under, if known.
+def _requester_node_name(source_dest) -> str | None:
+    """Resolve the requester's node key for air-history scoping.
 
-    The contact book is authoritative (an operator-set name wins); then the
-    name the device put in its own SensorReport.node_id; then the announce
-    display name (for a device that has announced but not yet reported).
+    ``EnvHistory`` keys on the ``SensorReport.node_id`` the device reports, so
+    that is what must be looked up — NOT the contact-book display name.  An
+    operator rename ("main bedroom" -> "Kitchen") would otherwise point at a
+    node that does not exist in the ring, and ``chart_bundle`` would silently
+    fall back to the newest reporter and chart ANOTHER device's series.
+
+    Order: the name the device reports -> the name it announces -> the
+    contact-book name (for a device that has announced/reported nothing yet).
     """
-    delivery_hash = (delivery_hash or "").lower()
+    if source_dest is None:
+        return None
+    try:
+        delivery_hash = RNS.hexrep(source_dest.hash, delimit=False).lower()
+    except Exception:
+        return None
+    reported = REPORT_NAMES.get(delivery_hash)
+    if reported:
+        return reported
+    announced = ANNOUNCED_NAMES.get(delivery_hash)
+    if announced:
+        return announced
     book = CONTACTS
     if book is not None:
         try:
@@ -182,17 +198,7 @@ def _node_name_for(delivery_hash: str) -> str | None:
                 return found[0].get("device_name") or None
         except Exception:
             pass
-    return REPORT_NAMES.get(delivery_hash) or ANNOUNCED_NAMES.get(delivery_hash)
-
-
-def _requester_node_name(source_dest) -> str | None:
-    """Resolve the requester's device name from its reply destination."""
-    if source_dest is None:
-        return None
-    try:
-        return _node_name_for(RNS.hexrep(source_dest.hash, delimit=False))
-    except Exception:
-        return None
+    return None
 
 
 # Central contact book (receiver directory).  Initialized in serve(); the
@@ -240,17 +246,22 @@ def _learn_contact(source_hash: str) -> None:
                 pubkey_hex = known[1].hex()
         except Exception:
             pubkey_hex = None
-        # Always upsert: register() keeps an operator-set name, but replaces the
-        # auto `<type>-<last4>` placeholder with the name the device reports
-        # (SensorReport.node_id) or announces — so a device learned before it
-        # was named gets renamed automatically.
+        # Always upsert: register() keeps an operator-set name and type, but
+        # replaces the auto `<type>-<last4>` placeholder with the name the
+        # device reports (SensorReport.node_id) or announces — so a device
+        # learned before it was named gets named automatically, and a device
+        # that renames itself is followed.  An operator rename is never undone
+        # (name_source precedence operator > device > auto).
         known_before = book.is_known(delivery_hash)
+        reported_name = (
+            REPORT_NAMES.get(delivery_hash) or ANNOUNCED_NAMES.get(delivery_hash)
+        )
         book.register(
             delivery_hash=delivery_hash,
             device_type="device",
-            device_name=REPORT_NAMES.get(delivery_hash)
-            or ANNOUNCED_NAMES.get(delivery_hash),
+            device_name=reported_name,
             pubkey_hex=pubkey_hex,
+            name_source="device" if reported_name else "auto",
         )
         if not known_before:
             logger.info("Contact book: learned new device %s", delivery_hash[:12])

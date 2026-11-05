@@ -196,6 +196,16 @@ py_test(
     ],
 )
 
+# Postgres contact book: URL detection, DSN composition, backfill guard.
+py_test(
+    name = "test_contact_book_pg",
+    srcs = ["test_contact_book_pg.py"],
+    deps = [
+        "//lma_core",
+        "@lmao_pip//pytest",
+    ],
+)
+
 # RoboDog home client: TCP-only config, air-series wire helpers, and the
 # request/reply round trip against a fake RNS/LXMF.
 py_test(
@@ -382,6 +392,15 @@ py_test(
 py_test(
     name = "test_robodog_flash",
     srcs = ["test_robodog_flash.py"],
+    # The scripts under test are executed as subprocesses, so they must be in
+    # runfiles (the test copies them into a throwaway workspace).
+    data = [
+        "//robodog_client:flash.sh",
+        "//robodog_client:flash_common.sh",
+        "//robodog_client:xiaozhi_flash.sh",
+        "//robodog_client:esp-claw/flash_esp_claw.sh",
+        "//robodog_client:main/rd_store.h",
+    ],
     deps = ["@lmao_pip//pytest"],
 )
 

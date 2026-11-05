@@ -42,20 +42,33 @@ bool write_cmd(uint8_t msb, uint8_t lsb) {
                                       pdMS_TO_TICKS(100)) == ESP_OK;
 }
 
-// Read one measurement word (2 data bytes + CRC) at *word*.
-bool read_word(uint16_t* word) {
-    uint8_t buf[3] = {0};
+// Read one measurement: T msb/lsb/crc then RH msb/lsb/crc, in ONE read
+// transaction (datasheet §5.6 — the master must ACK each byte; the sensor
+// keeps streaming until it sees a NACK).
+//
+// A second START would restart the read-out pointer at the FIRST word, so two
+// separate 3-byte reads return the temperature twice: raw_rh == raw_t and the
+// "humidity" becomes the linear image of the temperature, RH = (T+45)*4/7.
+// That is exactly the bug this single read fixes.
+bool read_measurement(uint16_t* raw_t, uint16_t* raw_rh) {
+    uint8_t buf[6] = {0};
     if (i2c_master_read_from_device(RH_I2C_PORT, RH_SHTC3_ADDR, buf,
                                     sizeof(buf),
                                     pdMS_TO_TICKS(100)) != ESP_OK) {
         return false;
     }
     if (crc8(buf, 2) != buf[2]) {
-        ESP_LOGW(TAG, "CRC mismatch (got 0x%02x want 0x%02x)", buf[2],
+        ESP_LOGW(TAG, "T CRC mismatch (got 0x%02x want 0x%02x)", buf[2],
                  crc8(buf, 2));
         return false;
     }
-    *word = (uint16_t)((buf[0] << 8) | buf[1]);
+    if (crc8(buf + 3, 2) != buf[5]) {
+        ESP_LOGW(TAG, "RH CRC mismatch (got 0x%02x want 0x%02x)", buf[5],
+                 crc8(buf + 3, 2));
+        return false;
+    }
+    *raw_t = (uint16_t)((buf[0] << 8) | buf[1]);
+    *raw_rh = (uint16_t)((buf[3] << 8) | buf[4]);
     return true;
 }
 
@@ -96,10 +109,9 @@ bool shtc3_read(float* temp_c, float* rh_pct) {
     }
     vTaskDelay(pdMS_TO_TICKS(1));
 
-    // One measurement returns T then RH, each as 2 data bytes + CRC.  Issuing
-    // a second "measure RH first" command (0x58E5) instead leaves the sensor
-    // mid-conversion and the second word read fails, so read both words from
-    // this single trigger.
+    // One measurement returns T then RH, each as 2 data bytes + CRC, read in a
+    // single transaction (see read_measurement: two separate reads would
+    // return the temperature twice and make humidity a linear image of it).
     if (!write_cmd(0x78, 0x66)) {  // measure T first
         ESP_LOGW(TAG, "measure failed");
         return false;
@@ -107,9 +119,8 @@ bool shtc3_read(float* temp_c, float* rh_pct) {
     vTaskDelay(pdMS_TO_TICKS(13));
 
     uint16_t raw_t = 0;
-    if (!read_word(&raw_t)) return false;
     uint16_t raw_rh = 0;
-    if (!read_word(&raw_rh)) return false;
+    if (!read_measurement(&raw_t, &raw_rh)) return false;
 
     (void)write_cmd(0xB0, 0x98);  // sleep
 

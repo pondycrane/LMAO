@@ -38,6 +38,11 @@ rd_flash_init "$APP"
 
 KID=""
 KID_FLAG=0
+# An EXPLICIT NVS flag is what writes NVS.  A credential picked up from the
+# environment or the local local_secrets.h is a VALUE source, not a request:
+# keying the wipe off "we happen to have a SSID" made a plain
+# `flash_firmware --port ...` wipe the 24 KB partition.
+NVS_FLAG=0
 WIFI_SSID="${LMAO_WIFI_SSID:-}"
 WIFI_PASS="${LMAO_WIFI_PASS:-}"
 SERVER_HOST="${LMAO_SERVER_HOST:-}"
@@ -52,19 +57,19 @@ while [ $# -gt 0 ]; do
         --kid-name)
             # Only an explicit `--kid-name ""` clears the board back to family.
             rd_need_value "--kid-name" $# "${2:-}" 'use --kid-name "" to clear to family'
-            KID="$2"; KID_FLAG=1; shift 2
+            KID="$2"; KID_FLAG=1; NVS_FLAG=1; shift 2
             ;;
         --wifi-ssid)
             rd_need_value "--wifi-ssid" $# "${2:-}"
-            WIFI_SSID="$2"; shift 2
+            WIFI_SSID="$2"; NVS_FLAG=1; shift 2
             ;;
         --wifi-pass)
             rd_need_value "--wifi-pass" $# "${2:-}"
-            WIFI_PASS="$2"; shift 2
+            WIFI_PASS="$2"; NVS_FLAG=1; shift 2
             ;;
         --server-host)
             rd_need_value "--server-host" $# "${2:-}"
-            SERVER_HOST="$2"; shift 2
+            SERVER_HOST="$2"; NVS_FLAG=1; shift 2
             ;;
         *)
             echo "unknown argument: $1 (expected --port, --kid-name, --wifi-ssid," >&2
@@ -98,7 +103,7 @@ csv_quote() {
 }
 
 NVS_ARGS=()
-if [ "$KID_FLAG" -eq 1 ] || [ -n "$WIFI_SSID" ]; then
+if [ "$NVS_FLAG" -eq 1 ]; then
     if [ -z "$WIFI_SSID" ] || [ -z "$WIFI_PASS" ]; then
         echo "error: writing NVS needs WiFi credentials (the board would boot" >&2
         echo "  with no network). Pass --wifi-ssid/--wifi-pass, export" >&2
@@ -135,6 +140,7 @@ fi
 
 echo "flashing app + partition table from @flash_args ..."
 if [ "${#NVS_ARGS[@]}" -eq 0 ]; then
+    echo "==== board $RD_PORT: NVS untouched (no --kid-name/--wifi-*/--server-host) ===="
     # exec: the esptool process becomes this script (no trailing shell).
     cd "$RD_APP/build"
     exec python3 -m esptool --chip esp32s3 -p "$RD_PORT" -b "$RD_BAUD" \

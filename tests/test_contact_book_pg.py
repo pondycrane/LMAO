@@ -9,6 +9,7 @@ no-legacy-file guard.
 from __future__ import annotations
 
 import os
+import sys
 from unittest import mock
 
 from lma_core import contact_book_pg as cbp
@@ -60,3 +61,7 @@ def test_backfill_noop_without_legacy_file(tmp_path):
     # No legacy SQLite file → nothing to backfill, and no PG connection is
     # attempted regardless of whether psycopg is installed.
     assert cbp.backfill_sqlite_to_pg(str(tmp_path / "nope.db"), "postgres://x") == 0
+
+
+if __name__ == "__main__":
+    sys.exit(__import__("pytest").main([__file__] + sys.argv[1:]))

@@ -12,6 +12,11 @@ load(":firmware_tools.bzl", "firmware_tool")
 # Reusable by the RoboDog home client firmware (//robodog_home_client), which
 # stages the same fetched u8g2 csrc + panel driver components.
 exports_files([
+    "flash.sh",
+    "flash_common.sh",
+    "xiaozhi_flash.sh",
+    "esp-claw/flash_esp_claw.sh",
+    "main/rd_store.h",
     "u8g2_prepare.sh",
     "components/u8g2/CMakeLists.txt",
     "components/u8g2_st7305/CMakeLists.txt",
