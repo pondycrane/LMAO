@@ -1,10 +1,11 @@
-// Reticulum TCPClientInterface for ESP-IDF (lwIP BSD sockets).
+// Reticulum TCPClientInterface — one source for POSIX hosts and ESP-IDF.
 //
-// Same framing as Python RNS TCP interfaces: a frame is
+// Same framing as Python RNS TCP interfaces:
 //   FLAG(0x7E) <escaped payload> FLAG(0x7E)
 // where 0x7E and 0x7D in the payload are escaped as ESC(0x7D) + (byte^0x20).
 //
-// Ported from smart_irrigation/native-client/host/tcp_interface.{h,cpp}.
+// The interface connects lazily and retries every few seconds, so a WiFi drop
+// or a server restart does not need a board reboot.
 #include "tcp_interface.h"
 
 #include <cerrno>
@@ -13,10 +14,17 @@
 #include <cstring>
 #include <fcntl.h>
 
+#ifdef ESP_PLATFORM
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "lwip/netdb.h"
 #include "lwip/sockets.h"
+#else
+#include <chrono>
+#include <netdb.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#endif
 
 using namespace RNS;
 
@@ -26,10 +34,9 @@ constexpr uint8_t HDLC_ESC = 0x7D;
 constexpr uint8_t HDLC_ESC_MASK = 0x20;
 constexpr uint64_t RECONNECT_BACKOFF_MS = 5000;
 
-constexpr const char* TAG = "rh_tcp";
-
+#ifdef ESP_PLATFORM
+constexpr const char* TAG = "tcp";
 uint64_t now_ms() { return (uint64_t)(esp_timer_get_time() / 1000); }
-
 void logf(const char* f, ...) {
     char buf[256];
     va_list v;
@@ -38,9 +45,23 @@ void logf(const char* f, ...) {
     va_end(v);
     ESP_LOGI(TAG, "%s", buf);
 }
+#else
+uint64_t now_ms() {
+    using namespace std::chrono;
+    return duration_cast<milliseconds>(
+               steady_clock::now().time_since_epoch()).count();
+}
+void logf(const char* f, ...) {
+    va_list v;
+    va_start(v, f);
+    vfprintf(stderr, f, v);
+    va_end(v);
+    fputc('\n', stderr);
+}
+#endif
 }  // namespace
 
-namespace RhTcp {
+namespace lma_tcp {
 
 TcpInterface::TcpInterface(const char* host, uint16_t port)
     : InterfaceImpl("tcp"), _host(host), _port(port) {}
@@ -112,12 +133,14 @@ void TcpInterface::disconnect() {
 }
 
 bool TcpInterface::start() {
+    // Online means "the interface exists"; the socket connects lazily from
+    // loop(), so a server that is down at boot does not stall startup.
     if (try_connect()) {
         _online = true;
         return true;
     }
     logf("initial connect failed, will retry");
-    _online = true;  // retried from loop()
+    _online = true;
     return true;
 }
 
@@ -188,4 +211,4 @@ void TcpInterface::send_outgoing(const Bytes& data) {
     }
 }
 
-}  // namespace RhTcp
+}  // namespace lma_tcp

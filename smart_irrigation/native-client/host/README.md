@@ -14,7 +14,10 @@ Proven on 2026-09-16:
 
 ## Artifacts
 - `interop.cpp` — host interop node (identity + `spike/interop` dest + announce + `on_announce`)
-- `tcp_interface.{h,cpp}` — POSIX port of the firmware TCP interface (HDLC; no handshake)
+- `../../../firmware_common/tcp_interface/` — the SHARED Reticulum TCPClientInterface
+  (HDLC; no handshake). One source compiles on POSIX and under ESP-IDF, so the
+  host harness and the board firmware cannot drift apart. Bazel target:
+  `//firmware_common:tcp_interface`.
 
 ## Build (aarch64 host)
 - Deps: `cmake`, `libmbedtls-dev`, **Monocypher** (built single-file → `/usr/local`),
@@ -23,10 +26,8 @@ Proven on 2026-09-16:
   ```bash
   git clone https://github.com/0xSeren/RTReticulum && cd RTReticulum
   cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j
-  g++ -std=c++17 -O2 -Iinclude -Ihost -Ithird_party/tlsf \
-      host/interop.cpp host/tcp_interface.cpp \
-      build/librtreticulum.a build/librtreticulum_hal.a \
-      -lpthread -lmbedcrypto -lmonocypher -lm -o build/interop
+  # Canonical build (Bazel pulls RTReticulum + the shared TCP interface):
+  bazel build //smart_irrigation/native-client:interop
   ```
 
 ## Run

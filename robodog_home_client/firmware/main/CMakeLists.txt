@@ -2,7 +2,6 @@ idf_component_register(
     SRCS
         "main.cpp"
         "wifi_helper.cpp"
-        "tcp_interface.cpp"
         "shtc3.cpp"
         "env_net.cpp"
         "ui.cpp"
@@ -12,6 +11,7 @@ idf_component_register(
     INCLUDE_DIRS "."
     REQUIRES
         lma_common
+        tcp_interface
         rtreticulum
         u8g2_st7305
         nvs_flash

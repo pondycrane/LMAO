@@ -533,8 +533,8 @@ bash ./build.sh
 bash flash.sh --port /dev/ttyACM0
 
 # Credentials come from the environment (or a local, gitignored
-# main/local_secrets.h). They are written into the board's NVS at flash time —
-# never compiled into the image:
+# main/local_secrets.h, which config.h does NOT include). They are written into
+# the board's NVS at flash time — never compiled into the image:
 LMAO_WIFI_SSID=... LMAO_WIFI_PASS=... \
   bazel run //robodog_client:flash_firmware -- --port /dev/ttyACM0
 
@@ -555,6 +555,7 @@ LMAO_WIFI_SSID=... LMAO_WIFI_PASS=... \
 #   --wifi-ssid/--wifi-pass, LMAO_WIFI_SSID/LMAO_WIFI_PASS, or the local
 #   main/local_secrets.h — with none the script refuses rather than flashing a
 #   board that boots with no network.  No NVS flags at all leaves NVS untouched
+#   (a local secrets file is a VALUE source, never a request to wipe)
 #   (family mode via the pinned RD_KID_NAME_DEFAULT build default).
 
 # capture: reset the board, then read frames; make --n/--timeout wide enough

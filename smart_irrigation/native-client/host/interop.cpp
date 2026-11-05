@@ -28,7 +28,7 @@ int main(int argc, char** argv) {
     int run_secs = argc > 3 ? atoi(argv[3]) : 30;
     printf("[interop] RTReticulum host interop -> tcp %s:%u for %ds\n", host, port, run_secs);
 
-    auto tcp = HostTCP::TcpInterface::create(host, port);
+    auto tcp = lma_tcp::TcpInterface::create(host, port);
     Transport::register_interface(tcp);
 
     Identity identity;

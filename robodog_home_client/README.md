@@ -16,8 +16,9 @@ answers air-only requests from its all-node air buffer
 (`lma_core/env_history.py`), which folds **every** node's `SensorReport` air
 readings — Sprout SHT30 ambient temperature/humidity (`sensor_id` 3/2) and the
 Cardputer's die temperature (`sensor_id` 1, used when no ambient reading is
-present).  The newest reporting node wins, so the output tracks whichever
-sensor last reported.
+present).  Samples are stored paired and stamped with the server's receive time
+(a node's own clock is not a trustworthy wall clock — issue #145 — and the
+chart's x-axis labels come from these stamps).
 
 The soil chart path is untouched: `SproutHistory` still owns soil-bearing
 reports, and a request that selects `SOIL` is answered from it exactly as
@@ -145,9 +146,13 @@ curl -X POST http://tp4:8081/contacts \
   -d '{"name":"main bedroom","type":"robodog_home","delivery_hash":"983c0411…"}'
 ```
 
-The server answers an air-history request from the **requester's own** series
-when it knows that device's name, so two boards on one mesh each chart their
-own history rather than whichever node reported last.
+The server answers an air-history request from the **requester's own** series,
+scoped by the `node_id` that device reports (its ring key) — falling back to
+its announce display name and then the contact-book name.  So two boards on one
+mesh each chart their own history, and an operator rename does not move the
+scope.  Contact names carry an owner (`operator` > `device` > `auto`): the
+device's own reported name replaces the placeholder, but never a name set with
+`POST :8081/contacts`.
 
 Capture/verify the panel exactly like the calendar firmware:
 
