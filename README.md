@@ -167,9 +167,12 @@ fit; the **Sprout / Atom Lite** native client
 (`smart_irrigation/native-client`) is its primary user. Both native trees
 share a **single canonical protocol component**
 in `firmware_common/` (DRY — no per-tree copies): `lma_common` holds the
-`lma_encoder`/`lxmf_send`/`path_find`/`lma_identity` sources and
-`rtreticulum/` holds the RNS wrapper; each `build.sh` stages it into the
-targeted `.rtreticulum/firmware/<name>/components/`. Add cross-device code
+`lma_encoder`/`lxmf_send`/`lma_chart`/`path_find`/`lma_identity` sources,
+`rtreticulum/` holds the RNS wrapper and `tcp_interface/` the Reticulum
+`TCPClientInterface` (one source that compiles on POSIX hosts and under
+ESP-IDF, so the host interop harness and the board firmwares share it); each
+`build.sh` stages it into the targeted
+`.rtreticulum/firmware/<name>/components/`. Add cross-device code
 there, never in a device `main/` (see AGENTS.md "DRY").
 
 **One-off: install M5Stack MicroPython (needed before the first client flash)**
@@ -659,8 +662,10 @@ WiFi/server credentials and `RD_SYNC_INTERVAL_SECONDS` are NVS-backed
 the credentials too — they are provisioned from
 `--wifi-ssid`/`--wifi-pass`, `LMAO_WIFI_SSID`/`LMAO_WIFI_PASS`, or a local
 (gitignored) `main/local_secrets.h`, and are **never compiled in or committed**.
-Build-time defaults live in `config.h`; `main/local_secrets.h` is an optional
-local fallback only. On a reachable 2.4 GHz LAN the device joins and syncs the
+`main/local_secrets.h` is a flash-time value source only — `config.h` does not
+include it, so a passphrase cannot end up in a built image.  NVS is written
+only when an explicit `--kid-name`/`--wifi-*`/`--server-host` flag asks for it;
+a plain `flash_firmware --port ...` leaves the partition untouched. On a reachable 2.4 GHz LAN the device joins and syncs the
 live family calendar over framed TCP (:4247)
 — header date and rows verified on hardware.
 
@@ -842,12 +847,21 @@ announce (matched by the `lmao-server` LXMF display name, or pinned with
 **Server side:** air-only `HistoryRequest`s are answered from
 `lma_core/env_history.py`, an all-node air buffer that folds **every**
 `SensorReport`'s ambient temperature/humidity (`sensor_id` 3/2) and falls back
-to die temperature (`sensor_id` 1) when no ambient reading is present.  The
-reply is scoped to the **requester's own** node (contact-book name, else the
-name it reports in `SensorReport.node_id`, else its announce display name), so
-each device charts its own history; an unknown requester gets the newest
-reporting node.  `SproutHistory` is unchanged, so `SOIL` requests still get
-the soil chart.
+to die temperature (`sensor_id` 1) when no ambient reading is present.  Samples
+are stored **paired** (one entry per report) and stamped with the **server
+receive time** (issue #145: a node's own clock is not trustworthy, and the
+chart's x-axis labels come from these stamps), so the temp/hum series keep one
+time base instead of drifting apart when a report carries only one reading.
+
+The reply is scoped to the **requester's own** node by the `node_id` it
+reports — the buffer's own key — falling back to its announce display name and
+then the contact-book name; an unknown requester gets the newest reporting
+node.  Scoping deliberately does **not** use the contact-book display name, so
+an operator rename cannot make a board chart another node's series.
+`SproutHistory` is unchanged, so `SOIL` requests still get the soil chart.
+Contact names carry an owner (`operator` > `device` > `auto`): a device's own
+reported name replaces the `<type>-<last4>` placeholder, but never an
+operator-set name (`POST :8081/contacts`).
 
 **The board that feeds it.** `robodog_home_client/firmware/` is the ESP-IDF
 firmware for the Waveshare ESP32-S3 RLCD-4.2 (ST7305) board: it reads its

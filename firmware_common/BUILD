@@ -30,6 +30,18 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+# ── Reticulum TCPClientInterface (POSIX + ESP-IDF, one source) ──
+# Used by the board firmwares (staged by build.sh) and the host interop
+# harness (//smart_irrigation/native-client:interop) — never copied per tree.
+cc_library(
+    name = "tcp_interface",
+    srcs = ["tcp_interface/tcp_interface.cpp"],
+    hdrs = ["tcp_interface/tcp_interface.h"],
+    strip_include_prefix = "tcp_interface",
+    deps = ["@rtreticulum//:rtreticulum"],
+    visibility = ["//visibility:public"],
+)
+
 # ── Host-testable: send-only LXMF (RTReticulum-dependent) ──
 cc_library(
     name = "lxmf_send",
@@ -49,6 +61,9 @@ filegroup(
         "lma_common/**/*.h",
         "rtreticulum/CMakeLists.txt",
         "lma_common/CMakeLists.txt",
+        "tcp_interface/**/*.cpp",
+        "tcp_interface/**/*.h",
+        "tcp_interface/CMakeLists.txt",
     ]),
     visibility = ["//visibility:public"],
 )

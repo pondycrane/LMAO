@@ -105,14 +105,12 @@ cc_test(
 # live Python peer on the network; buildable so the whole package is in Bazel.
 cc_binary(
     name = "interop",
-    srcs = [
-        "host/tcp_interface.h",
-        "host/interop.cpp",
-        "host/tcp_interface.cpp",
-    ],
-    includes = ["host"],
+    srcs = ["host/interop.cpp"],
     copts = ["-std=c++17"],
-    deps = ["@rtreticulum//:rtreticulum"],
+    deps = [
+        "@rtreticulum//:rtreticulum",
+        "//firmware_common:tcp_interface",
+    ],
     tags = ["manual"],
 )
 

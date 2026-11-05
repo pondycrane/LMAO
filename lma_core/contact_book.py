@@ -30,7 +30,12 @@ CREATE TABLE IF NOT EXISTS contacts (
     pubkey_hex    TEXT,
     identity_hash TEXT,
     first_seen    REAL NOT NULL,
-    last_seen     REAL NOT NULL
+    last_seen     REAL NOT NULL,
+    -- Who owns device_name: 'operator' (POST /contacts), 'device' (the name
+    -- the node reports in SensorReport.node_id / its announce), or 'auto'
+    -- (the <type>-<last4> placeholder).  Precedence operator > device > auto,
+    -- so an operator rename is never undone by the next report.
+    name_source   TEXT NOT NULL DEFAULT 'auto'
 )
 """
 
@@ -44,6 +49,7 @@ def _row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "identity_hash": row["identity_hash"],
         "first_seen": row["first_seen"],
         "last_seen": row["last_seen"],
+        "name_source": row["name_source"],
     }
 
 
@@ -56,7 +62,28 @@ class ContactBook:
         self._conn.row_factory = sqlite3.Row
         with self._lock:
             self._conn.execute(_SCHEMA)
+            self._migrate_name_source()
             self._conn.commit()
+
+    def _migrate_name_source(self) -> None:
+        """Add ``name_source`` to a contacts table created before it existed.
+
+        A pre-existing custom name (anything that is not the auto
+        ``<type>-<last4>`` placeholder) is treated as operator-owned, so the
+        learn path cannot rename a device that was already named by hand.
+        """
+        columns = {
+            row["name"] for row in self._conn.execute("PRAGMA table_info(contacts)")
+        }
+        if "name_source" in columns:
+            return
+        self._conn.execute(
+            "ALTER TABLE contacts ADD COLUMN name_source TEXT NOT NULL DEFAULT 'auto'"
+        )
+        self._conn.execute(
+            "UPDATE contacts SET name_source = 'operator' "
+            "WHERE device_name NOT LIKE device_type || '-%'"
+        )
 
     def register(
         self,
@@ -65,28 +92,50 @@ class ContactBook:
         device_name: str | None = None,
         pubkey_hex: str | None = None,
         identity_hash: str | None = None,
+        name_source: str = "auto",
     ) -> dict[str, Any]:
         """Upsert a contact.
 
         Keyed by ``delivery_hash`` (the destination the server sends to);
         ``device_name`` defaults to ``<type>-<last4 of hash>`` so a contact can
         exist and be reachable before the operator gives it a friendly name.
+
+        ``name_source`` says who owns the name: ``'operator'`` (the contacts
+        API), ``'device'`` (the name the node reports/announces) or ``'auto'``
+        (the placeholder).  Precedence is operator > device > auto, so an
+        operator rename survives every later report and a device's own name
+        survives a placeholder refresh.
         """
         name = device_name or f"{device_type}-{delivery_hash[-4:]}"
+        if not device_name:
+            name_source = "auto"
         now = time.time()
         with self._lock:
             self._conn.execute(
                 """
                 INSERT INTO contacts(
                     device_name, device_type, delivery_hash,
-                    pubkey_hex, identity_hash, first_seen, last_seen
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    pubkey_hex, identity_hash, first_seen, last_seen,
+                    name_source
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(delivery_hash) DO UPDATE SET
-                    device_name = CASE WHEN excluded.device_name
-                                        LIKE excluded.device_type || '-%'
-                                       THEN contacts.device_name   -- auto default: keep operator-set name
-                                       ELSE excluded.device_name   -- custom: honor the friendly name
-                                       END,
+                    device_name = CASE
+                        WHEN contacts.name_source = 'operator'
+                             THEN contacts.device_name          -- operator rename wins
+                        WHEN excluded.name_source = 'operator'
+                             THEN excluded.device_name          -- operator (re)names it
+                        WHEN contacts.name_source = 'device'
+                             AND excluded.name_source = 'auto'
+                             THEN contacts.device_name          -- keep the device's own name
+                        ELSE excluded.device_name               -- device name / placeholder
+                        END,
+                    name_source = CASE
+                        WHEN contacts.name_source = 'operator' THEN 'operator'
+                        WHEN excluded.name_source = 'operator' THEN 'operator'
+                        WHEN contacts.name_source = 'device'
+                             AND excluded.name_source = 'auto' THEN 'device'
+                        ELSE excluded.name_source
+                        END,
                     -- The auto-learn path always reports the generic 'device'
                     -- type; that must not overwrite an operator-set type
                     -- (POST :8081/contacts {type:...}).
@@ -98,7 +147,8 @@ class ContactBook:
                     identity_hash = COALESCE(excluded.identity_hash, contacts.identity_hash),
                     last_seen = excluded.last_seen
                 """,
-                (name, device_type, delivery_hash, pubkey_hex, identity_hash, now, now),
+                (name, device_type, delivery_hash, pubkey_hex, identity_hash,
+                 now, now, name_source),
             )
             self._conn.commit()
             cur = self._conn.execute(

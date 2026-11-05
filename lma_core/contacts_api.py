@@ -77,6 +77,9 @@ def create_app(book: Any) -> Any:  # aiohttp.web.Application
             device_name=body.get("name"),
             pubkey_hex=body.get("pubkey_hex"),
             identity_hash=body.get("identity_hash"),
+            # A name given here is the operator's: it must survive the device's
+            # own SensorReport.node_id / announce on every later report.
+            name_source="operator" if body.get("name") else "auto",
         )
         return aiohttp.web.json_response({"contact": entry}, status=201)
 

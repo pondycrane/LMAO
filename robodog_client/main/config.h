@@ -11,23 +11,18 @@
 
 #include "driver/gpio.h"
 
-/* ---- Optional per-build secrets (WiFi SSID/pass, server host).
-   NEVER commit: robodog_client/main/local_secrets.h is gitignored.
+/* ---- Network config: NVS ONLY, never compiled in.
+   flash.sh writes wifi_ssid/wifi_pass/server_host into the 24 KB NVS
+   partition at 0x9000 (namespace "robodog" — see rd_store.h) at flash time,
+   taking them from --wifi-ssid/--wifi-pass, LMAO_WIFI_SSID/LMAO_WIFI_PASS, or
+   the local (gitignored) main/local_secrets.h.  That file is a FLASH-TIME
+   source only: it is deliberately NOT included here, so a passphrase can
+   never end up inside a built image (it did once, from exactly that include).
 
-   Preferred source is FLASH TIME, not build time: flash.sh writes the
-   credentials into the 24 KB NVS partition at 0x9000 (namespace "robodog",
-   keys wifi_ssid/wifi_pass/server_host — see rd_store.h), taking them from
-   --wifi-ssid/--wifi-pass, LMAO_WIFI_SSID/LMAO_WIFI_PASS, or this file when
-   it exists locally.  NVS keys win over all of the defines below at runtime,
-   so a board provisioned at flash time needs no rebuild.
-
-   This file remains a fallback for a hand-built image; create it locally as:
-       #define RD_WIFI_SSID_DEFAULT     "MySSID"
-       #define RD_WIFI_PASS_DEFAULT     "secret"
-       #define RD_SERVER_HOST_DEFAULT   "192.168.10.19"
-   The value-settings below are guarded so the file may pre-set them. */
-#if __has_include("local_secrets.h")
-#include "local_secrets.h"
+   The empty defaults below are what a board with no NVS credentials boots
+   with: no WiFi, retried forever, panel shows "no wifi". */
+#ifndef RD_WIFI_SSID_DEFAULT
+#define RD_WIFI_SSID_DEFAULT ""
 #endif
 
 /* ---- ST7305 RLCD-4.2 SPI pinout (Waveshare ESP32-S3 board) ---- */

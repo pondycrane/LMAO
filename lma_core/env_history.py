@@ -17,16 +17,35 @@ Wire units match ``ChartBundle``:
 * ``temp`` — tenths of a degree Celsius
 * ``hum``  — integer percent
 
-Readings are timestamped from ``SensorReading.timestamp_ms`` when present;
-otherwise the server receive time is used.  The selected node is the one with
-the newest sample, and ``node_id`` in the reply is that node's id (first 8
+Samples are stored PAIRED — one ring entry per report, ``(ts, temp, hum)`` —
+rather than two independent rings.  ``ChartBundle`` carries a flat list plus a
+single ``period_ms``, so two rings of different length would be stretched over
+the same x range independently and a report that carried only one reading would
+shift the other trace in time.  Paired samples make the emitted temp/hum lists
+the same length over the same time base whenever both are present.
+
+Timestamps are the SERVER receive time, matching the ingest rule (issue #145):
+a node's embedded ``SensorReading.timestamp_ms`` is not a reliable Unix-epoch
+wall clock (unset, drifting, or scaled to a non-Unix epoch), and the chart's
+x-axis labels are derived from it.  ``clock`` is injectable for tests.
+
+``ChartBundle.temp`` is a ``uint32`` of tenths, so a sub-zero ambient reading
+cannot be represented: such a sample is dropped (and logged) instead of
+wrapping to ~4.29e9 tenths and blowing the chart's extent.
+
+The selected node is the one the caller names (the requester's own
+``SensorReport.node_id``); an unknown/absent name falls back to the node with
+the newest sample.  ``node_id`` in the reply is that node's id (first 8
 characters, matching the Sprout DATA-line convention).
 """
 
 from __future__ import annotations
 
+import logging
 import time
 from collections import deque
+
+logger = logging.getLogger(__name__)
 
 # Canonical sensor_id registry (proto/lma_messages.proto).
 SENSOR_DIE_TEMP = 1
@@ -42,21 +61,22 @@ def _now_ms() -> int:
 
 
 class _NodeSeries:
-    """One node's air temperature/humidity rings (oldest first)."""
+    """One node's paired air samples (oldest first)."""
 
-    __slots__ = ("temp", "hum", "last_seen_ms")
+    __slots__ = ("samples", "last_seen_ms")
 
     def __init__(self, maxlen: int):
-        self.temp = deque(maxlen=maxlen)  # (timestamp_ms, celsius)
-        self.hum = deque(maxlen=maxlen)  # (timestamp_ms, percent)
+        # (timestamp_ms, temp_c_or_None, humidity_or_None) — one entry per report.
+        self.samples = deque(maxlen=maxlen)
         self.last_seen_ms = 0
 
 
 class EnvHistory:
     """Recent air temperature/humidity samples, per reporting node."""
 
-    def __init__(self, maxlen: int = DEFAULT_MAXLEN):
+    def __init__(self, maxlen: int = DEFAULT_MAXLEN, clock=None):
         self._maxlen = int(maxlen)
+        self._clock = clock or _now_ms
         self._nodes: dict[str, _NodeSeries] = {}
 
     def update(self, sensor_report) -> bool:
@@ -69,7 +89,6 @@ class EnvHistory:
         node = getattr(sensor_report, "node_id", "") or ""
         temp = None
         humidity = None
-        timestamp_ms = 0
 
         for reading in getattr(sensor_report, "readings", None) or []:
             try:
@@ -77,12 +96,6 @@ class EnvHistory:
                 value = float(reading.value)
             except (AttributeError, TypeError, ValueError):
                 continue
-
-            try:
-                reading_ts = int(getattr(reading, "timestamp_ms", 0) or 0)
-            except (TypeError, ValueError):
-                reading_ts = 0
-            timestamp_ms = max(timestamp_ms, reading_ts)
 
             if sensor_id == SENSOR_AIR_TEMP:
                 temp = value
@@ -97,14 +110,20 @@ class EnvHistory:
         if temp is None and humidity is None:
             return False
 
-        if timestamp_ms <= 0:
-            timestamp_ms = _now_ms()
+        if temp is not None and temp < 0.0:
+            logger.warning(
+                "EnvHistory: dropping sub-zero temp %.1fC from %r — "
+                "ChartBundle.temp is uint32 tenths and cannot carry it",
+                temp, node,
+            )
+            temp = None
+        if temp is None and humidity is None:
+            return False
+
+        timestamp_ms = int(self._clock())
 
         series = self._nodes.setdefault(node, _NodeSeries(self._maxlen))
-        if temp is not None:
-            series.temp.append((timestamp_ms, temp))
-        if humidity is not None:
-            series.hum.append((timestamp_ms, humidity))
+        series.samples.append((timestamp_ms, temp, humidity))
         series.last_seen_ms = timestamp_ms
         return True
 
@@ -119,28 +138,47 @@ class EnvHistory:
         if selected is None:
             return None
         node, series = selected
-        temp = series.temp[-1] if series.temp else None
-        humidity = series.hum[-1] if series.hum else None
-        if temp is None and humidity is None:
+        if not series.samples:
             return None
+        timestamp_ms, temp, humidity = series.samples[-1]
         return {
             "node_id": node,
-            "temp_c": temp[1] if temp else None,
-            "humidity_pct": humidity[1] if humidity else None,
-            "timestamp_ms": max(
-                temp[0] if temp else 0,
-                humidity[0] if humidity else 0,
-            ),
+            "temp_c": temp,
+            "humidity_pct": humidity,
+            "timestamp_ms": timestamp_ms,
         }
 
     @staticmethod
     def _period_ms(samples) -> int:
         """Median sample spacing, or the nominal 5-minute cadence."""
-        times = [ts for ts, _value in samples]
+        times = [ts for ts, _t, _h in samples]
         if len(times) < 2:
             return DEFAULT_PERIOD_MS
         deltas = sorted(b - a for a, b in zip(times, times[1:], strict=False))
         return deltas[len(deltas) // 2] or DEFAULT_PERIOD_MS
+
+    @staticmethod
+    def _select(samples, count, want_temp, want_hum):
+        """Pick the sample window, preferring samples that carry both series.
+
+        Both-series windows keep temp and hum the same length over the same
+        time base.  When a report only ever carried one reading, fall back to
+        that single series (the other list is then empty) rather than emitting
+        two differently-sized lists that the client would stretch independently.
+        """
+        candidates = []
+        if want_temp and want_hum:
+            candidates.append([s for s in samples if s[1] is not None and s[2] is not None])
+            candidates.append([s for s in samples if s[1] is not None])
+            candidates.append([s for s in samples if s[2] is not None])
+        elif want_temp:
+            candidates.append([s for s in samples if s[1] is not None])
+        else:
+            candidates.append([s for s in samples if s[2] is not None])
+        for selected in candidates:
+            if selected:
+                return selected[-count:] if count else selected
+        return []
 
     def chart_bundle(
         self,
@@ -152,10 +190,10 @@ class EnvHistory:
         """Build a ``ChartBundle`` for one node's air history.
 
         ``node_id`` selects a specific reporting node (the requester's own
-        device name, resolved by the server from its contact book / announce),
-        so a multi-device mesh gets each device's own series instead of
-        whichever node happened to report last.  ``None``/unknown falls back to
-        the newest reporting node.
+        ``SensorReport.node_id``, resolved by the server from what the device
+        reports), so a multi-device mesh gets each device's own series instead
+        of whichever node happened to report last.  ``None``/unknown falls back
+        to the newest reporting node.
 
         ``since_ms`` drops samples older than that epoch-ms watermark.
         ``series`` is the request's selected ``Series`` set (empty = both
@@ -176,19 +214,13 @@ class EnvHistory:
         want_temp = (not series) or _Series.AIR_TEMP in series
         want_hum = (not series) or _Series.AIR_HUMIDITY in series
 
-        temp_samples = (
-            [(ts, value) for ts, value in node_series.temp if ts >= since_ms]
-            if want_temp
-            else []
-        )
-        hum_samples = (
-            [(ts, value) for ts, value in node_series.hum if ts >= since_ms]
-            if want_hum
-            else []
-        )
-        if count:
-            temp_samples = temp_samples[-count:]
-            hum_samples = hum_samples[-count:]
+        window = [s for s in node_series.samples if s[0] >= since_ms]
+        chosen = self._select(window, count, want_temp, want_hum)
+        if not chosen:
+            return None
+
+        temp_samples = [(ts, t) for ts, t, _h in chosen if want_temp and t is not None]
+        hum_samples = [(ts, h) for ts, _t, h in chosen if want_hum and h is not None]
         if not temp_samples and not hum_samples:
             return None
 
@@ -196,9 +228,7 @@ class EnvHistory:
         bundle = _ChartBundle()
         bundle.format = 1
         bundle.node_id = node[:8]
-        bundle.period_ms = self._period_ms(
-            temp_samples if temp_samples else hum_samples
-        )
+        bundle.period_ms = self._period_ms(chosen)
         bundle.start_ms = min(all_times)
         if temp_samples:
             bundle.temp.extend(int(round(value * 10)) for _, value in temp_samples)

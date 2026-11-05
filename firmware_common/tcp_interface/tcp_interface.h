@@ -5,13 +5,14 @@
 
 #include "rtreticulum/interface.h"
 
-namespace RhTcp {
-    // Reticulum TCPClientInterface for ESP-IDF (lwIP BSD sockets), wire
-    // compatible with Python RNS TCPServerInterface: HDLC/SLIP framing
-    // (flag 0x7E, escape 0x7D, escaped byte = raw XOR 0x20).
-    //
-    // The interface connects lazily and retries every few seconds, so a WiFi
-    // drop or a server restart does not need a board reboot.
+// Reticulum TCPClientInterface — wire compatible with Python RNS
+// TCPClient/ServerInterface: SLIP-style framing (NOT KISS): flag 0x7E, escape
+// 0x7D with XOR 0x20 (byte ^ 0x20).  No handshake.
+//
+// One implementation for both worlds: compiled on POSIX hosts (system
+// sockets) and under ESP-IDF (lwIP's BSD-sockets API, esp_timer/esp_log), so
+// the host interop harness and the board firmware cannot drift apart.
+namespace lma_tcp {
     class TcpInterface : public RNS::InterfaceImpl {
     public:
         TcpInterface(const char* host, uint16_t port);
@@ -24,6 +25,8 @@ namespace RhTcp {
         void send_outgoing(const RNS::Bytes& data) override;
         std::string toString() const override { return "TcpInterface[" + _host + "]"; }
 
+        // True once the socket is connected.  The interface connects lazily and
+        // retries, so a caller must check this before handing it packets.
         bool connected() const { return _connected; }
 
     private:
