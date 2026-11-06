@@ -140,6 +140,13 @@ firmware_tool(
         "esp-claw/overlay/components/robodog_phase0/src/voice_md.c",
         "esp-claw/overlay/components/robodog_phase0/src/voice_pipeline.c",
         "esp-claw/overlay/components/robodog_phase0/src/voice_pcm.c",
+        "esp-claw/overlay/components/robodog_phase0/include/robodog_realtime.h",
+        "esp-claw/overlay/components/robodog_phase0/src/robodog_realtime.c",
+        "esp-claw/overlay/components/robodog_phase0/include/robodog_speaker.h",
+        "esp-claw/overlay/components/robodog_phase0/src/robodog_speaker.c",
+        "esp-claw/overlay/components/robodog_phase0/include/voice_route.h",
+        "esp-claw/overlay/components/robodog_phase0/src/voice_route.c",
+        "esp-claw/omni_probe.py",
         "esp-claw/test_voice_split.c",
         "esp-claw/test_voice_pipeline.c",
         "esp-claw/test_voice_pcm.c",
@@ -185,6 +192,7 @@ cc_library(
         "esp-claw/overlay/components/robodog_phase0/src/voice_pipeline.c",
         "esp-claw/overlay/components/robodog_phase0/src/voice_pcm.c",
         "esp-claw/overlay/components/robodog_phase0/src/robodog_utf8.c",
+        "esp-claw/overlay/components/robodog_phase0/src/voice_route.c",
     ],
     hdrs = [
         "esp-claw/overlay/components/robodog_phase0/include/robodog_utf8.h",
@@ -193,6 +201,7 @@ cc_library(
         "esp-claw/overlay/components/robodog_phase0/include/voice_md.h",
         "esp-claw/overlay/components/robodog_phase0/include/voice_pipeline.h",
         "esp-claw/overlay/components/robodog_phase0/include/voice_pcm.h",
+        "esp-claw/overlay/components/robodog_phase0/include/voice_route.h",
     ],
     strip_include_prefix = "esp-claw/overlay/components/robodog_phase0/include",
     visibility = ["//visibility:public"],
@@ -398,4 +407,15 @@ cc_test(
     name = "test_rd_layout",
     srcs = ["main/rd_layout_selftest.c"],
     deps = [":robodog_pure"],
+)
+
+# Phase 3 capability router + resampler: the routing decision that keeps
+# esp-claw's skills/MCP/web reachable, and the sample-rate handling the omni
+# audio deltas depend on.  Pure C, same source the firmware compiles.
+cc_test(
+    name = "test_voice_route",
+    srcs = [
+        "esp-claw/test_voice_route.c",
+    ],
+    deps = [":esp_claw_voice_pure"],
 )

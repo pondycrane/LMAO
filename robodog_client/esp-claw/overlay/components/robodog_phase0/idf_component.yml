@@ -22,3 +22,8 @@ dependencies:
   lvgl/lvgl:
     version: ^9.5.0,<9.6.0
     public: true
+  # Phase 3 omni realtime: the OpenAI-Realtime session is a WebSocket. The
+  # component is already in the dependency graph (cap_im_platform pulls it),
+  # but a component's REQUIRES only resolves deps it declares itself — so the
+  # manifest must name it too or CMake fails with "unknown name".
+  espressif/esp_websocket_client: "^1.4.0"

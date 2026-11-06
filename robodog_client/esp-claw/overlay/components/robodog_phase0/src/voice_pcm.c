@@ -10,6 +10,8 @@
  */
 #include "voice_pcm.h"
 
+#include <string.h>
+
 /* Consecutive non-silent samples required to call a region speech: a single
  * click or a zero crossing inside a word must not end the trim. */
 #define SPEECH_HOLD_SAMPLES 32
@@ -85,4 +87,37 @@ void robodog_pcm_trim_silence(const int16_t *pcm, size_t n, uint32_t rate,
     }
     *out_off = off;
     *out_n = end - off;
+}
+
+size_t robodog_pcm_resample(const int16_t *in, size_t in_n,
+                            int16_t *out, size_t out_cap,
+                            uint32_t in_rate, uint32_t out_rate)
+{
+    if (out == NULL || out_cap == 0 || in == NULL) {
+        return 0;
+    }
+    if (in_rate == 0 || in_rate == out_rate) {
+        const size_t cp = (in_n < out_cap) ? in_n : out_cap;
+        if (cp > 0) {
+            memcpy(out, in, cp * sizeof(int16_t));
+        }
+        return cp;
+    }
+    /* Position in the INPUT per output sample is in_rate/out_rate: 16k->24k
+     * advances 0.667 input samples per output (150 outputs for 100 inputs),
+     * 24k->16k advances 1.5 (66 outputs).  Using the inverse here (the shape
+     * the Phase 2 helper had) makes every UPSAMPLE truncate to
+     * in_n * in_rate/out_rate — a 16 kHz WAV played on the 24 kHz hub would
+     * stop two thirds of the way through. */
+    size_t o = 0;
+    double pos = 0.0;
+    const double step = (double)in_rate / (double)out_rate;
+    while (o < out_cap && (size_t)pos + 1 < in_n) {
+        const size_t i = (size_t)pos;
+        const double frac = pos - (double)i;
+        const double v = (double)in[i] * (1.0 - frac) + (double)in[i + 1] * frac;
+        out[o++] = (int16_t)v;
+        pos += step;
+    }
+    return o;
 }
