@@ -1139,3 +1139,162 @@ Panel + state, captured with the RD_SHOT → `capture.decode_hermes` → vision
 readback path: a press with no speech shows `listening` on the status row and
 ends in the intended `no speech within 12000 ms` bail (`state -> idle`), while
 a press followed by speech runs the full chain and renders the reply.
+
+## Phase 3 — omni realtime voice path (standalone, no bridge)
+
+The Phase 2 loop is three serial HTTP calls, each returning a WHOLE response
+before the next can start. Measured on the board (`/dev/ttyACM0`, corpus
+`count`, 4.16 s WAV played into the mic):
+
+| Stage | Measured |
+|---|---|
+| VAD trailing silence | 0.8 s |
+| Whisper `/v1/audio/transcriptions` | 7.8–12.5 s (4.2 s fixed + 0.67 × utterance) |
+| claw_core reply (whole, no stream) + 3.6 s memory-extract stage note | 4.2–7.0 s |
+| Qwen3-TTS first chunk (TTFB == total, RTF ≈ 1) | 8.8–15.0 s |
+| **end-of-speech → first audio** | **24.3–32.5 s** |
+| read-out to `idle` | 11.6–14.2 s |
+
+Phase 3 replaces those three hops with ONE WebSocket session to a vLLM-Omni
+OpenAI-Realtime endpoint (cluster-ops `omni-realtime/`). The board streams its
+mic into the session **as it captures** (no utterance upload at all), commits
+when its own energy VAD says the user stopped, and receives transcript and PCM
+deltas as the model generates.
+
+**Measured on the same corpus, same board, warm session:**
+
+| Leg | Phase 2 | Phase 3 |
+|---|---|---|
+| end-of-speech → first audio | 24.3–32.5 s | **0.83 s** |
+| session handshake | n/a | 74–99 ms |
+| first audio → readout complete (9.2 s of audio) | ~11.6 s | 5.1 s |
+
+### Two per-turn shapes (esp-claw decides, per turn)
+
+The omni model answers and speaks a turn itself, but that path has no
+skills/MCP/web access. So the board picks the shape PER TURN:
+
+| Shape | Path | Cost |
+|---|---|---|
+| `OMNI` | omni answers + speaks (`modalities ["audio","text"]`) | ~0.8 s to first audio; **no esp-claw tools** |
+| `AGENT` | omni transcribes (`modalities ["text"]`), claw_core answers with skills/MCP/web/self-programming, Qwen3-TTS speaks | full capability, Phase-2 latency |
+
+`AUTO` (the default) routes with `voice_route.c` — a pure-C, host-tested
+keyword table, so the decision is auditable on the console
+(`RT route=agent reason=search`) and tunable per household. Anything that
+isn't a capability intent stays on the fast path. `rd_voice_mode
+[classic|auto|omni]` pins a path at runtime for A/B measurement, and a
+realtime fault falls through to the Phase 2 chain rather than losing the turn.
+
+### Session protocol (what the board sends)
+
+`session.update` → `session.created` → paced `input_audio_buffer.append`
+(100 ms PCM16 16 kHz frames, only once speech begins) →
+`input_audio_buffer.commit` → `response.create`. The session opens with
+`turn_detection: null` and `auto_response: false` so the turn boundary is
+the BOARD's (a server VAD would answer mid-sentence). The rates are declared
+explicitly — `sample_rate_hz` top-level for input and
+`audio.output.sample_rate_hz` for output — because the encodings alone do not
+pin them.
+
+**`response.listen` is not a turn end.** MiniCPM-o's native turn-taking can
+answer a commit with "keep listening" (measured: a 2.1 s committed utterance
+produced `listen`, then `speak` immediately after one explicit
+`response.create`). A committed utterance must still be answered, so the board
+re-asks ONCE; a second `listen` verdict is honoured (the user really did pause
+mid-sentence).
+
+### Device-side implementation
+
+`robodog_realtime.c` — WS client (`esp_websocket_client`, already a compiled
+dependency) + fragment reassembly + JSON dispatch + a playback task that
+writes decoded PCM deltas to the shared APP mixer track.
+
+- **No per-delta allocation**: the playback slots (`RT_QUEUE_DEPTH` ×
+  `RT_DELTA_MAX_BYTES`) and the base64 decode scratch are allocated ONCE at
+  init, so the Phase 2 R7 tlsf-free panic site cannot recur. An oversized
+  delta is dropped with a log rather than growing a buffer mid-stream.
+- **No sleep pacing**: the mixer ring is the backpressure (a short write is
+  retried), which is what paces playback at the codec rate. The Phase 2 loop
+  slept 19 ms per 20 ms frame and ran ~5 % fast.
+- **One session per boot**: `robodog_rt_connect()` is idempotent, so turns 2..N
+  reuse the admitted session (`duplex_session.max_sessions` counts admitted
+  sessions, and the server reports `resource_exhausted` beyond it).
+- **AEC**: `esp_audio_effects` in this tree ships ALC/DRC/EQ/mixer/rate-cvt but
+  no echo canceller, so the board stays half-duplex (mic not read while audio
+  plays) exactly as in Phase 2. MiniCPM-o supports barge-in; the hardware
+  does not.
+
+Shared helpers extracted so the two paths cannot drift:
+`robodog_speaker.c` (PA + DAC unmute + volume — the reply is silent until all
+three are asserted) and `robodog_pcm_resample()` in `voice_pcm.c` (used by both
+the TTS path and the realtime path; the omni endpoint declares its output rate
+per delta, so a wrong rate assumption would play a 16 kHz clip slow).
+
+### Server side (cluster-ops `omni-realtime/`)
+
+`vllm-omni serve openbmb/MiniCPM-o-4_5 --omni --deploy-config <overlay>` on
+spark-5307 (GB10, 121 GiB unified). The packaged profile budgets 0.55 + 0.15 +
+0.18 of the DEVICE, which assumes the node owns the GPU; the site overlay
+(`minicpmo_4_5_shared_gpu.yaml`) trims it so the omni endpoint coexists with
+Whisper (:8001) and Qwen3-TTS (:8004). Three install gaps found on the way:
+
+1. **`vllm-omni` does not depend on `vllm`** — install both at the same version.
+2. **Code2Wav needs `stepaudio2-minicpmo`**, and its bundled `cosyvoice2`
+   implementation is only registered under the upstream module name inside
+   `stepaudio2.Token2wav.__init__` — which vLLM-Omni's `StepAudio2Token2WavCore`
+   never calls. Without the `cosyvoice2.py` alias shim in site-packages, Stage 2
+   dies with `ImportError: There is no such class as
+   cosyvoice2.flow.flow.CausalMaskedDiffWithXvec`. (`hyperpyyaml` and
+   `speechbrain` are also needed.)
+3. **The vocoder assets live under `assets/token2wav/`** in the HF repo, not at
+   the snapshot root, so a plain `hf download` of the model leaves Stage 2
+   without `flow.pt`/`hift.pt`.
+
+Also: GB10 memory is UNIFIED, so the page cache counts as USED in vLLM's
+free-memory check — a warm cache can make a legal budget look impossible.
+Drop caches before starting the engine.
+
+### The session recipe that actually works (hardware-verified)
+
+Getting a turn answered took four findings, each reproduced on the board:
+
+1. **`session.type` is MANDATORY.** OpenAI's schema spells the session object
+   `RealtimeSessionCreateRequest`, whose `type` field is required. Omitting it
+   makes the server reject `session.update` with `invalid_event` and keep its
+   defaults — the session still opens, so the failure is silent (no
+   instructions, no turn behaviour change).
+2. **Wait for `session.updated` before streaming audio.** The server applies
+   the update asynchronously and RESETS the input buffer when it lands, so
+   anything appended before that event is discarded and the commit then
+   produces nothing at all.
+3. **Send the MINIMAL session payload.** Measured on hardware: adding
+   `modalities`, `turn_detection`, `input_audio_format`, `overlap_policy`,
+   `playback_commit_policy` or `extra_body` makes the update succeed but then
+   silently drop the commit. The accepted shape is
+   `{type:"session.update", session:{type:"realtime", model, instructions}}`.
+4. **Input audio is 24 kHz mono PCM16**, not 16 kHz — the OpenAI-compatible
+   handler hardcodes `SAMPLE_RATE_HZ = 24000`. The board's capture hub runs
+   16 kHz, so every frame is resampled up before the append; sending raw
+    16 kHz makes the model hear the utterance 1.5x fast.
+
+Then `input_audio_buffer.commit` + `response.create` with
+`{"modalities":["audio","text"]}` produces `response.created`,
+`response.output_audio_transcript.delta` (the RLCD subtitle) and
+`response.output_audio.delta` (PCM16 at 24 kHz, played through the shared APP
+mixer track).
+
+**Device-side WS sizing.** One audio delta is ~54 KB of JSON (base64 of ~40 KB
+of PCM16). With a 4 KB `esp_websocket_client` buffer the message fragments and
+its bytes are lost whenever the handler does work between reads — measured as
+every audio delta failing to parse. The buffer is therefore 64 KB, i.e. one
+event per message, and the playback queue is 16 x 64 KB (~1 MB) rather than
+48 slots (3 MB, which exhausted the ~3.2 MB of free SPIRAM and made the
+websocket client fail to init).
+
+Measured on the board after these fixes (`count` corpus, test speaker into the
+board mic): **6.3 s from end-of-speech to first audio** (device-internal
+commit→first-audio 5.4 s on that run), reply text streamed to the RLCD and
+audio played — against 24-32 s for the Phase 2 chain. The remaining gap is
+first-request model warmup plus the 800 ms VAD tail; the host probe on a warm
+engine measures 1.1-2.6 s.
