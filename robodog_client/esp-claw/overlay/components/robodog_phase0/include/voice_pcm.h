@@ -58,6 +58,27 @@ void robodog_pcm_trim_silence(const int16_t *pcm, size_t n, uint32_t rate,
                               size_t lead_keep_ms, size_t tail_keep_ms,
                               size_t *out_off, size_t *out_n);
 
+/**
+ * @brief Linear-interpolating sample-rate converter for 16-bit mono PCM.
+ *
+ * Same-rate input is a plain bounded copy (the common case: the audio hub runs
+ * 24 kHz and Qwen3-TTS / the omni model emit 24 kHz, so no processing at all).
+ * Any other rate is interpolated at step out_rate/in_rate, so pitch and tempo
+ * stay exact — blindly assuming a rate is what once made a 16 kHz WAV play
+ * slow with very low pitch.
+ *
+ * @param[in]  in        input samples (mono, s16)
+ * @param[in]  in_n      input sample count
+ * @param[out] out       output buffer (mono, s16), caller-owned
+ * @param[in]  out_cap   output capacity in samples
+ * @param[in]  in_rate   source rate (0 or == out_rate => copy)
+ * @param[in]  out_rate  destination rate
+ * @return number of samples written to `out` (<= out_cap)
+ */
+size_t robodog_pcm_resample(const int16_t *in, size_t in_n,
+                            int16_t *out, size_t out_cap,
+                            uint32_t in_rate, uint32_t out_rate);
+
 #ifdef __cplusplus
 }
 #endif
