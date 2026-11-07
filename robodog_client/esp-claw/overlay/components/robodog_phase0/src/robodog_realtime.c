@@ -54,6 +54,7 @@
 #include "robodog_ui.h"
 #include "voice_pcm.h"
 #include "voice_route.h"
+#include "voice_think.h"
 
 static const char *TAG = "robodog_rt";
 
@@ -120,6 +121,10 @@ static int64_t           s_commit_us;
 static bool              s_audio_started;
 static bool              s_want_audio;     /* this turn's modality choice   */
 static int               s_listen_retries; /* explicit re-asks after listen */
+static bool              s_saw_think;      /* the reply carried a think block */
+static bool              s_think_suppress; /* ... so server audio is dropped  */
+static uint32_t          s_dropped_deltas;  /* audio deltas discarded (think)  */
+static volatile bool     s_play_go;        /* text known -> playback may run   */
 
 /* Playback queue slots, allocated once. */
 static uint8_t *s_slots[CONFIG_ROBODOG_RT_QUEUE_DEPTH];
@@ -193,6 +198,25 @@ static void rt_play_task(void *arg)
         if (s_play_abort || item.data == NULL || item.len == 0) {
             continue; /* slots are never freed; the item is just dropped */
         }
+        if (s_think_suppress) {
+            s_dropped_deltas++;
+            continue; /* the reply had a think block; its audio is discarded */
+        }
+        if (!s_play_go) {
+            /* Hold until the first transcript delta proves the reply is clean.
+             * This MUST be strict: audio deltas can arrive BEFORE the text, so
+             * a timed fallback would start playing a reasoning block the
+             * stripper has not seen yet (measured: the first audio delta came
+             * 14.5 s after commit, well before the text).  The turn's own
+             * timeout bounds the wait, and the turn drains the queue at
+             * response.done. */
+            while (!s_play_go && !s_think_suppress && !s_play_abort) {
+                vTaskDelay(pdMS_TO_TICKS(10));
+            }
+            if (s_think_suppress || s_play_abort) {
+                continue;
+            }
+        }
         if (xSemaphoreTake(s_track_mtx, pdMS_TO_TICKS(200)) != pdTRUE) {
             ESP_LOGW(TAG, "no track lock; dropping %u B", (unsigned)item.len);
             continue;
@@ -241,6 +265,42 @@ static esp_err_t rt_send(const char *json);
 
 /* ── event dispatch ─────────────────────────────────────────────────────── */
 
+/* Raw (unstripped) reply text for the current turn: `s_turn.reply` holds the
+ * CLEAN text, this holds everything the server sent so a tag split across
+ * deltas is recognised once the block completes. */
+static char s_raw_reply[1024];
+static size_t s_ui_shown;   /* clean-text length already rendered on the RLCD */
+
+/* Append one delta: accumulate raw, re-derive clean, render the new suffix. */
+static size_t rt_reply_delta(const char *delta)
+{
+    if (delta == NULL) {
+        return strlen(s_turn.reply);
+    }
+    const size_t have = strlen(s_raw_reply);
+    if (have + 1 < sizeof(s_raw_reply)) {
+        size_t room = sizeof(s_raw_reply) - have - 1;
+        size_t n = strlen(delta);
+        if (n > room) {
+            /* Back off to a UTF-8 boundary: never split a codepoint. */
+            n = room;
+            while (n > 0 && ((unsigned char)delta[n] & 0xC0) == 0x80) {
+                n--;
+            }
+        }
+        memcpy(s_raw_reply + have, delta, n);
+        s_raw_reply[have + n] = '\0';
+    }
+    const size_t clean = robodog_think_strip(s_raw_reply, s_turn.reply,
+                                             sizeof(s_turn.reply));
+    if (clean > s_ui_shown) {
+        robodog_ui_append_assistant(s_turn.reply + s_ui_shown);
+        s_ui_shown = clean;
+    }
+    return clean;
+}
+
+/* Plain append for the ASR transcript (no think stripping there). */
 static void rt_append_text(char *dst, size_t cap, const char *delta)
 {
     if (delta == NULL) {
@@ -248,13 +308,11 @@ static void rt_append_text(char *dst, size_t cap, const char *delta)
     }
     const size_t have = strlen(dst);
     if (have + 1 >= cap) {
-        return; /* saturated: keep what we have, never split a codepoint */
+        return;
     }
     size_t room = cap - have - 1;
     size_t n = strlen(delta);
     if (n > room) {
-        /* Back off to a UTF-8 boundary so the RLCD never gets a partial
-         * multi-byte sequence (same rule as robodog_utf8). */
         n = room;
         while (n > 0 && ((unsigned char)delta[n] & 0xC0) == 0x80) {
             n--;
@@ -263,7 +321,6 @@ static void rt_append_text(char *dst, size_t cap, const char *delta)
     memcpy(dst + have, delta, n);
     dst[have + n] = '\0';
 }
-
 /* Push a decoded PCM delta onto the playback queue.  Slots are fixed; when the
  * queue is full the delta is dropped (a wedged playback path is already
  * reported through RT_BIT_ERR). */
@@ -362,10 +419,26 @@ static void rt_dispatch(cJSON *root)
         strcmp(type, "response.output_text.delta") == 0 ||
         strcmp(type, "response.text.delta") == 0) {
         const char *d = rt_str(root, "delta");
-        rt_append_text(s_turn.reply, sizeof(s_turn.reply), d);
-        /* Render as the sentence forms: the panel shows what is being said. */
-        if (d != NULL && d[0] != '\0') {
-            robodog_ui_append_assistant(d);
+        rt_reply_delta(d);
+        if (!s_think_suppress && robodog_think_present(s_raw_reply)) {
+            /* MiniCPM-o emitted a reasoning block.  It is VOICED by the
+             * Talker (measured: ASR of the turn's audio heard "Gate, rot,
+             * zoo, rot, okay, 21..." — the model pronouncing the tag), and
+             * there is no server-side switch that removes it.  So this turn's
+             * server audio is discarded and the CLEAN text is re-spoken with
+             * Qwen3-TTS after response.done.  Rare (only on repeated
+             * questions in one session), so the fast path is unaffected. */
+            ESP_LOGW(TAG, "RT reply carries a think block; suppressing the "
+                     "server audio for this turn");
+            s_saw_think = true;
+            s_think_suppress = true;
+            xQueueReset(s_play_q); /* drop whatever was already queued */
+        }
+        if (!s_think_suppress) {
+            /* The text is known and clean: let playback run.  The gate exists
+             * so audio queued BEFORE this delta cannot play while the reply
+             * is still unknown. */
+            s_play_go = true;
         }
         return;
     }
@@ -514,11 +587,19 @@ static void rt_ws_handler(void *arg, esp_event_base_t base, int32_t id,
 static esp_err_t rt_send(const char *json)
 {
     if (s_ws == NULL || !esp_websocket_client_is_connected(s_ws)) {
+        /* Drop the cached session so the next turn reconnects rather than
+         * reusing a dead handle (a dead engine or a dropped socket would
+         * otherwise make every later turn fail identically). */
+        s_session_ready = false;
         return ESP_ERR_INVALID_STATE;
     }
     const int n = esp_websocket_client_send_text(s_ws, json, (int)strlen(json),
                                                  pdMS_TO_TICKS(RT_WS_TIMEOUT_MS));
-    return (n < 0) ? ESP_FAIL : ESP_OK;
+    if (n < 0) {
+        s_session_ready = false;
+        return ESP_FAIL;
+    }
+    return ESP_OK;
 }
 
 /* Build + send the open handshake.  `auto_response=false` + `turn_detection:
@@ -545,6 +626,23 @@ static esp_err_t rt_session_update(void)
     cJSON_AddStringToObject(session, "model", CONFIG_ROBODOG_RT_MODEL);
     cJSON_AddStringToObject(session, "instructions",
                             CONFIG_ROBODOG_RT_INSTRUCTIONS);
+    /* `enable_thinking: false` is a TEMPLATE switch, not a prompt request:
+     * MiniCPM-o's chat template emits an empty ` thinking\n\n</think>\n\n`
+     * block when it is false, so the model skips reasoning entirely.  This is
+     * load-bearing, not cosmetic: when the model DOES emit a think block it
+     * produces no `<|tts_bos|>` span, and the Talker stage then dies with
+     * `ValueError: MiniCPM-o Talker requires tensor tts_token_ids and
+     * tts_hidden_states conditioning` — killing Stage-1 for the whole engine,
+     * after which EVERY later turn fails and the board falls back to idle with
+     * no answer.  Measured: this also halves time-to-first-audio (2.5 s ->
+     * 1.06 s) because the think tokens are no longer generated. */
+    cJSON *extra = cJSON_AddObjectToObject(session, "extra_body");
+    if (extra != NULL) {
+        cJSON *tmpl = cJSON_AddObjectToObject(extra, "chat_template_kwargs");
+        if (tmpl != NULL) {
+            cJSON_AddBoolToObject(tmpl, "enable_thinking", false);
+        }
+    }
     /* Input transcription: the AGENT shape routes on the USER's words, and a
      * turn-mode session does not produce them otherwise.  The handler accepts
      * this field and echoes it (its own docs note no separate ASR stage runs,
@@ -872,6 +970,12 @@ esp_err_t robodog_rt_turn(robodog_rt_mode_t mode, robodog_rt_turn_t *out)
     s_audio_started = false;
     s_play_abort = false;
     s_listen_retries = 0;
+    s_raw_reply[0] = '\0';
+    s_ui_shown = 0;
+    s_saw_think = false;
+    s_think_suppress = false;
+    s_play_go = false;
+    s_dropped_deltas = 0;
 
     esp_err_t err = robodog_rt_connect();
     if (err != ESP_OK) {
@@ -894,6 +998,7 @@ esp_err_t robodog_rt_turn(robodog_rt_mode_t mode, robodog_rt_turn_t *out)
         return ESP_OK;
     }
 
+    s_turn.captured = true; /* the utterance is now in the session */
     const bool want_audio = (mode == ROBODOG_RT_MODE_OMNI);
     s_want_audio = want_audio;
     /* Commit seals the utterance into a user item.  `response_create` is left
@@ -904,6 +1009,7 @@ esp_err_t robodog_rt_turn(robodog_rt_mode_t mode, robodog_rt_turn_t *out)
              "{\"type\":\"input_audio_buffer.commit\"}");
     if (rt_send(commit) != ESP_OK) {
         out->fault = true;
+        out->captured = true;
         return ESP_FAIL;
     }
 
@@ -915,6 +1021,7 @@ esp_err_t robodog_rt_turn(robodog_rt_mode_t mode, robodog_rt_turn_t *out)
     s_commit_us = esp_timer_get_time();
     if (rt_send(resp) != ESP_OK) {
         out->fault = true;
+        out->captured = true;
         return ESP_FAIL;
     }
     robodog_ui_set_agent_state(want_audio ? "responding" : "processing");
@@ -931,6 +1038,18 @@ esp_err_t robodog_rt_turn(robodog_rt_mode_t mode, robodog_rt_turn_t *out)
     const EventBits_t bits = xEventGroupWaitBits(
         s_evts, RT_BIT_DONE | RT_BIT_ERR, pdFALSE, pdFALSE,
         pdMS_TO_TICKS(CONFIG_ROBODOG_RT_TIMEOUT_MS));
+
+    /* Release the playback gate: if no think block was seen the remaining
+     * audio is legitimate and must play; if one was, it is all discarded.
+     * Without this a turn whose reply never produced a text delta would leave
+     * the playback task spinning on the gate and the drain below would never
+     * finish. */
+    if (s_think_suppress) {
+        s_play_abort = true;
+        xQueueReset(s_play_q);
+    } else {
+        s_play_go = true;
+    }
 
     /* Drain the playback queue before releasing the track, so the last
      * sentence is not cut off by the close. */
@@ -957,8 +1076,38 @@ esp_err_t robodog_rt_turn(robodog_rt_mode_t mode, robodog_rt_turn_t *out)
 
     memcpy(out, &s_turn, sizeof(*out));
     ESP_LOGI(TAG, "RT turn done: transcript=\"%.80s\" reply=\"%.80s\" "
-             "first_audio=%u ms", out->transcript, out->reply,
-             (unsigned)out->first_audio_ms);
+             "first_audio=%u ms captured=%d think=%d dropped=%u", out->transcript,
+             out->reply, (unsigned)out->first_audio_ms, (int)out->captured,
+             (int)s_saw_think, (unsigned)s_dropped_deltas);
+
+    /* The server's audio was dropped because the reply carried a think
+     * block.  Speak the CLEAN text instead so the answer is still heard. */
+    if (s_think_suppress) {
+        const char *say = out->reply[0] != '\0'
+                              ? out->reply
+                              : "Sorry, I lost that one. Please say it again.";
+        if (out->reply[0] == '\0') {
+            /* Every byte was reasoning, so the clean reply is empty: without
+             * this the turn is silent and the panel just says idle — the
+             * reported "hits idle and no response". */
+            ESP_LOGW(TAG, "RT reply was entirely a think block; speaking a "
+                     "retry prompt");
+        } else {
+            ESP_LOGI(TAG, "RT speaking the cleaned reply via Qwen3-TTS "
+                     "(think block removed)");
+        }
+        if (robodog_voice_speak(say) == ESP_OK) {
+            out->spoke = true;
+        } else {
+            ESP_LOGW(TAG, "RT clean-reply TTS failed");
+        }
+        /* The think block comes from the accumulated session history (it
+         * appears on repeated questions and a re-ask does NOT clear it —
+         * measured).  Drop the session so the NEXT turn starts with a clean
+         * history, which is the state that never emits one. */
+        robodog_rt_disconnect();
+        ESP_LOGI(TAG, "RT session reset (fresh history after a think turn)");
+    }
     return ESP_OK;
 }
 
