@@ -19,6 +19,7 @@
 
 #include "voice_pcm.h"
 #include "voice_route.h"
+#include "voice_think.h"
 
 static int failures;
 
@@ -170,6 +171,89 @@ static void test_resample_rejects_null(void)
           "zero capacity must yield 0");
 }
 
+/* ── think-block stripper ───────────────────────────────────────────────── */
+
+/* The real tag is ASCII "<think>" / "</think>"; built as macros so this file
+ * never contains a literal the model could echo. */
+#define TAG_OPEN  "<" "think" ">"
+#define TAG_CLOSE "<" "/" "think" ">"
+
+static void test_think_clean_text_untouched(void)
+{
+    char out[256];
+    const char *raw = "Okay, twenty-one, twenty-two.";
+    CHECK(robodog_think_strip(raw, out, sizeof(out)) > 0,
+          "clean text must survive");
+    CHECK(strcmp(out, raw) == 0, "clean text unchanged, got %s", out);
+}
+
+static void test_think_empty_block_removed(void)
+{
+    char out[256];
+    const char *raw = TAG_OPEN "\n\n" TAG_CLOSE "\n\nOkay, twenty-one.";
+    size_t n = robodog_think_strip(raw, out, sizeof(out));
+    CHECK(strcmp(out, "Okay, twenty-one.") == 0,
+          "empty think block removed, got %s", out);
+    CHECK(n == strlen("Okay, twenty-one."), "length matches (%zu)", n);
+    CHECK(!robodog_think_present(out), "clean text has no think marker");
+}
+
+static void test_think_span_mid_text(void)
+{
+    char out[256];
+    const char *raw = "Sure. " TAG_OPEN "thinking about it" TAG_CLOSE
+                      " The answer is 42.";
+    robodog_think_strip(raw, out, sizeof(out));
+    CHECK(strcmp(out, "Sure. The answer is 42.") == 0,
+          "mid-text block removed, got %s", out);
+}
+
+static void test_think_unclosed_drops_tail(void)
+{
+    char out[256];
+    const char *raw = "Hello. " TAG_OPEN "still reasoning";
+    robodog_think_strip(raw, out, sizeof(out));
+    CHECK(strncmp(out, "Hello.", 6) == 0,
+          "unclosed block drops the tail, got %s", out);
+    CHECK(strstr(out, "still reasoning") == NULL,
+          "reasoning text never survives, got %s", out);
+}
+
+static void test_think_present(void)
+{
+    CHECK(robodog_think_present(TAG_OPEN "\n\nhi"), "detects an open tag");
+    CHECK(!robodog_think_present("plain text"), "plain text has none");
+    CHECK(!robodog_think_present(NULL), "NULL is safe");
+}
+
+static void test_think_only_block_yields_empty(void)
+{
+    char out[64];
+    CHECK(robodog_think_strip(TAG_OPEN "\n\n" TAG_CLOSE "\n\n",
+                              out, sizeof(out)) == 0,
+          "a reply that is only a think block yields empty text");
+    CHECK(out[0] == '\0', "and an empty string");
+}
+
+static void test_think_split_tag_is_handled(void)
+{
+    /* The realtime stream splits the tag across deltas; the caller
+     * accumulates first, so the joined text must still be stripped. */
+    char out[256];
+    const char *raw = TAG_OPEN "\n\n" TAG_CLOSE "\n\nDone.";
+    robodog_think_strip(raw, out, sizeof(out));
+    CHECK(strcmp(out, "Done.") == 0, "split tag handled, got %s", out);
+}
+
+static void test_think_partial_tag_is_not_stripped(void)
+{
+    /* A half-received tag must not eat the answer. */
+    char out[256];
+    const char *raw = "the thi";
+    robodog_think_strip(raw, out, sizeof(out));
+    CHECK(strcmp(out, "the thi") == 0, "partial tag kept, got %s", out);
+}
+
 int main(void)
 {
     test_capability_turns_route_to_agent();
@@ -182,6 +266,14 @@ int main(void)
     test_resample_upsamples();
     test_resample_downsample_bounded();
     test_resample_rejects_null();
+    test_think_clean_text_untouched();
+    test_think_empty_block_removed();
+    test_think_span_mid_text();
+    test_think_unclosed_drops_tail();
+    test_think_present();
+    test_think_only_block_yields_empty();
+    test_think_split_tag_is_handled();
+    test_think_partial_tag_is_not_stripped();
 
     if (failures != 0) {
         fprintf(stderr, "%d assertion(s) failed\n", failures);

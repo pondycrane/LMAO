@@ -1298,3 +1298,63 @@ commit→first-audio 5.4 s on that run), reply text streamed to the RLCD and
 audio played — against 24-32 s for the Phase 2 chain. The remaining gap is
 first-request model warmup plus the 800 ms VAD tail; the host probe on a warm
 engine measures 1.1-2.6 s.
+
+### Why turns sometimes ended silent (root causes, all fixed)
+
+The board "often hit idle and no response". Three distinct causes, each
+reproduced on hardware:
+
+1. **The Talker stage died.** When the Thinker emits a `think` block with no
+   `<|tts_bos|>` span, Stage 1 raises
+   `ValueError: MiniCPM-o Talker requires tensor tts_token_ids and
+   tts_hidden_states conditioning` and is evicted. The API server keeps
+   answering `/health` **200**, but every realtime request then fails with
+   `OmniEngineDeadError: Stage-1 has no live replica` — forever, because
+   `Restart=always` only fires when the process *exits*. Fixed server-side by
+   `omni-realtime-watchdog.timer` (cluster-ops): it probes the real WS
+   handshake, skips the cold-load grace window, and restarts after three
+   consecutive failures.
+2. **The board re-captured after a failed turn.** On any realtime fault the
+   Phase 2 chain opened a *second* listen window; the user had already spoken,
+   so it found silence and ended in a clean `idle` — the symptom looked like
+   "the assistant ignored me". Now a realtime fault ends in a visible `error`
+   and the next turn reconnects (`rt_send` drops the cached session on
+   failure).
+3. **Nothing was heard.** A VAD miss ended in a plain `idle`, indistinguishable
+   from a broken turn. It now shows the `no speech` state and *says*
+   "Sorry, I didn't hear that." so the failure is audible.
+
+### Reasoning blocks ("it tries to pronounce think")
+
+MiniCPM-o sometimes emits `think ... /think` and the Talker **voices it** —
+ASR of such a turn heard `"Gate, rot, zoo, rot, okay, 21, 22, ..."`, i.e. the
+model pronouncing the tag before the answer. Measured facts:
+
+- **No server-side switch removes it.** `chat_template_kwargs.enable_thinking
+  = false` is accepted by the realtime handler and ignored (identical text and
+  audio with and without it, whether passed in `extra_body` or at the request
+  root). `use_tts_template` does not change it either.
+- **Re-asking does not clear it** (a second `response.create` on the same
+  committed turn emits the block again).
+- It appears on a **repeated question within one session**; a fresh session
+  never emitted one in 8 varied turns.
+
+Device-side handling (`voice_think.c`, pure C, host-tested):
+
+- `robodog_think_strip()` removes every block from the accumulated text — the
+  scan runs over the whole text because the streaming deltas split the tag
+  across events (`<`, `think`, `>` arrive separately).
+- When a block is present the turn's **server audio is discarded** (it
+  contains the spoken tag) and the CLEAN text is re-spoken through Qwen3-TTS.
+  The log carries `think=1 dropped=<n>` so the E2E can prove it.
+- A reply that is *entirely* a block strips to empty; rather than going
+  silent, the board says "Sorry, I lost that one. Please say it again."
+- The session is then **reset** (fresh history), which is the state that never
+  emits a block — verified: the turn after a think turn is clean and fast
+  (1.38 s to first audio).
+
+Playback is gated on the first transcript delta (`s_play_go`): audio deltas can
+arrive BEFORE the text (measured: the first audio delta came 14.5 s after
+commit, before the text), so a timed fallback would start playing a reasoning
+block the stripper has not seen yet. The turn releases the gate at
+`response.done` so a text-less stream cannot mute the turn or hang the drain.
