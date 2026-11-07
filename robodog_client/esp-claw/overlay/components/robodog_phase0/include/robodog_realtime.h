@@ -41,6 +41,10 @@
 
 #include "esp_err.h"
 
+/* robodog_voice_speak(): the clean-reply TTS fallback when a think block
+ * forces the server audio to be discarded. */
+#include "robodog_voice.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -58,6 +62,7 @@ typedef struct {
     char reply[1024];          /**< omni's own reply text (OMNI mode) */
     uint32_t first_audio_ms;   /**< commit -> first audio delta (0 = none) */
     bool     spoke;            /**< true when omni audio was played */
+    bool     captured;         /**< the utterance was streamed + committed  */
     bool     fault;            /**< a real fault (never "user was silent") */
 } robodog_rt_turn_t;
 
