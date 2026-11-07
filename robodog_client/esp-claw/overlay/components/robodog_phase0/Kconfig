@@ -419,15 +419,18 @@ menu "RoboDog Phase 3 omni realtime (vLLM-Omni OpenAI-Realtime)"
 
     config ROBODOG_RT_INSTRUCTIONS
         string "Session instructions (persona + spoken-prose rule)"
-        default "You are RoboDog, a friendly voice assistant on a desk display. Answer immediately in plain spoken prose, in one short sentence. Never show your reasoning or thinking. Never use markdown, headings, bullet lists, asterisks or emoji."
+        default "You are RoboDog, a friendly voice assistant on a desk display. Answer immediately in plain spoken prose, in one short sentence. Never use markdown, headings, bullet lists, asterisks or emoji."
         help
             Session-level persona.  Kept short on purpose: every extra
-            sentence is spoken aloud.  "Never show your reasoning" is load-
-            bearing — without it MiniCPM-o streams its ` thinking` trace as the
-            reply and the board reads the reasoning out loud (measured: a
-            35 s read-out of internal monologue).  "No markdown" is the same
-            rule the Phase 2 turn applies, since this path has no
-            md_strip backstop (the reply goes straight to TTS).
+            sentence is spoken aloud.  "No markdown" is the same rule the
+            Phase 2 turn applies, since this path has no md_strip backstop
+            (the reply goes straight to TTS).
+            Do NOT add "never show your reasoning" here: measured, that
+            phrasing makes the model MORE likely to emit a think block.  The
+            deterministic defence is voice_think.c (strip the block from the
+            text) plus discarding the turn's server audio when one appears
+            (the Talker voices the tag: ASR of such a turn heard
+            "Gate, rot, zoo, rot, okay, 21...").
 
     config ROBODOG_RT_TURN_MODE
         int "Default per-turn modality (0=auto, 1=omni direct, 2=agent)"

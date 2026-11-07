@@ -1391,11 +1391,27 @@ static void voice_turn(void)
              * utterance is already transcribed. */
             s_rt_transcript = strdup(rt.transcript);
         } else if (rterr != ESP_OK || rt.fault) {
-            ESP_LOGW(TAG, "RT path failed (%s); falling back to the Phase 2 "
-                     "chain", esp_err_to_name(rterr));
+            /* NEVER fall back into the Phase 2 capture here.  The user has
+             * already spoken: opening a second listen window finds silence,
+             * ends in a clean `idle`, and looks exactly like the reported
+             * "hit listen, it goes idle and says nothing".  End visibly, and
+             * let the next turn reconnect (rt_send drops the cached session
+             * on failure; the server side is healed by the omni watchdog). */
+            ESP_LOGE(TAG, "RT path failed (%s); ending turn in error (no "
+                     "re-capture)", esp_err_to_name(rterr));
+            robodog_ui_set_agent_state("error");
+            s_turn_active = false;
+            return;
         } else {
-            /* No speech captured: a clean idle, exactly like Phase 2. */
-            ESP_LOGW(TAG, "RT captured no utterance");
+            /* Nothing was captured.  This used to end in a plain `idle`, which
+             * is indistinguishable from a broken turn — the reported "hits
+             * idle and no response".  Say so out loud and show a distinct
+             * state so the user knows the mic (not the assistant) missed it. */
+            ESP_LOGW(TAG, "RT captured no utterance; prompting");
+            robodog_ui_set_agent_state("no speech");
+            if (robodog_voice_speak("Sorry, I didn't hear that.") != ESP_OK) {
+                ESP_LOGW(TAG, "RT no-speech prompt failed");
+            }
             robodog_ui_set_agent_state("idle");
             s_turn_active = false;
             return;
