@@ -1066,9 +1066,15 @@ Chinese reply (the vision prompt forbids translation).
     2. **UAF in `voice_speak`**: `esp_http_client_set_post_field` stores a
        pointer (does not copy); freeing the request JSON before `perform()`
        sent freed-memory as the body → Kokoro **400**. Both now fixed.
-- The test rig: the bidirectional USB PnP Audio device is **card 2 (`hw:2`)** on
-  the workspace host; there is **no ALSA `default` alias**, so the E2E drives
-  `hw:2` explicitly (`RD_ALSA_DEVICE`).
+- The test rig: the bidirectional USB PnP Audio device is **card 2** on the
+  workspace host; there is **no ALSA `default` alias**.  The raw `hw:2` node
+  returns `EIO` on the current kernel — the working node is **`plughw:2`**.
+  `robodog_claw_e2e.py` probes candidate nodes (`plughw:CARD=<id>`, `plughw:2`,
+  `hw:2`, `default`, each with and without the `sg audio` wrapper) with a 0.3 s
+  null-source playback and drives the first that opens; `RD_ALSA_DEVICE` pins
+  one.  It logs `/dev/snd`, `aplay -l`, the chosen node and every probe result,
+  and LOUD-SKIPS when no node opens — a playback failure is never silently
+  reported as "the board heard nothing" (issue #301).
 
 ### Gate (hardware-verified)
 
@@ -1219,11 +1225,19 @@ resampled 16 kHz → 24 kHz (the handler hardcodes `SAMPLE_RATE_HZ = 24000`).
 ### Capture pump: never block the reader (issue #301)
 
 The first implementation resampled + base64'd + sent each 20 ms frame inline in
-the capture loop, with a 10 s send timeout. A slow socket (or a slow frame
-build) stalled the reader, the capture subscriber ring overflowed
-(`sub ring overflow role=1 owner=robodog_rt drop=... total=` grew to ~2.5 MB),
-and the turn never reached its own no-speech / 30 s cap exits — so no
-`RT ASR text=` and no response.
+the capture loop, with a 10 s send timeout, so a slow socket could stall the
+reader — the pump is decoupled from the network below as hardening.
+
+The bench evidence then showed the reported "stalled pump" was a misreading.
+The subscriber ring `total` grew at the full 32 KB/s *minus ~600 frames per
+turn*: the reader consumed exactly the 12 s the `RT no speech within 12000 ms`
+bail allows and then stopped. The turn had ENDED on "no speech" while the
+still-open APP subscriber overflowed the ring for the rest of the gate's 90 s
+ASR wait, and the missing stage reset left the watchdog reporting
+`stage=capture` for a turn that was over. What the board actually lacked was
+speech: the gate drove the corpus into a device string that was not a PCM node
+(the ALSA `null` plugin's *description*; see the rig note below), so the mic
+only ever saw its noise floor.
 
 The reader now only fills a 64-slot ring of **raw 16 kHz frames** (PSRAM,
 1.28 s). A dedicated `robodog_rt_up` sender task drains it, resamples, base64s,
@@ -1231,10 +1245,18 @@ coalesces up to 3 frames into ONE `input_audio_buffer.append` (one JSON message
 per 40-60 ms) and sends with a **250 ms** timeout. A full ring drops the OLDEST
 frame and counts it; the reader never blocks on the network. The once-per-second
 pump log carries `frames`, `captured` bytes, `up_dropped`, `ever_speech`,
-`speech_ms`, `silence_ms` and the sender's `last/avg/max` build+send wall time,
-which distinguishes "pump too slow" from "socket blocked" in one run. The turn
+`speech_ms`, `silence_ms`, `vad_max`/`peak` (the highest frame mean-abs and
+sample the VAD saw) and the sender's `last/avg/max` build+send wall time, which
+distinguishes "pump too slow" from "socket blocked" from "the mic is silent" in
+one run. The turn
 drains the ring before `commit` so the whole utterance is sealed (a timed-out
 drain logs and commits what was sent).
+
+**No idle capture.** The APP subscriber is closed at the end of each RT turn
+(the capture task then idles with the codec left open, so there is no codec
+churn and no ring for the idle gap to overflow). Every early turn exit resets
+the stage to `idle`, so the watchdog can only report a stage that is actually
+being held.
 
 **`response.listen` is not a turn end.** MiniCPM-o's native turn-taking can
 answer a commit with "keep listening" (measured: a 2.1 s committed utterance
