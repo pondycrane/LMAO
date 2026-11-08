@@ -65,6 +65,17 @@ if [ ! -f "$SRC/.robodog_drop_log_patched" ]; then
     touch "$SRC/.robodog_drop_log_patched"
     REBUILD_FLAG=1
 fi
+# 2e. Raise the board's ES7210 mic PGA (upstream leaves it at 0 dB).  The gate's
+#     USB test dongle is marginal: with 0 dB PGA the corpus arrives only ~11 dB
+#     above the mic noise floor, far under the RT VAD threshold (mean-abs > 300)
+#     and unintelligible to ASR (#301).  Patched over the pristine upstream
+#     board file - never vendored into the repo.
+if [ ! -f "$SRC/.robodog_mic_gain_patched" ]; then
+    echo "applying $APP/esp-claw/patches/0005-mic-gain.patch"
+    (cd "$SRC" && patch -p1 < "$APP/esp-claw/patches/0005-mic-gain.patch")
+    touch "$SRC/.robodog_mic_gain_patched"
+    REBUILD_FLAG=1
+fi
 # 2b. The board's setup_device.c (ST7305 custom panel + the RoboDog RD_SHOT
 #     capture hook) is owned by LMAO in the overlay and wholesale-copied over
 #     the upstream waveshare board copy each build - drops the fragile

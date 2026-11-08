@@ -1087,6 +1087,22 @@ Chinese reply (the vision prompt forbids translation).
   `passed` and a missing acoustic rig must never read as a green gate (a node
   that opens but is not coupled to the board still fails honestly on the ASR
   legs).
+- **The board's mic PGA is raised in-tree**: `patches/0005-mic-gain.patch`
+  (applied by `build_esp_claw.sh` over the pristine upstream board file, never
+  vendored) sets the ES7210 `adc_init_gain` from the upstream `0` to **30 dB**
+  (`get_db()` supports GAIN_0DB..GAIN_37_5DB).  At 0 dB PGA the gate's dongle
+  put the corpus only ~11 dB above the board mic's noise floor (~−56 dB mean;
+  `vad_max` 53–72, `peak` 191–232 with `RD_PLAY_VOL` 0.7–2.0), i.e. under the
+  RT VAD threshold (mean-abs > 300) and unintelligible to ASR.  The VAD
+  threshold itself stays honest — a silent rig must still fail, not be tuned
+  down to pass.
+- **The acoustic rig stays marginal even with the PGA raised.**  The gate
+  expects the USB dongle's speaker within a few cm of the board's mic: doubling
+  `RD_PLAY_VOL` moved the board's mean only +2.7 dB (the dongle speaker
+  saturates), so drive level cannot close a 15–20 dB coupling gap.  Position the
+  speaker close, keep the dongle mic at its measured 82 % / +25.5 dB capture
+  level, and re-check `vad_max`/`peak` in the first pump line before blaming the
+  firmware.
 
 ### Gate (hardware-verified)
 
