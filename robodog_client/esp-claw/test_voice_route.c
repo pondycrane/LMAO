@@ -275,6 +275,21 @@ int main(void)
     test_think_split_tag_is_handled();
     test_think_partial_tag_is_not_stripped();
 
+    /* A capability question must reach the agent that owns the skills/tools;
+     * the omni model's generic "I can help with..." answer is not the board's
+     * real capability set (and the bench gate's `capabilities` corpus exercises
+     * the full-capability path). */
+    {
+        const char *reason = NULL;
+        CHECK(robodog_route_turn("what can you do", &reason) ==
+              ROBODOG_ROUTE_AGENT, "capabilities -> agent (reason=%s)",
+              reason ? reason : "?");
+        CHECK(robodog_route_turn("tell me your capabilities", &reason) ==
+              ROBODOG_ROUTE_AGENT, "capabilities (plural) -> agent");
+        CHECK(robodog_route_turn("what can you do today", &reason) ==
+              ROBODOG_ROUTE_AGENT, "can you do -> agent");
+    }
+
     if (failures != 0) {
         fprintf(stderr, "%d assertion(s) failed\n", failures);
         return 1;

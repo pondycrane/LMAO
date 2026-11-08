@@ -16,6 +16,10 @@
  * carries its trailing space so "listen" is not a capability request, and
  * "call " likewise. */
 static const char *const ROUTE_AGENT_KEYWORDS[] = {
+    /* the assistant's own capabilities: only claw_core knows the skills /
+     * MCP / tools it actually has, so a capability question must not be
+     * answered from the omni model's generic memory. */
+    "capabilit", "can you do", "what can you do",
     /* web / knowledge retrieval */
     "search", "google", "look up", "lookup", "web", "browse", "fetch",
     /* household data */

@@ -169,6 +169,10 @@ CONFIG_LV_FONT_MONTSERRAT_16=y
 CONFIG_ESP_BOARD_DEV_DISPLAY_LCD_SUPPORT=n
 CONFIG_APP_CLAW_SYSTEM_UI_ENABLE=n
 EOF
+# Echo the realtime-lane knobs into the build log: the bench builds with a
+# payload env, and a wrong/missing turn mode silently changes which voice path
+# the flashed image runs (the gate then asserts the wrong lane).
+echo "realtime lane: url=$CONFIG_ROBODOG_RT_URL model=$CONFIG_ROBODOG_RT_MODEL turn_mode=$CONFIG_ROBODOG_RT_TURN_MODE"
 
 # 5b. Drop any stale sdkconfig before configuring.  `idf.py` keeps sdkconfig
 #     across builds and its values WIN over SDKCONFIG_DEFAULTS, so a knob whose

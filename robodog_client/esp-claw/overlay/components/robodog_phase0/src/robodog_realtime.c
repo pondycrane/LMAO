@@ -112,7 +112,7 @@ static const char *TAG = "robodog_rt";
  * stream still carries the whole utterance). */
 #define RT_ASR_PCM_MAX        (256 * 1024)
 #define RT_ASR_RESP_MAX       (64 * 1024)
-#define RT_ASR_TIMEOUT_MS     30000
+#define RT_ASR_TIMEOUT_MS     10000
 /* The Qwen lane sends the WHOLE reply audio in ONE delta (~214 KB for 4.5 s),
  * far past the 64 KB playback slot: decode into this scratch and split across
  * the fixed slots. */
@@ -1177,7 +1177,9 @@ static esp_err_t rt_b64_flush(esp_http_client_handle_t client,
 static void rt_asr_utterance(robodog_rt_turn_t *out)
 {
     if (s_asr_pcm == NULL || s_asr_resp == NULL || s_asr_len == 0) {
-        ESP_LOGW(TAG, "RT ASR: no captured PCM");
+        ESP_LOGW(TAG, "RT ASR: no captured PCM (pcm=%p resp=%p len=%u)",
+                 (void *)s_asr_pcm, (void *)s_asr_resp, (unsigned)s_asr_len);
+        ESP_LOGI(TAG, "RT ASR text=\"\"");
         return;
     }
     s_asr_resp[0] = '\0';
@@ -1221,6 +1223,8 @@ static void rt_asr_utterance(robodog_rt_turn_t *out)
         return;
     }
     const size_t body_len = (size_t)hl + b64_len + (size_t)tl;
+    ESP_LOGI(TAG, "RT ASR request: %s (%u B pcm, %u B body)",
+             url, (unsigned)s_asr_len, (unsigned)body_len);
 
     const esp_http_client_config_t cfg = {
         .url = url,
@@ -1235,6 +1239,7 @@ static void rt_asr_utterance(robodog_rt_turn_t *out)
     }
     esp_http_client_set_header(client, "Content-Type", "application/json");
     esp_err_t err = esp_http_client_open(client, (int)body_len);
+    ESP_LOGI(TAG, "RT ASR open: %s", esp_err_to_name(err));
     uint8_t carry[2] = { 0, 0 };
     size_t carry_len = 0;
     if (err == ESP_OK) {
@@ -1249,6 +1254,7 @@ static void rt_asr_utterance(robodog_rt_turn_t *out)
     if (err == ESP_OK) {
         err = rt_b64_flush(client, carry, carry_len);
     }
+    ESP_LOGI(TAG, "RT ASR body sent: %s", esp_err_to_name(err));
     size_t rx_len = 0;
     if (err == ESP_OK) {
         (void)esp_http_client_fetch_headers(client);
@@ -1264,6 +1270,7 @@ static void rt_asr_utterance(robodog_rt_turn_t *out)
         s_asr_resp[rx_len] = '\0';
     }
     const int status = esp_http_client_get_status_code(client);
+    ESP_LOGI(TAG, "RT ASR http=%d rx=%u B", status, (unsigned)rx_len);
     esp_http_client_cleanup(client);
 
     if (err != ESP_OK || status < 200 || status >= 300 || rx_len == 0) {
@@ -1444,6 +1451,11 @@ esp_err_t robodog_rt_turn(robodog_rt_mode_t mode, robodog_rt_turn_t *out)
     }
     memset(out, 0, sizeof(*out));
     memset(&s_turn, 0, sizeof(s_turn));
+    ESP_LOGI(TAG, "RT turn start: mode=%d (%s), keep_pcm=%d",
+             (int)mode,
+             mode == ROBODOG_RT_MODE_OMNI ? "omni"
+                 : mode == ROBODOG_RT_MODE_AGENT ? "agent" : "auto",
+             (int)(mode != ROBODOG_RT_MODE_OMNI));
     s_commit_us = 0;
     s_audio_started = false;
     s_play_abort = false;
@@ -1484,6 +1496,29 @@ esp_err_t robodog_rt_turn(robodog_rt_mode_t mode, robodog_rt_turn_t *out)
     }
     s_turn.captured = true; /* the utterance is now in the session */
 
+    if (s_up_fault) {
+        out->fault = true;
+        ESP_LOGE(TAG, "RT uplink socket down; ending turn");
+        robodog_ui_set_agent_state("error");
+        return ESP_FAIL;
+    }
+    if (!rt_up_drain(RT_UP_DRAIN_MS)) {
+        ESP_LOGW(TAG, "RT uplink drain timed out; committing the frames sent");
+    }
+
+    /* Commit FIRST: it seals the streamed audio into a user item (a small
+     * control message, no response).  The explicit ASR then runs against the
+     * same model endpoint without an uncommitted buffer in flight, and the
+     * response.create below picks the shape the router chose. */
+    char commit[160];
+    snprintf(commit, sizeof(commit),
+             "{\"type\":\"input_audio_buffer.commit\"}");
+    if (rt_send(commit) != ESP_OK) {
+        out->fault = true;
+        out->captured = true;
+        return ESP_FAIL;
+    }
+
     /* The AGENT shape routes on the USER's words, and the deployed Qwen lane
      * does not emit the realtime transcription event — so the transcript comes
      * from the explicit chat-completions ASR round trip (same model endpoint,
@@ -1517,27 +1552,6 @@ esp_err_t robodog_rt_turn(robodog_rt_mode_t mode, robodog_rt_turn_t *out)
      * rendered on the RLCD; an AGENT-shape text response is unused (claw_core
      * answers from the transcript). */
     s_render_reply = want_audio;
-
-    if (s_up_fault) {
-        out->fault = true;
-        ESP_LOGE(TAG, "RT uplink socket down; ending turn");
-        robodog_ui_set_agent_state("error");
-        return ESP_FAIL;
-    }
-    if (!rt_up_drain(RT_UP_DRAIN_MS)) {
-        ESP_LOGW(TAG, "RT uplink drain timed out; committing the frames sent");
-    }
-
-    /* Commit seals the utterance into a user item.  `response_create` is left
-     * false so the turn boundary and the modality choice stay ours. */
-    char commit[160];
-    snprintf(commit, sizeof(commit),
-             "{\"type\":\"input_audio_buffer.commit\"}");
-    if (rt_send(commit) != ESP_OK) {
-        out->fault = true;
-        out->captured = true;
-        return ESP_FAIL;
-    }
 
     char resp[256];
     snprintf(resp, sizeof(resp),
