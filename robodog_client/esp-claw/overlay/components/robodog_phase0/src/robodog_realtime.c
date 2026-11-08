@@ -104,6 +104,12 @@ static const char *TAG = "robodog_rt";
 #define RT_UP_COALESCE        3    /* frames per append (40-60 ms messages)   */
 #define RT_UP_SEND_TIMEOUT_MS 250  /* audio append timeout (never 10 s)       */
 #define RT_UP_DRAIN_MS        3000 /* wait for the ring to flush before commit */
+/* The omni server accepts ~20 s of streamed audio but CLOSES the socket on a
+ * ~30 s stream (probed on the deployed lane: 10 s and 20 s answered, 30 s
+ * closed the connection).  So the model gets at most this much of a long
+ * utterance; the capture keeps running for the ASR/VAD (a 30 s utterance is
+ * still transcribed from its first 8 s). */
+#define RT_STREAM_MAX_MS      20000
 #define RT_B64_CHUNK          1536 /* multiple of 3 for streaming base64       */
 #define RT_UP_MSG_MAX         4224 /* 3 frames -> 2880 B PCM -> 3840 b64 + JSON */
 /* Explicit ASR (the Qwen lane never emits the transcription event): keep the
@@ -1220,6 +1226,7 @@ static void rt_asr_utterance(robodog_rt_turn_t *out)
     if (hl <= 0 || (size_t)hl >= sizeof(head) || tl <= 0 ||
         (size_t)tl >= sizeof(tail)) {
         ESP_LOGE(TAG, "RT ASR: request envelope overflow");
+        ESP_LOGI(TAG, "RT ASR text=\"\"");
         return;
     }
     const size_t body_len = (size_t)hl + b64_len + (size_t)tl;
@@ -1235,6 +1242,7 @@ static void rt_asr_utterance(robodog_rt_turn_t *out)
     esp_http_client_handle_t client = esp_http_client_init(&cfg);
     if (client == NULL) {
         ESP_LOGE(TAG, "RT ASR: http client init failed");
+        ESP_LOGI(TAG, "RT ASR text=\"\"");
         return;
     }
     esp_http_client_set_header(client, "Content-Type", "application/json");
@@ -1341,6 +1349,8 @@ static size_t rt_stream_utterance(bool *fault, bool keep_pcm)
     uint32_t silence_ms = 0;
     uint32_t speech_ms = 0;
     bool ever_speech = false;
+    bool stream_capped = false;
+    int64_t stream_t0 = -1;
     int64_t speech_t0 = -1;
     const int64_t t0 = esp_timer_get_time();
     int64_t last_log = t0;
@@ -1384,8 +1394,20 @@ static size_t rt_stream_utterance(bool *fault, bool keep_pcm)
              * room before the utterance.  The SENDER resamples to the session
              * rate; this loop only copies 640 B. */
             if (speech || ever_speech) {
-                rt_up_push(frame);
-                frames++;
+                if (stream_t0 < 0) {
+                    stream_t0 = now;
+                }
+                if (!stream_capped &&
+                    now - stream_t0 >= (int64_t)RT_STREAM_MAX_MS * 1000) {
+                    stream_capped = true;
+                    ESP_LOGW(TAG, "RT stream capped at %d ms (model gets the "
+                             "first %d ms; ASR keeps capturing)",
+                             RT_STREAM_MAX_MS, RT_STREAM_MAX_MS);
+                }
+                if (!stream_capped) {
+                    rt_up_push(frame);
+                    frames++;
+                }
                 if (keep_pcm && s_asr_pcm != NULL) {
                     if (s_asr_len + RT_FRAME_BYTES <= RT_ASR_PCM_MAX) {
                         memcpy(s_asr_pcm + s_asr_len, frame, RT_FRAME_BYTES);
