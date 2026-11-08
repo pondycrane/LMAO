@@ -601,47 +601,6 @@ static int16_t *voice_capture(size_t *out_samples, bool *out_fault)
 
 /* ── ASR: 16 kHz PCM -> Whisper text ────────────────────────────────────── */
 
-/* Build a canonical RIFF/WAV header for 16 kHz mono 16-bit PCM. */
-static size_t build_wav_header(uint8_t *dst, size_t dst_cap, size_t data_bytes)
-{
-    const size_t hdr = 44;
-    if (dst_cap < hdr) {
-        return 0;
-    }
-    const uint32_t sample_rate = VOICE_RATE;
-    const uint16_t channels = VOICE_CH;
-    const uint16_t bits = VOICE_BITS;
-    const uint32_t byte_rate = sample_rate * channels * (bits / 8);
-    const uint16_t block_align = (uint16_t)(channels * (bits / 8));
-#define PUT32(p, v) do {                                  \
-        (p)[0] = (uint8_t)((v) & 0xff);                   \
-        (p)[1] = (uint8_t)(((v) >> 8) & 0xff);            \
-        (p)[2] = (uint8_t)(((v) >> 16) & 0xff);           \
-        (p)[3] = (uint8_t)(((v) >> 24) & 0xff);           \
-    } while (0)
-#define PUT16(p, v) do {                                  \
-        (p)[0] = (uint8_t)((v) & 0xff);                   \
-        (p)[1] = (uint8_t)(((v) >> 8) & 0xff);            \
-    } while (0)
-    uint8_t *o = dst;
-    memcpy(o, "RIFF", 4);   o += 4;
-    PUT32(o, (uint32_t)(36 + data_bytes)); o += 4;
-    memcpy(o, "WAVE", 4);   o += 4;
-    memcpy(o, "fmt ", 4);   o += 4;
-    PUT32(o, 16);           o += 4;
-    PUT16(o, 1);            o += 2;   /* PCM */
-    PUT16(o, channels);     o += 2;
-    PUT32(o, sample_rate);  o += 4;
-    PUT32(o, byte_rate);    o += 4;
-    PUT16(o, block_align);  o += 2;
-    PUT16(o, bits);         o += 2;
-    memcpy(o, "data", 4);   o += 4;
-    PUT32(o, (uint32_t)data_bytes); o += 4;
-#undef PUT32
-#undef PUT16
-    return hdr;
-}
-
 /* Write `len` bytes to an OPEN esp_http_client request body, looping over
  * partial writes.  Used to stream the ASR multipart body (see
  * robodog_voice_asr) instead of assembling it in one contiguous buffer. */
@@ -694,7 +653,9 @@ char *robodog_voice_asr(const int16_t *pcm, size_t samples,
                                              "\r\n--%s--\r\n", boundary);
 
     uint8_t wav_hdr[44];
-    const size_t wav_len = build_wav_header(wav_hdr, sizeof(wav_hdr), pcm_bytes);
+    const size_t wav_len = robodog_wav_header(wav_hdr, sizeof(wav_hdr),
+                                              pcm_bytes, VOICE_RATE,
+                                              VOICE_CH, VOICE_BITS);
     const size_t body_len = head_len + wav_len + pcm_bytes + foot_len;
 
     robodog_http_rx_t rx;
@@ -1343,14 +1304,17 @@ static void voice_turn(void)
     /* ── Phase 3: the omni realtime path ────────────────────────────────
      * One WebSocket session replaces the three serial HTTP hops below.  The
      * mic is streamed into the session AS IT IS CAPTURED (no utterance
-     * upload), and the turn shape is chosen per turn:
+     * upload); the transcript comes from the explicit ASR round trip, the
+     * capability router decides the shape, and the RT module runs exactly ONE
+     * response for it:
      *   OMNI  -> the model answers and speaks the turn itself (fast);
-     *   AGENT -> transcript only, then claw_core answers with its
-     *            skills/MCP/web tools and Qwen3-TTS speaks (full capability).
-     * AUTO resolves through robodog_rt_route(); the routing decision is
-     * logged so the console shows WHY a turn took a given path.
-     * A realtime fault falls through to the Phase 2 chain (never a lost
-     * turn), and `rd_voice_mode` can pin either path for A/B measurement. */
+     *   AGENT -> transcript only (session history), then claw_core answers
+     *            with its skills/MCP/web tools and Qwen3-TTS speaks.
+     * AUTO resolves through robodog_rt_route() inside the RT module; the
+     * decision is logged there (`RT route=...`) so the console shows WHY a
+     * turn took a given path.
+     * A realtime fault ends the turn visibly (never a re-capture: the user
+     * already spoke), and `rd_voice_mode` can pin a path for A/B measurement. */
     if (s_voice_path != VOICE_PATH_CLASSIC) {
         robodog_rt_turn_t rt;
         const robodog_rt_mode_t forced =
@@ -1368,27 +1332,10 @@ static void voice_turn(void)
                 s_turn_active = false;
                 return;
             }
-            /* AGENT shape: the transcript came from the model, so the
-             * capability router now decides whether claw_core takes over.
-             * A non-capability turn is answered by a second, audio-shaped
-             * omni response over the SAME committed utterance. */
-            const char *reason = NULL;
-            const robodog_rt_mode_t route = robodog_rt_route(rt.transcript, &reason);
-            ESP_LOGI(TAG, "RT route=%s reason=%s",
-                     route == ROBODOG_RT_MODE_AGENT ? "agent" : "omni", reason);
-            if (route == ROBODOG_RT_MODE_OMNI) {
-                robodog_rt_turn_t rt2;
-                if (robodog_rt_turn(ROBODOG_RT_MODE_OMNI, &rt2) == ESP_OK &&
-                    !rt2.fault) {
-                    robodog_ui_set_agent_state("idle");
-                    s_turn_active = false;
-                    return;
-                }
-            }
-            /* Capability turn (or the omni answer failed): hand the model's
-             * transcript to the Phase 2 chain, which owns the claw_core run
-             * and the Qwen3-TTS read-out.  Skip its capture + ASR legs — the
-             * utterance is already transcribed. */
+            /* AGENT shape: the RT module already transcribed the utterance
+             * (and rendered it on the RLCD); hand it to the Phase 2 chain,
+             * which owns the claw_core run and the Qwen3-TTS read-out.  Skip
+             * its capture + ASR legs — the utterance is already transcribed. */
             s_rt_transcript = strdup(rt.transcript);
         } else if (rterr != ESP_OK || rt.fault) {
             /* NEVER fall back into the Phase 2 capture here.  The user has
@@ -1447,13 +1394,14 @@ static void voice_turn(void)
 
     robodog_asr_meta_t meta;
     char *text;
-    if (s_rt_transcript != NULL) {
-        /* The omni session already transcribed this utterance. */
+    const bool from_rt = (s_rt_transcript != NULL);
+    if (from_rt) {
+        /* The realtime module already transcribed this utterance AND rendered
+         * it on the RLCD (robodog_ui_show_user) — do not render it twice. */
         memset(&meta, 0, sizeof(meta));
         text = s_rt_transcript;
         s_rt_transcript = NULL;
-        ESP_LOGI(TAG, "ASR text=\"%s\" (from the omni session)", text);
-        robodog_ui_show_user(text);
+        ESP_LOGI(TAG, "ASR text=\"%s\" (from the realtime ASR)", text);
     } else {
         text = robodog_voice_asr(pcm, samples, &meta);
     }
@@ -1478,8 +1426,12 @@ static void voice_turn(void)
 
     /* Render the user transcript (same role/timing as a user message
      * finalizing), then mark the agent as reasoning while the LLM is in
-     * flight; the reply is appended when it finalizes (stale-caption safe). */
-    robodog_ui_show_user(text);
+     * flight; the reply is appended when it finalizes (stale-caption safe).
+     * The realtime path already rendered it — rendering again would duplicate
+     * the user line on the panel. */
+    if (!from_rt) {
+        robodog_ui_show_user(text);
+    }
 
     /* Auto-title the conversation session from the FIRST question (friendly
      * name for the top-middle RLCD label); a no-op once a title exists. */

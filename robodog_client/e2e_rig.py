@@ -15,6 +15,7 @@ module on a host without it (e.g. a Bazel py_test) still works.
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
@@ -184,6 +185,39 @@ def wave_duration(path):
 # ---------------------------------------------------------------------------
 # Re-ASR of the board's spoken reply (OpenAI-compatible Whisper endpoint)
 # ---------------------------------------------------------------------------
+def remote_asr_omni(wav_path, url, model, timeout=120):
+    """Transcribe a WAV with the OMNI model's chat-completions `input_audio`
+    shape (the realtime lane's ASR backend).
+
+    The deployed Qwen3-Omni realtime lane never emits the transcription event,
+    and Whisper is retired on that lane — this is the host-side replacement for
+    `remote_asr()`'s Whisper multipart POST, used by the RING / FULL_READOUT
+    acoustic legs.  `modalities:["text"]` keeps the response tiny (without it
+    the model also returns ~50 KB of audio)."""
+    wav = base64.b64encode(Path(wav_path).read_bytes()).decode()
+    body = {
+        "model": model,
+        "modalities": ["text"],
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "input_audio",
+                 "input_audio": {"data": wav, "format": "wav"}},
+                {"type": "text",
+                 "text": "Transcribe the audio verbatim. "
+                         "Output only the transcript."},
+            ],
+        }],
+    }
+    req = urllib.request.Request(
+        url, data=json.dumps(body).encode(),
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        data = json.load(resp)
+    return data["choices"][0]["message"]["content"].strip()
+
+
 def remote_asr(wav_path, url, model="whisper-1", timeout=300):
     boundary = "--lmao-ring-" + os.urandom(8).hex()
     wav = Path(wav_path).read_bytes()

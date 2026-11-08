@@ -57,6 +57,47 @@ char *robodog_json_escape(const char *s)
     return out;
 }
 
+/* ── RIFF/WAVE header (single copy: Whisper upload + realtime ASR) ──────── */
+
+size_t robodog_wav_header(uint8_t *dst, size_t dst_cap, size_t data_bytes,
+                          uint32_t sample_rate, uint16_t channels,
+                          uint16_t bits)
+{
+    const size_t hdr = 44;
+    if (dst == NULL || dst_cap < hdr) {
+        return 0;
+    }
+    const uint32_t byte_rate = sample_rate * channels * (bits / 8);
+    const uint16_t block_align = (uint16_t)(channels * (bits / 8));
+#define PUT32(p, v) do {                                  \
+        (p)[0] = (uint8_t)((v) & 0xff);                   \
+        (p)[1] = (uint8_t)(((v) >> 8) & 0xff);            \
+        (p)[2] = (uint8_t)(((v) >> 16) & 0xff);           \
+        (p)[3] = (uint8_t)(((v) >> 24) & 0xff);           \
+    } while (0)
+#define PUT16(p, v) do {                                  \
+        (p)[0] = (uint8_t)((v) & 0xff);                   \
+        (p)[1] = (uint8_t)(((v) >> 8) & 0xff);            \
+    } while (0)
+    uint8_t *o = dst;
+    memcpy(o, "RIFF", 4);   o += 4;
+    PUT32(o, (uint32_t)(36 + data_bytes)); o += 4;
+    memcpy(o, "WAVE", 4);   o += 4;
+    memcpy(o, "fmt ", 4);   o += 4;
+    PUT32(o, 16);           o += 4;
+    PUT16(o, 1);            o += 2;   /* PCM */
+    PUT16(o, channels);     o += 2;
+    PUT32(o, sample_rate);  o += 4;
+    PUT32(o, byte_rate);    o += 4;
+    PUT16(o, block_align);  o += 2;
+    PUT16(o, bits);         o += 2;
+    memcpy(o, "data", 4);   o += 4;
+    PUT32(o, (uint32_t)data_bytes); o += 4;
+#undef PUT32
+#undef PUT16
+    return hdr;
+}
+
 /* ── RIFF/WAVE payload locator (single copy: ASR probe + TTS parse) ─────── */
 
 size_t robodog_wav_pcm_offset(const uint8_t *wav, size_t len, uint32_t *out_rate)

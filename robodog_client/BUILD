@@ -142,6 +142,9 @@ firmware_tool(
         "esp-claw/overlay/components/robodog_phase0/src/voice_pcm.c",
         "esp-claw/overlay/components/robodog_phase0/include/robodog_realtime.h",
         "esp-claw/overlay/components/robodog_phase0/src/robodog_realtime.c",
+        "esp-claw/overlay/components/robodog_phase0/include/voice_asr.h",
+        "esp-claw/overlay/components/robodog_phase0/src/voice_asr.c",
+        "esp-claw/test_voice_asr.c",
         "esp-claw/overlay/components/robodog_phase0/include/robodog_speaker.h",
         "esp-claw/overlay/components/robodog_phase0/src/robodog_speaker.c",
         "esp-claw/overlay/components/robodog_phase0/include/voice_route.h",
@@ -196,6 +199,7 @@ cc_library(
         "esp-claw/overlay/components/robodog_phase0/src/robodog_utf8.c",
         "esp-claw/overlay/components/robodog_phase0/src/voice_route.c",
         "esp-claw/overlay/components/robodog_phase0/src/voice_think.c",
+        "esp-claw/overlay/components/robodog_phase0/src/voice_asr.c",
     ],
     hdrs = [
         "esp-claw/overlay/components/robodog_phase0/include/robodog_utf8.h",
@@ -206,6 +210,7 @@ cc_library(
         "esp-claw/overlay/components/robodog_phase0/include/voice_pcm.h",
         "esp-claw/overlay/components/robodog_phase0/include/voice_route.h",
         "esp-claw/overlay/components/robodog_phase0/include/voice_think.h",
+        "esp-claw/overlay/components/robodog_phase0/include/voice_asr.h",
     ],
     strip_include_prefix = "esp-claw/overlay/components/robodog_phase0/include",
     visibility = ["//visibility:public"],
@@ -421,5 +426,11 @@ cc_test(
     srcs = [
         "esp-claw/test_voice_route.c",
     ],
+    deps = [":esp_claw_voice_pure"],
+)
+
+cc_test(
+    name = "test_voice_asr",
+    srcs = ["esp-claw/test_voice_asr.c"],
     deps = [":esp_claw_voice_pure"],
 )

@@ -1184,18 +1184,57 @@ keyword table, so the decision is auditable on the console
 (`RT route=agent reason=search`) and tunable per household. Anything that
 isn't a capability intent stays on the fast path. `rd_voice_mode
 [classic|auto|omni]` pins a path at runtime for A/B measurement, and a
-realtime fault falls through to the Phase 2 chain rather than losing the turn.
+realtime fault ends the turn visibly (never a re-capture).
+
+**The transcript comes from an explicit ASR call, not the realtime event.**
+The deployed Qwen3-Omni lane never emits
+`conversation.item.input_audio_transcription.completed` (bench-probed: it
+accepts and echoes `input_audio_transcription` in `session.update`, then emits
+only `input_audio_buffer.committed` / `conversation.item.*` / `response.*`), and
+the fallback the code used to claim in `rt_dispatch` never existed. So for the
+AGENT shape the board POSTs the captured utterance to
+`<realtime host>/v1/chat/completions` as `input_audio` (same model, no new
+service, `modalities:["text"]`), logs `RT ASR text="..."` (gate regex unchanged)
+and `RT ASR language=<tag> prob=0.00`, renders the transcript on the RLCD, and
+routes on it. The ASR prompt asks for `{"language":...,"text":...}` so the
+language tag is the model's own detection rather than a script guess; the pure-C
+`voice_asr.c` parser (host-tested) accepts a plain transcript too.
+
+That makes the AUTO turn **one** response, not two: capture → explicit ASR →
+route → commit → `response.create` with the shape's modalities. The omni shape
+streams and plays the model's audio; the agent shape gets a text-only response
+(kept so the session history has the model's answer) and then claw_core answers
+with Qwen3-TTS. The unused text-only reply is neither rendered nor
+think-suppressed (its audio is ignored before decode).
 
 ### Session protocol (what the board sends)
 
 `session.update` → `session.created` → paced `input_audio_buffer.append`
-(100 ms PCM16 16 kHz frames, only once speech begins) →
+(40-60 ms PCM16 24 kHz frames, only once speech begins) →
 `input_audio_buffer.commit` → `response.create`. The session opens with
 `turn_detection: null` and `auto_response: false` so the turn boundary is
-the BOARD's (a server VAD would answer mid-sentence). The rates are declared
-explicitly — `sample_rate_hz` top-level for input and
-`audio.output.sample_rate_hz` for output — because the encodings alone do not
-pin them.
+the BOARD's (a server VAD would answer mid-sentence). The input audio is
+resampled 16 kHz → 24 kHz (the handler hardcodes `SAMPLE_RATE_HZ = 24000`).
+
+### Capture pump: never block the reader (issue #301)
+
+The first implementation resampled + base64'd + sent each 20 ms frame inline in
+the capture loop, with a 10 s send timeout. A slow socket (or a slow frame
+build) stalled the reader, the capture subscriber ring overflowed
+(`sub ring overflow role=1 owner=robodog_rt drop=... total=` grew to ~2.5 MB),
+and the turn never reached its own no-speech / 30 s cap exits — so no
+`RT ASR text=` and no response.
+
+The reader now only fills a 64-slot ring of **raw 16 kHz frames** (PSRAM,
+1.28 s). A dedicated `robodog_rt_up` sender task drains it, resamples, base64s,
+coalesces up to 3 frames into ONE `input_audio_buffer.append` (one JSON message
+per 40-60 ms) and sends with a **250 ms** timeout. A full ring drops the OLDEST
+frame and counts it; the reader never blocks on the network. The once-per-second
+pump log carries `frames`, `captured` bytes, `up_dropped`, `ever_speech`,
+`speech_ms`, `silence_ms` and the sender's `last/avg/max` build+send wall time,
+which distinguishes "pump too slow" from "socket blocked" in one run. The turn
+drains the ring before `commit` so the whole utterance is sealed (a timed-out
+drain logs and commits what was sent).
 
 **`response.listen` is not a turn end.** MiniCPM-o's native turn-taking can
 answer a commit with "keep listening" (measured: a 2.1 s committed utterance
@@ -1285,12 +1324,14 @@ Then `input_audio_buffer.commit` + `response.create` with
 mixer track).
 
 **Device-side WS sizing.** One audio delta is ~54 KB of JSON (base64 of ~40 KB
-of PCM16). With a 4 KB `esp_websocket_client` buffer the message fragments and
-its bytes are lost whenever the handler does work between reads — measured as
-every audio delta failing to parse. The buffer is therefore 64 KB, i.e. one
-event per message, and the playback queue is 16 x 64 KB (~1 MB) rather than
-48 slots (3 MB, which exhausted the ~3.2 MB of free SPIRAM and made the
-websocket client fail to init).
+of PCM16) on the MiniCPM-o lane, but the Qwen lane sends the WHOLE reply in ONE
+delta (~214 KB of PCM for a 4.5 s answer). With a 4 KB `esp_websocket_client`
+buffer the message fragments and its bytes are lost whenever the handler does
+work between reads — measured as every audio delta failing to parse. The buffer
+is therefore 64 KB, i.e. one event per message; the decode scratch is 256 KB
+(the whole-reply delta) and the decoded PCM is split across the playback slots.
+The queue is 16 x 64 KB (~1 MB) rather than 48 slots (3 MB, which exhausted the
+~3.2 MB of free SPIRAM and made the websocket client fail to init).
 
 Measured on the board after these fixes (`count` corpus, test speaker into the
 board mic): **6.3 s from end-of-speech to first audio** (device-internal

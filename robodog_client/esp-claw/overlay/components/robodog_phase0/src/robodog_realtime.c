@@ -14,6 +14,11 @@
  * Threading
  *   - esp_websocket_client owns the socket task; our event handler only
  *     assembles fragments and dispatches JSON.  It NEVER blocks on audio.
+ *   - the CAPTURE loop only reads the mic and pushes raw frames into the
+ *     uplink ring; a dedicated sender task resamples/base64s/coalesces them
+ *     and writes to the socket with a short timeout.  A slow socket drops the
+ *     oldest frame (counted) instead of stalling the reader — the turn keeps
+ *     its realtime pace and can still reach its own cap.
  *   - audio deltas are decoded (base64 -> PCM16) into fixed-size PSRAM buffers
  *     and queued; the playback task writes them to the shared APP mixer track.
  *     The mixer ring provides backpressure, so no fixed sleep pacing is
@@ -22,8 +27,9 @@
  *
  * Memory invariants: no allocation per delta beyond the fixed queue slots
  * (allocated once at init), so the Phase 2 R7 heap-churn class cannot recur.
- * A delta larger than CONFIG_ROBODOG_RT_DELTA_MAX_BYTES is dropped with a log
- * rather than growing a buffer mid-stream.
+ * The decode scratch is sized for the WHOLE reply delta the Qwen lane sends
+ * (~214 KB for a 4.5 s answer); a larger one is dropped with a log rather than
+ * growing a buffer mid-stream.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -35,6 +41,7 @@
 
 #include "cJSON.h"
 #include "esp_heap_caps.h"
+#include "esp_http_client.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -50,8 +57,11 @@
 #include "esp_console.h"
 #include "esp_websocket_client.h"
 
+#include "robodog_http.h"
 #include "robodog_speaker.h"
 #include "robodog_ui.h"
+#include "robodog_utf8.h"
+#include "voice_asr.h"
 #include "voice_pcm.h"
 #include "voice_route.h"
 #include "voice_think.h"
@@ -81,6 +91,39 @@ static const char *TAG = "robodog_rt";
 #define RT_PLAY_STACK       4096
 #define RT_PLAY_PRIO        4
 #define RT_STALL_LIMIT      200     /* consecutive empty writes before abort  */
+
+/* ── capture -> socket decoupling ──────────────────────────────────────────
+ * The capture loop must NEVER block on the network.  It reads the mic ring at
+ * real-time pace and pushes raw 16 kHz frames into `s_up_ring`; the sender task
+ * below drains them, resamples to the session rate, base64s, coalesces up to
+ * RT_UP_COALESCE frames into ONE input_audio_buffer.append (one JSON message
+ * per 40-60 ms), and sends with a SHORT timeout.  When the ring is full the
+ * OLDEST frame is dropped (counted) instead of stalling the reader, so a slow
+ * socket can never wedge the turn or overflow the capture subscriber ring. */
+#define RT_UP_FRAMES          64   /* 64 x 20 ms = 1.28 s of raw 16 kHz PCM  */
+#define RT_UP_COALESCE        3    /* frames per append (40-60 ms messages)   */
+#define RT_UP_SEND_TIMEOUT_MS 250  /* audio append timeout (never 10 s)       */
+#define RT_UP_DRAIN_MS        3000 /* wait for the ring to flush before commit */
+#define RT_B64_CHUNK          1536 /* multiple of 3 for streaming base64       */
+#define RT_UP_MSG_MAX         4224 /* 3 frames -> 2880 B PCM -> 3840 b64 + JSON */
+/* Explicit ASR (the Qwen lane never emits the transcription event): keep the
+ * utterance PCM for the chat-completions round trip.  8 s of 16 kHz mono
+ * covers a normal turn; a longer one is truncated with a loud log (the realtime
+ * stream still carries the whole utterance). */
+#define RT_ASR_PCM_MAX        (256 * 1024)
+#define RT_ASR_RESP_MAX       (64 * 1024)
+#define RT_ASR_TIMEOUT_MS     30000
+/* The Qwen lane sends the WHOLE reply audio in ONE delta (~214 KB for 4.5 s),
+ * far past the 64 KB playback slot: decode into this scratch and split across
+ * the fixed slots. */
+#define RT_DECODE_MAX         (256 * 1024)
+
+/* The prompt asks for the language + transcript as ONE JSON object so the
+ * console can carry an honest detected language (`RT ASR language=`) instead of
+ * a script guess.  The parser also accepts a plain transcript. */
+#define RT_ASR_PROMPT                                                         \
+    "Transcribe the audio verbatim. Reply with only a JSON object, no prose: " \
+    "{\"language\":\"<ISO 639-1 code>\",\"text\":\"<verbatim transcript>\"}"
 
 /* Event bits */
 #define RT_BIT_CONNECTED    BIT4    /* WEBSOCKET_EVENT_CONNECTED seen          */
@@ -120,6 +163,7 @@ static robodog_rt_turn_t s_turn;
 static int64_t           s_commit_us;
 static bool              s_audio_started;
 static bool              s_want_audio;     /* this turn's modality choice   */
+static bool              s_render_reply;   /* stream the reply onto the RLCD */
 static int               s_listen_retries; /* explicit re-asks after listen */
 static bool              s_saw_think;      /* the reply carried a think block */
 static bool              s_think_suppress; /* ... so server audio is dropped  */
@@ -130,22 +174,44 @@ static volatile bool     s_play_go;        /* text known -> playback may run   *
 static uint8_t *s_slots[CONFIG_ROBODOG_RT_QUEUE_DEPTH];
 static uint8_t *s_dec;   /* base64 decode scratch, allocated once */
 
+/* Capture -> socket uplink ring, allocated once (PSRAM): raw 16 kHz frames. */
+static uint8_t        *s_up_ring;
+static size_t          s_up_head;      /* next write slot (monotonic) */
+static size_t          s_up_tail;      /* next read slot  (monotonic) */
+static SemaphoreHandle_t s_up_mtx;
+static TaskHandle_t    s_up_task;
+static volatile uint32_t s_up_dropped;  /* frames dropped (ring full)     */
+static volatile bool     s_up_sending;  /* sender inside build+send       */
+static volatile bool     s_up_fault;    /* the socket is down             */
+static volatile uint32_t s_up_sent_bytes;
+static volatile uint32_t s_up_msgs;
+static volatile uint32_t s_up_last_ms;
+static volatile uint32_t s_up_max_ms;
+static volatile uint64_t s_up_ms_sum;
+
+/* Explicit ASR: the captured utterance (16 kHz PCM16) + the response body.
+ * Both allocated once in PSRAM. */
+static uint8_t *s_asr_pcm;
+static size_t   s_asr_len;
+static bool     s_asr_truncated;
+static char    *s_asr_resp;
+
 /* ── base64 ─────────────────────────────────────────────────────────────── */
 
-static char *rt_b64_encode(const uint8_t *src, size_t len)
+/* Encode into a caller-owned buffer (no per-message malloc: the sender runs
+ * once per 20-60 ms and heap churn is the Phase 2 R7 class of bug). */
+static size_t rt_b64_encode_into(const uint8_t *src, size_t len,
+                                 char *dst, size_t cap)
 {
-    const size_t cap = 4 * ((len + 2) / 3) + 1;
-    char *out = malloc(cap);
-    if (out == NULL) {
-        return NULL;
+    if (dst == NULL || cap < 4 * ((len + 2) / 3) + 1) {
+        return 0;
     }
     size_t olen = 0;
-    if (mbedtls_base64_encode((unsigned char *)out, cap, &olen, src, len) != 0) {
-        free(out);
-        return NULL;
+    if (mbedtls_base64_encode((unsigned char *)dst, cap, &olen, src, len) != 0) {
+        return 0;
     }
-    out[olen] = '\0';
-    return out;
+    dst[olen] = '\0';
+    return olen;
 }
 
 /* Decode into `dst` (capacity `cap`).  Returns bytes written, 0 on failure. */
@@ -293,7 +359,7 @@ static size_t rt_reply_delta(const char *delta)
     }
     const size_t clean = robodog_think_strip(s_raw_reply, s_turn.reply,
                                              sizeof(s_turn.reply));
-    if (clean > s_ui_shown) {
+    if (s_render_reply && clean > s_ui_shown) {
         robodog_ui_append_assistant(s_turn.reply + s_ui_shown);
         s_ui_shown = clean;
     }
@@ -321,14 +387,15 @@ static void rt_append_text(char *dst, size_t cap, const char *delta)
     memcpy(dst + have, delta, n);
     dst[have + n] = '\0';
 }
-/* Push a decoded PCM delta onto the playback queue.  Slots are fixed; when the
- * queue is full the delta is dropped (a wedged playback path is already
- * reported through RT_BIT_ERR). */
+/* Push one decoded PCM chunk onto the playback queue.  Slots are fixed; when
+ * the queue is full the chunk is dropped (a wedged playback path is already
+ * reported through RT_BIT_ERR).  A chunk is capped at the slot size, so the
+ * caller splits a big delta across several calls. */
 static void rt_enqueue_audio(const uint8_t *pcm, size_t len, uint32_t rate)
 {
     static size_t next_slot;
     if (len == 0 || len > CONFIG_ROBODOG_RT_DELTA_MAX_BYTES) {
-        ESP_LOGW(TAG, "audio delta %u B outside 1..%d; dropped",
+        ESP_LOGW(TAG, "audio chunk %u B outside 1..%d; dropped",
                  (unsigned)len, CONFIG_ROBODOG_RT_DELTA_MAX_BYTES);
         return;
     }
@@ -341,7 +408,7 @@ static void rt_enqueue_audio(const uint8_t *pcm, size_t len, uint32_t rate)
     memcpy(slot, pcm, len);
     const rt_audio_t item = { .data = slot, .len = len, .rate = rate };
     if (xQueueSend(s_play_q, &item, 0) != pdTRUE) {
-        ESP_LOGW(TAG, "playback queue full; dropping %u B delta",
+        ESP_LOGW(TAG, "playback queue full; dropping %u B chunk",
                  (unsigned)len);
         return;
     }
@@ -351,6 +418,26 @@ static void rt_enqueue_audio(const uint8_t *pcm, size_t len, uint32_t rate)
         s_turn.first_audio_ms = (uint32_t)((esp_timer_get_time() - s_commit_us) / 1000);
         s_turn.spoke = true;
         ESP_LOGI(TAG, "RT first audio %u ms after commit", s_turn.first_audio_ms);
+    }
+}
+
+/* One WS audio delta may be the WHOLE reply (the Qwen lane sends ~214 KB in a
+ * single event).  Decode into s_dec, then split it across the fixed slots so
+ * playback still runs through the paced mixer track. */
+static void rt_queue_audio_delta(const uint8_t *pcm, size_t len, uint32_t rate)
+{
+    size_t off = 0;
+    while (off < len) {
+        size_t chunk = len - off;
+        if (chunk > CONFIG_ROBODOG_RT_DELTA_MAX_BYTES) {
+            chunk = CONFIG_ROBODOG_RT_DELTA_MAX_BYTES;
+        }
+        chunk &= ~(size_t)1; /* whole int16 samples */
+        if (chunk == 0) {
+            break;
+        }
+        rt_enqueue_audio(pcm + off, chunk, rate);
+        off += chunk;
     }
 }
 
@@ -420,7 +507,13 @@ static void rt_dispatch(cJSON *root)
         strcmp(type, "response.text.delta") == 0) {
         const char *d = rt_str(root, "delta");
         rt_reply_delta(d);
-        if (!s_think_suppress && robodog_think_present(s_raw_reply)) {
+        /* The text-only (AGENT-shape) response is NOT this turn's answer:
+         * claw_core answers from the transcript.  Its reply must not be
+         * rendered, and a think block in it must not trigger the re-speak
+         * fallback (that would voice the unused model answer over the agent's
+         * TTS read-out).  Only an audio-shaped (OMNI) response is ours. */
+        if (s_want_audio && !s_think_suppress &&
+            robodog_think_present(s_raw_reply)) {
             /* MiniCPM-o emitted a reasoning block.  It is VOICED by the
              * Talker (measured: ASR of the turn's audio heard "Gate, rot,
              * zoo, rot, okay, 21..." — the model pronouncing the tag), and
@@ -443,6 +536,12 @@ static void rt_dispatch(cJSON *root)
         return;
     }
     if (strcmp(type, "response.output_audio.delta") == 0) {
+        if (!s_want_audio) {
+            /* The Qwen lane emits audio even for a modalities:["text"] request
+             * (measured).  This turn asked for text only, so the audio is not
+             * ours: do not decode it (no slots, no spoke flag, no CPU). */
+            return;
+        }
         const char *b64 = rt_str(root, "delta");
         if (b64 == NULL) {
             b64 = rt_str(root, "audio");
@@ -458,13 +557,13 @@ static void rt_dispatch(cJSON *root)
             return;
         }
         const size_t n = rt_b64_decode(b64, strlen(b64), s_dec,
-                                       CONFIG_ROBODOG_RT_DELTA_MAX_BYTES);
+                                       RT_DECODE_MAX);
         if (n == 0) {
             ESP_LOGW(TAG, "audio delta did not decode (%u b64 chars, cap %d)",
-                     (unsigned)strlen(b64), CONFIG_ROBODOG_RT_DELTA_MAX_BYTES);
+                     (unsigned)strlen(b64), RT_DECODE_MAX);
             return;
         }
-        rt_enqueue_audio(s_dec, n, rate);
+        rt_queue_audio_delta(s_dec, n, rate);
         return;
     }
     if (strcmp(type, "response.listen") == 0) {
@@ -584,7 +683,10 @@ static void rt_ws_handler(void *arg, esp_event_base_t base, int32_t id,
 
 /* ── session ────────────────────────────────────────────────────────────── */
 
-static esp_err_t rt_send(const char *json)
+/* Send one text frame with an explicit timeout.  A timeout on an audio append
+ * is NOT a dead socket: the sender counts the dropped message and keeps the
+ * session (the next turn must not pay a full reconnect for a slow moment). */
+static esp_err_t rt_send_timeout(const char *json, uint32_t timeout_ms)
 {
     if (s_ws == NULL || !esp_websocket_client_is_connected(s_ws)) {
         /* Drop the cached session so the next turn reconnects rather than
@@ -594,12 +696,22 @@ static esp_err_t rt_send(const char *json)
         return ESP_ERR_INVALID_STATE;
     }
     const int n = esp_websocket_client_send_text(s_ws, json, (int)strlen(json),
-                                                 pdMS_TO_TICKS(RT_WS_TIMEOUT_MS));
+                                                 pdMS_TO_TICKS(timeout_ms));
     if (n < 0) {
-        s_session_ready = false;
+        if (!esp_websocket_client_is_connected(s_ws)) {
+            s_session_ready = false;
+            return ESP_ERR_INVALID_STATE;
+        }
         return ESP_FAIL;
     }
     return ESP_OK;
+}
+
+/* Control messages (handshake, commit, response.create) may wait for the tx
+ * buffer; audio appends use the short timeout above. */
+static esp_err_t rt_send(const char *json)
+{
+    return rt_send_timeout(json, RT_WS_TIMEOUT_MS);
 }
 
 /* Build + send the open handshake.  `auto_response=false` + `turn_detection:
@@ -643,16 +755,13 @@ static esp_err_t rt_session_update(void)
             cJSON_AddBoolToObject(tmpl, "enable_thinking", false);
         }
     }
-    /* Input transcription: the AGENT shape routes on the USER's words, and a
-     * turn-mode session does not produce them otherwise.  The handler accepts
-     * this field and echoes it (its own docs note no separate ASR stage runs,
-     * so the transcript comes from the model — see the fallback in
-     * rt_dispatch, which also reads the reply text when the user transcript
-     * is absent). */
-    cJSON *tx = cJSON_AddObjectToObject(session, "input_audio_transcription");
-    if (tx != NULL) {
-        cJSON_AddStringToObject(tx, "model", "whisper-1");
-    }
+    /* NO input_audio_transcription here: the deployed Qwen lane accepts and
+     * echoes the field but NEVER emits
+     * `conversation.item.input_audio_transcription.completed` (bench-probed),
+     * and the code's claimed rt_dispatch fallback never existed — the
+     * transcript was only ever assigned from that event.  The transcript now
+     * comes from the explicit chat-completions ASR round trip in
+     * rt_asr_utterance(), so the dead field is gone. */
     cJSON_AddItemToObject(root, "session", session);
 
     char *json = cJSON_PrintUnformatted(root);
@@ -811,10 +920,383 @@ static void rt_playback_end(audio_mixer_track_handle_t track)
     audio_mixer_close_track(track);
 }
 
-/* Capture the utterance and stream it into the session as it arrives.
- * Returns samples streamed (0 = nothing captured) and sets `fault` on a real
+/* ── uplink: capture task -> sender task ────────────────────────────────── */
+
+static void rt_up_reset(void)
+{
+    if (s_up_mtx == NULL) {
+        return;
+    }
+    xSemaphoreTake(s_up_mtx, portMAX_DELAY);
+    s_up_head = 0;
+    s_up_tail = 0;
+    xSemaphoreGive(s_up_mtx);
+    s_up_dropped = 0;
+    s_up_sent_bytes = 0;
+    s_up_msgs = 0;
+    s_up_last_ms = 0;
+    s_up_max_ms = 0;
+    s_up_ms_sum = 0;
+    s_up_fault = false;
+}
+
+/* Capture side: push one raw 16 kHz frame.  A FULL ring drops the OLDEST frame
+ * and counts it; the reader NEVER blocks on the network. */
+static void rt_up_push(const int16_t *frame)
+{
+    if (s_up_ring == NULL || s_up_mtx == NULL) {
+        return;
+    }
+    xSemaphoreTake(s_up_mtx, portMAX_DELAY);
+    if (s_up_head - s_up_tail >= RT_UP_FRAMES) {
+        s_up_tail++;
+        s_up_dropped++;
+    }
+    memcpy(s_up_ring + (s_up_head % RT_UP_FRAMES) * RT_FRAME_BYTES,
+           frame, RT_FRAME_BYTES);
+    s_up_head++;
+    xSemaphoreGive(s_up_mtx);
+}
+
+static bool rt_up_pop(uint8_t *out)
+{
+    bool ok = false;
+    xSemaphoreTake(s_up_mtx, portMAX_DELAY);
+    if (s_up_head != s_up_tail) {
+        memcpy(out, s_up_ring + (s_up_tail % RT_UP_FRAMES) * RT_FRAME_BYTES,
+               RT_FRAME_BYTES);
+        s_up_tail++;
+        ok = true;
+    }
+    xSemaphoreGive(s_up_mtx);
+    return ok;
+}
+
+static bool rt_up_empty(void)
+{
+    xSemaphoreTake(s_up_mtx, portMAX_DELAY);
+    const bool empty = (s_up_head == s_up_tail);
+    xSemaphoreGive(s_up_mtx);
+    return empty;
+}
+
+/* Wait until every captured frame has been sent (or dropped) so the commit
+ * seals the WHOLE utterance. */
+static bool rt_up_drain(uint32_t timeout_ms)
+{
+    const int64_t deadline = esp_timer_get_time() + (int64_t)timeout_ms * 1000;
+    for (;;) {
+        if (rt_up_empty() && !s_up_sending) {
+            return true;
+        }
+        if (esp_timer_get_time() >= deadline) {
+            return false;
+        }
+        vTaskDelay(pdMS_TO_TICKS(5));
+    }
+}
+
+/* Sender task: drain the ring, resample to the session rate, base64, coalesce
+ * up to RT_UP_COALESCE frames into ONE append, send with a short timeout.  The
+ * wall time of build+send is what the once-per-second pump log reports, so
+ * "pump too slow" and "socket blocked" are distinguishable in one run. */
+static void rt_uplink_task(void *arg)
+{
+    (void)arg;
+    static uint8_t raw[RT_UP_COALESCE][RT_FRAME_BYTES];
+    static int16_t up[RT_UP_COALESCE * RT_FRAME_SAMPLES *
+                      RT_RATE_OUT_DEFAULT / RT_RATE_IN + 8];
+    static char b64[RT_UP_MSG_MAX];
+    static char msg[RT_UP_MSG_MAX];
+    for (;;) {
+        if (!rt_up_pop(raw[0])) {
+            vTaskDelay(pdMS_TO_TICKS(5));
+            continue;
+        }
+        /* Set BEFORE the coalesce pops: the turn's drain must not see the ring
+         * empty while this batch is still about to be sent (it would commit
+         * before the last frames reached the session). */
+        s_up_sending = true;
+        size_t nf = 1;
+        while (nf < RT_UP_COALESCE && rt_up_pop(raw[nf])) {
+            nf++;
+        }
+        const int64_t t0 = esp_timer_get_time();
+        size_t out_n = 0;
+        for (size_t i = 0; i < nf; i++) {
+            out_n += robodog_pcm_resample(
+                (const int16_t *)raw[i], RT_FRAME_SAMPLES, up + out_n,
+                sizeof(up) / sizeof(up[0]) - out_n, RT_RATE_IN,
+                RT_RATE_OUT_DEFAULT);
+        }
+        const size_t b64_len = rt_b64_encode_into(
+            (const uint8_t *)up, out_n * sizeof(int16_t), b64, sizeof(b64));
+        int mlen = -1;
+        if (b64_len > 0) {
+            mlen = snprintf(msg, sizeof(msg),
+                            "{\"type\":\"input_audio_buffer.append\","
+                            "\"audio\":\"%s\"}", b64);
+        }
+        esp_err_t err = ESP_FAIL;
+        if (mlen > 0 && (size_t)mlen < sizeof(msg)) {
+            err = rt_send_timeout(msg, RT_UP_SEND_TIMEOUT_MS);
+        } else {
+            ESP_LOGE(TAG, "RT append message build failed (%d)", mlen);
+        }
+        const uint32_t ms = (uint32_t)((esp_timer_get_time() - t0) / 1000);
+        s_up_last_ms = ms;
+        if (ms > s_up_max_ms) {
+            s_up_max_ms = ms;
+        }
+        s_up_msgs++;
+        s_up_ms_sum += ms;
+        if (err == ESP_OK) {
+            s_up_sent_bytes += (uint32_t)(out_n * sizeof(int16_t));
+        } else {
+            s_up_dropped += (uint32_t)nf;
+            if (err == ESP_ERR_INVALID_STATE) {
+                s_up_fault = true;
+                ESP_LOGE(TAG, "RT append failed: socket down");
+            } else {
+                ESP_LOGW(TAG, "RT append timed out after %u ms; dropped %u "
+                         "frame(s)", (unsigned)ms, (unsigned)nf);
+            }
+        }
+        s_up_sending = false;
+    }
+}
+
+static void rt_pump_log(uint32_t t_ms, uint32_t frames, uint32_t captured_bytes,
+                        bool ever_speech, uint32_t speech_ms,
+                        uint32_t silence_ms)
+{
+    const uint32_t avg_ms =
+        s_up_msgs != 0 ? (uint32_t)(s_up_ms_sum / s_up_msgs) : 0;
+    ESP_LOGI(TAG, "RT pump t=%ums frames=%u captured=%u B up_dropped=%u "
+             "ever_speech=%d speech=%ums silence=%ums send last=%ums avg=%ums "
+             "max=%ums msgs=%u sent=%u B",
+             (unsigned)t_ms, (unsigned)frames, (unsigned)captured_bytes,
+             (unsigned)s_up_dropped, (int)ever_speech, (unsigned)speech_ms,
+             (unsigned)silence_ms, (unsigned)s_up_last_ms, (unsigned)avg_ms,
+             (unsigned)s_up_max_ms, (unsigned)s_up_msgs,
+             (unsigned)s_up_sent_bytes);
+}
+
+/* ── explicit ASR (chat/completions, same omni model) ───────────────────── */
+
+/* The deployed Qwen lane never emits the realtime transcription event, so the
+ * transcript comes from one HTTP round trip to the SAME model endpoint:
+ *   POST <realtime host>/v1/chat/completions  with input_audio (base64 WAV).
+ * No new service, and the console contract stays `RT ASR text="..."`. */
+static void rt_asr_url(char *out, size_t cap)
+{
+    const char *u = CONFIG_ROBODOG_RT_URL;
+    const char *scheme = "http://";
+    const char *rest = u;
+    if (strncmp(u, "ws://", 5) == 0) {
+        rest = u + 5;
+    } else if (strncmp(u, "wss://", 6) == 0) {
+        scheme = "https://";
+        rest = u + 6;
+    } else if (strncmp(u, "http://", 7) == 0) {
+        rest = u + 7;
+    } else if (strncmp(u, "https://", 8) == 0) {
+        scheme = "https://";
+        rest = u + 8;
+    }
+    const char *slash = strchr(rest, '/');
+    const size_t host_len = slash != NULL ? (size_t)(slash - rest)
+                                          : strlen(rest);
+    snprintf(out, cap, "%s%.*s/v1/chat/completions", scheme,
+             (int)host_len, rest);
+}
+
+static esp_err_t rt_http_write_all(esp_http_client_handle_t client,
+                                   const void *data, size_t len)
+{
+    const uint8_t *p = (const uint8_t *)data;
+    while (len > 0) {
+        const int w = esp_http_client_write(client, (const char *)p, (int)len);
+        if (w <= 0) {
+            return ESP_FAIL;
+        }
+        p += (size_t)w;
+        len -= (size_t)w;
+    }
+    return ESP_OK;
+}
+
+/* Streaming base64: encode `data` as it arrives, carrying the 1-2 byte
+ * remainder between chunks, so the WAV header + PCM are ONE base64 stream
+ * without a body-sized contiguous copy. */
+static esp_err_t rt_b64_write(esp_http_client_handle_t client,
+                              uint8_t *carry, size_t *carry_len,
+                              const uint8_t *data, size_t len)
+{
+    static uint8_t in[RT_B64_CHUNK + 2];
+    static char out[4 * (RT_B64_CHUNK + 2) / 3 + 8];
+    while (len > 0) {
+        const size_t take = len > RT_B64_CHUNK ? RT_B64_CHUNK : len;
+        memcpy(in, carry, *carry_len);
+        memcpy(in + *carry_len, data, take);
+        const size_t total = *carry_len + take;
+        const size_t n3 = (total / 3) * 3;
+        if (n3 > 0) {
+            size_t olen = 0;
+            if (mbedtls_base64_encode((unsigned char *)out, sizeof(out),
+                                      &olen, in, n3) != 0) {
+                return ESP_FAIL;
+            }
+            if (rt_http_write_all(client, out, olen) != ESP_OK) {
+                return ESP_FAIL;
+            }
+        }
+        *carry_len = total - n3;
+        memcpy(carry, in + n3, *carry_len);
+        data += take;
+        len -= take;
+    }
+    return ESP_OK;
+}
+
+static esp_err_t rt_b64_flush(esp_http_client_handle_t client,
+                              const uint8_t *carry, size_t carry_len)
+{
+    if (carry_len == 0) {
+        return ESP_OK;
+    }
+    char out[8];
+    size_t olen = 0;
+    if (mbedtls_base64_encode((unsigned char *)out, sizeof(out), &olen,
+                              carry, carry_len) != 0) {
+        return ESP_FAIL;
+    }
+    return rt_http_write_all(client, out, olen);
+}
+
+static void rt_asr_utterance(robodog_rt_turn_t *out)
+{
+    if (s_asr_pcm == NULL || s_asr_resp == NULL || s_asr_len == 0) {
+        ESP_LOGW(TAG, "RT ASR: no captured PCM");
+        return;
+    }
+    s_asr_resp[0] = '\0';
+    if (s_asr_truncated) {
+        ESP_LOGW(TAG, "RT ASR: utterance truncated to %u B (~%u s)",
+                 (unsigned)s_asr_len,
+                 (unsigned)(s_asr_len / (RT_RATE_IN * 2)));
+    }
+
+    uint8_t wav[44];
+    const size_t wav_len = robodog_wav_header(wav, sizeof(wav), s_asr_len,
+                                              RT_RATE_IN, RT_CH, RT_BITS);
+    const size_t wav_bytes = wav_len + s_asr_len;
+    const size_t b64_len = 4 * ((wav_bytes + 2) / 3);
+
+    /* Static (one turn at a time) so the voice task's 8 KB stack is not
+     * consumed by the request envelope. */
+    static char url[160];
+    static char head[768];
+    static char tail[768];
+    rt_asr_url(url, sizeof(url));
+    char *prompt = robodog_json_escape(RT_ASR_PROMPT);
+    if (prompt == NULL) {
+        ESP_LOGE(TAG, "RT ASR: no memory for the prompt escape");
+        return;
+    }
+    const int hl = snprintf(
+        head, sizeof(head),
+        "{\"model\":\"%s\",\"modalities\":[\"text\"],\"messages\":["
+        "{\"role\":\"user\",\"content\":["
+        "{\"type\":\"input_audio\",\"input_audio\":{\"data\":\"",
+        CONFIG_ROBODOG_RT_MODEL);
+    const int tl = snprintf(
+        tail, sizeof(tail),
+        "\",\"format\":\"wav\"}},{\"type\":\"text\",\"text\":\"%s\"}]}]}",
+        prompt);
+    free(prompt);
+    if (hl <= 0 || (size_t)hl >= sizeof(head) || tl <= 0 ||
+        (size_t)tl >= sizeof(tail)) {
+        ESP_LOGE(TAG, "RT ASR: request envelope overflow");
+        return;
+    }
+    const size_t body_len = (size_t)hl + b64_len + (size_t)tl;
+
+    const esp_http_client_config_t cfg = {
+        .url = url,
+        .method = HTTP_METHOD_POST,
+        .timeout_ms = RT_ASR_TIMEOUT_MS,
+        .buffer_size = 512,
+    };
+    esp_http_client_handle_t client = esp_http_client_init(&cfg);
+    if (client == NULL) {
+        ESP_LOGE(TAG, "RT ASR: http client init failed");
+        return;
+    }
+    esp_http_client_set_header(client, "Content-Type", "application/json");
+    esp_err_t err = esp_http_client_open(client, (int)body_len);
+    uint8_t carry[2] = { 0, 0 };
+    size_t carry_len = 0;
+    if (err == ESP_OK) {
+        err = rt_http_write_all(client, head, (size_t)hl);
+    }
+    if (err == ESP_OK) {
+        err = rt_b64_write(client, carry, &carry_len, wav, wav_len);
+    }
+    if (err == ESP_OK) {
+        err = rt_b64_write(client, carry, &carry_len, s_asr_pcm, s_asr_len);
+    }
+    if (err == ESP_OK) {
+        err = rt_b64_flush(client, carry, carry_len);
+    }
+    size_t rx_len = 0;
+    if (err == ESP_OK) {
+        (void)esp_http_client_fetch_headers(client);
+        while (rx_len + 1 < RT_ASR_RESP_MAX) {
+            const int r = esp_http_client_read(
+                client, s_asr_resp + rx_len,
+                (int)(RT_ASR_RESP_MAX - 1 - rx_len));
+            if (r <= 0) {
+                break;
+            }
+            rx_len += (size_t)r;
+        }
+        s_asr_resp[rx_len] = '\0';
+    }
+    const int status = esp_http_client_get_status_code(client);
+    esp_http_client_cleanup(client);
+
+    if (err != ESP_OK || status < 200 || status >= 300 || rx_len == 0) {
+        ESP_LOGE(TAG, "RT ASR: round-trip failed (http=%d err=%s body='%.160s')",
+                 status, esp_err_to_name(err),
+                 s_asr_resp[0] != '\0' ? s_asr_resp : "(none)");
+        ESP_LOGI(TAG, "RT ASR text=\"\"");
+        return;
+    }
+    char lang[16] = "";
+    char text[512] = "";
+    if (!robodog_asr_parse(s_asr_resp, lang, sizeof(lang), text, sizeof(text))) {
+        ESP_LOGE(TAG, "RT ASR: no transcript in body='%.160s'", s_asr_resp);
+        ESP_LOGI(TAG, "RT ASR text=\"\"");
+        return;
+    }
+    if (lang[0] == '\0') {
+        strlcpy(lang, robodog_utf8_has_cjk(text) ? "zh" : "en", sizeof(lang));
+    }
+    strlcpy(out->transcript, text, sizeof(out->transcript));
+    ESP_LOGI(TAG, "RT ASR text=\"%s\"", out->transcript);
+    ESP_LOGI(TAG, "RT ASR language=%s prob=0.00", lang);
+    robodog_ui_show_user(out->transcript);
+}
+
+/* ── capture ────────────────────────────────────────────────────────────── */
+
+/* Capture the utterance and push it into the session as it arrives.  The reader
+ * only touches the mic ring + the uplink ring: the network work is the sender
+ * task's, so a slow socket can never stall this loop (issue #301).
+ * Returns samples captured (0 = nothing captured) and sets `fault` on a real
  * capture fault (never on "the user said nothing"). */
-static size_t rt_stream_utterance(bool *fault)
+static size_t rt_stream_utterance(bool *fault, bool keep_pcm)
 {
     *fault = false;
     static audio_capture_sub_handle_t sub;
@@ -838,19 +1320,23 @@ static size_t rt_stream_utterance(bool *fault)
         }
     }
     (void)audio_capture_sub_flush(sub);
+    rt_up_reset();
+    s_asr_len = 0;
+    s_asr_truncated = false;
     ESP_LOGI(TAG, "RT listen started (16k/1/16, VAD energy=%d silence=%dms)",
              RT_VAD_ENERGY, CONFIG_ROBODOG_RT_SILENCE_MS);
     robodog_ui_set_agent_state("listening");
 
     static int16_t frame[RT_FRAME_SAMPLES];
     size_t fi = 0;
-    size_t streamed = 0;
-    size_t streamed_bytes = 0;
+    size_t frames = 0;          /* frames pushed into the uplink ring */
+    size_t captured_bytes = 0;  /* bytes read from the mic ring        */
     uint32_t silence_ms = 0;
     uint32_t speech_ms = 0;
     bool ever_speech = false;
     int64_t speech_t0 = -1;
     const int64_t t0 = esp_timer_get_time();
+    int64_t last_log = t0;
     const int64_t no_speech_us = (int64_t)RT_NO_SPEECH_MS * 1000LL;
     const int64_t cap_us = (int64_t)CONFIG_ROBODOG_RT_MAX_SECS * 1000000LL;
 
@@ -873,7 +1359,7 @@ static size_t rt_stream_utterance(bool *fault)
         const size_t n = audio_capture_sub_read(sub, (uint8_t *)(frame + fi),
                                                 want * sizeof(int16_t), 150);
         if (n > 0) {
-            streamed_bytes += n;
+            captured_bytes += n;
             fi += n / sizeof(int16_t);
         }
         if (fi < RT_FRAME_SAMPLES) {
@@ -888,43 +1374,19 @@ static size_t rt_stream_utterance(bool *fault)
 
             /* Stream EVERY frame once speech has begun (word tails included);
              * pre-speech silence is not sent, so the model never hears the
-             * room before the utterance. */
+             * room before the utterance.  The SENDER resamples to the session
+             * rate; this loop only copies 640 B. */
             if (speech || ever_speech) {
-                /* The realtime PCM contract is 24 kHz mono PCM16 (the
-                 * handler hardcodes SAMPLE_RATE_HZ), while this board's
-                 * capture hub runs 16 kHz.  Send the resampled frame —
-                 * appending raw 16 kHz audio makes the model hear the
-                 * utterance 1.5x fast and transcribe garbage. */
-                static int16_t up[RT_FRAME_SAMPLES * RT_RATE_OUT_DEFAULT /
-                                   RT_RATE_IN + 8];
-                const size_t up_n = robodog_pcm_resample(
-                    frame, RT_FRAME_SAMPLES, up,
-                    sizeof(up) / sizeof(up[0]), RT_RATE_IN,
-                    RT_RATE_OUT_DEFAULT);
-                char *b64 = rt_b64_encode((const uint8_t *)up,
-                                          up_n * sizeof(int16_t));
-                if (b64 != NULL) {
-                    /* One frame is 640 B -> 856 base64 chars; the JSON
-                     * envelope fits the fixed buffer with margin. */
-                    static char msg[1400];
-                    const int mlen = snprintf(
-                        msg, sizeof(msg),
-                        "{\"type\":\"input_audio_buffer.append\","
-                        "\"audio\":\"%s\"}",
-                        b64);
-                    free(b64);
-                    if (mlen <= 0 || (size_t)mlen >= sizeof(msg)) {
-                        ESP_LOGE(TAG, "RT append message overflow (%d)", mlen);
-                        *fault = true;
-                        return streamed;
-                    }
-                    if (rt_send(msg) != ESP_OK) {
-                        ESP_LOGE(TAG, "RT append failed (socket down)");
-                        *fault = true;
-                        return streamed;
+                rt_up_push(frame);
+                frames++;
+                if (keep_pcm && s_asr_pcm != NULL) {
+                    if (s_asr_len + RT_FRAME_BYTES <= RT_ASR_PCM_MAX) {
+                        memcpy(s_asr_pcm + s_asr_len, frame, RT_FRAME_BYTES);
+                        s_asr_len += RT_FRAME_BYTES;
+                    } else {
+                        s_asr_truncated = true;
                     }
                 }
-                streamed += RT_FRAME_SAMPLES;
             }
             if (speech) {
                 if (!ever_speech) {
@@ -950,13 +1412,29 @@ static size_t rt_stream_utterance(bool *fault)
             ever_speech = false;
             speech_t0 = -1;
         }
+
+        const int64_t now2 = esp_timer_get_time();
+        if (now2 - last_log >= 1000000LL) {
+            rt_pump_log((uint32_t)((now2 - t0) / 1000), (uint32_t)frames,
+                        (uint32_t)captured_bytes, ever_speech, speech_ms,
+                        silence_ms);
+            last_log = now2;
+        }
     }
 
-    if (streamed_bytes == 0) {
+    rt_pump_log((uint32_t)((esp_timer_get_time() - t0) / 1000),
+                (uint32_t)frames, (uint32_t)captured_bytes, ever_speech,
+                speech_ms, silence_ms);
+    ESP_LOGI(TAG, "RT capture done: frames=%u captured=%u B asr=%u B%s "
+             "up_dropped=%u ever_speech=%d speech=%ums silence=%ums",
+             (unsigned)frames, (unsigned)captured_bytes, (unsigned)s_asr_len,
+             s_asr_truncated ? " (truncated)" : "", (unsigned)s_up_dropped,
+             (int)ever_speech, (unsigned)speech_ms, (unsigned)silence_ms);
+    if (captured_bytes == 0) {
         ESP_LOGE(TAG, "RT capture stream produced no audio (codec/I2S RX?)");
         *fault = true;
     }
-    return streamed;
+    return frames * RT_FRAME_SAMPLES;
 }
 
 esp_err_t robodog_rt_turn(robodog_rt_mode_t mode, robodog_rt_turn_t *out)
@@ -976,6 +1454,7 @@ esp_err_t robodog_rt_turn(robodog_rt_mode_t mode, robodog_rt_turn_t *out)
     s_think_suppress = false;
     s_play_go = false;
     s_dropped_deltas = 0;
+    s_render_reply = false;
 
     esp_err_t err = robodog_rt_connect();
     if (err != ESP_OK) {
@@ -984,8 +1463,14 @@ esp_err_t robodog_rt_turn(robodog_rt_mode_t mode, robodog_rt_turn_t *out)
     }
     xEventGroupClearBits(s_evts, RT_BIT_DONE | RT_BIT_ERR);
 
+    /* Let the previous turn's sender finish, then capture.  The reader only
+     * fills the uplink ring; the sender owns the socket, so this loop can
+     * always reach its own no-speech / cap / silence exits (issue #301). */
+    (void)rt_up_drain(RT_UP_DRAIN_MS);
+
     bool cap_fault = false;
-    const size_t samples = rt_stream_utterance(&cap_fault);
+    const bool keep_pcm = (mode != ROBODOG_RT_MODE_OMNI);
+    const size_t samples = rt_stream_utterance(&cap_fault, keep_pcm);
     if (cap_fault) {
         out->fault = true;
         ESP_LOGE(TAG, "RT capture fault; ending turn");
@@ -997,14 +1482,55 @@ esp_err_t robodog_rt_turn(robodog_rt_mode_t mode, robodog_rt_turn_t *out)
         robodog_ui_set_agent_state("idle");
         return ESP_OK;
     }
-
     s_turn.captured = true; /* the utterance is now in the session */
-    const bool want_audio = (mode == ROBODOG_RT_MODE_OMNI);
+
+    /* The AGENT shape routes on the USER's words, and the deployed Qwen lane
+     * does not emit the realtime transcription event — so the transcript comes
+     * from the explicit chat-completions ASR round trip (same model endpoint,
+     * logged as `RT ASR text=`).  The OMNI shape needs no transcript. */
+    bool want_audio;
+    if (mode == ROBODOG_RT_MODE_OMNI) {
+        want_audio = true;
+    } else {
+        rt_asr_utterance(out);
+        /* Keep the transcript in the per-turn accumulator too: the final
+         * memcpy(out, &s_turn) must not lose it. */
+        strlcpy(s_turn.transcript, out->transcript,
+                sizeof(s_turn.transcript));
+        const char *reason = NULL;
+        const robodog_rt_mode_t route =
+            (mode == ROBODOG_RT_MODE_AGENT)
+                ? ROBODOG_RT_MODE_AGENT
+                : robodog_rt_route(out->transcript, &reason);
+        if (mode != ROBODOG_RT_MODE_AGENT) {
+            ESP_LOGI(TAG, "RT route=%s reason=%s",
+                     route == ROBODOG_RT_MODE_AGENT ? "agent" : "omni",
+                     reason != NULL ? reason : "?");
+        }
+        want_audio = (route == ROBODOG_RT_MODE_OMNI);
+        if (want_audio && out->transcript[0] == '\0') {
+            ESP_LOGW(TAG, "RT no transcript; answering on the omni path");
+        }
+    }
     s_want_audio = want_audio;
+    /* Only the audio-shaped (OMNI) response is this turn's answer and may be
+     * rendered on the RLCD; an AGENT-shape text response is unused (claw_core
+     * answers from the transcript). */
+    s_render_reply = want_audio;
+
+    if (s_up_fault) {
+        out->fault = true;
+        ESP_LOGE(TAG, "RT uplink socket down; ending turn");
+        robodog_ui_set_agent_state("error");
+        return ESP_FAIL;
+    }
+    if (!rt_up_drain(RT_UP_DRAIN_MS)) {
+        ESP_LOGW(TAG, "RT uplink drain timed out; committing the frames sent");
+    }
+
     /* Commit seals the utterance into a user item.  `response_create` is left
      * false so the turn boundary and the modality choice stay ours. */
     char commit[160];
-    /* Turn mode: the plain OpenAI commit; `auto_response` answers it. */
     snprintf(commit, sizeof(commit),
              "{\"type\":\"input_audio_buffer.commit\"}");
     if (rt_send(commit) != ESP_OK) {
@@ -1076,9 +1602,19 @@ esp_err_t robodog_rt_turn(robodog_rt_mode_t mode, robodog_rt_turn_t *out)
 
     memcpy(out, &s_turn, sizeof(*out));
     ESP_LOGI(TAG, "RT turn done: transcript=\"%.80s\" reply=\"%.80s\" "
-             "first_audio=%u ms captured=%d think=%d dropped=%u", out->transcript,
-             out->reply, (unsigned)out->first_audio_ms, (int)out->captured,
-             (int)s_saw_think, (unsigned)s_dropped_deltas);
+             "first_audio=%u ms captured=%d think=%d dropped=%u",
+             out->transcript, out->reply, (unsigned)out->first_audio_ms,
+             (int)out->captured, (int)s_saw_think,
+             (unsigned)s_dropped_deltas);
+
+    /* Full, line-safe reply for the E2E gate (the `RT turn done` line above is
+     * truncated): JSON-escaped so a quote/newline cannot split the log. */
+    if (want_audio && out->reply[0] != '\0') {
+        char *esc = robodog_json_escape(out->reply);
+        ESP_LOGI(TAG, "RT reply text=%s",
+                 esc != NULL ? esc : out->reply);
+        free(esc);
+    }
 
     /* The server's audio was dropped because the reply carried a think
      * block.  Speak the CLEAN text instead so the answer is still heard. */
@@ -1137,12 +1673,36 @@ esp_err_t robodog_rt_init(void)
     }
     s_rx_len = 0;
 
-    s_dec = heap_caps_malloc(CONFIG_ROBODOG_RT_DELTA_MAX_BYTES,
+    /* The decode scratch holds a WHOLE reply delta: the Qwen lane sends one
+     * ~214 KB audio delta (4.5 s), then it is split across the 64 KB slots. */
+    s_dec = heap_caps_malloc(RT_DECODE_MAX,
                              MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (s_dec == NULL) {
-        ESP_LOGE(TAG, "RT no SPIRAM for the delta decode buffer");
+        ESP_LOGE(TAG, "RT no SPIRAM for the delta decode buffer (%d B)",
+                 RT_DECODE_MAX);
         return ESP_ERR_NO_MEM;
     }
+
+    /* Capture -> socket uplink ring (raw 16 kHz frames) + its mutex. */
+    s_up_ring = heap_caps_malloc(RT_UP_FRAMES * RT_FRAME_BYTES,
+                                 MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    s_up_mtx = xSemaphoreCreateMutex();
+    if (s_up_ring == NULL || s_up_mtx == NULL) {
+        ESP_LOGE(TAG, "RT no SPIRAM/mutex for the uplink ring");
+        return ESP_ERR_NO_MEM;
+    }
+
+    /* Explicit-ASR utterance PCM + response body. */
+    s_asr_pcm = heap_caps_malloc(RT_ASR_PCM_MAX,
+                                 MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    s_asr_resp = heap_caps_malloc(RT_ASR_RESP_MAX,
+                                  MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (s_asr_pcm == NULL || s_asr_resp == NULL) {
+        ESP_LOGE(TAG, "RT no SPIRAM for the ASR buffers (%d + %d B)",
+                 RT_ASR_PCM_MAX, RT_ASR_RESP_MAX);
+        return ESP_ERR_NO_MEM;
+    }
+
     s_play_q = xQueueCreate(CONFIG_ROBODOG_RT_QUEUE_DEPTH, sizeof(rt_audio_t));
     if (s_play_q == NULL) {
         ESP_LOGE(TAG, "RT no queue");
@@ -1172,9 +1732,19 @@ esp_err_t robodog_rt_init(void)
         ESP_LOGE(TAG, "RT playback task failed");
         return ESP_ERR_NO_MEM;
     }
+    if (xTaskCreate(rt_uplink_task, "robodog_rt_up", RT_PLAY_STACK, NULL,
+                    RT_PLAY_PRIO, &s_up_task) != pdPASS) {
+        ESP_LOGE(TAG, "RT uplink task failed");
+        return ESP_ERR_NO_MEM;
+    }
     s_inited = true;
     ESP_LOGI(TAG, "RoboDog Phase 3 realtime ready: %s (model %s)",
              CONFIG_ROBODOG_RT_URL, CONFIG_ROBODOG_RT_MODEL);
+    ESP_LOGI(TAG, "RT memory: rx=%u B dec=%d B slots=%u x %d B uplink=%u x %u B "
+             "asr=%d B",
+             (unsigned)s_rx_cap, RT_DECODE_MAX, (unsigned)slots,
+             CONFIG_ROBODOG_RT_DELTA_MAX_BYTES, RT_UP_FRAMES,
+             (unsigned)RT_FRAME_BYTES, RT_ASR_PCM_MAX);
     return ESP_OK;
 }
 

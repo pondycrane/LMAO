@@ -180,6 +180,29 @@ ASR_MATCH flap. The *reply* is Traditional (the directive), rendered by the
 generated Noto Sans CJK TC font and spoken by the Beijing-native `dylan`
 timbre with the Beijing instruct and fixed seed.
 
+### Realtime (Phase 3 omni) lane
+
+The same gate runs against the Phase 3 realtime firmware.  It detects the lane
+from the console (`robodog_rt:` tag) and only asserts what that lane can prove:
+
+- `OPEN_SESSION`, `ASR_MATCH` and `ASR_LANG` are the same lines (`RT listen
+  started`, `RT ASR text=`, `RT ASR language=`); the transcript and the language
+  tag come from the explicit chat-completions ASR the firmware performs.
+- `REPLY_LANG`, `TTS_POLICY` and `TTS` are `SKIP` on the omni route: there is no
+  reply-language directive, no claw_core, and no Qwen3-TTS bracket — the model
+  answers and speaks the turn itself.
+- `REPLY` reads `RT reply text=` (the model's full, line-safe reply).
+- `RING` captures the board speaker from `RT first audio` and re-ASRs it with the
+  omni chat-completions `input_audio` backend (`RD_OMNI_ASR_URL`, default
+  `http://192.168.50.27:8099/v1/chat/completions`) — Whisper is retired on this
+  lane.
+- `SUBTITLE` requires BOTH the reply and the user transcript on the RLCD (the
+  panel-transcription contract), not only the reply.
+
+The agent route (`RT route=agent`) keeps the Phase 2 legs: the realtime module
+transcribes and the claw_core chain answers, so `agent reply:` / `TTS start/stop`
+/ `TTS_POLICY` / `voice reply language=` are asserted as before.
+
 Write `$ARTIFACTS_DIR/robodog-claw-e2e/robodog-claw-e2e.md` (under the run
 subdir where the verbatim transcripts also live), plus a top-level
 `$ARTIFACTS_DIR/hardware-e2e.md` summary for the generic gate-chain/finalize

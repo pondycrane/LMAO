@@ -68,6 +68,17 @@ void robodog_http_rx_reset(robodog_http_rx_t *rx);
 char *robodog_json_escape(const char *s);
 
 /**
+ * @brief Build a canonical 44-byte RIFF/WAVE header for PCM16 audio.
+ *        Single copy of record: used by the Whisper multipart ASR path
+ *        (robodog_voice.c) and the realtime chat-completions ASR
+ *        (robodog_realtime.c), so the two uploads cannot drift.
+ * @return the header length (44), or 0 when `dst_cap` is too small.
+ */
+size_t robodog_wav_header(uint8_t *dst, size_t dst_cap, size_t data_bytes,
+                          uint32_t sample_rate, uint16_t channels,
+                          uint16_t bits);
+
+/**
  * @brief Locate the PCM payload of a RIFF/WAVE blob (robust to non-44-byte
  *        headers) and, in the same pass, read the sample rate declared in the
  *        fmt chunk.  Returns the byte offset of the `data` chunk payload, or 0
