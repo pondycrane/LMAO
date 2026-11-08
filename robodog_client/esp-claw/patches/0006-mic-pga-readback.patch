@@ -1,12 +1,27 @@
-RoboDog #301: state the live ES7210 mic PGA on the console and force it to
-+37.5 dB when the high-level esp_codec_dev_set_in_gain() call did not land.
+RoboDog #301: state the live ES7210 mic PGA on the console, expose it to the
+RT lane, and force it to +37.5 dB when the high-level
+esp_codec_dev_set_in_gain() call did not land.
 
 esp_codec_dev's set_in_gain() ignores the codec driver's return value, so a
 rejected I2C write silently leaves the ADC at 0 dB while the capture hub
 believes it set 42 dB.  Reading registers 0x43/0x44 back makes the bench
-console state the gain the ADC actually runs at (the subscribe line fires on
-every RT turn).
+console state the gain the ADC actually runs at.
 
+--- a/components/common/audio_hub/include/audio_capture.h
++++ b/components/common/audio_hub/include/audio_capture.h
+@@ -47,6 +47,12 @@
+ esp_err_t audio_capture_set_input_gain(audio_capture_handle_t capture, float gain_db);
+ esp_err_t audio_capture_get_input_gain(audio_capture_handle_t capture, float *out_gain_db);
+ 
++/* Live codec mic PGA (ES7210 reg 0x43 low nibble: 0 = 0 dB, 10 = 30 dB,
++ * 14 = 37.5 dB).  Unlike audio_capture_get_input_gain(), which returns the
++ * value the hub asked for, this reads the codec back - the value the ADC
++ * actually runs at.  Returns -1 when the codec cannot be read. */
++int audio_capture_get_mic_pga(audio_capture_handle_t capture);
++
+ /* One subscriber per role; a second open returns ESP_ERR_INVALID_STATE. */
+ esp_err_t audio_capture_open_subscriber(audio_capture_handle_t capture, audio_capture_subscriber_role_t role, const audio_capture_sub_format_t *fmt, const char *owner_tag, audio_capture_sub_handle_t *out_sub);
+ 
 --- a/components/common/audio_hub/src/audio_capture.c
 +++ b/components/common/audio_hub/src/audio_capture.c
 @@ -453,6 +453,27 @@
@@ -37,7 +52,29 @@ every RT turn).
      }
  
      h->running = true;
-@@ -539,6 +560,15 @@
+@@ -503,6 +524,21 @@
+     return ESP_OK;
+ }
+ 
++int audio_capture_get_mic_pga(audio_capture_handle_t capture)
++{
++    if (capture == NULL || capture->codec_dev == NULL) {
++        return -1;
++    }
++    int reg = -1;
++    xSemaphoreTake(capture->mtx, portMAX_DELAY);
++    int cret = esp_codec_dev_read_reg(capture->codec_dev, 0x43, &reg);
++    xSemaphoreGive(capture->mtx);
++    if (cret != ESP_CODEC_DEV_OK) {
++        return -1;
++    }
++    return reg & 0x0f;
++}
++
+ esp_err_t audio_capture_get_input_gain(audio_capture_handle_t capture, float *out_gain_db)
+ {
+     if (capture == NULL || out_gain_db == NULL) {
+@@ -539,6 +575,15 @@
      }
  
      xSemaphoreTake(capture->mtx, portMAX_DELAY);

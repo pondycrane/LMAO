@@ -1399,6 +1399,14 @@ static size_t rt_stream_utterance(bool *fault, bool keep_pcm)
     rt_up_reset();
     s_asr_len = 0;
     s_asr_truncated = false;
+    /* Surface the codec's live mic PGA: the hub asks for 42 dB, but
+     * esp_codec_dev swallows the driver's write result, so the ADC can sit at
+     * 0 dB while everything above it believes the gain is set (#301). */
+    audio_capture_handle_t gain_cap = NULL;
+    const int mic_pga = (audio_hub_get_capture(&gain_cap) == ESP_OK)
+                            ? audio_capture_get_mic_pga(gain_cap) : -1;
+    ESP_LOGI(TAG, "RT mic pga idx=%d (ES7210 reg 0x43; 0=0dB 10=30dB 14=37.5dB)",
+             mic_pga);
     ESP_LOGI(TAG, "RT listen started (16k/1/16, VAD energy=%d silence=%dms)",
              RT_VAD_ENERGY, CONFIG_ROBODOG_RT_SILENCE_MS);
     robodog_ui_set_agent_state("listening");
@@ -1416,6 +1424,7 @@ static size_t rt_stream_utterance(bool *fault, bool keep_pcm)
     const int64_t t0 = esp_timer_get_time();
     int64_t last_log = t0;
     int32_t vad_max = 0;   /* highest frame mean |sample| seen (the VAD metric) */
+    int32_t vad_min = 0x7fffffff; /* lowest frame mean (the mic noise floor) */
     int32_t peak = 0;      /* highest single |sample| seen in the window      */
     const int64_t no_speech_us = (int64_t)RT_NO_SPEECH_MS * 1000LL;
     const int64_t cap_us = (int64_t)CONFIG_ROBODOG_RT_MAX_SECS * 1000000LL;
@@ -1430,8 +1439,9 @@ static size_t rt_stream_utterance(bool *fault, bool keep_pcm)
         if (!ever_speech && now - t0 >= no_speech_us) {
             /* `vad_max` well under RT_VAD_ENERGY = the mic heard nothing
              * (silent rig / dead input), not a stalled capture pump. */
-            ESP_LOGW(TAG, "RT no speech within %d ms (vad_max=%d peak=%d), "
-                     "bailing", RT_NO_SPEECH_MS, (int)vad_max, (int)peak);
+            ESP_LOGW(TAG, "RT no speech within %d ms (vad_max=%d vad_min=%d "
+                     "peak=%d pga=%d), bailing", RT_NO_SPEECH_MS, (int)vad_max,
+                     (int)vad_min, (int)peak, mic_pga);
             break;
         }
         if (ever_speech && now - speech_t0 >= cap_us) {
@@ -1463,6 +1473,9 @@ static size_t rt_stream_utterance(bool *fault, bool keep_pcm)
             const bool speech = mean > RT_VAD_ENERGY;
             if (mean > vad_max) {
                 vad_max = mean;
+            }
+            if (mean < vad_min) {
+                vad_min = mean;
             }
             if (fpk > peak) {
                 peak = fpk;
@@ -1535,11 +1548,11 @@ static size_t rt_stream_utterance(bool *fault, bool keep_pcm)
                 speech_ms, silence_ms, vad_max, peak);
     ESP_LOGI(TAG, "RT capture done: frames=%u captured=%u B asr=%u B%s "
              "up_dropped=%u ever_speech=%d speech=%ums silence=%ums "
-             "vad_max=%d peak=%d",
+             "vad_max=%d vad_min=%d peak=%d pga=%d",
              (unsigned)frames, (unsigned)captured_bytes, (unsigned)s_asr_len,
              s_asr_truncated ? " (truncated)" : "", (unsigned)s_up_dropped,
              (int)ever_speech, (unsigned)speech_ms, (unsigned)silence_ms,
-             (int)vad_max, (int)peak);
+             (int)vad_max, (int)vad_min, (int)peak, mic_pga);
     /* Close the subscriber for the idle gap: the capture task only reads the
      * codec while a subscriber is open, so leaving it open between turns
      * captures ~32 KB/s into a ring nobody drains (the ring-overflow warning
