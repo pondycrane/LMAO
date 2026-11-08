@@ -93,17 +93,28 @@ robodog-validate  →  robodog-hardware-e2e  →  robodog-production-health
   the manual-tagged firmware targets, so C errors surface before the board is
   touched). `robodog_client/capture.py` joins the BUILD-completeness exemption
   list as a standalone host tool. No hardware is touched here.
-- **`robodog-hardware-e2e`** — the verification gate. It builds + flashes the
-  real RoboDog board (Waveshare ESP32-S3 RLCD-4.2; verified fingerprint
-  `0x303A:0x1001` from `lma_core/device_detect.py`, or the `ROBODOG_PORT`
-  override — **never** the Cardputer `0x8120` or RNode), then **screen-captures
-  the exact ST7305 pixels**: `capture.py --reset --n 4 --timeout 120 --describe`
-  streams the live u8g2 frame buffer (300×400 panel memory) over USB-JTAG and
-  reconstructs `panel_raw_portrait.png` / `panel_landscape.png`, and `--describe`
-  sends the frame to the same self-hosted vision model hermes uses (Qwen2.5-VL
-  at `spark-eebf`, `~/.hermes/config.yaml "vision"`) which **transcribes** the
-  header clock + every row. The agent asserts `HEADER_PRESENT` (sync date/time
-  in the readback), `ROWS_RENDERED` (≥1 calendar row), `NO_UNEXPECTED_STATUS`
+- **`robodog-hardware-e2e`** — the verification gate. It **prefers the bench
+  service** (`benchd` on op4, `cluster-ops/benchd`, `BENCH_URL=http://op4:8099`):
+  the gate pushes its HEAD to `origin` as `refs/bench/<sha>`, submits a `build`
+  job (`class ci`) and then a `flash_capture` job bound to that build, and pulls
+  the captured frames + transcriptions back into `$ARTIFACTS_DIR/robodog-shots/`.
+  The bench owns the board, so the dev loop and CI cannot flash over each other;
+  the build never holds the board lease, and a CI build of a HEAD the dev lane
+  already built is deduped onto the same job. When the bench is unreachable the
+  gate falls back to the local `bazel run //robodog_client:build_firmware` +
+  `flash_firmware` + `capture.py` path and records `BENCH=UNREACHABLE`.
+
+  Either way it flashes the real RoboDog board (Waveshare ESP32-S3 RLCD-4.2;
+  verified fingerprint `0x303A:0x1001` from `lma_core/device_detect.py`, or the
+  `ROBODOG_PORT` override — **never** the Cardputer `0x8120` or RNode), then
+  **screen-captures the exact ST7305 pixels**: `capture.py --reset --n 4
+  --timeout 120 --describe` streams the live u8g2 frame buffer (300×400 panel
+  memory) over USB-JTAG and reconstructs `panel_raw_portrait.png` /
+  `panel_landscape.png`, and `--describe` sends the frame to the same
+  self-hosted vision model hermes uses (Qwen2.5-VL at `spark-eebf`,
+  `~/.hermes/config.yaml "vision"`) which **transcribes** the header clock +
+  every row. The agent asserts `HEADER_PRESENT` (sync date/time in the
+  readback), `ROWS_RENDERED` (≥1 calendar row), `NO_UNEXPECTED_STATUS`
   (no `no wifi`/`stale` on the synced frame unless that *is* the feature) and,
   best-effort, `ROW_MATCH` against the server's `CalendarBundle`. The evidence
   (verbatim transcriptions + frame PNG paths) is written to the canonical
