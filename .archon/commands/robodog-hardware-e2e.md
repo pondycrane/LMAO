@@ -11,10 +11,14 @@ argument-hint: (no arguments - detects the robodog board, builds, flashes, captu
 
 1. **This gate flashes the robodog board** — the Waveshare ESP32-S3 RLCD-4.2
    (ST7305), verified fingerprint VID `0x303A` PID `0x1001` (plain ESP32-S3
-   USB-Serial-JTAG; see `lma_core/device_detect.py`). The ONLY flash path is
-   `bazel run //robodog_client:flash_firmware -- --port <port>`
-   (`robodog_client/flash.sh` — host esptool, because Docker ttyACM RTS
-   passthrough breaks the button-free reset). Never hand-esptool the board.
+   USB-Serial-JTAG; see `lma_core/device_detect.py`). There are exactly TWO
+   sanctioned flash paths, both of which run `robodog_client/flash.sh` (host
+   esptool, because Docker ttyACM RTS passthrough breaks the button-free reset):
+   - **preferred**: `bench submit flash_capture` — the bench service on op4
+     owns the board and serialises access (`cluster-ops/benchd`).
+   - **fallback**: `bazel run //robodog_client:flash_firmware -- --port <port>`.
+
+   Never hand-esptool the board on either path.
 2. **NEVER run esptool on the Cardputer** (`0x303A:0x8120`) — no flashing, no
    `chip_id`, no probing. esptool kills the USB-Serial-JTAG interface; recovery
    needs a physical replug. The Cardputer is flashed ONLY via
@@ -96,27 +100,44 @@ and STOP.
 
 ## Phase 1: HOST PREREQUISITES
 
+The gate prefers the **bench service** (`benchd` on op4). When it is reachable
+this host needs only `git`, `curl` and the `bench` client — no Docker, no
+esptool, no serial port. The bench owns the board.
+
+```bash
+BENCH_URL="${BENCH_URL:-http://op4:8099}"
+command -v bench || echo "MISSING: bench client (install cluster-ops/benchd/bench)"
+curl -s -m 5 -o /dev/null -w 'benchd: %{http_code}\n' "$BENCH_URL/v1/health"
+```
+
+`200` → use **Phase 4 (bench path)**. Anything else → use **Phase 5 (local
+fallback)**, and record `BENCH=UNREACHABLE` in the artifact.
+
+Local-fallback prerequisites (only needed when the bench is down):
+
 ```bash
 python3 -c "import serial; import PIL"        # capture.py needs both
 command -v tesseract                          # orientation OCR (capture.py dihedral)
 python3 -m esptool --help >/dev/null 2>&1     # flash.sh host esptool
 docker version >/dev/null 2>&1                # build.sh ESP-IDF image runner
-curl -s -o /dev/null -w '%{http_code}\n' --max-time 8 http://spark-eebf:8000/v1/models  # vision endpoint
 ```
 
 If `serial`/`PIL`/`tesseract` are missing, install them (`pip install pyserial
 Pillow`, `apt install tesseract-ocr`) and re-check — capture.py cannot decode the
-frames or pick the orientation without them. The vision endpoint timeout is not
-fatal: capture still writes the PNGs, `--describe` just fails per-frame (record
-`VISION=UNVERIFIABLE` and fall back to your own reading of the PNG).
+frames or pick the orientation without them.
 
 ---
 
-## Phase 2: DETECT — The RoboDog Board
+## Phase 2: DETECT — The RoboDog Board (local fallback only)
 
-An explicit `ROBODOG_PORT` always wins; otherwise auto-detect ONLY the verified
-robodog fingerprint (`0x303A:0x1001`). Never touch `0x303A:0x8120` (Cardputer)
-or `0x10C4:0xEA60` (RNode):
+**When the bench is reachable, skip this phase** — the bench owns the board and
+reports it in `bench boards` (`robodog-1  ready`). A `quarantined` board there
+means the previous job died mid-flash and needs a physical replug; record
+`BENCH=QUARANTINED` and STOP with a loud skip (do NOT retry).
+
+For the local fallback, an explicit `ROBODOG_PORT` always wins; otherwise
+auto-detect ONLY the verified robodog fingerprint (`0x303A:0x1001`). Never touch
+`0x303A:0x8120` (Cardputer) or `0x10C4:0xEA60` (RNode):
 
 ```bash
 PORT="${ROBODOG_PORT:-}"
@@ -138,6 +159,9 @@ echo "ROBODOG_PORT=${PORT:-NONE}"
 ---
 
 ## Phase 3: NO BOARD → LOUD SKIP (+ offline decode evidence)
+
+Only reachable in the **local fallback** (the bench path always has a board or
+reports `quarantined`).
 
 If `ROBODOG_PORT` is NONE:
 
@@ -173,7 +197,100 @@ If `ROBODOG_PORT` is NONE:
 
 ---
 
-## Phase 4: BUILD THE FIRMWARE
+## Phase 4: VERIFY VIA BENCHD (preferred path)
+
+The bench builds, flashes, captures and transcribes in two queued jobs. The
+board lease covers **only** the flash+capture window; the build never holds it.
+
+### 4a. Make the commit reachable
+
+The bench fetches from the public origin itself. If the commit is already on
+origin (a branch or a PR head) there is **nothing to push** — name the ref and
+let the bench fetch it:
+
+```bash
+cd "$WT"
+HEAD_SHA="$(git rev-parse HEAD)"
+REF="$(gh pr view --json headRefName -q .headRefName 2>/dev/null \
+        | sed 's|^|refs/heads/|')" || REF=""
+```
+
+Only a commit that exists **nowhere** on origin (e.g. a local-only fix) needs
+publishing:
+
+```bash
+git push --force origin "HEAD:refs/bench/$(git rev-parse --short HEAD)"
+REF=""
+```
+
+These `refs/bench/*` refs are transient transport, not branches: the bench
+fetches `+refs/bench/*` and never merges them. Prune them with
+`git push origin --delete refs/bench/<sha>`.
+
+### 4b. Queue the build (CI class)
+
+```bash
+B=$(bench --url "$BENCH_URL" submit build \
+      --head "$HEAD_SHA" ${REF:+--ref "$REF"} \
+      --family calendar --class ci --by "ci:$WORKFLOW_ID")
+bench --url "$BENCH_URL" wait "$B" --timeout 2400
+BUILD_RC=$?
+```
+
+- `BUILD_RC=0` → the firmware compiled. Reuse is automatic: a `dev` lane that
+  already built this HEAD shares the same job (dedupe by head+family), so CI
+  pays ~90 s instead of a full build.
+- `BUILD_RC=2` → **compile error in the branch**. Fix it and re-run; a red build
+  must not flash anything.
+- `BUILD_RC=75` → bench busy past the timeout. Record `BENCH=BUSY` and STOP with
+  a loud skip; do not report a hardware verdict you did not obtain.
+
+### 4c. Queue flash + capture (same build)
+
+```bash
+J=$(bench --url "$BENCH_URL" submit flash_capture \
+      --head "$HEAD_SHA" --family calendar --build "$B" --class ci \
+      --by "ci:$WORKFLOW_ID")
+bench --url "$BENCH_URL" wait "$J" --timeout 900 \
+      --on-artifacts "$ARTIFACTS_DIR/robodog-shots"
+E2E_RC=$?
+```
+
+- `E2E_RC=0` → the bench asserted `HEADER_PRESENT`, `ROWS_RENDERED` and
+  `NO_UNEXPECTED_STATUS` on the captured frames, and wrote the PNGs +
+  `frameN_analysis.txt` into `$ARTIFACTS_DIR/robodog-shots/`.
+- `E2E_RC=2` → an assertion failed. The verdict line names which one; read the
+  transcriptions in Phase 7 before deciding whether it is a real regression or
+  the intended state (e.g. a `no wifi` feature). **FAIL the gate** unless the
+  change under test is exactly that state.
+- `E2E_RC=78` → the board is quarantined (a previous job died mid-flash). Record
+  `BENCH=QUARANTINED`, STOP with a loud skip, and tell the operator to replug
+  the board and run `bench probe robodog-1`. **Never retry into a quarantined
+  board** — a killed flash leaves it unbootable.
+
+### 4d. Record the bench evidence
+
+```bash
+bench --url "$BENCH_URL" evidence "$J" > "$ARTIFACTS_DIR/bench-evidence.md"
+bench --url "$BENCH_URL" boards
+```
+
+The `boards` line proves which board served the run and which HEAD it now holds
+(`robodog-1 ready calendar <sha>`), which is the "flashed HEAD" claim in the
+artifact.
+
+**Do not run `bazel run //robodog_client:build_firmware` or `flash.sh` on this
+host when the bench path succeeded** — the bench already flashed the board, and
+a second flash would invalidate the evidence.
+
+---
+
+## Phase 5: LOCAL FALLBACK (only when benchd is unreachable)
+
+Use this only when Phase 1's health probe failed. Record `BENCH=UNREACHABLE` in
+the artifact so the PR shows the weaker verification path.
+
+### 5a. Build
 
 ```bash
 cd "$WT"
@@ -186,9 +303,7 @@ bazel run //robodog_client:build_firmware
   must not flash anything.
 - Record the commit flashed for the report: `git -C "$WT" rev-parse HEAD`.
 
----
-
-## Phase 5: FLASH THE BOARD
+### 5b. Flash
 
 ```bash
 bazel run //robodog_client:flash_firmware -- --port "$PORT"
@@ -199,9 +314,7 @@ bazel run //robodog_client:flash_firmware -- --port "$PORT"
 - Any failure on the USB-Serial-JTAG interface: if the port wedges, a physical
   unplug/replug is the recovery (record it, retry once).
 
----
-
-## Phase 6: CAPTURE — Stream The Exact Panel Pixels
+### 5c. Capture — stream the exact panel pixels
 
 ```bash
 mkdir -p "$ARTIFACTS_DIR/robodog-shots"
@@ -223,6 +336,12 @@ python3 robodog_client/capture.py --port "$PORT" --reset --n 4 --timeout 120 \
 ---
 
 ## Phase 7: VISION VERIFY — Read The Render Back
+
+On the bench path, `benchd` already ran assertions 1–3 and returned them in the
+verdict (`HEADER_PRESENT=… ROWS_RENDERED=… NO_UNEXPECTED_STATUS=…`). You still
+read the transcriptions yourself to confirm the verdict matches the pixels —
+and assertion 4 (ROW_MATCH) is yours, because the bench cannot see the server's
+`CalendarBundle`.
 
 Read each frame's state from `frameN_analysis.txt` (optionally open the PNGs).
 The transcription looks like:
@@ -285,9 +404,10 @@ robodog capture evidence):
 **Status**: ✅ PASS | ⚠️ SKIPPED (see Phase 3) | ❌ FAIL
 
 **Flashed HEAD**: {git sha}   **Board**: Waveshare ESP32-S3 RLCD-4.2 (0x303A:0x1001)
-**Builder**: `bazel run //robodog_client:build_firmware`
-**Flasher**: `bazel run //robodog_client:flash_firmware -- --port <port>`
-**Capture**: `capture.py --reset --n 4 --timeout 120 --describe` (→ `$ARTIFACTS_DIR/robodog-shots/`)
+**Path**: {`benchd` on op4 — job `{job id}`} | {`LOCAL FALLBACK` — bench unreachable}
+**Builder**: {`bench submit build --class ci`} | {`bazel run //robodog_client:build_firmware`}
+**Flasher**: {`bench submit flash_capture --build {id}`} | {`bazel run //robodog_client:flash_firmware -- --port <port>`}
+**Capture**: {benchd `capture.py --reset --n 4 --describe`} | {`capture.py --reset --n 4 --timeout 120 --describe`} (→ `$ARTIFACTS_DIR/robodog-shots/`)
 
 | Assertion | Result |
 |-----------|--------|
@@ -297,6 +417,7 @@ robodog capture evidence):
 | NO_UNEXPECTED_STATUS (no wifi/stale absent on final frame) | ✅ / ❌ |
 | ROW_MATCH vs server CalendarBundle | ✅ / UNVERIFIABLE |
 | Vision endpoint (Qwen2.5-VL readback) | ✅ {model} |
+| Bench lease (exclusive during flash+capture) | ✅ / N/A (local fallback) |
 
 ## Captured frames (verbatim vision readback)
 
@@ -304,6 +425,15 @@ robodog capture evidence):
 - `frameN_analysis.txt`: `2026-10-15 21:25 / RoboDog play date 14:00 / BLANK`  ← synced ✅
 
 ## Evidence files
+
+Bench path (frames arrive under a `shots/` subdir):
+
+- `$ARTIFACTS_DIR/robodog-shots/shots/panel_landscape.png` (400×300 as seen in landscape)
+- `$ARTIFACTS_DIR/robodog-shots/shots/panel_raw_portrait.png` (300×400 panel memory)
+- `$ARTIFACTS_DIR/robodog-shots/shots/frameN_analysis.txt` (vision transcription)
+- `$ARTIFACTS_DIR/bench-evidence.md` (the benchd job record, incl. verdict + job id)
+
+Local fallback (flat layout):
 
 - `$ARTIFACTS_DIR/robodog-shots/panel_landscape.png` (400×300 as seen in landscape)
 - `$ARTIFACTS_DIR/robodog-shots/panel_raw_portrait.png` (300×400 panel memory)
@@ -353,3 +483,4 @@ A failed/blocked gate FAILS this node — do not continue to PR creation.
 - **NO_UNEXPECTED_STATUS**: no `no wifi`/`stale` on the synced frame (unless intentional)
 - **EVIDENCE**: `$ARTIFACTS_DIR/hardware-e2e.md` with verbatim transcriptions + PNG paths; loud-skip variant when no board
 - **NON_DESTRUCTIVE**: esptool only ever ran on the robodog board port; Cardputer/RNode untouched
+- **BENCH RECORDED**: the artifact names the path used (`benchd` job id, or `LOCAL FALLBACK` + `BENCH=UNREACHABLE`). Never claim bench verification you did not obtain

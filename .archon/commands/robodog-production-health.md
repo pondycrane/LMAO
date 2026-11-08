@@ -123,7 +123,32 @@ is the stronger signal.
 
 ## Phase 3: PANEL CHECK — One Non-Destructive Frame
 
-Detect the board exactly like the E2E gate (never the Cardputer):
+The bench service (op4) is the preferred path: it holds a **read lease**, which
+never flashes and never blocks another reader — but it does block a writer, so a
+health probe can never race an in-flight flash.
+
+```bash
+BENCH_URL="${BENCH_URL:-http://op4:8099}"
+if curl -s -m 5 -o /dev/null "$BENCH_URL/v1/health"; then
+  C=$(bench --url "$BENCH_URL" submit capture --board robodog-1 --class health \
+        --payload '{"frames":1}' --by "health:$WORKFLOW_ID")
+  bench --url "$BENCH_URL" wait "$C" --timeout 300 \
+        --on-artifacts "$ARTIFACTS_DIR/robodog-shots"
+  HEALTH_RC=$?
+  cat "$ARTIFACTS_DIR/robodog-shots/shots/frame0_analysis.txt" 2>/dev/null
+  echo "BENCH=OK job=$C rc=$HEALTH_RC"
+else
+  echo "BENCH=UNREACHABLE — falling back to a local capture"
+fi
+```
+
+`rc=0` → the panel renders. `rc=2` → the frame was captured but the bench's
+assertions failed (BLANK header or `no wifi`/`stale`) — treat it as a health
+signal, not a gate failure. `rc=78` → the board is quarantined; record
+`PANEL=UNVERIFIABLE (board quarantined — replug + bench probe robodog-1)`.
+
+**Local fallback** (only when the bench is unreachable). Detect the board
+exactly like the E2E gate (never the Cardputer):
 
 ```bash
 PORT="${ROBODOG_PORT:-}"
@@ -158,6 +183,12 @@ rows. A BLANK header here is expected only if the board just powered on and
 WiFi/sync has not landed (~40 s) — one retry with a longer timeout before
 judging.
 
+**A `no wifi` readback here is a real finding, not a gate failure**: the E2E gate
+may have flashed a build while the board's NVS has no WiFi credentials (the
+bench deliberately never writes NVS — `--kid-name` wipes the 24 KB partition).
+Record it as `PANEL=ALIVE (no wifi — NVS unprovisioned)` and say so loudly; the
+panel renders, but it is not synced.
+
 ---
 
 ## Phase 4: VERDICT
@@ -172,6 +203,7 @@ judging.
 **Generated**: {YYYY-MM-DD HH:MM}
 **Workflow ID**: $WORKFLOW_ID
 **Status**: ✅ HEALTHY
+**Path**: {`benchd` job `{id}` — read lease, no flash} | {`LOCAL FALLBACK` — bench unreachable}
 
 Fresh panel capture shows the header clock + calendar rows (live sync).
 Frame readback (verbatim):

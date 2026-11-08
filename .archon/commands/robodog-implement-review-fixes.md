@@ -14,8 +14,10 @@ argument-hint: (none - reads from consolidated review artifact)
 **Hardware safety — violating these can brick physical devices:**
 
 1. **RoboDog board** (Waveshare ESP32-S3 RLCD-4.2, VID `0x303A` PID `0x1001`)
-   is flashed ONLY via `bazel run //robodog_client:flash_firmware -- --port <port>`
-   (`robodog_client/flash.sh`, host esptool).
+   is flashed ONLY via one of two paths, both running `robodog_client/flash.sh`
+   (host esptool): the **bench service** (`bench submit flash_capture`) or
+   `bazel run //robodog_client:flash_firmware -- --port <port>`. The bench is
+   preferred — it serialises the board across dev iterations and CI gates.
 2. **NEVER run esptool on the Cardputer** (`0x303A:0x8120`) or flash the RNode
    via esptool — those devices are untouched by this step.
 3. After a robodog flash the new firmware owns the panel — display-affecting
@@ -118,7 +120,27 @@ Verify you are on `$HEAD_BRANCH`.
 ### 2.2 Display-Affecting Fix
 
 If the fix changes what the panel draws/shows (layout, status hints, row
-logic, pictures, fonts), verify it from the pixels:
+logic, pictures, fonts), verify it from the pixels — prefer the **bench
+service** (op4), which owns the board so a fix iteration cannot flash over a CI
+gate:
+
+```bash
+BENCH_URL="${BENCH_URL:-http://op4:8099}"
+if curl -s -m 5 -o /dev/null "$BENCH_URL/v1/health"; then
+  HEAD_SHA="$(git rev-parse HEAD)"; SHORT="$(git rev-parse --short HEAD)"
+  git push --force origin "HEAD:refs/bench/$SHORT"
+  B=$(bench --url "$BENCH_URL" submit build --head "$HEAD_SHA" \
+        --family calendar --class dev --by "fixes:$WORKFLOW_ID")
+  bench --url "$BENCH_URL" wait "$B" --timeout 2400 || exit 1
+  J=$(bench --url "$BENCH_URL" submit flash_capture --head "$HEAD_SHA" \
+        --family calendar --build "$B" --class dev --by "fixes:$WORKFLOW_ID")
+  bench --url "$BENCH_URL" wait "$J" --timeout 900 \
+        --on-artifacts "$ARTIFACTS_DIR/robodog-shots-fixes"
+  cat "$ARTIFACTS_DIR/robodog-shots-fixes/shots/"*_analysis.txt
+fi
+```
+
+**Local fallback** (bench unreachable):
 
 ```bash
 bazel run //robodog_client:build_firmware
