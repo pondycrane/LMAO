@@ -14,11 +14,14 @@ argument-hint: (no arguments - reads from workflow artifacts)
 **Hardware safety — violating these can brick physical devices:**
 
 1. **The robodog board is the Waveshare ESP32-S3 RLCD-4.2 (ST7305)** — VID
-   `0x303A` PID `0x1001`. It is flashed ONLY via
-   `bazel run //robodog_client:flash_firmware -- --port <port>` — host esptool
-   (`robodog_client/flash.sh`) because Docker ttyACM RTS passthrough breaks the
-   button-free reset. This is the ONE esptool-on-the-robodog-board path that is
-   allowed; it re-reads `build/flash_args` so do not hand-esptool.
+   `0x303A` PID `0x1001`. It is flashed ONLY via one of two sanctioned paths,
+   both running host esptool through `robodog_client/flash.sh` (Docker ttyACM
+   RTS passthrough breaks the button-free reset):
+   - **preferred**: `bench submit flash_capture` — the bench service on op4 owns
+     the board and serialises dev iterations against CI gates.
+   - **fallback**: `bazel run //robodog_client:flash_firmware -- --port <port>`.
+
+   Both re-read `build/flash_args`, so do not hand-esptool the board.
 2. **NEVER run esptool on the Cardputer** (`0x303A:0x8120`) — no flashing, no
    `chip_id`, no probing. It kills the USB-Serial-JTAG interface; recovery needs
    a physical replug. The Cardputer is flashed ONLY via
@@ -148,7 +151,34 @@ standalone host tool — it stays exempt (do not invent a test for it).
 
 ### 2.4 Display-Change Loop (Renderer/UI/pictures/data tasks)
 
-When the task changes what the panel draws:
+When the task changes what the panel draws, prefer the **bench service** (op4)
+— it owns the board, so a dev iteration and a CI gate cannot flash over each
+other. The build never holds the board; only the flash+capture window does.
+
+```bash
+BENCH_URL="${BENCH_URL:-http://op4:8099}"
+if curl -s -m 5 -o /dev/null "$BENCH_URL/v1/health"; then
+  HEAD_SHA="$(git rev-parse HEAD)"; SHORT="$(git rev-parse --short HEAD)"
+  git push --force origin "HEAD:refs/bench/$SHORT"          # bench fetches this
+  B=$(bench --url "$BENCH_URL" submit build --head "$HEAD_SHA" \
+        --family calendar --class dev --by "dev:$WORKFLOW_ID")
+  bench --url "$BENCH_URL" wait "$B" --timeout 2400 || exit 1   # compile error
+  J=$(bench --url "$BENCH_URL" submit flash_capture --head "$HEAD_SHA" \
+        --family calendar --build "$B" --class dev --by "dev:$WORKFLOW_ID")
+  bench --url "$BENCH_URL" wait "$J" --timeout 900 \
+        --on-artifacts "$ARTIFACTS_DIR/robodog-shots"
+  cat "$ARTIFACTS_DIR/robodog-shots/shots/"*_analysis.txt
+fi
+```
+
+`wait` exits `0` (pass), `2` (assertion failed — iterate), `75` (bench busy —
+report `waiting`, never `failed`), `78` (board quarantined — stop and tell the
+operator to replug). Read the vision transcription + `panel_landscape.png`; the
+final frame should show the header date/time (WiFi + sync healthy) and the
+expected rows/status words. A BLANK header + `no wifi` is the expected pre-sync
+boot frame, not a pass. If the intended state is not on the panel, iterate.
+
+**Local fallback** (only when the bench is unreachable):
 
 ```bash
 # 1. real compile

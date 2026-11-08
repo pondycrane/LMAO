@@ -23,7 +23,10 @@ IDF_IMG="${IDF_IMG:-espressif/idf:v5.3.1}"
 # main-task stack — which reset-loops the board in the sync+render chain (stack
 # overflow right after WiFi gets an IP).  Fail loudly instead of flashing a
 # board that reboots every cycle.
-STACK=$(grep -E '^CONFIG_ESP_MAIN_TASK_STACK_SIZE=' "$APP/sdkconfig" 2>/dev/null | cut -d= -f2)
+# A fresh checkout has no `sdkconfig` (gitignored, generated on first
+# configure), so the grep must tolerate a missing file: `set -euo pipefail`
+# turns grep's exit 2 into an abort before docker ever runs.
+STACK=$(grep -E '^CONFIG_ESP_MAIN_TASK_STACK_SIZE=' "$APP/sdkconfig" 2>/dev/null | cut -d= -f2 || true)
 if [ -n "${STACK:-}" ] && [ "$STACK" -lt 8192 ]; then
     echo "error: sdkconfig has CONFIG_ESP_MAIN_TASK_STACK_SIZE=$STACK (< 8192)." >&2
     echo "       The sync+render+RDSHOT chain overflows the IDF default stack." >&2
