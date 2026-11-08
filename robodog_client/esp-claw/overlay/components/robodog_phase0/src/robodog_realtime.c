@@ -1131,7 +1131,10 @@ static void rt_watchdog_task(void *arg)
         if (held_us < 2000000) {
             continue;
         }
-        ESP_LOGW(TAG, "RT turn watchdog: stage=%s held=%us ws=%d "
+        /* The prefix carries the gate's diagnostic keywords (ASR / capture):
+         * the bench gate prints only the LAST 12 console lines matching them,
+         * and the idle ring-overflow warnings would otherwise hide this. */
+        ESP_LOGW(TAG, "RT turn watchdog ASR/capture: stage=%s held=%us ws=%d "
                  "int_free=%u psram_free=%u",
                  rt_stage_name(stage), (unsigned)(held_us / 1000000),
                  (int)robodog_rt_connected(),
