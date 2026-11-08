@@ -1087,22 +1087,34 @@ Chinese reply (the vision prompt forbids translation).
   `passed` and a missing acoustic rig must never read as a green gate (a node
   that opens but is not coupled to the board still fails honestly on the ASR
   legs).
-- **The board's mic PGA is raised in-tree**: `patches/0005-mic-gain.patch`
-  (applied by `build_esp_claw.sh` over the pristine upstream board file, never
-  vendored) sets the ES7210 `adc_init_gain` from the upstream `0` to **30 dB**
-  (`get_db()` supports GAIN_0DB..GAIN_37_5DB).  At 0 dB PGA the gate's dongle
-  put the corpus only ~11 dB above the board mic's noise floor (~−56 dB mean;
-  `vad_max` 53–72, `peak` 191–232 with `RD_PLAY_VOL` 0.7–2.0), i.e. under the
-  RT VAD threshold (mean-abs > 300) and unintelligible to ASR.  The VAD
-  threshold itself stays honest — a silent rig must still fail, not be tuned
-  down to pass.
-- **The acoustic rig stays marginal even with the PGA raised.**  The gate
-  expects the USB dongle's speaker within a few cm of the board's mic: doubling
+- **The board yaml's `adc_init_gain` is dead config in esp_board_manager
+  0.6.2.**  `patches/0005-mic-gain.patch` (applied by `build_esp_claw.sh` over
+  the pristine upstream board file, never vendored) raises the ES7210
+  `adc_init_gain` from the upstream `0` to **30 dB**, but nothing reads it:
+  the field only appears in the component's header, the board yaml and the
+  codegen, and no runtime `.c` applies it (`dev_audio_codec.c` only calls
+  `esp_codec_dev_new()`), so the patch cannot move the PGA.  The gain that
+  actually applies comes from the capture hub: `audio_capture_start()` calls
+  `esp_codec_dev_set_in_gain(codec, 42)` after `esp_codec_dev_open()`, and
+  esp_codec_dev 1.6.2 maps 42 dB through the ES7210 `get_db()` to
+  **GAIN_37_5DB** (the top step).  `patches/0006-mic-pga-readback.patch` reads
+  registers `0x43`/`0x44` back, logs the live index every turn
+  (`RT mic pga idx=…`, 0 = 0 dB, 10 = 30 dB, 14 = 37.5 dB) and forces
+  MIC1/MIC2 to +37.5 dB when the readback still shows 0 dB — necessary
+  because `esp_codec_dev_set_in_gain()` ignores the codec driver's return
+  value, so a rejected I2C write leaves the ADC at 0 dB while the hub believes
+  it set 42 dB.  The VAD threshold itself stays honest — a silent rig must
+  still fail, not be tuned down to pass.
+- **The acoustic rig stays marginal even at the top PGA.**  The gate expects
+  the USB dongle's speaker within a few cm of the board's mic: doubling
   `RD_PLAY_VOL` moved the board's mean only +2.7 dB (the dongle speaker
-  saturates), so drive level cannot close a 15–20 dB coupling gap.  Position the
-  speaker close, keep the dongle mic at its measured 82 % / +25.5 dB capture
-  level, and re-check `vad_max`/`peak` in the first pump line before blaming the
-  firmware.
+  saturates), so drive level cannot close a coupling gap.  With the dongle
+  plugged into op4's hub port 3 and the corpus played into
+  `plughw:CARD=Device`, the turn log reads `vad_max=203 peak=639` — ~5× the
+  earlier `vad_max=37 peak=126` — but still under the RT VAD threshold
+  (mean-abs > 300), so no utterance reaches ASR.  Position the speaker closer,
+  keep the dongle mic at its measured 82 % / +25.5 dB capture level, and read
+  `vad_max`/`vad_min`/`peak`/`pga` in the turn log before blaming the firmware.
 
 ### Gate (hardware-verified)
 
