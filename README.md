@@ -1326,6 +1326,26 @@ archon workflow run lmao-feature-dev "Add X to Y"     # idea → gated feature �
 See [docs/archon-workflows.md](docs/archon-workflows.md) for the gate chain,
 commands, and design rationale (issue #89).
 
+### 11b. dsh-superagent (issue → PR driver)
+
+The DeepSeek Harness **superagent** bundle runs on `selfhost` as
+`dsh-superagent.service` under a dedicated OS account (`dsh-agent`): a GitHub
+mention becomes a Ticket, an Executor Session and a PR, with hardware
+verification routed through the **bench** (`cluster-ops/benchd` on op4) rather
+than a local serial port. Everything is local — the model is the TensorFold
+DeepSeek endpoint on the LAN, never `api.deepseek.com`.
+
+```bash
+sudo bash tools/dsh_superagent_install.sh      # idempotent host install
+python3 tools/dsh_superagent_settings.py       # policy / executor / prompts / Source
+```
+
+It ships in **`observe`** mode (records "would accept", acts on nothing) so it
+cannot compete with the Archon gate chain for the repo or the board. The agent
+GitHub account is an operator step. See
+[docs/superagent.md](docs/superagent.md) for the deployment, layout, evidence
+and the remaining steps (issue #303).
+
 ### 12. Run the Human Client
 
 ```bash
