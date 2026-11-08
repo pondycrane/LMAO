@@ -76,6 +76,16 @@ if [ ! -f "$SRC/.robodog_mic_gain_patched" ]; then
     touch "$SRC/.robodog_mic_gain_patched"
     REBUILD_FLAG=1
 fi
+# 2f. Read the ES7210 mic PGA back after the capture hub sets it, and force it to
+#     the +37.5 dB ceiling when the high-level esp_codec_dev_set_in_gain() call
+#     did not land (it swallows the codec driver's return value, so a rejected
+#     write leaves the ADC at 0 dB while the hub believes it set 42 dB) (#301).
+if [ ! -f "$SRC/.robodog_mic_pga_readback_patched" ]; then
+    echo "applying $APP/esp-claw/patches/0006-mic-pga-readback.patch"
+    (cd "$SRC" && patch -p1 < "$APP/esp-claw/patches/0006-mic-pga-readback.patch")
+    touch "$SRC/.robodog_mic_pga_readback_patched"
+    REBUILD_FLAG=1
+fi
 # 2b. The board's setup_device.c (ST7305 custom panel + the RoboDog RD_SHOT
 #     capture hook) is owned by LMAO in the overlay and wholesale-copied over
 #     the upstream waveshare board copy each build - drops the fragile

@@ -1,0 +1,55 @@
+RoboDog #301: state the live ES7210 mic PGA on the console and force it to
++37.5 dB when the high-level esp_codec_dev_set_in_gain() call did not land.
+
+esp_codec_dev's set_in_gain() ignores the codec driver's return value, so a
+rejected I2C write silently leaves the ADC at 0 dB while the capture hub
+believes it set 42 dB.  Reading registers 0x43/0x44 back makes the bench
+console state the gain the ADC actually runs at (the subscribe line fires on
+every RT turn).
+
+--- a/components/common/audio_hub/src/audio_capture.c
++++ b/components/common/audio_hub/src/audio_capture.c
+@@ -453,6 +453,27 @@
+         if (cret != ESP_CODEC_DEV_OK) {
+             ESP_LOGW(TAG, "set default input_gain=%d dB failed: %d", (int)h->input_gain_db, cret);
+         }
++        /* RoboDog (#301): read the ES7210 PGA back.  esp_codec_dev swallows the
++         * codec driver's set_mic_gain() return value, so a rejected/failed I2C
++         * write would silently leave the ADC at 0 dB and the corpus under the
++         * VAD floor.  Registers 0x43..0x46 hold MIC1..MIC4 gain in the low
++         * nibble (bit4 = enable; 0 = 0 dB, 10 = 30 dB, 14 = 37.5 dB). */
++        int reg_mic1 = -1;
++        int reg_mic2 = -1;
++        int r1 = esp_codec_dev_read_reg(h->codec_dev, 0x43, &reg_mic1);
++        int r2 = esp_codec_dev_read_reg(h->codec_dev, 0x44, &reg_mic2);
++        ESP_LOGI(TAG, "mic pga readback: mic1=0x%02x mic2=0x%02x (read %d/%d) requested=%d dB",
++                 reg_mic1, reg_mic2, r1, r2, (int)h->input_gain_db);
++        if (r1 == ESP_CODEC_DEV_OK && (reg_mic1 & 0x0f) == 0) {
++            /* The high-level gain call did not land: force MIC1/MIC2 to the
++             * +37.5 dB ceiling so a bench run can measure what the ADC can
++             * actually deliver on this rig. */
++            ESP_LOGW(TAG, "mic pga still 0 dB - forcing ES7210 MIC1/MIC2 to +37.5 dB");
++            esp_codec_dev_write_reg(h->codec_dev, 0x43, 0x10 | 14);
++            esp_codec_dev_write_reg(h->codec_dev, 0x44, 0x10 | 14);
++            esp_codec_dev_read_reg(h->codec_dev, 0x43, &reg_mic1);
++            ESP_LOGI(TAG, "mic pga after force: mic1=0x%02x", reg_mic1);
++        }
+     }
+ 
+     h->running = true;
+@@ -539,6 +560,15 @@
+     }
+ 
+     xSemaphoreTake(capture->mtx, portMAX_DELAY);
++    /* RoboDog (#301): state the live ES7210 PGA at every subscriber open (the
++     * RT lane opens one per turn) so the bench console shows the gain the ADC
++     * actually runs at, not just the value the hub asked for. */
++    {
++        int reg_mic1 = -1;
++        if (esp_codec_dev_read_reg(capture->codec_dev, 0x43, &reg_mic1) == ESP_CODEC_DEV_OK) {
++            ESP_LOGI(TAG, "mic pga at subscribe: mic1=0x%02x (gain idx %d)", reg_mic1, reg_mic1 & 0x0f);
++        }
++    }
+     struct audio_capture_subscriber *s = &capture->subs[role];
+     if (s->open) {
+         xSemaphoreGive(capture->mtx);
