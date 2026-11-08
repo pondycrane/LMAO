@@ -527,11 +527,25 @@ def run_loop(n, instr, artifacts, voice_verify):
             # capture fault.  The tail keeps every line, so nothing scrolled
             # past (the old byte spill lost this evidence behind the RD_SHOT
             # dump).
+            # Persist the WHOLE ASR-window console (minus the RD_SHOT dumps)
+            # as an artifact: the last-12 keyword filter below is a summary,
+            # but a wedged turn needs the full sequence — `RT pump` /
+            # `RT capture done` / `RT utterance capped` / `RT no speech` /
+            # `RT capture fault` — which the keyword filter drops (the pump
+            # line carries none of the keywords, and the exit reason scrolls
+            # past the last-12 window).
+            window = [ln for ln in tail.take(0, 0)[0][asr_start:cur]
+                      if "RD_SHOT" not in ln]
+            (run_dir / "console_asr.log").write_text("\n".join(window) + "\n")
+            res["artifacts"]["console_log"] = str(run_dir / "console_asr.log")
+            if window:
+                log("board console during the ASR window (tail):")
+                for bl in window[-40:]:
+                    log("   | " + bl.strip()[:160])
             board_lines = [
-                ln for ln in tail.take(0, 0)[0][asr_start:cur]
+                ln for ln in window
                 if any(k in ln for k in ("robodog_voice", "ASR", "utterance",
                                          "speech", "bail", "SPIRAM", "capture"))
-                and "RD_SHOT" not in ln
             ]
             if board_lines:
                 log("board capture/VAD/ASR decisions (no `ASR text=`):")
