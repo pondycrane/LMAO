@@ -41,9 +41,12 @@ import e2e_rig  # noqa: E402  (shared rig: board/audio/ASR/console scaffolding)
 BOARD_VID, BOARD_PID = 0x303A, 0x1001
 SOUND_CARD = os.environ.get("RD_SOUND_CARD", "Device")
 # ALSA device for the test rig (test speaker out + test mic in).  The
-# bidirectional USB PnP Audio device is card 2 (hw:2) on the workspace host;
-# there is no `default` alias.  Override with RD_ALSA_DEVICE.
-ALSA_DEV = os.environ.get("RD_ALSA_DEVICE", "hw:2")
+# bidirectional USB PnP Audio device is card 2 on the workspace host, and the
+# working node there is `plughw:2` — the raw `hw:2` node fails with EIO on the
+# current kernel (verified 2026-10-27).  `resolve_alsa()` probes candidates and
+# overrides this; RD_ALSA_DEVICE pins it.
+ALSA_DEV = os.environ.get("RD_ALSA_DEVICE", "")
+ALSA_SG = os.environ.get("E2E_AUDIO_SG", "sg audio -c")
 PLAY_VOL = float(os.environ.get("RD_PLAY_VOL", "0.7"))
 N_RUNS = int(os.environ.get("E2E_RUNS", "1"))
 ASR_TIMEOUT = int(os.environ.get("E2E_ASR_TIMEOUT", "90"))
@@ -147,14 +150,77 @@ def play_wav(path: Path, volume: float = PLAY_VOL):
     # The board's mic sits far from the test speaker (marginal coupling, the
     # documented RING PASS-WEAK rig): stream the corpus TWICE back-to-back at
     # realtime so the energy-VAD and Whisper get a clear, repeatable signal.
-    e2e_rig.play_wav(path, ALSA_DEV, volume=volume, loop=2, channels=2,
-                     rate=None, sg=e2e_rig.SILENCE)
+    r = e2e_rig.play_wav(path, ALSA_DEV, volume=volume, loop=2, channels=2,
+                         rate=None, sg=ALSA_SG)
+    if r.returncode != 0:
+        # A failed playback used to be silent, so the gate blamed the board's
+        # capture/VAD for hearing nothing (#301).  Make it loud.
+        log(f"corpus playback FAILED rc={r.returncode} dev={ALSA_DEV!r} "
+            f"sg={ALSA_SG!r}: {r.stderr[-240:].strip()}")
+        return False
+    return True
 
 
 def capture_mic(path: Path, seconds: float):
-    e2e_rig.capture_mic(path, ALSA_DEV, seconds, channels=1, rate=16000,
-                        sg=e2e_rig.SILENCE)
+    r = e2e_rig.capture_mic(path, ALSA_DEV, seconds, channels=1, rate=16000,
+                            sg=ALSA_SG)
+    if r.returncode != 0:
+        log(f"mic capture FAILED rc={r.returncode} dev={ALSA_DEV!r} "
+            f"sg={ALSA_SG!r}: {r.stderr[-240:].strip()}")
     return path
+
+
+def audio_env_report():
+    """One console line with the rig's ALSA reality: a bench job can run in a
+    sandbox with no /dev/snd at all, and that must be visible, not inferred."""
+    snd = sorted(p.name for p in Path("/dev/snd").glob("*")) \
+        if Path("/dev/snd").is_dir() else []
+    try:
+        cards = Path("/proc/asound/cards").read_text().strip() or "(empty)"
+    except OSError:
+        cards = "(missing)"
+    try:
+        r = shell_run("aplay -l", timeout=10)
+        pcm = " / ".join(r.stdout.strip().splitlines()[:6]) or "(none)"
+    except Exception:  # noqa: BLE001
+        pcm = "(aplay failed)"
+    log(f"audio env: /dev/snd={snd} /proc/asound/cards={cards!r} "
+        f"aplay-l={pcm!r}")
+
+
+def resolve_alsa():
+    """Pick the ALSA device + `sg` wrapper the rig can actually OPEN.
+
+    The documented rig node is `plughw:2` (raw `hw:2` returns EIO on the
+    current kernel), but the card id/index differs per host, so probe each
+    candidate with a 0.3 s null-source playback and take the first that exits
+    0.  Every attempt is logged: a silent open failure is what made the bench
+    gate read "the board heard nothing" as a firmware stall (#301).
+    """
+    card = detect_sound_card()
+    cands = []
+    if ALSA_DEV:
+        cands.append(ALSA_DEV)
+    if card:
+        cands += [f"plughw:CARD={card}", f"hw:CARD={card}"]
+    cands += ["plughw:2", "hw:2", "plughw:1", "hw:1", "plughw:0", "hw:0",
+              "default"]
+    seen = set()
+    for dev in cands:
+        if dev in seen:
+            continue
+        seen.add(dev)
+        for sg in (ALSA_SG, ""):
+            try:
+                r = e2e_rig.probe_alsa_device(dev, sg=sg)
+            except subprocess.TimeoutExpired:
+                log(f"alsa probe dev={dev} sg={sg!r} TIMEOUT")
+                continue
+            log(f"alsa probe dev={dev} sg={sg!r} rc={r.returncode}"
+                + (f" err={r.stderr.strip()[-160:]}" if r.returncode else ""))
+            if r.returncode == 0:
+                return dev, sg
+    return None, None
 
 
 def trim_loudest_window(path: Path, out: Path, seconds: float):
@@ -497,7 +563,12 @@ def run_loop(n, instr, artifacts, voice_verify):
         # The corpus pins its own drive level: the rig's speaker->board-mic
         # coupling needs a louder drive for Chinese (0.7 decoded one word,
         # 0.9 the whole sentence), while English is fine at the default.
-        play_wav(target_wav, volume=instr.get("play_vol", PLAY_VOL))
+        played = play_wav(target_wav, volume=instr.get("play_vol", PLAY_VOL))
+        res["artifacts"]["playback"] = "ok" if played else "FAILED"
+        if not played:
+            res["asserts"]["PLAYBACK"] = (
+                f"FAIL (corpus playback failed on {ALSA_DEV} — rig audio, "
+                "not the board's capture/VAD)")
 
         asr_start = cur
         m_asr, cur = wait_for_log(
@@ -1123,15 +1194,20 @@ def main():
     artifacts = Path(args.artifacts) / tag
     artifacts.mkdir(parents=True, exist_ok=True)
 
-    global DETECTED_PORT
+    global DETECTED_PORT, ALSA_DEV, ALSA_SG
     DETECTED_PORT = detect_board_port()
+    audio_env_report()
     card = detect_sound_card()
-    log(f"board={DETECTED_PORT or 'NONE'} sound='{card}' runs={N_RUNS} corpus={args.corpus}")
+    dev, sg = resolve_alsa()
+    if dev is not None:
+        ALSA_DEV, ALSA_SG = dev, sg
+    log(f"board={DETECTED_PORT or 'NONE'} sound='{card}' alsa={ALSA_DEV!r} "
+        f"sg={ALSA_SG!r} runs={N_RUNS} corpus={args.corpus}")
     skips = []
     if not DETECTED_PORT:
         skips.append("ROBODOG BOARD NOT DETECTED")
-    if not card:
-        skips.append("TEST AUDIO CARD NOT DETECTED (ALSA USB)")
+    if dev is None:
+        skips.append("TEST AUDIO DEVICE UNUSABLE (no ALSA node opens)")
     if skips:
         print("\nLOUD SKIP: " + "; ".join(skips) + "\n")
         (artifacts / "SKIPPED.txt").write_text("; ".join(skips) + "\n")

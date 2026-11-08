@@ -1083,16 +1083,20 @@ static void rt_uplink_task(void *arg)
 
 static void rt_pump_log(uint32_t t_ms, uint32_t frames, uint32_t captured_bytes,
                         bool ever_speech, uint32_t speech_ms,
-                        uint32_t silence_ms)
+                        uint32_t silence_ms, int32_t vad_max, int32_t peak)
 {
     const uint32_t avg_ms =
         s_up_msgs != 0 ? (uint32_t)(s_up_ms_sum / s_up_msgs) : 0;
+    /* `vad_max`/`peak` are the mic levels the VAD actually saw: the gate reads
+     * a silent capture (level below RT_VAD_ENERGY for the whole window) apart
+     * from a stalled pump without a second run (issue #301). */
     ESP_LOGI(TAG, "RT pump t=%ums frames=%u captured=%u B up_dropped=%u "
-             "ever_speech=%d speech=%ums silence=%ums send last=%ums avg=%ums "
-             "max=%ums msgs=%u sent=%u B",
+             "ever_speech=%d speech=%ums silence=%ums vad_max=%d peak=%d "
+             "send last=%ums avg=%ums max=%ums msgs=%u sent=%u B",
              (unsigned)t_ms, (unsigned)frames, (unsigned)captured_bytes,
              (unsigned)s_up_dropped, (int)ever_speech, (unsigned)speech_ms,
-             (unsigned)silence_ms, (unsigned)s_up_last_ms, (unsigned)avg_ms,
+             (unsigned)silence_ms, (int)vad_max, (int)peak,
+             (unsigned)s_up_last_ms, (unsigned)avg_ms,
              (unsigned)s_up_max_ms, (unsigned)s_up_msgs,
              (unsigned)s_up_sent_bytes);
 }
@@ -1411,18 +1415,23 @@ static size_t rt_stream_utterance(bool *fault, bool keep_pcm)
     int64_t speech_t0 = -1;
     const int64_t t0 = esp_timer_get_time();
     int64_t last_log = t0;
+    int32_t vad_max = 0;   /* highest frame mean |sample| seen (the VAD metric) */
+    int32_t peak = 0;      /* highest single |sample| seen in the window      */
     const int64_t no_speech_us = (int64_t)RT_NO_SPEECH_MS * 1000LL;
     const int64_t cap_us = (int64_t)CONFIG_ROBODOG_RT_MAX_SECS * 1000000LL;
 
     for (;;) {
         const int64_t now = esp_timer_get_time();
         if (now - t0 >= cap_us) {
-            ESP_LOGW(TAG, "RT utterance capped at %d s",
-                     CONFIG_ROBODOG_RT_MAX_SECS);
+            ESP_LOGW(TAG, "RT utterance capped at %d s (vad_max=%d peak=%d)",
+                     CONFIG_ROBODOG_RT_MAX_SECS, (int)vad_max, (int)peak);
             break;
         }
         if (!ever_speech && now - t0 >= no_speech_us) {
-            ESP_LOGW(TAG, "RT no speech within %d ms, bailing", RT_NO_SPEECH_MS);
+            /* `vad_max` well under RT_VAD_ENERGY = the mic heard nothing
+             * (silent rig / dead input), not a stalled capture pump. */
+            ESP_LOGW(TAG, "RT no speech within %d ms (vad_max=%d peak=%d), "
+                     "bailing", RT_NO_SPEECH_MS, (int)vad_max, (int)peak);
             break;
         }
         if (ever_speech && now - speech_t0 >= cap_us) {
@@ -1441,10 +1450,23 @@ static size_t rt_stream_utterance(bool *fault, bool keep_pcm)
              * still run so a quiet ring can end a real utterance. */
         } else {
             int64_t sum = 0;
+            int32_t fpk = 0;
             for (size_t i = 0; i < RT_FRAME_SAMPLES; i++) {
-                sum += (frame[i] < 0) ? -(int64_t)frame[i] : (int64_t)frame[i];
+                const int32_t v = frame[i];
+                const int32_t a = v < 0 ? -v : v;
+                sum += a;
+                if (a > fpk) {
+                    fpk = a;
+                }
             }
-            const bool speech = (sum / (int64_t)RT_FRAME_SAMPLES) > RT_VAD_ENERGY;
+            const int32_t mean = (int32_t)(sum / (int64_t)RT_FRAME_SAMPLES);
+            const bool speech = mean > RT_VAD_ENERGY;
+            if (mean > vad_max) {
+                vad_max = mean;
+            }
+            if (fpk > peak) {
+                peak = fpk;
+            }
 
             /* Stream EVERY frame once speech has begun (word tails included);
              * pre-speech silence is not sent, so the model never hears the
@@ -1503,19 +1525,28 @@ static size_t rt_stream_utterance(bool *fault, bool keep_pcm)
         if (now2 - last_log >= 1000000LL) {
             rt_pump_log((uint32_t)((now2 - t0) / 1000), (uint32_t)frames,
                         (uint32_t)captured_bytes, ever_speech, speech_ms,
-                        silence_ms);
+                        silence_ms, vad_max, peak);
             last_log = now2;
         }
     }
 
     rt_pump_log((uint32_t)((esp_timer_get_time() - t0) / 1000),
                 (uint32_t)frames, (uint32_t)captured_bytes, ever_speech,
-                speech_ms, silence_ms);
+                speech_ms, silence_ms, vad_max, peak);
     ESP_LOGI(TAG, "RT capture done: frames=%u captured=%u B asr=%u B%s "
-             "up_dropped=%u ever_speech=%d speech=%ums silence=%ums",
+             "up_dropped=%u ever_speech=%d speech=%ums silence=%ums "
+             "vad_max=%d peak=%d",
              (unsigned)frames, (unsigned)captured_bytes, (unsigned)s_asr_len,
              s_asr_truncated ? " (truncated)" : "", (unsigned)s_up_dropped,
-             (int)ever_speech, (unsigned)speech_ms, (unsigned)silence_ms);
+             (int)ever_speech, (unsigned)speech_ms, (unsigned)silence_ms,
+             (int)vad_max, (int)peak);
+    /* Close the subscriber for the idle gap: the capture task only reads the
+     * codec while a subscriber is open, so leaving it open between turns
+     * captures ~32 KB/s into a ring nobody drains (the ring-overflow warning
+     * flood the bench console showed in issue #301) and keeps the mic hot.
+     * The next turn reopens it and flushes the ring. */
+    (void)audio_capture_close_subscriber(sub);
+    sub = NULL;
     if (captured_bytes == 0) {
         ESP_LOGE(TAG, "RT capture stream produced no audio (codec/I2S RX?)");
         *fault = true;
@@ -1567,11 +1598,13 @@ esp_err_t robodog_rt_turn(robodog_rt_mode_t mode, robodog_rt_turn_t *out)
         out->fault = true;
         ESP_LOGE(TAG, "RT capture fault; ending turn");
         robodog_ui_set_agent_state("error");
+        rt_stage_set(RT_STAGE_IDLE); /* never leave the watchdog on capture */
         return ESP_FAIL;
     }
     if (samples == 0) {
         ESP_LOGW(TAG, "RT no usable utterance");
         robodog_ui_set_agent_state("idle");
+        rt_stage_set(RT_STAGE_IDLE); /* the turn ended: not still capturing */
         return ESP_OK;
     }
     s_turn.captured = true; /* the utterance is now in the session */
@@ -1580,6 +1613,7 @@ esp_err_t robodog_rt_turn(robodog_rt_mode_t mode, robodog_rt_turn_t *out)
         out->fault = true;
         ESP_LOGE(TAG, "RT uplink socket down; ending turn");
         robodog_ui_set_agent_state("error");
+        rt_stage_set(RT_STAGE_IDLE);
         return ESP_FAIL;
     }
     if (!rt_up_drain(RT_UP_DRAIN_MS)) {
@@ -1597,6 +1631,7 @@ esp_err_t robodog_rt_turn(robodog_rt_mode_t mode, robodog_rt_turn_t *out)
     if (rt_send(commit) != ESP_OK) {
         out->fault = true;
         out->captured = true;
+        rt_stage_set(RT_STAGE_IDLE);
         return ESP_FAIL;
     }
 
@@ -1645,6 +1680,7 @@ esp_err_t robodog_rt_turn(robodog_rt_mode_t mode, robodog_rt_turn_t *out)
     if (rt_send(resp) != ESP_OK) {
         out->fault = true;
         out->captured = true;
+        rt_stage_set(RT_STAGE_IDLE);
         return ESP_FAIL;
     }
     robodog_ui_set_agent_state(want_audio ? "responding" : "processing");
@@ -1654,6 +1690,7 @@ esp_err_t robodog_rt_turn(robodog_rt_mode_t mode, robodog_rt_turn_t *out)
         err = rt_playback_begin(&track);
         if (err != ESP_OK) {
             out->fault = true;
+            rt_stage_set(RT_STAGE_IDLE);
             return err;
         }
     }
@@ -1687,6 +1724,7 @@ esp_err_t robodog_rt_turn(robodog_rt_mode_t mode, robodog_rt_turn_t *out)
     if ((bits & RT_BIT_ERR) != 0) {
         out->fault = true;
         robodog_ui_set_agent_state("error");
+        rt_stage_set(RT_STAGE_IDLE);
         return ESP_FAIL;
     }
     if ((bits & RT_BIT_DONE) == 0) {
@@ -1694,6 +1732,7 @@ esp_err_t robodog_rt_turn(robodog_rt_mode_t mode, robodog_rt_turn_t *out)
                  CONFIG_ROBODOG_RT_TIMEOUT_MS);
         out->fault = true;
         robodog_ui_set_agent_state("error");
+        rt_stage_set(RT_STAGE_IDLE);
         return ESP_ERR_TIMEOUT;
     }
 

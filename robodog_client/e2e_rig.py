@@ -97,8 +97,21 @@ def detect_board_port():
 
 
 def detect_sound_card(default="Device"):
-    """Configured ALSA card id, else the first USB audio card."""
-    for line in Path("/proc/asound/cards").read_text().splitlines():
+    """Configured ALSA card id, else the first USB audio card.
+
+    `aplay -L` prints a device name on one line and its INDENTED description
+    on the next, with the `null` plugin FIRST on a plain-ALSA host.  Matching
+    "the first line that is not `default`/`null`" therefore returns the null
+    DESCRIPTION ("Discard all samples (playback) or generate zero samples
+    (capture)") and hides every real card — which is how the bench gate ended
+    up playing the corpus into a non-existent device and reading "the board
+    heard nothing" as a firmware stall (#301).
+    """
+    try:
+        lines = Path("/proc/asound/cards").read_text().splitlines()
+    except OSError:
+        lines = []
+    for line in lines:
         if "USB-Audio" in line and "[" in line:
             card = line.split("[", 1)[1].split("]", 1)[0].strip()
             if card:
@@ -106,9 +119,12 @@ def detect_sound_card(default="Device"):
     try:
         out = subprocess.run(["aplay", "-L"], capture_output=True, text=True)
         for line in out.stdout.splitlines():
-            line = line.strip()
-            if line and "default" not in line and line != "null":
-                return line
+            if not line or line[0].isspace():
+                continue  # description line, not a PCM name
+            name = line.strip()
+            if name in ("null", "default") or name.startswith("default:"):
+                continue
+            return name
     except Exception:  # noqa: BLE001 — aplay absent is not fatal
         pass
     return default
@@ -127,6 +143,18 @@ def audio_cmd(core, sg=None):
     """
     sg = SILENCE if sg is None else sg
     return f"{sg} '{core}'" if sg else core
+
+
+def probe_alsa_device(dev, sg=None, seconds=0.3):
+    """Run one short null-source playback to prove `dev` actually OPENS.
+
+    A device name can be present in `aplay -L` and still fail on open (the
+    raw `hw:2` node returns EIO on the current kernel); probing is the only
+    way to know before the gate silently plays a corpus nobody hears.
+    """
+    core = (f"ffmpeg -hide_banner -loglevel error -f lavfi "
+            f"-i anullsrc=r=16000:cl=mono -t {seconds:.1f} -f alsa {dev}")
+    return shell_run(audio_cmd(core, sg), timeout=20)
 
 
 def play_wav(path, device, volume=0.7, loop=1, channels=1, rate=16000,
