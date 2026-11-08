@@ -112,3 +112,23 @@ py_binary(
     visibility = ["//visibility:public"],
     deps = [":check_node_addresses_lib"],
 )
+
+# dsh-superagent host deployment (issue #303): the bundle runs on selfhost as a
+# systemd service under the dedicated `dsh-agent` account. The installer is a
+# host script (it needs root for the unit + env file); the settings tool talks
+# to the loopback Management API of that profile.
+#   sudo bash tools/dsh_superagent_install.sh
+#   python3 tools/dsh_superagent_settings.py
+sh_binary(
+    name = "dsh_superagent_install",
+    srcs = ["dsh_superagent_install.sh"],
+    data = ["dsh_superagent_settings.py"],
+    visibility = ["//visibility:public"],
+)
+
+py_binary(
+    name = "dsh_superagent_settings",
+    srcs = ["dsh_superagent_settings.py"],
+    main = "dsh_superagent_settings.py",
+    visibility = ["//visibility:public"],
+)
