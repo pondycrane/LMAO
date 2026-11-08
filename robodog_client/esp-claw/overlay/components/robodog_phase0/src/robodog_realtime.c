@@ -170,6 +170,15 @@ static int64_t           s_commit_us;
 static bool              s_audio_started;
 static bool              s_want_audio;     /* this turn's modality choice   */
 static bool              s_render_reply;   /* stream the reply onto the RLCD */
+/* Turn-stage watchdog: the turn runs on the voice task, and a blocking HTTP /
+ * socket call is invisible in the console until it returns.  The stage + its
+ * age are logged once a stage is held >2 s, so a wedged commit/ASR is named in
+ * the gate's console diagnostics instead of looking like a silent turn. */
+enum { RT_STAGE_IDLE = 0, RT_STAGE_CAPTURE, RT_STAGE_COMMIT, RT_STAGE_ASR,
+       RT_STAGE_RESPONSE, RT_STAGE_DONE };
+static volatile int     s_stage;
+static volatile int64_t s_stage_since;
+static TaskHandle_t     s_wd_task;
 static int               s_listen_retries; /* explicit re-asks after listen */
 static bool              s_saw_think;      /* the reply carried a think block */
 static bool              s_think_suppress; /* ... so server audio is dropped  */
@@ -1088,6 +1097,49 @@ static void rt_pump_log(uint32_t t_ms, uint32_t frames, uint32_t captured_bytes,
              (unsigned)s_up_sent_bytes);
 }
 
+static const char *rt_stage_name(int stage)
+{
+    switch (stage) {
+    case RT_STAGE_CAPTURE:  return "capture";
+    case RT_STAGE_COMMIT:   return "commit";
+    case RT_STAGE_ASR:      return "asr";
+    case RT_STAGE_RESPONSE: return "response";
+    case RT_STAGE_DONE:     return "done";
+    default:                return "idle";
+    }
+}
+
+static void rt_stage_set(int stage)
+{
+    s_stage = stage;
+    s_stage_since = esp_timer_get_time();
+}
+
+/* Logs the current stage (with its age + heap + socket state) once it has been
+ * held for >2 s: the one diagnostic that distinguishes a wedged socket write
+ * from a wedged HTTP round trip on the bench console. */
+static void rt_watchdog_task(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        const int stage = s_stage;
+        if (stage == RT_STAGE_IDLE) {
+            continue;
+        }
+        const int64_t held_us = esp_timer_get_time() - s_stage_since;
+        if (held_us < 2000000) {
+            continue;
+        }
+        ESP_LOGW(TAG, "RT turn watchdog: stage=%s held=%us ws=%d "
+                 "int_free=%u psram_free=%u",
+                 rt_stage_name(stage), (unsigned)(held_us / 1000000),
+                 (int)robodog_rt_connected(),
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+    }
+}
+
 /* ── explicit ASR (chat/completions, same omni model) ───────────────────── */
 
 /* The deployed Qwen lane never emits the realtime transcription event, so the
@@ -1230,8 +1282,10 @@ static void rt_asr_utterance(robodog_rt_turn_t *out)
         return;
     }
     const size_t body_len = (size_t)hl + b64_len + (size_t)tl;
-    ESP_LOGI(TAG, "RT ASR request: %s (%u B pcm, %u B body)",
-             url, (unsigned)s_asr_len, (unsigned)body_len);
+    ESP_LOGI(TAG, "RT ASR request: %s (%u B pcm, %u B body, int_free=%u "
+             "psram_free=%u)", url, (unsigned)s_asr_len, (unsigned)body_len,
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
 
     const esp_http_client_config_t cfg = {
         .url = url,
@@ -1502,6 +1556,7 @@ esp_err_t robodog_rt_turn(robodog_rt_mode_t mode, robodog_rt_turn_t *out)
      * always reach its own no-speech / cap / silence exits (issue #301). */
     (void)rt_up_drain(RT_UP_DRAIN_MS);
 
+    rt_stage_set(RT_STAGE_CAPTURE);
     bool cap_fault = false;
     const bool keep_pcm = (mode != ROBODOG_RT_MODE_OMNI);
     const size_t samples = rt_stream_utterance(&cap_fault, keep_pcm);
@@ -1532,6 +1587,7 @@ esp_err_t robodog_rt_turn(robodog_rt_mode_t mode, robodog_rt_turn_t *out)
      * control message, no response).  The explicit ASR then runs against the
      * same model endpoint without an uncommitted buffer in flight, and the
      * response.create below picks the shape the router chose. */
+    rt_stage_set(RT_STAGE_COMMIT);
     char commit[160];
     snprintf(commit, sizeof(commit),
              "{\"type\":\"input_audio_buffer.commit\"}");
@@ -1549,6 +1605,7 @@ esp_err_t robodog_rt_turn(robodog_rt_mode_t mode, robodog_rt_turn_t *out)
     if (mode == ROBODOG_RT_MODE_OMNI) {
         want_audio = true;
     } else {
+        rt_stage_set(RT_STAGE_ASR);
         rt_asr_utterance(out);
         /* Keep the transcript in the per-turn accumulator too: the final
          * memcpy(out, &s_turn) must not lose it. */
@@ -1580,6 +1637,7 @@ esp_err_t robodog_rt_turn(robodog_rt_mode_t mode, robodog_rt_turn_t *out)
              "{\"type\":\"response.create\",\"response\":{\"modalities\":[%s]%s}}",
              want_audio ? "\"audio\",\"text\"" : "\"text\"",
              want_audio ? "" : ",\"max_output_tokens\":256");
+    rt_stage_set(RT_STAGE_RESPONSE);
     s_commit_us = esp_timer_get_time();
     if (rt_send(resp) != ESP_OK) {
         out->fault = true;
@@ -1636,6 +1694,7 @@ esp_err_t robodog_rt_turn(robodog_rt_mode_t mode, robodog_rt_turn_t *out)
         return ESP_ERR_TIMEOUT;
     }
 
+    rt_stage_set(RT_STAGE_DONE);
     memcpy(out, &s_turn, sizeof(*out));
     ESP_LOGI(TAG, "RT turn done: transcript=\"%.80s\" reply=\"%.80s\" "
              "first_audio=%u ms captured=%d think=%d dropped=%u",
@@ -1680,6 +1739,7 @@ esp_err_t robodog_rt_turn(robodog_rt_mode_t mode, robodog_rt_turn_t *out)
         robodog_rt_disconnect();
         ESP_LOGI(TAG, "RT session reset (fresh history after a think turn)");
     }
+    rt_stage_set(RT_STAGE_IDLE);
     return ESP_OK;
 }
 
@@ -1771,6 +1831,11 @@ esp_err_t robodog_rt_init(void)
     if (xTaskCreate(rt_uplink_task, "robodog_rt_up", RT_PLAY_STACK, NULL,
                     RT_PLAY_PRIO, &s_up_task) != pdPASS) {
         ESP_LOGE(TAG, "RT uplink task failed");
+        return ESP_ERR_NO_MEM;
+    }
+    if (xTaskCreate(rt_watchdog_task, "robodog_rt_wd", 3072, NULL, 2,
+                    &s_wd_task) != pdPASS) {
+        ESP_LOGE(TAG, "RT watchdog task failed");
         return ESP_ERR_NO_MEM;
     }
     s_inited = true;

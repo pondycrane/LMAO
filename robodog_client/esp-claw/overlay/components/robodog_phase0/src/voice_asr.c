@@ -134,7 +134,8 @@ static const char *json_string(const char *p, char *out, size_t cap)
             break;
         }
     }
-    return NULL; /* unterminated */
+    out[o] = '\0'; /* unterminated: still a valid C string for the caller */
+    return NULL;
 }
 
 /* Locate the string value of `key` inside `obj` (a JSON object text).
