@@ -40,15 +40,22 @@ import e2e_rig  # noqa: E402  (shared rig: board/audio/ASR/console scaffolding)
 
 BOARD_VID, BOARD_PID = 0x303A, 0x1001
 SOUND_CARD = os.environ.get("RD_SOUND_CARD", "Device")
-# ALSA device for the test rig (test speaker out + test mic in).  The
-# bidirectional USB PnP Audio device is card 2 on the workspace host, and the
-# working node there is `plughw:2` — the raw `hw:2` node fails with EIO on the
-# current kernel (verified 2026-10-27).  `resolve_alsa()` probes candidates and
-# overrides this; RD_ALSA_DEVICE pins it.
+# ALSA device for the test rig (test speaker out + test mic in).  On the
+# workspace host the bidirectional USB PnP Audio device is card 2 and the
+# working node is `plughw:2` — the raw `hw:2` node fails with EIO on that
+# kernel (verified 2026-10-27).  The bench host (op4) has NO USB audio: only
+# card 0 `sndi2s4` (onboard ES8389, not coupled to the board) and card 1
+# `allwinnerhdmi`, so on op4 the probe finds `default:CARD=sndi2s4` and the
+# acoustic legs cannot pass.  `resolve_alsa()` probes candidates and overrides
+# this; RD_ALSA_DEVICE pins it.
 ALSA_DEV = os.environ.get("RD_ALSA_DEVICE", "")
 ALSA_SG = os.environ.get("E2E_AUDIO_SG", "sg audio -c")
 PLAY_VOL = float(os.environ.get("RD_PLAY_VOL", "0.7"))
 N_RUNS = int(os.environ.get("E2E_RUNS", "1"))
+# Exit code for "the board is here but the acoustic rig is not".  benchd maps
+# rc==0 to EXIT_PASS, so a skip that returned 0 would let a missing test-audio
+# node read as a passing voice_loop job in CI.  A rig fault is a FAILURE.
+RIG_FAULT_EXIT = 4
 ASR_TIMEOUT = int(os.environ.get("E2E_ASR_TIMEOUT", "90"))
 REPLY_TIMEOUT = int(os.environ.get("E2E_REPLY_TIMEOUT", "180"))
 CONSOLE_BAUD = 115200
@@ -1203,15 +1210,26 @@ def main():
         ALSA_DEV, ALSA_SG = dev, sg
     log(f"board={DETECTED_PORT or 'NONE'} sound='{card}' alsa={ALSA_DEV!r} "
         f"sg={ALSA_SG!r} runs={N_RUNS} corpus={args.corpus}")
-    skips = []
+    # Two different absences, two different verdicts:
+    #  * no board -> the documented loud-skip convention for dev machines
+    #    (SKIPPED.txt, exit 0, never .gate-head): nothing can be verified.
+    #  * board present but no ALSA test node opens -> a RIG FAULT, not a skip.
+    #    benchd maps rc==0 to EXIT_PASS, so exiting 0 here would let a missing
+    #    acoustic rig read as a passing voice_loop job in CI.  Exit 4 instead
+    #    so the job reports failed.
     if not DETECTED_PORT:
-        skips.append("ROBODOG BOARD NOT DETECTED")
-    if dev is None:
-        skips.append("TEST AUDIO DEVICE UNUSABLE (no ALSA node opens)")
-    if skips:
-        print("\nLOUD SKIP: " + "; ".join(skips) + "\n")
-        (artifacts / "SKIPPED.txt").write_text("; ".join(skips) + "\n")
+        msg = "ROBODOG BOARD NOT DETECTED"
+        print(f"\nLOUD SKIP: {msg}\n")
+        (artifacts / "SKIPPED.txt").write_text(msg + "\n")
         return 0
+    if dev is None:
+        msg = (
+            "TEST AUDIO DEVICE UNUSABLE (no ALSA node opens) — RIG FAULT, "
+            "NOT A PASS: the corpus cannot reach the board's mic"
+        )
+        print(f"\nLOUD SKIP: {msg}\n")
+        (artifacts / "RIG_UNUSABLE.txt").write_text(msg + "\n")
+        return RIG_FAULT_EXIT
 
     man = json.loads((HERE.parent / "voice" / "corpus" / "corpus.json").read_text())
     if args.corpus not in man:

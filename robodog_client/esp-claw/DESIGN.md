@@ -1069,12 +1069,24 @@ Chinese reply (the vision prompt forbids translation).
 - The test rig: the bidirectional USB PnP Audio device is **card 2** on the
   workspace host; there is **no ALSA `default` alias**.  The raw `hw:2` node
   returns `EIO` on the current kernel — the working node is **`plughw:2`**.
+  The bench host (op4) has **no USB audio at all**: only card 0 `sndi2s4`
+  (onboard ES8389, not coupled to the RoboDog board) and card 1
+  `allwinnerhdmi`; benchd's defaults (`BENCH_AUDIO_PLAYBACK`/
+  `BENCH_AUDIO_CAPTURE` = `default:CARD=sndi2s4`) therefore play into the
+  onboard codec and record from it — a 3 s capture there measures
+  `mean_volume −76.5 dB`, `max_volume −45.6 dB`, i.e. the noise floor.
   `robodog_claw_e2e.py` probes candidate nodes (`plughw:CARD=<id>`, `plughw:2`,
   `hw:2`, `default`, each with and without the `sg audio` wrapper) with a 0.3 s
   null-source playback and drives the first that opens; `RD_ALSA_DEVICE` pins
   one.  It logs `/dev/snd`, `aplay -l`, the chosen node and every probe result,
   and LOUD-SKIPS when no node opens — a playback failure is never silently
-  reported as "the board heard nothing" (issue #301).
+  reported as "the board heard nothing" (issue #301).  The skip is split by
+  verdict: **no board** keeps the documented loud-skip convention (`SKIPPED.txt`,
+  exit 0), while **board present but no ALSA node opens** is a **rig fault** —
+  it writes `RIG_UNUSABLE.txt` and exits **4**, because benchd maps rc==0 to
+  `passed` and a missing acoustic rig must never read as a green gate (a node
+  that opens but is not coupled to the board still fails honestly on the ASR
+  legs).
 
 ### Gate (hardware-verified)
 

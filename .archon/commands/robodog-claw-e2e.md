@@ -112,8 +112,23 @@ curl -s -m 8 -o /dev/null -w '%{http_code}\n' -H 'Content-Type: application/json
 ## Phase 2: DETECT — board + test audio
 
 `robodog_claw_e2e.py` detects the board (`ROBODOG_PORT` wins, else
-`0x303A:0x1001`) and the ALSA USB test card. Absent either → LOUD SKIP (writes
-`SKIPPED.txt`, returns 0, never writes `.gate-head`).
+`0x303A:0x1001`) and probes for an ALSA test node (`resolve_alsa()`: card-id
+form, then indices, with and without `sg audio -c`). The two absences have
+different verdicts:
+
+- **No board** → the documented loud-skip convention: `SKIPPED.txt`, returns
+  0, never writes `.gate-head` (a dev machine cannot verify anything).
+- **Board present, no ALSA node opens** → a **rig fault**, not a skip: prints
+  `RIG FAULT, NOT A PASS`, writes `RIG_UNUSABLE.txt`, returns **4**. benchd
+  maps rc==0 to `passed`, so a skip that returned 0 would let a missing
+  acoustic rig read as a green voice_loop job in CI; exit 4 makes the job
+  report failed. The gate's own `hardware-e2e.md` is still authored only by
+  the gate node, never by the bench job.
+
+A node that opens but is not acoustically coupled to the board (e.g. op4's
+onboard `default:CARD=sndi2s4`) still fails honestly on the ASR legs — the
+console shows `RT no speech within 12000 ms (vad_max=… peak=…)` with
+`ever_speech=0`.
 
 ## Phase 3: RUN THE LOOP
 
