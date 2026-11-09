@@ -27,12 +27,17 @@ description: |
      comment-quality / docs-impact) -> synthesize
   5. implement-fixes: act on the review findings, rebuild + RE-FLASH the board
      if firmware changed, commit, push
-  6. FINAL gate chain re-run: lmao-validate -> robodog-claw-e2e (voice loop on
-     the real board, serial-console asserts + test-mic ring re-ASR + RD_SHOT
-     subtitle readback) -> robodog-claw-voice-verify (the chunked reply is
-     read out to its END — every `voice chunk i/n` TTS-bracketed on the
-     console + mic-capture re-ASR carries the reply's tail tokens, catching
-     truncation) -> robodog-production-health (.gate-head owner).
+  6. FINAL gate chain re-run, ALL ON THE BENCH (benchd on op4 — the board is
+     there, never on this host; every gate builds/flashes/asserts from the ONE
+     commit under test, so the assertions cannot be older than the firmware):
+       lmao-validate
+       -> robodog-claw-e2e         (one turn: capture -> ASR -> reply -> TTS
+                                    -> panel readback, via `bench submit e2e`)
+       -> robodog-claw-voice-verify (the chunked reply is read out to its END)
+       -> robodog-claw-stress      (R7 soak: N>=5 consecutive turns; a turn
+                                    that only works on the first session after
+                                    a boot is invisible to a one-turn gate)
+       -> robodog-production-health (.gate-head owner).
      Fast-pass ONLY when HEAD is unchanged since the last full chain.
   7. Final summary with decision matrix -> GitHub comment, ntfy push.
 
@@ -204,9 +209,19 @@ nodes:
     context: fresh
     model: large
 
+  # R7 soak: N consecutive voice sessions on the same bench build. Catches a
+  # turn that only works on the first session after a boot (a leaked buffer
+  # makes every later turn collapse back to idle) — invisible to a one-turn
+  # gate. Runs on the bench (bench submit stress / e2e with INCLUDE_STRESS=1).
+  - id: final-claw-stress
+    command: robodog-claw-stress
+    depends_on: [final-claw-voice-verify]
+    context: fresh
+    model: large
+
   - id: final-production-health
     command: robodog-production-health
-    depends_on: [final-claw-voice-verify]
+    depends_on: [final-claw-stress]
     context: fresh
     model: large
 

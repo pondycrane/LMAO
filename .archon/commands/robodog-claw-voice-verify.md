@@ -49,6 +49,43 @@ FULL_READOUT  : the test mic, recording across ALL chunk brackets, captured
    `$ARTIFACTS_DIR/hardware-e2e.md` either — that contract slot belongs to the
    regular `robodog-claw-e2e` node.
 
+## Phase 0: BENCH (default path — do this first)
+
+The board lives on the bench host (op4) behind `benchd`, not on this machine.
+Run this gate there, against a build you name:
+
+```bash
+# 1. Build the commit under test (one request; bench fetches it from origin).
+B=$(bench submit build --head "$HEAD_SHA" --ref "$PR_REF" --family claw --class ci \
+  --payload '{"env":{"CLAW_RT_MODEL":"Qwen/Qwen3-Omni-30B-A3B-Instruct",
+                     "CLAW_RT_DISABLE_THINKING":"n"}}')
+bench wait "$B"
+
+# 2. Flash that exact build, then run THIS gate from its worktree.
+F=$(bench submit flash_capture --head "$HEAD_SHA" --build "$B" --family claw --class ci)
+bench wait "$F"
+
+V=$(bench submit voice_loop --head "$HEAD_SHA" --build "$B" --family claw --class ci \
+  --payload '{"args":["--corpus","capabilities","--voice-verify"],
+              "env":{"RD_ALSA_DEVICE":"plughw:CARD=Device",
+                     "RD_SOUND_CARD":"Device","RD_PLAY_VOL":"0.9"}}')
+bench wait "$V" --on-artifacts "$ARTIFACTS_DIR/claw-voice"
+bench result "$V"
+```
+
+`--build "$B"` is what keeps this honest: benchd runs the gate script from
+**that build's worktree**, not the persistent clone, so the assertions cannot
+be older than the firmware. Without `--build` benchd logs a drift warning.
+
+`bench result` prints every leg (CHUNKED_QUEUE, FULL_READOUT, ...) as
+PASS/FAIL/SKIP, plus fault lines and symbolised frames on a crash.
+
+Alternatively fold it into the e2e chain: `bench submit e2e ... --payload
+'{"env":{...},"args":["--corpus","capabilities","--voice-verify"]}'`.
+
+If the bench is unreachable, fall through to Phases 1-4 below and say loudly
+in the artifact that verification ran locally.
+
 ## Phase 1: HOST PREREQUISITES
 
 ```bash
