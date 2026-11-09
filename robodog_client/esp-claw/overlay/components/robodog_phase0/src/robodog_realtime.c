@@ -1215,6 +1215,11 @@ static void rt_asr_url(char *out, size_t cap)
              (int)host_len, rest);
 }
 
+/* Bytes the ASR post actually put on the wire: a Content-Length that does not
+ * match what was written leaves the server waiting for the rest of the body,
+ * so the response never comes (#301). */
+static size_t s_asr_written;
+
 static esp_err_t rt_http_write_all(esp_http_client_handle_t client,
                                    const void *data, size_t len)
 {
@@ -1226,6 +1231,7 @@ static esp_err_t rt_http_write_all(esp_http_client_handle_t client,
         }
         p += (size_t)w;
         len -= (size_t)w;
+        s_asr_written += (size_t)w;
     }
     return ESP_OK;
 }
@@ -1396,8 +1402,11 @@ static void rt_asr_utterance(robodog_rt_turn_t *out)
         return;
     }
     esp_http_client_set_header(client, "Content-Type", "application/json");
+    s_asr_written = 0;
+    const int64_t t_post = esp_timer_get_time();
     esp_err_t err = esp_http_client_open(client, (int)body_len);
-    ESP_LOGI(TAG, "RT ASR open: %s", esp_err_to_name(err));
+    ESP_LOGI(TAG, "RT ASR open: %s (content-length=%u)", esp_err_to_name(err),
+             (unsigned)body_len);
     uint8_t carry[2] = { 0, 0 };
     size_t carry_len = 0;
     if (err == ESP_OK) {
@@ -1412,7 +1421,10 @@ static void rt_asr_utterance(robodog_rt_turn_t *out)
     if (err == ESP_OK) {
         err = rt_b64_flush(client, carry, carry_len);
     }
-    ESP_LOGI(TAG, "RT ASR body sent: %s", esp_err_to_name(err));
+    ESP_LOGI(TAG, "RT ASR body sent: %s (wrote %u B of %u B in %u ms)",
+             esp_err_to_name(err), (unsigned)s_asr_written,
+             (unsigned)body_len,
+             (unsigned)((esp_timer_get_time() - t_post) / 1000));
     size_t rx_len = 0;
     if (err == ESP_OK) {
         /* fetch_headers() must not be fire-and-forget: it is what parses the
@@ -1453,7 +1465,9 @@ static void rt_asr_utterance(robodog_rt_turn_t *out)
         s_asr_resp[rx_len] = '\0';
     }
     const int status = esp_http_client_get_status_code(client);
-    ESP_LOGI(TAG, "RT ASR http=%d rx=%u B", status, (unsigned)rx_len);
+    ESP_LOGI(TAG, "RT ASR http=%d rx=%u B in %u ms", status,
+             (unsigned)rx_len,
+             (unsigned)((esp_timer_get_time() - t_post) / 1000));
     /* The endpoint's answer is the only way to tell "rejected request" from
      * "model returned nothing" - log it before parsing (#301). */
     ESP_LOGI(TAG, "RT ASR body: '%.500s'", s_asr_resp[0] != '\0'
@@ -1463,24 +1477,35 @@ static void rt_asr_utterance(robodog_rt_turn_t *out)
              (int)heap_caps_check_integrity_all(true));
 
     if (err != ESP_OK || status < 200 || status >= 300 || rx_len == 0) {
-        ESP_LOGE(TAG, "RT ASR: round-trip failed (http=%d err=%s body='%.160s')",
-                 status, esp_err_to_name(err),
+        ESP_LOGE(TAG, "RT ASR: round-trip failed (http=%d err=%s wrote=%u/%u B "
+                 "body='%.160s')", status, esp_err_to_name(err),
+                 (unsigned)s_asr_written, (unsigned)body_len,
                  s_asr_resp[0] != '\0' ? s_asr_resp : "(none)");
-        ESP_LOGI(TAG, "RT ASR text=\"\"");
+        ESP_LOGI(TAG, "RT ASR text=\"\" http=%d rx=%u B in %u ms audio=%u B "
+                 "at %u Hz body='%.400s'", status, (unsigned)rx_len,
+                 (unsigned)((esp_timer_get_time() - t_post) / 1000),
+                 (unsigned)post_len, (unsigned)post_rate,
+                 s_asr_resp[0] != '\0' ? s_asr_resp : "(none)");
         return;
     }
     char lang[16] = "";
     char text[512] = "";
     if (!robodog_asr_parse(s_asr_resp, lang, sizeof(lang), text, sizeof(text))) {
         ESP_LOGE(TAG, "RT ASR: no transcript in body='%.160s'", s_asr_resp);
-        ESP_LOGI(TAG, "RT ASR text=\"\"");
+        ESP_LOGI(TAG, "RT ASR text=\"\" http=%d rx=%u B in %u ms audio=%u B "
+                 "at %u Hz body='%.400s'", status, (unsigned)rx_len,
+                 (unsigned)((esp_timer_get_time() - t_post) / 1000),
+                 (unsigned)post_len, (unsigned)post_rate, s_asr_resp);
         return;
     }
     if (lang[0] == '\0') {
         strlcpy(lang, robodog_utf8_has_cjk(text) ? "zh" : "en", sizeof(lang));
     }
     strlcpy(out->transcript, text, sizeof(out->transcript));
-    ESP_LOGI(TAG, "RT ASR text=\"%s\"", out->transcript);
+    ESP_LOGI(TAG, "RT ASR text=\"%s\" http=%d rx=%u B in %u ms audio=%u B at "
+             "%u Hz", out->transcript, status, (unsigned)rx_len,
+             (unsigned)((esp_timer_get_time() - t_post) / 1000),
+             (unsigned)post_len, (unsigned)post_rate);
     ESP_LOGI(TAG, "RT ASR language=%s prob=0.00", lang);
     robodog_ui_show_user(out->transcript);
 }
