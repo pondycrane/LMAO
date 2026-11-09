@@ -217,6 +217,8 @@ static volatile uint64_t s_up_ms_sum;
  * Both allocated once in PSRAM. */
 static uint8_t *s_asr_pcm;
 static size_t   s_asr_len;
+static int16_t *s_asr_up;      /* resample scratch (PSRAM), kept across turns */
+static size_t   s_asr_up_cap;
 static bool     s_asr_truncated;
 static char    *s_asr_resp;
 
@@ -1285,6 +1287,12 @@ static void rt_asr_utterance(robodog_rt_turn_t *out)
         return;
     }
     s_asr_resp[0] = '\0';
+    ESP_LOGI(TAG, "RT ASR start: pcm=%u B resp_cap=%u int_free=%u "
+             "psram_free=%u heap_ok=%d",
+             (unsigned)s_asr_len, (unsigned)RT_ASR_RESP_MAX,
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+             (int)heap_caps_check_integrity_all(true));
     if (s_asr_truncated) {
         ESP_LOGW(TAG, "RT ASR: utterance truncated to %u B (~%u s)",
                  (unsigned)s_asr_len,
@@ -1302,12 +1310,29 @@ static void rt_asr_utterance(robodog_rt_turn_t *out)
     size_t asr_samples = pcm_samples;
     if (asr_rate != RT_RATE_IN && pcm_samples > 0) {
         const size_t cap = pcm_samples * asr_rate / RT_RATE_IN + 8;
-        asr_pcm = heap_caps_malloc(cap * sizeof(int16_t), MALLOC_CAP_SPIRAM);
-        if (asr_pcm != NULL) {
+        /* ONE scratch, kept across turns: a per-turn malloc/free in this path
+         * was followed by a `tlsf_free ... block already marked as free`
+         * assert on the bench (#301), and the voice task is the only user. */
+        if (s_asr_up == NULL || s_asr_up_cap < cap) {
+            int16_t *n = heap_caps_realloc(s_asr_up, cap * sizeof(int16_t),
+                                           MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+            if (n != NULL) {
+                s_asr_up = n;
+                s_asr_up_cap = cap;
+            }
+        }
+        asr_pcm = s_asr_up;
+        if (asr_pcm != NULL && s_asr_up_cap >= cap) {
             asr_samples = robodog_pcm_resample((const int16_t *)s_asr_pcm,
                                                pcm_samples, asr_pcm, cap,
                                                RT_RATE_IN, asr_rate);
+            ESP_LOGI(TAG, "RT ASR resampled: %u -> %u samples at %u Hz "
+                     "(scratch=%p cap=%u heap_ok=%d)", (unsigned)pcm_samples,
+                     (unsigned)asr_samples, (unsigned)asr_rate,
+                     (void *)s_asr_up, (unsigned)s_asr_up_cap,
+                     (int)heap_caps_check_integrity_all(true));
         } else {
+            asr_pcm = NULL;
             ESP_LOGW(TAG, "RT ASR: no SPIRAM to resample to %u Hz; posting "
                      "the raw %d Hz capture", (unsigned)asr_rate, RT_RATE_IN);
         }
@@ -1331,7 +1356,6 @@ static void rt_asr_utterance(robodog_rt_turn_t *out)
     char *prompt = robodog_json_escape(RT_ASR_PROMPT);
     if (prompt == NULL) {
         ESP_LOGE(TAG, "RT ASR: no memory for the prompt escape");
-        free(asr_pcm);
         return;
     }
     const int hl = snprintf(
@@ -1348,7 +1372,6 @@ static void rt_asr_utterance(robodog_rt_turn_t *out)
     if (hl <= 0 || (size_t)hl >= sizeof(head) || tl <= 0 ||
         (size_t)tl >= sizeof(tail)) {
         ESP_LOGE(TAG, "RT ASR: request envelope overflow");
-        free(asr_pcm);
         ESP_LOGI(TAG, "RT ASR text=\"\"");
         return;
     }
@@ -1369,7 +1392,6 @@ static void rt_asr_utterance(robodog_rt_turn_t *out)
     esp_http_client_handle_t client = esp_http_client_init(&cfg);
     if (client == NULL) {
         ESP_LOGE(TAG, "RT ASR: http client init failed");
-        free(asr_pcm);
         ESP_LOGI(TAG, "RT ASR text=\"\"");
         return;
     }
@@ -1437,7 +1459,8 @@ static void rt_asr_utterance(robodog_rt_turn_t *out)
     ESP_LOGI(TAG, "RT ASR body: '%.500s'", s_asr_resp[0] != '\0'
                                                ? s_asr_resp : "(empty)");
     esp_http_client_cleanup(client);
-    free(asr_pcm);
+    ESP_LOGI(TAG, "RT ASR done: heap_ok=%d",
+             (int)heap_caps_check_integrity_all(true));
 
     if (err != ESP_OK || status < 200 || status >= 300 || rx_len == 0) {
         ESP_LOGE(TAG, "RT ASR: round-trip failed (http=%d err=%s body='%.160s')",
@@ -1635,12 +1658,17 @@ static size_t rt_stream_utterance(bool *fault, bool keep_pcm)
     rt_pump_log((uint32_t)((esp_timer_get_time() - t0) / 1000),
                 (uint32_t)frames, (uint32_t)captured_bytes, ever_speech,
                 speech_ms, silence_ms, vad_max, peak);
+    /* A tlsf_free assert right after this line has twice killed a bench turn
+     * (#301).  Probe both heaps here so the report says whether the corruption
+     * predates the ASR round trip or is caused by it. */
+    const bool heap_ok = heap_caps_check_integrity_all(true);
     ESP_LOGI(TAG, "RT capture done: frames=%u captured=%u B asr=%u B%s "
-             "up_dropped=%u up_fault=%d ws=%d ever_speech=%d speech=%ums "
-             "silence=%ums vad_max=%d vad_min=%d peak=%d",
+             "up_dropped=%u up_fault=%d ws=%d heap_ok=%d ever_speech=%d "
+             "speech=%ums silence=%ums vad_max=%d vad_min=%d peak=%d",
              (unsigned)frames, (unsigned)captured_bytes, (unsigned)s_asr_len,
              s_asr_truncated ? " (truncated)" : "", (unsigned)s_up_dropped,
-             (int)s_up_fault, (int)robodog_rt_connected(), (int)ever_speech,
+             (int)s_up_fault, (int)robodog_rt_connected(), (int)heap_ok,
+             (int)ever_speech,
              (unsigned)speech_ms, (unsigned)silence_ms,
              (int)vad_max, (int)vad_min, (int)peak);
     /* Close the subscriber for the idle gap: the capture task only reads the
