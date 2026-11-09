@@ -1717,7 +1717,16 @@ static size_t rt_stream_utterance(bool *fault, bool keep_pcm)
      * captures ~32 KB/s into a ring nobody drains (the ring-overflow warning
      * flood the bench console showed in issue #301) and keeps the mic hot.
      * The next turn reopens it and flushes the ring. */
-    (void)audio_capture_close_subscriber(sub);
+    ESP_LOGI(TAG, "RT capture close: begin sub=%p heap_ok=%d int_free=%u "
+             "psram_free=%u", (void *)sub, (int)heap_caps_check_integrity_all(true),
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    const esp_err_t cerr = audio_capture_close_subscriber(sub);
+    ESP_LOGI(TAG, "RT capture close: done err=%s heap_ok=%d int_free=%u "
+             "psram_free=%u", esp_err_to_name(cerr),
+             (int)heap_caps_check_integrity_all(true),
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
     sub = NULL;
     if (captured_bytes == 0) {
         ESP_LOGE(TAG, "RT capture stream produced no audio (codec/I2S RX?)");
@@ -1790,7 +1799,13 @@ esp_err_t robodog_rt_turn(robodog_rt_mode_t mode, robodog_rt_turn_t *out)
         rt_stage_set(RT_STAGE_IDLE);
         return ESP_FAIL;
     }
-    if (!rt_up_drain(RT_UP_DRAIN_MS)) {
+    ESP_LOGI(TAG, "RT uplink drain: begin (post-capture) heap_ok=%d",
+             (int)heap_caps_check_integrity_all(true));
+    const bool drained = rt_up_drain(RT_UP_DRAIN_MS);
+    ESP_LOGI(TAG, "RT uplink drain: done drained=%d heap_ok=%d ws=%d",
+             (int)drained, (int)heap_caps_check_integrity_all(true),
+             (int)robodog_rt_connected());
+    if (!drained) {
         ESP_LOGW(TAG, "RT uplink drain timed out; committing the frames sent");
     }
 
