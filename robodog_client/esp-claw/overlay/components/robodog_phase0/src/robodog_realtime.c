@@ -101,9 +101,15 @@ static const char *TAG = "robodog_rt";
  * OLDEST frame is dropped (counted) instead of stalling the reader, so a slow
  * socket can never wedge the turn or overflow the capture subscriber ring. */
 #define RT_UP_FRAMES          64   /* 64 x 20 ms = 1.28 s of raw 16 kHz PCM  */
-#define RT_UP_COALESCE        3    /* frames per append (40-60 ms messages)   */
-#define RT_UP_SEND_TIMEOUT_MS 250  /* audio append timeout (never 10 s)       */
-#define RT_UP_DRAIN_MS        3000 /* wait for the ring to flush before commit */
+#define RT_UP_COALESCE        6    /* frames per append (120 ms messages)     */
+/* The append timeout must ABSORB Wi-Fi backpressure, not police it:
+ * esp_websocket_client ABORTS the whole connection when a write returns 0
+ * (`esp_transport_write() returned 0` -> abort_connection, issue #301), so a
+ * short budget turns a momentarily full TCP send buffer into a dead socket.
+ * The sender is a background task and the ring drops the oldest frame when
+ * full, so blocking here is harmless. */
+#define RT_UP_SEND_TIMEOUT_MS 3000 /* absorb a full TCP send buffer           */
+#define RT_UP_DRAIN_MS        5000 /* wait for the ring to flush before commit */
 /* The omni server accepts ~20 s of streamed audio but CLOSES the socket on a
  * ~30 s stream (probed on the deployed lane: 10 s and 20 s answered, 30 s
  * closed the connection).  So the model gets at most this much of a long
@@ -111,7 +117,7 @@ static const char *TAG = "robodog_rt";
  * still transcribed from its first 8 s). */
 #define RT_STREAM_MAX_MS      20000
 #define RT_B64_CHUNK          1536 /* multiple of 3 for streaming base64       */
-#define RT_UP_MSG_MAX         4224 /* 3 frames -> 2880 B PCM -> 3840 b64 + JSON */
+#define RT_UP_MSG_MAX         8448 /* 6 frames -> 5760 B PCM -> 7680 b64 + JSON */
 /* Explicit ASR (the Qwen lane never emits the transcription event): keep the
  * utterance PCM for the chat-completions round trip.  8 s of 16 kHz mono
  * covers a normal turn; a longer one is truncated with a loud log (the realtime
@@ -1023,7 +1029,9 @@ static bool rt_up_drain(uint32_t timeout_ms)
 }
 
 /* Sender task: drain the ring, resample to the session rate, base64, coalesce
- * up to RT_UP_COALESCE frames into ONE append, send with a short timeout.  The
+ * up to RT_UP_COALESCE frames into ONE append, sent with a budget that absorbs
+ * backpressure (a zero-length write makes esp_websocket_client abort the whole
+ * connection, so the timeout must never be tight).  The
  * wall time of build+send is what the once-per-second pump log reports, so
  * "pump too slow" and "socket blocked" are distinguishable in one run. */
 static void rt_uplink_task(void *arg)
@@ -1080,13 +1088,18 @@ static void rt_uplink_task(void *arg)
             s_up_sent_bytes += (uint32_t)(out_n * sizeof(int16_t));
         } else {
             s_up_dropped += (uint32_t)nf;
-            if (err == ESP_ERR_INVALID_STATE) {
+            if (err == ESP_ERR_INVALID_STATE && !robodog_rt_connected()) {
+                /* The client tore the link down (a zero-length write aborts
+                 * the connection): nothing can reach the session any more, so
+                 * this is the only append failure that ends the turn. */
                 s_up_fault = true;
                 ESP_LOGE(TAG, "RT append failed: socket down, the capture/ASR "
                          "turn ends");
             } else {
-                ESP_LOGW(TAG, "RT append timed out after %u ms; dropped %u "
-                         "capture frame(s)", (unsigned)ms, (unsigned)nf);
+                ESP_LOGW(TAG, "RT append did not complete in %u ms; dropped "
+                         "%u capture frame(s) (socket still up=%d)",
+                         (unsigned)ms, (unsigned)nf,
+                         (int)robodog_rt_connected());
             }
         }
         s_up_sending = false;
