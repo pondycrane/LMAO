@@ -23,10 +23,12 @@ argument-hint: (no arguments - detects the board + test audio, drives the autono
    current kernel the raw node **`hw:2` fails with EIO on both directions** —
    the working device is **`RD_ALSA_DEVICE=plughw:2`** (verified 2026-10-27:
    play + capture OK, full voice loop ran through it).  Node needs the `audio`
-   group; `robodog_claw_e2e.py` runs audio ops through `sg audio` (or set
-   `E2E_AUDIO_SG=""` when ALSA perms are granted).  A `default`-named card
-   appears where a real ALSA default exists — the script parametrizes either
-   way.
+   group; `robodog_claw_e2e.py` runs audio ops through `sg audio` **only when
+   `sg` exists** (it defaults `E2E_AUDIO_SG` to `""` otherwise — op4 has no
+   `sg`, and wrapping playback there exits 127 before ffmpeg runs).  Set
+   `E2E_AUDIO_SG=""` explicitly to force the unwrapped path, or a value to
+   force the wrapper.  A `default`-named card appears where a real ALSA default
+   exists — the script parametrizes either way.
 4. **Never write `$ARTIFACTS_DIR/.gate-head`** — only `robodog-production-health`
    owns that marker (issue #100 guard).
 
@@ -113,8 +115,16 @@ curl -s -m 8 -o /dev/null -w '%{http_code}\n' -H 'Content-Type: application/json
 
 `robodog_claw_e2e.py` detects the board (`ROBODOG_PORT` wins, else
 `0x303A:0x1001`) and probes for an ALSA test node (`resolve_alsa()`: card-id
-form, then indices, with and without `sg audio -c`). The two absences have
-different verdicts:
+form, then indices, with and without `sg audio -c`).
+
+The firmware under test must also name the model the server actually serves
+(`/v1/models`): build with `payload.env
+{"CLAW_RT_MODEL":"Qwen/Qwen3-Omni-30B-A3B-Instruct",
+"CLAW_RT_DISABLE_THINKING":"n"}`.  A mismatched id is rejected by the realtime
+handler, which closes the socket (`RT append failed: socket down`), and the
+explicit-ASR post uses the same id.
+
+The two absences have different verdicts:
 
 - **No board** → the documented loud-skip convention: `SKIPPED.txt`, returns
   0, never writes `.gate-head` (a dev machine cannot verify anything).

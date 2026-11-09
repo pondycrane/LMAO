@@ -25,6 +25,7 @@ import contextlib
 import json
 import os
 import re
+import shutil
 import sys
 import threading
 import time
@@ -49,7 +50,18 @@ SOUND_CARD = os.environ.get("RD_SOUND_CARD", "Device")
 # acoustic legs cannot pass.  `resolve_alsa()` probes candidates and overrides
 # this; RD_ALSA_DEVICE pins it.
 ALSA_DEV = os.environ.get("RD_ALSA_DEVICE", "")
-ALSA_SG = os.environ.get("E2E_AUDIO_SG", "sg audio -c")
+# `sg audio -c` is a convenience for hosts whose user is not in the `audio`
+# group, not a portable requirement: op4 has no `sg` at all, so wrapping the
+# playback there makes the shell exit 127 ("command not found") before ffmpeg
+# runs - the old gate ignored the rc and logged "playing corpus" while the
+# board heard only its noise floor (#301).  Default to the wrapper only when
+# `sg` exists; an explicit E2E_AUDIO_SG always wins (including "" = no wrapper).
+if "E2E_AUDIO_SG" in os.environ:
+    ALSA_SG = os.environ["E2E_AUDIO_SG"]
+elif shutil.which("sg"):
+    ALSA_SG = "sg audio -c"
+else:
+    ALSA_SG = ""
 PLAY_VOL = float(os.environ.get("RD_PLAY_VOL", "0.7"))
 N_RUNS = int(os.environ.get("E2E_RUNS", "1"))
 # Exit code for "the board is here but the acoustic rig is not".  benchd maps

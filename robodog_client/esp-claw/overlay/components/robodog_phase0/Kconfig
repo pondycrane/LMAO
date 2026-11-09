@@ -417,6 +417,18 @@ menu "RoboDog Phase 3 omni realtime (vLLM-Omni OpenAI-Realtime)"
             Must match the model the server was started with; the duplex
             handler validates it against the served model.
 
+    config ROBODOG_RT_ASR_RATE
+        int "Sample rate of the WAV posted to /v1/chat/completions (Hz)"
+        default 24000
+        range 8000 48000
+        help
+            The explicit-ASR round trip posts one WAV per turn.  The
+            OpenAI-compatible handler on the omni server assumes the
+            realtime lane's 24 kHz (it hardcodes SAMPLE_RATE_HZ = 24000 for
+            input_audio_buffer.append), so post 24 kHz audio there too: the
+            board captures at 16 kHz and resamples up for the post.  Set to
+            16000 to post the raw capture instead.
+
     config ROBODOG_RT_INSTRUCTIONS
         string "Session instructions (persona + spoken-prose rule)"
         default "You are RoboDog, a friendly voice assistant on a desk display. Answer immediately in plain spoken prose, in one short sentence. Never use markdown, headings, bullet lists, asterisks or emoji."

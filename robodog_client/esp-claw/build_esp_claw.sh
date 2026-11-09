@@ -65,27 +65,6 @@ if [ ! -f "$SRC/.robodog_drop_log_patched" ]; then
     touch "$SRC/.robodog_drop_log_patched"
     REBUILD_FLAG=1
 fi
-# 2e. Raise the board's ES7210 mic PGA (upstream leaves it at 0 dB).  The gate's
-#     USB test dongle is marginal: with 0 dB PGA the corpus arrives only ~11 dB
-#     above the mic noise floor, far under the RT VAD threshold (mean-abs > 300)
-#     and unintelligible to ASR (#301).  Patched over the pristine upstream
-#     board file - never vendored into the repo.
-if [ ! -f "$SRC/.robodog_mic_gain_patched" ]; then
-    echo "applying $APP/esp-claw/patches/0005-mic-gain.patch"
-    (cd "$SRC" && patch -p1 < "$APP/esp-claw/patches/0005-mic-gain.patch")
-    touch "$SRC/.robodog_mic_gain_patched"
-    REBUILD_FLAG=1
-fi
-# 2f. Read the ES7210 mic PGA back after the capture hub sets it, and force it to
-#     the +37.5 dB ceiling when the high-level esp_codec_dev_set_in_gain() call
-#     did not land (it swallows the codec driver's return value, so a rejected
-#     write leaves the ADC at 0 dB while the hub believes it set 42 dB) (#301).
-if [ ! -f "$SRC/.robodog_mic_pga_readback_patched" ]; then
-    echo "applying $APP/esp-claw/patches/0006-mic-pga-readback.patch"
-    (cd "$SRC" && patch -p1 < "$APP/esp-claw/patches/0006-mic-pga-readback.patch")
-    touch "$SRC/.robodog_mic_pga_readback_patched"
-    REBUILD_FLAG=1
-fi
 # 2b. The board's setup_device.c (ST7305 custom panel + the RoboDog RD_SHOT
 #     capture hook) is owned by LMAO in the overlay and wholesale-copied over
 #     the upstream waveshare board copy each build - drops the fragile
@@ -159,6 +138,7 @@ cat > "$EDGE/sdkconfig.defaults.robodog" <<EOF
 # end-of-speech to first audio).  CLAW_RT_URL overrides it per build.
 CONFIG_ROBODOG_RT_URL="${CLAW_RT_URL:-ws://192.168.50.27:8099/v1/realtime}"
 CONFIG_ROBODOG_RT_MODEL="${CLAW_RT_MODEL:-openbmb/MiniCPM-o-4_5}"
+CONFIG_ROBODOG_RT_ASR_RATE=${CLAW_RT_ASR_RATE:-24000}
 CONFIG_ROBODOG_RT_TURN_MODE=${CLAW_RT_TURN_MODE:-0}
 # Phase 2 fallback endpoints (still used by rd_asr/rd_tts probes and by the
 # AGENT-shaped turn, where claw_core answers and Qwen3-TTS speaks).

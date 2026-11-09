@@ -1088,33 +1088,47 @@ Chinese reply (the vision prompt forbids translation).
   that opens but is not coupled to the board still fails honestly on the ASR
   legs).
 - **The board yaml's `adc_init_gain` is dead config in esp_board_manager
-  0.6.2.**  `patches/0005-mic-gain.patch` (applied by `build_esp_claw.sh` over
-  the pristine upstream board file, never vendored) raises the ES7210
-  `adc_init_gain` from the upstream `0` to **30 dB**, but nothing reads it:
-  the field only appears in the component's header, the board yaml and the
-  codegen, and no runtime `.c` applies it (`dev_audio_codec.c` only calls
-  `esp_codec_dev_new()`), so the patch cannot move the PGA.  The gain that
-  actually applies comes from the capture hub: `audio_capture_start()` calls
-  `esp_codec_dev_set_in_gain(codec, 42)` after `esp_codec_dev_open()`, and
-  esp_codec_dev 1.6.2 maps 42 dB through the ES7210 `get_db()` to
-  **GAIN_37_5DB** (the top step).  `patches/0006-mic-pga-readback.patch` reads
-  registers `0x43`/`0x44` back, logs the live index every turn
-  (`RT mic pga idx=…`, 0 = 0 dB, 10 = 30 dB, 14 = 37.5 dB) and forces
-  MIC1/MIC2 to +37.5 dB when the readback still shows 0 dB — necessary
-  because `esp_codec_dev_set_in_gain()` ignores the codec driver's return
-  value, so a rejected I2C write leaves the ADC at 0 dB while the hub believes
-  it set 42 dB.  The VAD threshold itself stays honest — a silent rig must
-  still fail, not be tuned down to pass.
-- **The acoustic rig stays marginal even at the top PGA.**  The gate expects
-  the USB dongle's speaker within a few cm of the board's mic: doubling
-  `RD_PLAY_VOL` moved the board's mean only +2.7 dB (the dongle speaker
-  saturates), so drive level cannot close a coupling gap.  With the dongle
-  plugged into op4's hub port 3 and the corpus played into
-  `plughw:CARD=Device`, the turn log reads `vad_max=203 peak=639` — ~5× the
-  earlier `vad_max=37 peak=126` — but still under the RT VAD threshold
-  (mean-abs > 300), so no utterance reaches ASR.  Position the speaker closer,
-  keep the dongle mic at its measured 82 % / +25.5 dB capture level, and read
-  `vad_max`/`vad_min`/`peak`/`pga` in the turn log before blaming the firmware.
+  0.6.2 - no board patch is needed for the mic gain.**  The field only appears
+  in the component's header, the board yaml and the codegen; no runtime `.c`
+  applies it (`dev_audio_codec.c` only calls `esp_codec_dev_new()`), so
+  `patches/0005-mic-gain.patch` (0 -> 30 dB) measurably changed nothing.  The
+  gain that actually applies comes from the capture hub:
+  `audio_capture_start()` calls `esp_codec_dev_set_in_gain(codec, 42)` after
+  `esp_codec_dev_open()`, and esp_codec_dev 1.6.2 maps 42 dB through the ES7210
+  `get_db()` to **GAIN_37_5DB**, the top step (bench register readback
+  `mic1=0x1e`).  A follow-up `patches/0006-mic-pga-readback.patch` (raw
+  `0x43`/`0x44` read/write + force) was **reverted**: it produced a
+  `tlsf_free` assert and a mid-turn reboot on the bench (`NO_RESET: FAIL`), and
+  the readback had already proven the hub's 42 dB lands.  Keep the hub's gain;
+  do not patch the board file.
+- **The gate's playback must not be wrapped in `sg` on op4.**  `benchd` runs
+  `robodog_claw_e2e.py` from its persistent `/srv/benchd/repo` checkout, which
+  is older than the head under test; that copy wraps playback in
+  `sg audio -c`, and **op4 has no `sg`** - the shell exits 127, ffmpeg never
+  runs, and the old script ignored the rc and logged "playing corpus".  Proof:
+  same head, same corpus, `E2E_AUDIO_SG=""` -> `ever_speech=1 vad_max=1360
+  frames=122 asr=78080 B`; with the wrapper -> `vad_max=33..203
+  ever_speech=0`.  The gate now defaults `E2E_AUDIO_SG` to `""` when `sg` is
+  absent from PATH (an explicit value always wins) and every playback path
+  checks the rc, so a missing wrapper can never read as a silent board again.
+  Ops still needs `_do_voice_loop` to run the script from the job's build
+  worktree (like `_do_flash_capture`) - until then the bench executes the old
+  copy and the env must be passed in the job payload.
+- **The explicit-ASR post is 24 kHz, not the raw 16 kHz capture.**  The omni
+  server's OpenAI-compatible handler hardcodes `SAMPLE_RATE_HZ = 24000` for the
+  realtime lane; a WAV posted to `/v1/chat/completions` at the capture's
+  16 kHz came back as an empty transcript.  `CONFIG_ROBODOG_RT_ASR_RATE`
+  (default 24000, `CLAW_RT_ASR_RATE` per build) resamples the captured PCM up
+  for that one post and the console logs the rate, the model id, the HTTP
+  status, the rx bytes and the response body (`RT ASR body: '...'`), so an
+  empty transcript is diagnosable from a single run.
+- **The acoustic rig works once playback actually runs.**  With
+  `E2E_AUDIO_SG=""` and `RD_ALSA_DEVICE=plughw:CARD=Device` the corpus reaches
+  the board (`ever_speech=1 vad_max=1360`, 122 frames / 78080 B captured) and
+  the omni turn returns a correct spoken reply.  Keep the dongle's speaker
+  within a few cm of the board's mic — doubling `RD_PLAY_VOL` adds only
+  +2.7 dB, the speaker saturates — and read `vad_max`/`vad_min`/`peak` in the
+  turn log before blaming the firmware.
 
 ### Gate (hardware-verified)
 
@@ -1358,7 +1372,7 @@ Drop caches before starting the engine.
 
 ### The session recipe that actually works (hardware-verified)
 
-Getting a turn answered took four findings, each reproduced on the board:
+Getting a turn answered took five findings, each reproduced on the board:
 
 1. **`session.type` is MANDATORY.** OpenAI's schema spells the session object
    `RealtimeSessionCreateRequest`, whose `type` field is required. Omitting it
@@ -1378,6 +1392,17 @@ Getting a turn answered took four findings, each reproduced on the board:
    handler hardcodes `SAMPLE_RATE_HZ = 24000`. The board's capture hub runs
    16 kHz, so every frame is resampled up before the append; sending raw
     16 kHz makes the model hear the utterance 1.5x fast.
+5. **The model id must match the served lane.** `build_esp_claw.sh` compiles
+   `CONFIG_ROBODOG_RT_MODEL` from `CLAW_RT_MODEL` (default
+   `openbmb/MiniCPM-o-4_5`). The bench serves ONLY
+   `Qwen/Qwen3-Omni-30B-A3B-Instruct` (`/v1/models`); a session whose model id
+   does not match is rejected by the realtime handler, which closes the
+   socket — the firmware then logs `RT append failed: socket down` (x20) and
+   `RT uplink socket down; ending turn`, and the turn dies before any audio is
+   heard. Build the gate with `payload.env
+   {"CLAW_RT_MODEL":"Qwen/Qwen3-Omni-30B-A3B-Instruct",
+   "CLAW_RT_DISABLE_THINKING":"n"}` (bench build `j-1794187280`). The same id
+   is sent in the explicit-ASR post, so a wrong id kills that call too.
 
 Then `input_audio_buffer.commit` + `response.create` with
 `{"modalities":["audio","text"]}` produces `response.created`,

@@ -1254,10 +1254,35 @@ static void rt_asr_utterance(robodog_rt_turn_t *out)
                  (unsigned)(s_asr_len / (RT_RATE_IN * 2)));
     }
 
+    /* Post at the omni server's audio rate (CONFIG_ROBODOG_RT_ASR_RATE): the
+     * realtime handler hardcodes 24 kHz, so a WAV carrying the raw 16 kHz
+     * capture rate comes back as an empty transcript (#301).  The capture stays
+     * 16 kHz (the hub's rate); only this post is resampled up.  Falls back to
+     * the raw capture when the SPIRAM scratch cannot be allocated. */
+    const size_t pcm_samples = s_asr_len / sizeof(int16_t);
+    const uint32_t asr_rate = CONFIG_ROBODOG_RT_ASR_RATE;
+    int16_t *asr_pcm = NULL;
+    size_t asr_samples = pcm_samples;
+    if (asr_rate != RT_RATE_IN && pcm_samples > 0) {
+        const size_t cap = pcm_samples * asr_rate / RT_RATE_IN + 8;
+        asr_pcm = heap_caps_malloc(cap * sizeof(int16_t), MALLOC_CAP_SPIRAM);
+        if (asr_pcm != NULL) {
+            asr_samples = robodog_pcm_resample((const int16_t *)s_asr_pcm,
+                                               pcm_samples, asr_pcm, cap,
+                                               RT_RATE_IN, asr_rate);
+        } else {
+            ESP_LOGW(TAG, "RT ASR: no SPIRAM to resample to %u Hz; posting "
+                     "the raw %d Hz capture", (unsigned)asr_rate, RT_RATE_IN);
+        }
+    }
+    const uint8_t *post_pcm = asr_pcm != NULL ? (const uint8_t *)asr_pcm
+                                              : s_asr_pcm;
+    const size_t post_len = asr_samples * sizeof(int16_t);
+    const uint32_t post_rate = asr_pcm != NULL ? asr_rate : RT_RATE_IN;
     uint8_t wav[44];
-    const size_t wav_len = robodog_wav_header(wav, sizeof(wav), s_asr_len,
-                                              RT_RATE_IN, RT_CH, RT_BITS);
-    const size_t wav_bytes = wav_len + s_asr_len;
+    const size_t wav_len = robodog_wav_header(wav, sizeof(wav), post_len,
+                                              post_rate, RT_CH, RT_BITS);
+    const size_t wav_bytes = wav_len + post_len;
     const size_t b64_len = 4 * ((wav_bytes + 2) / 3);
 
     /* Static (one turn at a time) so the voice task's 8 KB stack is not
@@ -1269,6 +1294,7 @@ static void rt_asr_utterance(robodog_rt_turn_t *out)
     char *prompt = robodog_json_escape(RT_ASR_PROMPT);
     if (prompt == NULL) {
         ESP_LOGE(TAG, "RT ASR: no memory for the prompt escape");
+        free(asr_pcm);
         return;
     }
     const int hl = snprintf(
@@ -1285,12 +1311,15 @@ static void rt_asr_utterance(robodog_rt_turn_t *out)
     if (hl <= 0 || (size_t)hl >= sizeof(head) || tl <= 0 ||
         (size_t)tl >= sizeof(tail)) {
         ESP_LOGE(TAG, "RT ASR: request envelope overflow");
+        free(asr_pcm);
         ESP_LOGI(TAG, "RT ASR text=\"\"");
         return;
     }
     const size_t body_len = (size_t)hl + b64_len + (size_t)tl;
-    ESP_LOGI(TAG, "RT ASR request: %s (%u B pcm, %u B body, int_free=%u "
-             "psram_free=%u)", url, (unsigned)s_asr_len, (unsigned)body_len,
+    ESP_LOGI(TAG, "RT ASR request: %s model=%s audio=%d Hz/%d ch/%d bit "
+             "(%u B pcm, %u B wav, %u B body, int_free=%u psram_free=%u)",
+             url, CONFIG_ROBODOG_RT_MODEL, (int)post_rate, RT_CH, RT_BITS,
+             (unsigned)post_len, (unsigned)wav_bytes, (unsigned)body_len,
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
 
@@ -1303,6 +1332,7 @@ static void rt_asr_utterance(robodog_rt_turn_t *out)
     esp_http_client_handle_t client = esp_http_client_init(&cfg);
     if (client == NULL) {
         ESP_LOGE(TAG, "RT ASR: http client init failed");
+        free(asr_pcm);
         ESP_LOGI(TAG, "RT ASR text=\"\"");
         return;
     }
@@ -1318,7 +1348,7 @@ static void rt_asr_utterance(robodog_rt_turn_t *out)
         err = rt_b64_write(client, carry, &carry_len, wav, wav_len);
     }
     if (err == ESP_OK) {
-        err = rt_b64_write(client, carry, &carry_len, s_asr_pcm, s_asr_len);
+        err = rt_b64_write(client, carry, &carry_len, post_pcm, post_len);
     }
     if (err == ESP_OK) {
         err = rt_b64_flush(client, carry, carry_len);
@@ -1340,7 +1370,12 @@ static void rt_asr_utterance(robodog_rt_turn_t *out)
     }
     const int status = esp_http_client_get_status_code(client);
     ESP_LOGI(TAG, "RT ASR http=%d rx=%u B", status, (unsigned)rx_len);
+    /* The endpoint's answer is the only way to tell "rejected request" from
+     * "model returned nothing" - log it before parsing (#301). */
+    ESP_LOGI(TAG, "RT ASR body: '%.500s'", s_asr_resp[0] != '\0'
+                                               ? s_asr_resp : "(empty)");
     esp_http_client_cleanup(client);
+    free(asr_pcm);
 
     if (err != ESP_OK || status < 200 || status >= 300 || rx_len == 0) {
         ESP_LOGE(TAG, "RT ASR: round-trip failed (http=%d err=%s body='%.160s')",
@@ -1399,14 +1434,6 @@ static size_t rt_stream_utterance(bool *fault, bool keep_pcm)
     rt_up_reset();
     s_asr_len = 0;
     s_asr_truncated = false;
-    /* Surface the codec's live mic PGA: the hub asks for 42 dB, but
-     * esp_codec_dev swallows the driver's write result, so the ADC can sit at
-     * 0 dB while everything above it believes the gain is set (#301). */
-    audio_capture_handle_t gain_cap = NULL;
-    const int mic_pga = (audio_hub_get_capture(&gain_cap) == ESP_OK)
-                            ? audio_capture_get_mic_pga(gain_cap) : -1;
-    ESP_LOGI(TAG, "RT mic pga idx=%d (ES7210 reg 0x43; 0=0dB 10=30dB 14=37.5dB)",
-             mic_pga);
     ESP_LOGI(TAG, "RT listen started (16k/1/16, VAD energy=%d silence=%dms)",
              RT_VAD_ENERGY, CONFIG_ROBODOG_RT_SILENCE_MS);
     robodog_ui_set_agent_state("listening");
@@ -1440,8 +1467,8 @@ static size_t rt_stream_utterance(bool *fault, bool keep_pcm)
             /* `vad_max` well under RT_VAD_ENERGY = the mic heard nothing
              * (silent rig / dead input), not a stalled capture pump. */
             ESP_LOGW(TAG, "RT no speech within %d ms (vad_max=%d vad_min=%d "
-                     "peak=%d pga=%d), bailing", RT_NO_SPEECH_MS, (int)vad_max,
-                     (int)vad_min, (int)peak, mic_pga);
+                     "peak=%d), bailing", RT_NO_SPEECH_MS, (int)vad_max,
+                     (int)vad_min, (int)peak);
             break;
         }
         if (ever_speech && now - speech_t0 >= cap_us) {
@@ -1548,11 +1575,11 @@ static size_t rt_stream_utterance(bool *fault, bool keep_pcm)
                 speech_ms, silence_ms, vad_max, peak);
     ESP_LOGI(TAG, "RT capture done: frames=%u captured=%u B asr=%u B%s "
              "up_dropped=%u ever_speech=%d speech=%ums silence=%ums "
-             "vad_max=%d vad_min=%d peak=%d pga=%d",
+             "vad_max=%d vad_min=%d peak=%d",
              (unsigned)frames, (unsigned)captured_bytes, (unsigned)s_asr_len,
              s_asr_truncated ? " (truncated)" : "", (unsigned)s_up_dropped,
              (int)ever_speech, (unsigned)speech_ms, (unsigned)silence_ms,
-             (int)vad_max, (int)vad_min, (int)peak, mic_pga);
+             (int)vad_max, (int)vad_min, (int)peak);
     /* Close the subscriber for the idle gap: the capture task only reads the
      * codec while a subscriber is open, so leaving it open between turns
      * captures ~32 KB/s into a ring nobody drains (the ring-overflow warning
