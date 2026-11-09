@@ -50,6 +50,50 @@ Every leg is asserted from the **device serial console** logs
 (`listen started`, `ASR text="..."`, `agent reply: ...`, `TTS start` /
 `TTS stop`) plus one RD_SHOT frame readback — there is no bridge journal.
 
+## Phase 0: BENCH (default path — do this first)
+
+The board lives on the bench host (op4) behind `benchd`, not on this machine.
+**Run the gate there.** It builds, flashes and asserts from ONE commit, so the
+gate can never judge firmware it did not build.
+
+```bash
+# ONE command: fetch <head> from origin, build it with this env, flash that
+# exact binary, then run this gate from the same worktree.
+B=$(bench submit e2e --head "$HEAD_SHA" --ref "$PR_REF" --family claw --class ci \
+  --payload '{"env":{"CLAW_RT_MODEL":"Qwen/Qwen3-Omni-30B-A3B-Instruct",
+                     "CLAW_RT_DISABLE_THINKING":"n",
+                     "RD_ALSA_DEVICE":"plughw:CARD=Device",
+                     "RD_SOUND_CARD":"Device","RD_PLAY_VOL":"0.9"},
+              "args":["--corpus","capabilities"]}')
+bench wait "$B" --on-artifacts "$ARTIFACTS_DIR/claw-e2e"
+bench result "$B"            # verdict + per-leg assertions + symbols + artifacts
+```
+
+`bench result` prints every leg as PASS/FAIL/SKIP. On a crash it also prints
+the fault line and `addr2line`-symbolised frames, so a panic names the function
+and line instead of just "python exit 1".
+
+Useful while it runs:
+
+```bash
+bench tail "$B"                              # follow build/flash/gate logs live
+bench logs "$B" --artifact gate/python.log --grep "ASR|PANIC|ROUTE"
+bench artifacts "$B" --out "$ARTIFACTS_DIR/claw-e2e"
+```
+
+**Never** run esptool, `flash.sh` or `capture.py` on this host: the bench owns
+the board. `RD_ALSA_DEVICE=plughw:CARD=Device` + `RD_SOUND_CARD=Device` are the
+op4 USB test dongle; `E2E_AUDIO_SG` is auto-cleared by benchd when `sg` is
+absent (it is not installed there).
+
+Verdict mapping: `bench wait` exits 0 only when the whole chain passed.
+`bench result` exits 0 iff `state=passed`. A gate FAIL is a real FAIL; the
+only legitimate skip is the documented board-absent case, which exits
+non-zero on a bench with a board (RIG_UNUSABLE).
+
+If the bench is unreachable (`bench boards` fails), fall through to Phases 1-4
+below and say loudly in the artifact that verification ran locally.
+
 ## Phase 1: HOST PREREQUISITES
 
 ```bash
