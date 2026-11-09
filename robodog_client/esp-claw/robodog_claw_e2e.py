@@ -624,18 +624,23 @@ def run_loop(n, instr, artifacts, voice_verify):
             # `RT capture fault` — which the keyword filter drops (the pump
             # line carries none of the keywords, and the exit reason scrolls
             # past the last-12 window).
-            window = [ln for ln in tail.take(0, 0)[0][asr_start:cur]
+            # From the LISTEN, not from the playback: `RT turn start: mode=`
+            # and the uplink/WS decisions precede the capture, and a turn that
+            # dies before the ASR is exactly what a missing `ASR text=` hides.
+            window = [ln for ln in tail.take(0, 0)[0][open_start:cur]
                       if "RD_SHOT" not in ln]
             (run_dir / "console_asr.log").write_text("\n".join(window) + "\n")
             res["artifacts"]["console_log"] = str(run_dir / "console_asr.log")
             if window:
-                log("board console during the ASR window (tail):")
-                for bl in window[-40:]:
-                    log("   | " + bl.strip()[:160])
+                log(f"board console from listen ({len(window)} lines, tail):")
+                for bl in window[-80:]:
+                    log("   | " + bl.strip()[:200])
             board_lines = [
                 ln for ln in window
                 if any(k in ln for k in ("robodog_voice", "ASR", "utterance",
-                                         "speech", "bail", "SPIRAM", "capture"))
+                                         "speech", "bail", "SPIRAM", "capture",
+                                         "append", "socket", "websocket",
+                                         "uplink", "turn start", "watchdog"))
             ]
             if board_lines:
                 log("board capture/VAD/ASR decisions (no `ASR text=`):")

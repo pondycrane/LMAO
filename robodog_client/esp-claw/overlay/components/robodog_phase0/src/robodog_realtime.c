@@ -636,14 +636,22 @@ static void rt_ws_handler(void *arg, esp_event_base_t base, int32_t id,
         ESP_LOGI(TAG, "RT websocket connected");
         xEventGroupSetBits(s_evts, RT_BIT_CONNECTED);
         break;
+    /* The bench gate prints only the last 12 console lines that match its
+     * keyword set (ASR / capture / speech / utterance / SPIRAM / bail), so a
+     * bare "websocket closed" is INVISIBLE in a failed-turn report: every
+     * turn-ending path must carry one of those words (#301). */
     case WEBSOCKET_EVENT_DISCONNECTED:
     case WEBSOCKET_EVENT_CLOSED:
-        ESP_LOGW(TAG, "RT websocket closed/disconnected");
+        ESP_LOGW(TAG, "RT websocket closed/disconnected; the capture/ASR turn "
+                 "cannot continue (status=%d errno=%d)",
+                 ev->error_handle.esp_ws_handshake_status_code,
+                 ev->error_handle.esp_transport_sock_errno);
         s_session_ready = false;
         xEventGroupSetBits(s_evts, RT_BIT_ERR);
         break;
     case WEBSOCKET_EVENT_ERROR:
-        ESP_LOGE(TAG, "RT websocket error type=%d status=%d errno=%d",
+        ESP_LOGE(TAG, "RT websocket error in the capture/ASR turn type=%d "
+                 "status=%d errno=%d",
                  (int)ev->error_handle.error_type,
                  ev->error_handle.esp_ws_handshake_status_code,
                  ev->error_handle.esp_transport_sock_errno);
@@ -1074,10 +1082,11 @@ static void rt_uplink_task(void *arg)
             s_up_dropped += (uint32_t)nf;
             if (err == ESP_ERR_INVALID_STATE) {
                 s_up_fault = true;
-                ESP_LOGE(TAG, "RT append failed: socket down");
+                ESP_LOGE(TAG, "RT append failed: socket down, the capture/ASR "
+                         "turn ends");
             } else {
                 ESP_LOGW(TAG, "RT append timed out after %u ms; dropped %u "
-                         "frame(s)", (unsigned)ms, (unsigned)nf);
+                         "capture frame(s)", (unsigned)ms, (unsigned)nf);
             }
         }
         s_up_sending = false;
@@ -1120,6 +1129,18 @@ static void rt_stage_set(int stage)
 {
     s_stage = stage;
     s_stage_since = esp_timer_get_time();
+}
+
+/* ONE line for every turn-ending fault, carrying the gate's diagnostic
+ * keywords: the bench prints only the last 12 matching lines, so a failure
+ * logged under a bare "turn failed" never reaches the report (#301). */
+static void rt_turn_fail(const char *why, esp_err_t err)
+{
+    ESP_LOGE(TAG, "RT capture/ASR turn failed: why=%s err=%s ws=%d "
+             "up_fault=%d up_dropped=%u stage=%s",
+             why, esp_err_to_name(err), (int)robodog_rt_connected(),
+             (int)s_up_fault, (unsigned)s_up_dropped,
+             rt_stage_name(s_stage));
 }
 
 /* Logs the current stage (with its age + heap + socket state) once it has been
@@ -1602,11 +1623,12 @@ static size_t rt_stream_utterance(bool *fault, bool keep_pcm)
                 (uint32_t)frames, (uint32_t)captured_bytes, ever_speech,
                 speech_ms, silence_ms, vad_max, peak);
     ESP_LOGI(TAG, "RT capture done: frames=%u captured=%u B asr=%u B%s "
-             "up_dropped=%u ever_speech=%d speech=%ums silence=%ums "
-             "vad_max=%d vad_min=%d peak=%d",
+             "up_dropped=%u up_fault=%d ws=%d ever_speech=%d speech=%ums "
+             "silence=%ums vad_max=%d vad_min=%d peak=%d",
              (unsigned)frames, (unsigned)captured_bytes, (unsigned)s_asr_len,
              s_asr_truncated ? " (truncated)" : "", (unsigned)s_up_dropped,
-             (int)ever_speech, (unsigned)speech_ms, (unsigned)silence_ms,
+             (int)s_up_fault, (int)robodog_rt_connected(), (int)ever_speech,
+             (unsigned)speech_ms, (unsigned)silence_ms,
              (int)vad_max, (int)vad_min, (int)peak);
     /* Close the subscriber for the idle gap: the capture task only reads the
      * codec while a subscriber is open, so leaving it open between turns
@@ -1664,6 +1686,7 @@ esp_err_t robodog_rt_turn(robodog_rt_mode_t mode, robodog_rt_turn_t *out)
     const size_t samples = rt_stream_utterance(&cap_fault, keep_pcm);
     if (cap_fault) {
         out->fault = true;
+        rt_turn_fail("capture-fault", ESP_FAIL);
         ESP_LOGE(TAG, "RT capture fault; ending turn");
         robodog_ui_set_agent_state("error");
         rt_stage_set(RT_STAGE_IDLE); /* never leave the watchdog on capture */
@@ -1679,7 +1702,8 @@ esp_err_t robodog_rt_turn(robodog_rt_mode_t mode, robodog_rt_turn_t *out)
 
     if (s_up_fault) {
         out->fault = true;
-        ESP_LOGE(TAG, "RT uplink socket down; ending turn");
+        rt_turn_fail("uplink-down", ESP_FAIL);
+        ESP_LOGE(TAG, "RT uplink socket down; ending the capture/ASR turn");
         robodog_ui_set_agent_state("error");
         rt_stage_set(RT_STAGE_IDLE);
         return ESP_FAIL;
@@ -1712,6 +1736,7 @@ esp_err_t robodog_rt_turn(robodog_rt_mode_t mode, robodog_rt_turn_t *out)
     if (rt_send(commit) != ESP_OK) {
         out->fault = true;
         out->captured = true;
+        rt_turn_fail("commit-send", ESP_FAIL);
         rt_stage_set(RT_STAGE_IDLE);
         return ESP_FAIL;
     }
