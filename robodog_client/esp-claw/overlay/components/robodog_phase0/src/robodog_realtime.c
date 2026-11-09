@@ -1421,6 +1421,22 @@ static void rt_asr_utterance(robodog_rt_turn_t *out)
     if (err == ESP_OK) {
         err = rt_b64_flush(client, carry, carry_len);
     }
+    if (err == ESP_OK) {
+        /* The closing `","format":"wav"}},{...}]}]}` tail is part of the
+         * declared Content-Length: leaving it out makes the server wait for
+         * the rest of the body and never answer (#301). */
+        err = rt_http_write_all(client, tail, (size_t)tl);
+    }
+    /* Self-checking accounting: a short write against the declared length
+     * means the server is still waiting for the rest, so the round trip can
+     * only time out.  Fail loudly here instead of burning the deadline. */
+    if (err == ESP_OK && s_asr_written != body_len) {
+        ESP_LOGE(TAG, "RT ASR: body incomplete, wrote %u of %u B (head=%u "
+                 "b64=%u tail=%u); the server cannot answer",
+                 (unsigned)s_asr_written, (unsigned)body_len, (unsigned)hl,
+                 (unsigned)b64_len, (unsigned)tl);
+        err = ESP_FAIL;
+    }
     ESP_LOGI(TAG, "RT ASR body sent: %s (wrote %u B of %u B in %u ms)",
              esp_err_to_name(err), (unsigned)s_asr_written,
              (unsigned)body_len,
