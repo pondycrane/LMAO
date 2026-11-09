@@ -118,7 +118,10 @@ static const char *TAG = "robodog_rt";
  * stream still carries the whole utterance). */
 #define RT_ASR_PCM_MAX        (256 * 1024)
 #define RT_ASR_RESP_MAX       (64 * 1024)
-#define RT_ASR_TIMEOUT_MS     10000
+/* Generous: the POST carries ~160 KB of base64 audio and the engine may be
+ * finishing the previous turn's generation; the host probe measures 0.8 s on a
+ * warm engine, but a 10 s cap aborted the round trip before the answer (#301). */
+#define RT_ASR_TIMEOUT_MS     30000
 /* The Qwen lane sends the WHOLE reply audio in ONE delta (~214 KB for 4.5 s),
  * far past the 64 KB playback slot: decode into this scratch and split across
  * the fixed slots. */
@@ -1356,15 +1359,40 @@ static void rt_asr_utterance(robodog_rt_turn_t *out)
     ESP_LOGI(TAG, "RT ASR body sent: %s", esp_err_to_name(err));
     size_t rx_len = 0;
     if (err == ESP_OK) {
-        (void)esp_http_client_fetch_headers(client);
+        /* fetch_headers() must not be fire-and-forget: it is what parses the
+         * status line, and a failure here is the ONLY thing `http=-1` used to
+         * say (#301). */
+        const esp_err_t fh = esp_http_client_fetch_headers(client);
+        const int hdr_status = esp_http_client_get_status_code(client);
+        ESP_LOGI(TAG, "RT ASR headers: %s status=%d content_len=%d",
+                 esp_err_to_name(fh), hdr_status,
+                 (int)esp_http_client_get_content_length(client));
+        const int64_t t_rx = esp_timer_get_time();
         while (rx_len + 1 < RT_ASR_RESP_MAX) {
             const int r = esp_http_client_read(
                 client, s_asr_resp + rx_len,
                 (int)(RT_ASR_RESP_MAX - 1 - rx_len));
-            if (r <= 0) {
+            if (r > 0) {
+                rx_len += (size_t)r;
+                continue;
+            }
+            if (r < 0) {
+                ESP_LOGW(TAG, "RT ASR read: transport error after %u B",
+                         (unsigned)rx_len);
                 break;
             }
-            rx_len += (size_t)r;
+            /* r == 0 is "no bytes arrived YET", not EOF: the old loop broke
+             * here and gave up while the server was still working.  Stop only
+             * when the response is complete or the deadline has passed. */
+            if (esp_http_client_is_complete_data_received(client)) {
+                break;
+            }
+            if ((esp_timer_get_time() - t_rx) / 1000 > RT_ASR_TIMEOUT_MS) {
+                ESP_LOGW(TAG, "RT ASR read: no data after %d ms (%u B so far)",
+                         RT_ASR_TIMEOUT_MS, (unsigned)rx_len);
+                break;
+            }
+            vTaskDelay(pdMS_TO_TICKS(20));
         }
         s_asr_resp[rx_len] = '\0';
     }
@@ -1660,10 +1688,23 @@ esp_err_t robodog_rt_turn(robodog_rt_mode_t mode, robodog_rt_turn_t *out)
         ESP_LOGW(TAG, "RT uplink drain timed out; committing the frames sent");
     }
 
-    /* Commit FIRST: it seals the streamed audio into a user item (a small
-     * control message, no response).  The explicit ASR then runs against the
-     * same model endpoint without an uncommitted buffer in flight, and the
-     * response.create below picks the shape the router chose. */
+    /* Explicit ASR FIRST, then the commit.  In turn mode the server starts
+     * generating the reply as soon as the commit lands, and the engine
+     * serialises requests: a POST issued after the commit queues behind that
+     * generation and blew the ASR timeout with zero bytes read (#301).  The
+     * utterance is already in the session's input buffer, so committing after
+     * the ASR seals exactly the same audio. */
+    if (mode != ROBODOG_RT_MODE_OMNI) {
+        rt_stage_set(RT_STAGE_ASR);
+        rt_asr_utterance(out);
+        /* Keep the transcript in the per-turn accumulator too: the final
+         * memcpy(out, &s_turn) must not lose it. */
+        strlcpy(s_turn.transcript, out->transcript,
+                sizeof(s_turn.transcript));
+    }
+
+    /* Commit: seals the streamed audio into a user item (a small control
+     * message).  The response.create below picks the shape the router chose. */
     rt_stage_set(RT_STAGE_COMMIT);
     char commit[160];
     snprintf(commit, sizeof(commit),
@@ -1683,12 +1724,6 @@ esp_err_t robodog_rt_turn(robodog_rt_mode_t mode, robodog_rt_turn_t *out)
     if (mode == ROBODOG_RT_MODE_OMNI) {
         want_audio = true;
     } else {
-        rt_stage_set(RT_STAGE_ASR);
-        rt_asr_utterance(out);
-        /* Keep the transcript in the per-turn accumulator too: the final
-         * memcpy(out, &s_turn) must not lose it. */
-        strlcpy(s_turn.transcript, out->transcript,
-                sizeof(s_turn.transcript));
         const char *reason = NULL;
         const robodog_rt_mode_t route =
             (mode == ROBODOG_RT_MODE_AGENT)
