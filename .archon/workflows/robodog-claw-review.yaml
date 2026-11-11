@@ -23,8 +23,10 @@ description: |
      in this worktree (works in default isolation mode)
   2. verify-pr-base (re-targets the PR onto $BASE_BRANCH if needed)
   3. review-scope + sync the PR with main
-  4. 5 parallel review agents (code-review / error-handling / test-coverage /
-     comment-quality / docs-impact) -> synthesize
+  4. 5 review lenses run ONE AT A TIME (code-review -> error-handling ->
+     test-coverage -> comment-quality -> docs-impact; serialized, never a
+     concurrent fan-out — 5 simultaneous agents took down the local gx10
+     cluster) -> synthesize
   5. implement-fixes: act on the review findings, rebuild + RE-FLASH the board
      if firmware changed, commit, push
   6. FINAL gate chain re-run, ALL ON THE BENCH (benchd on op4 — the board is
@@ -134,6 +136,11 @@ nodes:
     context: fresh
     model: large
 
+  # The five review lenses run ONE AT A TIME, chained (never as a concurrent
+  # fan-out): five agents hitting the local gx10 cluster at once took it down.
+  # trigger_rule: all_done keeps each lens independent of the previous lens's
+  # outcome, so one failing lens never skips the rest; synthesize still needs
+  # at least one lens to have succeeded.
   - id: code-review
     command: archon-code-review-agent
     depends_on: [sync]
@@ -142,25 +149,29 @@ nodes:
 
   - id: error-handling
     command: archon-error-handling-agent
-    depends_on: [sync]
+    depends_on: [code-review]
+    trigger_rule: all_done
     context: fresh
     model: large
 
   - id: test-coverage
     command: archon-test-coverage-agent
-    depends_on: [sync]
+    depends_on: [error-handling]
+    trigger_rule: all_done
     context: fresh
     model: large
 
   - id: comment-quality
     command: archon-comment-quality-agent
-    depends_on: [sync]
+    depends_on: [test-coverage]
+    trigger_rule: all_done
     context: fresh
     model: large
 
   - id: docs-impact
     command: archon-docs-impact-agent
-    depends_on: [sync]
+    depends_on: [comment-quality]
+    trigger_rule: all_done
     context: fresh
     model: large
 
