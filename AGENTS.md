@@ -253,6 +253,15 @@ archon workflow run robodog-claw-review "review PR #NNN"
 # `participants @> '"<kid>"'::jsonb`) and prints the kid name LEFT + live clock
 # RIGHT on the single header row.
 
+# CONCURRENCY: the robodog-* workflows are strictly serialized — every node
+# sits in its own DAG layer, so exactly ONE node runs at a time and no two
+# nodes ever run concurrently. The five review lenses are a chain
+# (code-review -> error-handling -> test-coverage -> comment-quality ->
+# docs-impact, each `trigger_rule: all_done`), never a fan-out. Reason: five
+# simultaneous agents took down the local gx10 cluster. Never re-introduce a
+# parallel fan-out (several nodes sharing one `depends_on` set) in these
+# workflows; omp's own subagent cap is `task.maxConcurrency: 1`.
+
 # Sprout — smart irrigation node (Atom Lite + DTU base + Watering Unit + ENV III). Blueprint phases.
 # Firmware work is hard-blocked until smart_irrigation/docs/algorithm-evaluation.md
 # exists (blueprint Appendix 13). ⚠️ The smart-irrigation-dev workflow is NOT ready
