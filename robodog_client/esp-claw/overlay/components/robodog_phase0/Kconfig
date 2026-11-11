@@ -18,6 +18,24 @@ menu "RoboDog kconfig-symbol completion"
         bool "UAC codec support (defined here for skipped espressif/usb_host_uac)"
         default n
 
+    # Same class, second set: esp_audio_render / gmf_audio / esp_hls_stream
+    # gate their optional deps on `$CONFIG{ESP_PLAYER_ENABLE_*}` in their
+    # DOWNLOADED manifests, while esp_player's own Kconfig is not part of the
+    # component-manager kconfig pass for this board.  Declaring them here
+    # keeps the missed-key set empty (the values match the ones the IDF
+    # config pass resolves for the player: audio + HLS on, video off).
+    config ESP_PLAYER_ENABLE_AUDIO
+        bool "esp_player audio (declared for the component-manager kconfig pass)"
+        default y
+
+    config ESP_PLAYER_ENABLE_HLS_IO
+        bool "esp_player HLS IO (declared for the component-manager kconfig pass)"
+        default y
+
+    config ESP_PLAYER_ENABLE_VIDEO
+        bool "esp_player video (declared for the component-manager kconfig pass)"
+        default n
+
 endmenu
 
 menu "RoboDog Phase 0 probes"
@@ -364,5 +382,129 @@ menu "RoboDog Phase 2 voice loop"
             false-complete idle), and the robodog-claw-voice-verify gate
             FAILs on the marker so a half-read reply can never pass as a full
             readout.  Prefer a shorter reply over raising this cap.
+
+endmenu
+
+menu "RoboDog Phase 3 omni realtime (vLLM-Omni OpenAI-Realtime)"
+
+    config ROBODOG_RT_URL
+        string "Omni realtime WebSocket URL"
+        default "ws://192.168.50.27:8099/v1/realtime"
+        help
+            vLLM-Omni OpenAI-Realtime endpoint.  One session replaces the
+            three serial HTTP hops of the Phase 2 loop (Whisper ASR ->
+            claw_core -> Qwen3-TTS), each of which returned a WHOLE response
+            before the next could start: measured 24-32 s from end-of-speech
+            to first audio on this board.  An omni model streams transcript
+            deltas AND PCM deltas from one session, so first audio lands after
+            a fraction of a second of generation.
+
+            Plain `/v1/realtime` is the TURN-mode endpoint, and it is the
+            deployed lane.  The duplex deployment (`?duplex=1`) lets the model
+            decide per commit whether to answer or keep listening: measured on
+            this board's corpus, 2 of 5 turns ended with `response.listen` and
+            produced NO answer at all, which a voice assistant cannot ship.
+            Turn mode always answers a committed turn; measured 1.5-3.7 s from
+            end-of-speech to first audio (vs 24-32 s for the Phase 2 chain).
+            Full duplex is unusable here regardless — this board has no AEC,
+            so the mic cannot be read while the speaker plays.  Overridden
+            per-build from CLAW_RT_URL.
+
+    config ROBODOG_RT_MODEL
+        string "Model id sent in session.update"
+        default "openbmb/MiniCPM-o-4_5"
+        help
+            Must match the model the server was started with; the duplex
+            handler validates it against the served model.
+
+    config ROBODOG_RT_ASR_RATE
+        int "Sample rate of the WAV posted to /v1/chat/completions (Hz)"
+        default 24000
+        range 8000 48000
+        help
+            The explicit-ASR round trip posts one WAV per turn.  The
+            OpenAI-compatible handler on the omni server assumes the
+            realtime lane's 24 kHz (it hardcodes SAMPLE_RATE_HZ = 24000 for
+            input_audio_buffer.append), so post 24 kHz audio there too: the
+            board captures at 16 kHz and resamples up for the post.  Set to
+            16000 to post the raw capture instead.
+
+    config ROBODOG_RT_INSTRUCTIONS
+        string "Session instructions (persona + spoken-prose rule)"
+        default "You are RoboDog, a friendly voice assistant on a desk display. Answer immediately in plain spoken prose, in one short sentence. Never use markdown, headings, bullet lists, asterisks or emoji."
+        help
+            Session-level persona.  Kept short on purpose: every extra
+            sentence is spoken aloud.  "No markdown" is the same rule the
+            Phase 2 turn applies, since this path has no md_strip backstop
+            (the reply goes straight to TTS).
+            Do NOT add "never show your reasoning" here: measured, that
+            phrasing makes the model MORE likely to emit a think block.  The
+            deterministic defence is voice_think.c (strip the block from the
+            text) plus discarding the turn's server audio when one appears
+            (the Talker voices the tag: ASR of such a turn heard
+            "Gate, rot, zoo, rot, okay, 21...").
+
+    config ROBODOG_RT_TURN_MODE
+        int "Default per-turn modality (0=auto, 1=omni direct, 2=agent)"
+        default 0
+        range 0 2
+        help
+            0 = auto: the turn router picks (capability keywords -> agent,
+            everything else -> omni direct).  1 = omni answers the turn
+            itself (audio+text out): fastest, but esp-claw's skills/MCP/tools
+            are not in that path.  2 = omni transcribes only (text out) and
+            esp-claw's claw_core answers, spoken by Qwen3-TTS: full
+            capability, slower.
+
+    config ROBODOG_RT_SILENCE_MS
+        int "Trailing silence that ends the utterance (ms)"
+        default 800
+        range 200 3000
+        help
+            Client-side end-of-turn detector.  The session is opened with
+            turn_detection=null and auto_response=false so the turn boundary
+            is OURS: the board commits when it decides the user stopped,
+            never on a server heuristic (which would answer mid-sentence).
+
+    config ROBODOG_RT_MAX_SECS
+        int "Hard cap on a single streamed utterance (seconds)"
+        default 30
+        range 5 120
+        help
+            Bounds the streaming window so a saturated mic cannot stream
+            forever.  Audio is appended as it is captured, so there is no
+            large utterance buffer to exhaust (the Phase 2 capture cliff
+            cannot recur).
+
+    config ROBODOG_RT_TIMEOUT_MS
+        int "Response timeout after commit (ms)"
+        default 60000
+        range 5000 180000
+        help
+            How long to wait for response.done.  The model streams audio as
+            it generates, so this only bounds a wedged session.
+
+    config ROBODOG_RT_QUEUE_DEPTH
+        int "Playback queue depth (audio delta buffers)"
+        default 16
+        range 8 64
+        help
+            Audio deltas arrive faster than real time and are played paced.
+            This many decoded-PCM buffers absorb the burst; each is capped by
+            ROBODOG_RT_DELTA_MAX_BYTES.
+            Memory: DEPTH x DELTA_MAX_BYTES of PSRAM, allocated ONCE at init.
+            Keep the product small — the board has ~3.2 MB of SPIRAM free at
+            boot and the WS event buffer + decode scratch share it.  Measured:
+            a delta is ~40-56 KB of PCM, and the server sends ~1.5 MB of audio
+            for a 30 s reply, so 16 slots (~1 MB) absorbs the burst with
+            plenty of headroom; 48 slots (3 MB) exhausted SPIRAM and the
+            websocket client then failed to init.
+
+    config ROBODOG_RT_DELTA_MAX_BYTES
+        int "Largest audio delta accepted (bytes)"
+        default 65536
+        help
+            A delta bigger than this is dropped with a loud log rather than
+            growing a buffer mid-stream (the R7 heap-churn class of bug).
 
 endmenu

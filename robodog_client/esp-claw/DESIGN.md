@@ -1066,9 +1066,69 @@ Chinese reply (the vision prompt forbids translation).
     2. **UAF in `voice_speak`**: `esp_http_client_set_post_field` stores a
        pointer (does not copy); freeing the request JSON before `perform()`
        sent freed-memory as the body → Kokoro **400**. Both now fixed.
-- The test rig: the bidirectional USB PnP Audio device is **card 2 (`hw:2`)** on
-  the workspace host; there is **no ALSA `default` alias**, so the E2E drives
-  `hw:2` explicitly (`RD_ALSA_DEVICE`).
+- The test rig: the bidirectional USB PnP Audio device is **card 2** on the
+  workspace host; there is **no ALSA `default` alias**.  The raw `hw:2` node
+  returns `EIO` on the current kernel — the working node is **`plughw:2`**.
+  The bench host (op4) has **no USB audio at all**: only card 0 `sndi2s4`
+  (onboard ES8389, not coupled to the RoboDog board) and card 1
+  `allwinnerhdmi`; benchd's defaults (`BENCH_AUDIO_PLAYBACK`/
+  `BENCH_AUDIO_CAPTURE` = `default:CARD=sndi2s4`) therefore play into the
+  onboard codec and record from it — a 3 s capture there measures
+  `mean_volume −76.5 dB`, `max_volume −45.6 dB`, i.e. the noise floor.
+  `robodog_claw_e2e.py` probes candidate nodes (`plughw:CARD=<id>`, `plughw:2`,
+  `hw:2`, `default`, each with and without the `sg audio` wrapper) with a 0.3 s
+  null-source playback and drives the first that opens; `RD_ALSA_DEVICE` pins
+  one.  It logs `/dev/snd`, `aplay -l`, the chosen node and every probe result,
+  and LOUD-SKIPS when no node opens — a playback failure is never silently
+  reported as "the board heard nothing" (issue #301).  The skip is split by
+  verdict: **no board** keeps the documented loud-skip convention (`SKIPPED.txt`,
+  exit 0), while **board present but no ALSA node opens** is a **rig fault** —
+  it writes `RIG_UNUSABLE.txt` and exits **4**, because benchd maps rc==0 to
+  `passed` and a missing acoustic rig must never read as a green gate (a node
+  that opens but is not coupled to the board still fails honestly on the ASR
+  legs).
+- **The board yaml's `adc_init_gain` is dead config in esp_board_manager
+  0.6.2 - no board patch is needed for the mic gain.**  The field only appears
+  in the component's header, the board yaml and the codegen; no runtime `.c`
+  applies it (`dev_audio_codec.c` only calls `esp_codec_dev_new()`), so
+  `patches/0005-mic-gain.patch` (0 -> 30 dB) measurably changed nothing.  The
+  gain that actually applies comes from the capture hub:
+  `audio_capture_start()` calls `esp_codec_dev_set_in_gain(codec, 42)` after
+  `esp_codec_dev_open()`, and esp_codec_dev 1.6.2 maps 42 dB through the ES7210
+  `get_db()` to **GAIN_37_5DB**, the top step (bench register readback
+  `mic1=0x1e`).  A follow-up `patches/0006-mic-pga-readback.patch` (raw
+  `0x43`/`0x44` read/write + force) was **reverted**: it produced a
+  `tlsf_free` assert and a mid-turn reboot on the bench (`NO_RESET: FAIL`), and
+  the readback had already proven the hub's 42 dB lands.  Keep the hub's gain;
+  do not patch the board file.
+- **The gate's playback must not be wrapped in `sg` on op4.**  `benchd` runs
+  `robodog_claw_e2e.py` from its persistent `/srv/benchd/repo` checkout, which
+  is older than the head under test; that copy wraps playback in
+  `sg audio -c`, and **op4 has no `sg`** - the shell exits 127, ffmpeg never
+  runs, and the old script ignored the rc and logged "playing corpus".  Proof:
+  same head, same corpus, `E2E_AUDIO_SG=""` -> `ever_speech=1 vad_max=1360
+  frames=122 asr=78080 B`; with the wrapper -> `vad_max=33..203
+  ever_speech=0`.  The gate now defaults `E2E_AUDIO_SG` to `""` when `sg` is
+  absent from PATH (an explicit value always wins) and every playback path
+  checks the rc, so a missing wrapper can never read as a silent board again.
+  Ops still needs `_do_voice_loop` to run the script from the job's build
+  worktree (like `_do_flash_capture`) - until then the bench executes the old
+  copy and the env must be passed in the job payload.
+- **The explicit-ASR post is 24 kHz, not the raw 16 kHz capture.**  The omni
+  server's OpenAI-compatible handler hardcodes `SAMPLE_RATE_HZ = 24000` for the
+  realtime lane; a WAV posted to `/v1/chat/completions` at the capture's
+  16 kHz came back as an empty transcript.  `CONFIG_ROBODOG_RT_ASR_RATE`
+  (default 24000, `CLAW_RT_ASR_RATE` per build) resamples the captured PCM up
+  for that one post and the console logs the rate, the model id, the HTTP
+  status, the rx bytes and the response body (`RT ASR body: '...'`), so an
+  empty transcript is diagnosable from a single run.
+- **The acoustic rig works once playback actually runs.**  With
+  `E2E_AUDIO_SG=""` and `RD_ALSA_DEVICE=plughw:CARD=Device` the corpus reaches
+  the board (`ever_speech=1 vad_max=1360`, 122 frames / 78080 B captured) and
+  the omni turn returns a correct spoken reply.  Keep the dongle's speaker
+  within a few cm of the board's mic — doubling `RD_PLAY_VOL` adds only
+  +2.7 dB, the speaker saturates — and read `vad_max`/`vad_min`/`peak` in the
+  turn log before blaming the firmware.
 
 ### Gate (hardware-verified)
 
@@ -1139,3 +1199,290 @@ Panel + state, captured with the RD_SHOT → `capture.decode_hermes` → vision
 readback path: a press with no speech shows `listening` on the status row and
 ends in the intended `no speech within 12000 ms` bail (`state -> idle`), while
 a press followed by speech runs the full chain and renders the reply.
+
+## Phase 3 — omni realtime voice path (standalone, no bridge)
+
+The Phase 2 loop is three serial HTTP calls, each returning a WHOLE response
+before the next can start. Measured on the board (`/dev/ttyACM0`, corpus
+`count`, 4.16 s WAV played into the mic):
+
+| Stage | Measured |
+|---|---|
+| VAD trailing silence | 0.8 s |
+| Whisper `/v1/audio/transcriptions` | 7.8–12.5 s (4.2 s fixed + 0.67 × utterance) |
+| claw_core reply (whole, no stream) + 3.6 s memory-extract stage note | 4.2–7.0 s |
+| Qwen3-TTS first chunk (TTFB == total, RTF ≈ 1) | 8.8–15.0 s |
+| **end-of-speech → first audio** | **24.3–32.5 s** |
+| read-out to `idle` | 11.6–14.2 s |
+
+Phase 3 replaces those three hops with ONE WebSocket session to a vLLM-Omni
+OpenAI-Realtime endpoint (cluster-ops `omni-realtime/`). The board streams its
+mic into the session **as it captures** (no utterance upload at all), commits
+when its own energy VAD says the user stopped, and receives transcript and PCM
+deltas as the model generates.
+
+**Measured on the same corpus, same board, warm session:**
+
+| Leg | Phase 2 | Phase 3 |
+|---|---|---|
+| end-of-speech → first audio | 24.3–32.5 s | **0.83 s** |
+| session handshake | n/a | 74–99 ms |
+| first audio → readout complete (9.2 s of audio) | ~11.6 s | 5.1 s |
+
+### Two per-turn shapes (esp-claw decides, per turn)
+
+The omni model answers and speaks a turn itself, but that path has no
+skills/MCP/web access. So the board picks the shape PER TURN:
+
+| Shape | Path | Cost |
+|---|---|---|
+| `OMNI` | omni answers + speaks (`modalities ["audio","text"]`) | ~0.8 s to first audio; **no esp-claw tools** |
+| `AGENT` | omni transcribes (`modalities ["text"]`), claw_core answers with skills/MCP/web/self-programming, Qwen3-TTS speaks | full capability, Phase-2 latency |
+
+`AUTO` (the default) routes with `voice_route.c` — a pure-C, host-tested
+keyword table, so the decision is auditable on the console
+(`RT route=agent reason=search`) and tunable per household. Anything that
+isn't a capability intent stays on the fast path. `rd_voice_mode
+[classic|auto|omni]` pins a path at runtime for A/B measurement, and a
+realtime fault ends the turn visibly (never a re-capture).
+
+**The transcript comes from an explicit ASR call, not the realtime event.**
+The deployed Qwen3-Omni lane never emits
+`conversation.item.input_audio_transcription.completed` (bench-probed: it
+accepts and echoes `input_audio_transcription` in `session.update`, then emits
+only `input_audio_buffer.committed` / `conversation.item.*` / `response.*`), and
+the fallback the code used to claim in `rt_dispatch` never existed. So for the
+AGENT shape the board POSTs the captured utterance to
+`<realtime host>/v1/chat/completions` as `input_audio` (same model, no new
+service, `modalities:["text"]`), logs `RT ASR text="..."` (gate regex unchanged)
+and `RT ASR language=<tag> prob=0.00`, renders the transcript on the RLCD, and
+routes on it. The ASR prompt asks for `{"language":...,"text":...}` so the
+language tag is the model's own detection rather than a script guess; the pure-C
+`voice_asr.c` parser (host-tested) accepts a plain transcript too.
+
+That makes the AUTO turn **one** response, not two: capture → explicit ASR →
+route → commit → `response.create` with the shape's modalities. The omni shape
+streams and plays the model's audio; the agent shape gets a text-only response
+(kept so the session history has the model's answer) and then claw_core answers
+with Qwen3-TTS. The unused text-only reply is neither rendered nor
+think-suppressed (its audio is ignored before decode).
+
+### Session protocol (what the board sends)
+
+`session.update` → `session.created` → paced `input_audio_buffer.append`
+(40-60 ms PCM16 24 kHz frames, only once speech begins) →
+`input_audio_buffer.commit` → `response.create`. The session opens with
+`turn_detection: null` and `auto_response: false` so the turn boundary is
+the BOARD's (a server VAD would answer mid-sentence). The input audio is
+resampled 16 kHz → 24 kHz (the handler hardcodes `SAMPLE_RATE_HZ = 24000`).
+
+### Capture pump: never block the reader (issue #301)
+
+The first implementation resampled + base64'd + sent each 20 ms frame inline in
+the capture loop, with a 10 s send timeout, so a slow socket could stall the
+reader — the pump is decoupled from the network below as hardening.
+
+The bench evidence then showed the reported "stalled pump" was a misreading.
+The subscriber ring `total` grew at the full 32 KB/s *minus ~600 frames per
+turn*: the reader consumed exactly the 12 s the `RT no speech within 12000 ms`
+bail allows and then stopped. The turn had ENDED on "no speech" while the
+still-open APP subscriber overflowed the ring for the rest of the gate's 90 s
+ASR wait, and the missing stage reset left the watchdog reporting
+`stage=capture` for a turn that was over. What the board actually lacked was
+speech: the gate drove the corpus into a device string that was not a PCM node
+(the ALSA `null` plugin's *description*; see the rig note below), so the mic
+only ever saw its noise floor.
+
+The reader now only fills a 64-slot ring of **raw 16 kHz frames** (PSRAM,
+1.28 s). A dedicated `robodog_rt_up` sender task drains it, resamples, base64s,
+coalesces up to 3 frames into ONE `input_audio_buffer.append` (one JSON message
+per 40-60 ms) and sends with a **250 ms** timeout. A full ring drops the OLDEST
+frame and counts it; the reader never blocks on the network. The once-per-second
+pump log carries `frames`, `captured` bytes, `up_dropped`, `ever_speech`,
+`speech_ms`, `silence_ms`, `vad_max`/`peak` (the highest frame mean-abs and
+sample the VAD saw) and the sender's `last/avg/max` build+send wall time, which
+distinguishes "pump too slow" from "socket blocked" from "the mic is silent" in
+one run. The turn
+drains the ring before `commit` so the whole utterance is sealed (a timed-out
+drain logs and commits what was sent).
+
+**No idle capture.** The APP subscriber is closed at the end of each RT turn
+(the capture task then idles with the codec left open, so there is no codec
+churn and no ring for the idle gap to overflow). Every early turn exit resets
+the stage to `idle`, so the watchdog can only report a stage that is actually
+being held.
+
+**`response.listen` is not a turn end.** MiniCPM-o's native turn-taking can
+answer a commit with "keep listening" (measured: a 2.1 s committed utterance
+produced `listen`, then `speak` immediately after one explicit
+`response.create`). A committed utterance must still be answered, so the board
+re-asks ONCE; a second `listen` verdict is honoured (the user really did pause
+mid-sentence).
+
+### Device-side implementation
+
+`robodog_realtime.c` — WS client (`esp_websocket_client`, already a compiled
+dependency) + fragment reassembly + JSON dispatch + a playback task that
+writes decoded PCM deltas to the shared APP mixer track.
+
+- **No per-delta allocation**: the playback slots (`RT_QUEUE_DEPTH` ×
+  `RT_DELTA_MAX_BYTES`) and the base64 decode scratch are allocated ONCE at
+  init, so the Phase 2 R7 tlsf-free panic site cannot recur. An oversized
+  delta is dropped with a log rather than growing a buffer mid-stream.
+- **No sleep pacing**: the mixer ring is the backpressure (a short write is
+  retried), which is what paces playback at the codec rate. The Phase 2 loop
+  slept 19 ms per 20 ms frame and ran ~5 % fast.
+- **One session per boot**: `robodog_rt_connect()` is idempotent, so turns 2..N
+  reuse the admitted session (`duplex_session.max_sessions` counts admitted
+  sessions, and the server reports `resource_exhausted` beyond it).
+- **AEC**: `esp_audio_effects` in this tree ships ALC/DRC/EQ/mixer/rate-cvt but
+  no echo canceller, so the board stays half-duplex (mic not read while audio
+  plays) exactly as in Phase 2. MiniCPM-o supports barge-in; the hardware
+  does not.
+
+Shared helpers extracted so the two paths cannot drift:
+`robodog_speaker.c` (PA + DAC unmute + volume — the reply is silent until all
+three are asserted) and `robodog_pcm_resample()` in `voice_pcm.c` (used by both
+the TTS path and the realtime path; the omni endpoint declares its output rate
+per delta, so a wrong rate assumption would play a 16 kHz clip slow).
+
+### Server side (cluster-ops `omni-realtime/`)
+
+`vllm-omni serve openbmb/MiniCPM-o-4_5 --omni --deploy-config <overlay>` on
+spark-5307 (GB10, 121 GiB unified). The packaged profile budgets 0.55 + 0.15 +
+0.18 of the DEVICE, which assumes the node owns the GPU; the site overlay
+(`minicpmo_4_5_shared_gpu.yaml`) trims it so the omni endpoint coexists with
+Whisper (:8001) and Qwen3-TTS (:8004). Three install gaps found on the way:
+
+1. **`vllm-omni` does not depend on `vllm`** — install both at the same version.
+2. **Code2Wav needs `stepaudio2-minicpmo`**, and its bundled `cosyvoice2`
+   implementation is only registered under the upstream module name inside
+   `stepaudio2.Token2wav.__init__` — which vLLM-Omni's `StepAudio2Token2WavCore`
+   never calls. Without the `cosyvoice2.py` alias shim in site-packages, Stage 2
+   dies with `ImportError: There is no such class as
+   cosyvoice2.flow.flow.CausalMaskedDiffWithXvec`. (`hyperpyyaml` and
+   `speechbrain` are also needed.)
+3. **The vocoder assets live under `assets/token2wav/`** in the HF repo, not at
+   the snapshot root, so a plain `hf download` of the model leaves Stage 2
+   without `flow.pt`/`hift.pt`.
+
+Also: GB10 memory is UNIFIED, so the page cache counts as USED in vLLM's
+free-memory check — a warm cache can make a legal budget look impossible.
+Drop caches before starting the engine.
+
+### The session recipe that actually works (hardware-verified)
+
+Getting a turn answered took five findings, each reproduced on the board:
+
+1. **`session.type` is MANDATORY.** OpenAI's schema spells the session object
+   `RealtimeSessionCreateRequest`, whose `type` field is required. Omitting it
+   makes the server reject `session.update` with `invalid_event` and keep its
+   defaults — the session still opens, so the failure is silent (no
+   instructions, no turn behaviour change).
+2. **Wait for `session.updated` before streaming audio.** The server applies
+   the update asynchronously and RESETS the input buffer when it lands, so
+   anything appended before that event is discarded and the commit then
+   produces nothing at all.
+3. **Send the MINIMAL session payload.** Measured on hardware: adding
+   `modalities`, `turn_detection`, `input_audio_format`, `overlap_policy`,
+   `playback_commit_policy` or `extra_body` makes the update succeed but then
+   silently drop the commit. The accepted shape is
+   `{type:"session.update", session:{type:"realtime", model, instructions}}`.
+4. **Input audio is 24 kHz mono PCM16**, not 16 kHz — the OpenAI-compatible
+   handler hardcodes `SAMPLE_RATE_HZ = 24000`. The board's capture hub runs
+   16 kHz, so every frame is resampled up before the append; sending raw
+    16 kHz makes the model hear the utterance 1.5x fast.
+5. **The model id must match the served lane.** `build_esp_claw.sh` compiles
+   `CONFIG_ROBODOG_RT_MODEL` from `CLAW_RT_MODEL` (default
+   `openbmb/MiniCPM-o-4_5`). The bench serves ONLY
+   `Qwen/Qwen3-Omni-30B-A3B-Instruct` (`/v1/models`); a session whose model id
+   does not match is rejected by the realtime handler, which closes the
+   socket — the firmware then logs `RT append failed: socket down` (x20) and
+   `RT uplink socket down; ending turn`, and the turn dies before any audio is
+   heard. Build the gate with `payload.env
+   {"CLAW_RT_MODEL":"Qwen/Qwen3-Omni-30B-A3B-Instruct",
+   "CLAW_RT_DISABLE_THINKING":"n"}` (bench build `j-1794187280`). The same id
+   is sent in the explicit-ASR post, so a wrong id kills that call too.
+
+Then `input_audio_buffer.commit` + `response.create` with
+`{"modalities":["audio","text"]}` produces `response.created`,
+`response.output_audio_transcript.delta` (the RLCD subtitle) and
+`response.output_audio.delta` (PCM16 at 24 kHz, played through the shared APP
+mixer track).
+
+**Device-side WS sizing.** One audio delta is ~54 KB of JSON (base64 of ~40 KB
+of PCM16) on the MiniCPM-o lane, but the Qwen lane sends the WHOLE reply in ONE
+delta (~214 KB of PCM for a 4.5 s answer). With a 4 KB `esp_websocket_client`
+buffer the message fragments and its bytes are lost whenever the handler does
+work between reads — measured as every audio delta failing to parse. The buffer
+is therefore 64 KB, i.e. one event per message; the decode scratch is 256 KB
+(the whole-reply delta) and the decoded PCM is split across the playback slots.
+The queue is 16 x 64 KB (~1 MB) rather than 48 slots (3 MB, which exhausted the
+~3.2 MB of free SPIRAM and made the websocket client fail to init).
+
+Measured on the board after these fixes (`count` corpus, test speaker into the
+board mic): **6.3 s from end-of-speech to first audio** (device-internal
+commit→first-audio 5.4 s on that run), reply text streamed to the RLCD and
+audio played — against 24-32 s for the Phase 2 chain. The remaining gap is
+first-request model warmup plus the 800 ms VAD tail; the host probe on a warm
+engine measures 1.1-2.6 s.
+
+### Why turns sometimes ended silent (root causes, all fixed)
+
+The board "often hit idle and no response". Three distinct causes, each
+reproduced on hardware:
+
+1. **The Talker stage died.** When the Thinker emits a `think` block with no
+   `<|tts_bos|>` span, Stage 1 raises
+   `ValueError: MiniCPM-o Talker requires tensor tts_token_ids and
+   tts_hidden_states conditioning` and is evicted. The API server keeps
+   answering `/health` **200**, but every realtime request then fails with
+   `OmniEngineDeadError: Stage-1 has no live replica` — forever, because
+   `Restart=always` only fires when the process *exits*. Fixed server-side by
+   `omni-realtime-watchdog.timer` (cluster-ops): it probes the real WS
+   handshake, skips the cold-load grace window, and restarts after three
+   consecutive failures.
+2. **The board re-captured after a failed turn.** On any realtime fault the
+   Phase 2 chain opened a *second* listen window; the user had already spoken,
+   so it found silence and ended in a clean `idle` — the symptom looked like
+   "the assistant ignored me". Now a realtime fault ends in a visible `error`
+   and the next turn reconnects (`rt_send` drops the cached session on
+   failure).
+3. **Nothing was heard.** A VAD miss ended in a plain `idle`, indistinguishable
+   from a broken turn. It now shows the `no speech` state and *says*
+   "Sorry, I didn't hear that." so the failure is audible.
+
+### Reasoning blocks ("it tries to pronounce think")
+
+MiniCPM-o sometimes emits `think ... /think` and the Talker **voices it** —
+ASR of such a turn heard `"Gate, rot, zoo, rot, okay, 21, 22, ..."`, i.e. the
+model pronouncing the tag before the answer. Measured facts:
+
+- **No server-side switch removes it.** `chat_template_kwargs.enable_thinking
+  = false` is accepted by the realtime handler and ignored (identical text and
+  audio with and without it, whether passed in `extra_body` or at the request
+  root). `use_tts_template` does not change it either.
+- **Re-asking does not clear it** (a second `response.create` on the same
+  committed turn emits the block again).
+- It appears on a **repeated question within one session**; a fresh session
+  never emitted one in 8 varied turns.
+
+Device-side handling (`voice_think.c`, pure C, host-tested):
+
+- `robodog_think_strip()` removes every block from the accumulated text — the
+  scan runs over the whole text because the streaming deltas split the tag
+  across events (`<`, `think`, `>` arrive separately).
+- When a block is present the turn's **server audio is discarded** (it
+  contains the spoken tag) and the CLEAN text is re-spoken through Qwen3-TTS.
+  The log carries `think=1 dropped=<n>` so the E2E can prove it.
+- A reply that is *entirely* a block strips to empty; rather than going
+  silent, the board says "Sorry, I lost that one. Please say it again."
+- The session is then **reset** (fresh history), which is the state that never
+  emits a block — verified: the turn after a think turn is clean and fast
+  (1.38 s to first audio).
+
+Playback is gated on the first transcript delta (`s_play_go`): audio deltas can
+arrive BEFORE the text (measured: the first audio delta came 14.5 s after
+commit, before the text), so a timed fallback would start playing a reasoning
+block the stripper has not seen yet. The turn releases the gate at
+`response.done` so a text-less stream cannot mute the turn or hang the drain.

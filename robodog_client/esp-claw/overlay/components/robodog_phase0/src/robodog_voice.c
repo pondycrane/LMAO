@@ -21,6 +21,8 @@
 #include "voice_split.h"
 #include "voice_md.h"
 #include "voice_pipeline.h"
+#include "robodog_realtime.h"
+#include "robodog_speaker.h"
 #include "voice_pcm.h"
 #include "robodog_utf8.h"
 
@@ -129,6 +131,27 @@ static EventGroupHandle_t s_voice_evts;
 static TaskHandle_t s_voice_task;
 static volatile bool s_turn_active;
 
+/* Which voice path a turn takes.
+ *   CLASSIC — the Phase 2 chain (capture -> Whisper -> claw_core -> Qwen3-TTS)
+ *   OMNI    — the Phase 3 realtime session, omni answers and speaks the turn
+ *   AUTO    — realtime session; the capability router decides per turn
+ * `rd_voice_mode` switches it at runtime so the two paths can be measured
+ * back to back on the same board (the E2E does exactly that). */
+typedef enum {
+    VOICE_PATH_CLASSIC = 0,
+    VOICE_PATH_AUTO = 1,
+    VOICE_PATH_OMNI = 2,
+} voice_path_t;
+static voice_path_t s_voice_path =
+    (CONFIG_ROBODOG_RT_TURN_MODE == 1) ? VOICE_PATH_OMNI
+    : (CONFIG_ROBODOG_RT_TURN_MODE == 2) ? VOICE_PATH_CLASSIC
+    : VOICE_PATH_AUTO;
+
+/* Set when the realtime session already transcribed the utterance, so the
+ * Phase 2 chain must skip its own capture + Whisper legs (ownership moves to
+ * the turn, which frees it). */
+static char *s_rt_transcript;
+
 /* The language of the TTS requests for the CURRENT turn.  The endpoint would
  * otherwise infer each chunk independently from its script, so a short
  * English-only chunk inside a Chinese reply could flip to the English-native
@@ -179,48 +202,9 @@ typedef struct {
  * from the board manager's peripheral init even though the DAC device hook
  * declares active_level=1 — see VOICE_PA_GPIO).  Configure as push-pull
  * output HIGH ourselves so the amp is up regardless of bmgr state. */
-static void voice_enable_pa(void)
-{
-    static bool s_pa_on;
-    if (s_pa_on) {
-        return;
-    }
-    gpio_config_t io = {
-        .pin_bit_mask = 1ULL << VOICE_PA_GPIO,
-        .mode = GPIO_MODE_OUTPUT,
-        .pull_up_en = GPIO_PULLUP_DISABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE,
-    };
-    if (gpio_config(&io) == ESP_OK && gpio_set_level(VOICE_PA_GPIO, 1) == ESP_OK) {
-        s_pa_on = true;
-        ESP_LOGI(TAG, "speaker PA enabled (GPIO%d -> high)", VOICE_PA_GPIO);
-    } else {
-        ESP_LOGW(TAG, "failed to enable speaker PA on GPIO%d",
-                 VOICE_PA_GPIO);
-    }
-}
-
-/* ── Audio playback diagnostic (rd_audio_diag) ──────────────────────────── */
-/* The claw audio_hub path delivers real-time data on this board but produced
- * no audible output even with the PA raised, so dump the live ES8311 DAC
- * registers (power/DAC-enable/mute/volume), force an unmute + 80% volume,
- * then play a 1 kHz tone through the same paced APP-track path so the test
- * rig's microphone can confirm signal spectrally.  Register numbers come from
- * the esp_codec_dev es8311 driver (es8311_reg.h). */
-static esp_codec_dev_handle_t voice_dac_dev(void)
-{
-    void *dev_handle = NULL;
-    if (esp_board_manager_get_device_handle("audio_dac", &dev_handle) != ESP_OK ||
-        dev_handle == NULL) {
-        return NULL;
-    }
-    return ((dev_audio_codec_handles_t *)dev_handle)->codec_dev;
-}
-
 static void voice_dump_dac_regs(const char *tag)
 {
-    esp_codec_dev_handle_t h = voice_dac_dev();
+    esp_codec_dev_handle_t h = robodog_speaker_dac();
     if (h == NULL) {
         ESP_LOGW(TAG, "audio diag: no audio_dac codec handle");
         return;
@@ -320,12 +304,12 @@ static void voice_play_tone(unsigned ms, int freq)
 static int cmd_audio_diag(int argc, char **argv)
 {
     (void)argc; (void)argv;
-    esp_codec_dev_handle_t h = voice_dac_dev();
+    esp_codec_dev_handle_t h = robodog_speaker_dac();
     if (h == NULL) {
         ESP_LOGE(TAG, "audio diag: no audio_dac codec handle");
         return 1;
     }
-    voice_enable_pa();
+    (void)robodog_speaker_assert_output();
     voice_dump_dac_regs("before");
     (void)esp_codec_dev_set_out_mute(h, false);
     (void)esp_codec_dev_set_out_vol(h, 80);
@@ -617,47 +601,6 @@ static int16_t *voice_capture(size_t *out_samples, bool *out_fault)
 
 /* ── ASR: 16 kHz PCM -> Whisper text ────────────────────────────────────── */
 
-/* Build a canonical RIFF/WAV header for 16 kHz mono 16-bit PCM. */
-static size_t build_wav_header(uint8_t *dst, size_t dst_cap, size_t data_bytes)
-{
-    const size_t hdr = 44;
-    if (dst_cap < hdr) {
-        return 0;
-    }
-    const uint32_t sample_rate = VOICE_RATE;
-    const uint16_t channels = VOICE_CH;
-    const uint16_t bits = VOICE_BITS;
-    const uint32_t byte_rate = sample_rate * channels * (bits / 8);
-    const uint16_t block_align = (uint16_t)(channels * (bits / 8));
-#define PUT32(p, v) do {                                  \
-        (p)[0] = (uint8_t)((v) & 0xff);                   \
-        (p)[1] = (uint8_t)(((v) >> 8) & 0xff);            \
-        (p)[2] = (uint8_t)(((v) >> 16) & 0xff);           \
-        (p)[3] = (uint8_t)(((v) >> 24) & 0xff);           \
-    } while (0)
-#define PUT16(p, v) do {                                  \
-        (p)[0] = (uint8_t)((v) & 0xff);                   \
-        (p)[1] = (uint8_t)(((v) >> 8) & 0xff);            \
-    } while (0)
-    uint8_t *o = dst;
-    memcpy(o, "RIFF", 4);   o += 4;
-    PUT32(o, (uint32_t)(36 + data_bytes)); o += 4;
-    memcpy(o, "WAVE", 4);   o += 4;
-    memcpy(o, "fmt ", 4);   o += 4;
-    PUT32(o, 16);           o += 4;
-    PUT16(o, 1);            o += 2;   /* PCM */
-    PUT16(o, channels);     o += 2;
-    PUT32(o, sample_rate);  o += 4;
-    PUT32(o, byte_rate);    o += 4;
-    PUT16(o, block_align);  o += 2;
-    PUT16(o, bits);         o += 2;
-    memcpy(o, "data", 4);   o += 4;
-    PUT32(o, (uint32_t)data_bytes); o += 4;
-#undef PUT32
-#undef PUT16
-    return hdr;
-}
-
 /* Write `len` bytes to an OPEN esp_http_client request body, looping over
  * partial writes.  Used to stream the ASR multipart body (see
  * robodog_voice_asr) instead of assembling it in one contiguous buffer. */
@@ -710,7 +653,9 @@ char *robodog_voice_asr(const int16_t *pcm, size_t samples,
                                              "\r\n--%s--\r\n", boundary);
 
     uint8_t wav_hdr[44];
-    const size_t wav_len = build_wav_header(wav_hdr, sizeof(wav_hdr), pcm_bytes);
+    const size_t wav_len = robodog_wav_header(wav_hdr, sizeof(wav_hdr),
+                                              pcm_bytes, VOICE_RATE,
+                                              VOICE_CH, VOICE_BITS);
     const size_t body_len = head_len + wav_len + pcm_bytes + foot_len;
 
     robodog_http_rx_t rx;
@@ -822,28 +767,6 @@ out:
  * makes the common Kaspi 24 kHz case a pure passthrough with zero software
  * processing; any other rate is interpolated at step out_rate/in_rate so
  * pitch and tempo stay exact. */
-static size_t resample_to_rate(const int16_t *in, size_t in_n,
-                               int16_t *out, size_t out_cap,
-                               uint32_t in_rate, uint32_t out_rate)
-{
-    if (in_rate == 0 || in_rate == out_rate) {
-        const size_t cp = (in_n < out_cap) ? in_n : out_cap;
-        memcpy(out, in, cp * sizeof(int16_t));
-        return cp;
-    }
-    size_t o = 0;
-    double pos = 0.0;
-    const double step = (double)out_rate / (double)in_rate;
-    while (o < out_cap && (size_t)pos + 1 < in_n) {
-        const size_t i = (size_t)pos;
-        const double frac = pos - (double)i;
-        const double v = (double)in[i] * (1.0 - frac) + (double)in[i + 1] * frac;
-        out[o++] = (int16_t)v;
-        pos += step;
-    }
-    return o;
-}
-
 /* ── TTS playback: reply text -> WAV -> device 16 kHz -> ES8311 ──────────── */
 
 /* The voice/language/instruct triple for a TTS request.  The per-language
@@ -1099,7 +1022,7 @@ static esp_err_t voice_play_chunk(audio_mixer_track_handle_t track,
                      (unsigned)out_cap);
             return ESP_ERR_NO_MEM;
         }
-        out_samples = resample_to_rate(
+        out_samples = robodog_pcm_resample(
             (const int16_t *)(rx->buf + data_off) + trim_off, trim_n, out16,
             out_cap, src_rate, play_rate);
         pcm_src16 = out16;
@@ -1146,12 +1069,7 @@ esp_err_t robodog_voice_speak(const char *reply)
         robodog_http_rx_free(&rx); /* nothing played */
         return fetch;
     }
-    voice_enable_pa();
-    esp_codec_dev_handle_t dac = voice_dac_dev();
-    if (dac != NULL) {
-        (void)esp_codec_dev_set_out_mute(dac, false);
-        (void)esp_codec_dev_set_out_vol(dac, 80);
-    }
+    (void)robodog_speaker_assert_output();
     audio_mixer_track_handle_t track = NULL;
     uint32_t play_rate = VOICE_RATE;
     esp_err_t play = voice_track_open(&track, &play_rate);
@@ -1383,10 +1301,80 @@ static void voice_turn(void)
         return;
     }
 
+    /* ── Phase 3: the omni realtime path ────────────────────────────────
+     * One WebSocket session replaces the three serial HTTP hops below.  The
+     * mic is streamed into the session AS IT IS CAPTURED (no utterance
+     * upload); the transcript comes from the explicit ASR round trip, the
+     * capability router decides the shape, and the RT module runs exactly ONE
+     * response for it:
+     *   OMNI  -> the model answers and speaks the turn itself (fast);
+     *   AGENT -> transcript only (session history), then claw_core answers
+     *            with its skills/MCP/web tools and Qwen3-TTS speaks.
+     * AUTO resolves through robodog_rt_route() inside the RT module; the
+     * decision is logged there (`RT route=...`) so the console shows WHY a
+     * turn took a given path.
+     * A realtime fault ends the turn visibly (never a re-capture: the user
+     * already spoke), and `rd_voice_mode` can pin a path for A/B measurement. */
+    if (s_voice_path != VOICE_PATH_CLASSIC) {
+        robodog_rt_turn_t rt;
+        const robodog_rt_mode_t forced =
+            (s_voice_path == VOICE_PATH_OMNI) ? ROBODOG_RT_MODE_OMNI : ROBODOG_RT_MODE_AUTO;
+        const esp_err_t rterr = robodog_rt_turn(forced, &rt);
+        if (rterr == ESP_OK && !rt.fault &&
+            (rt.transcript[0] != '\0' || rt.spoke)) {
+            ESP_LOGI(TAG, "RT turn: mode=%s transcript=\"%s\" spoke=%d",
+                     forced == ROBODOG_RT_MODE_OMNI ? "omni" : "auto",
+                     rt.transcript, (int)rt.spoke);
+            if (rt.spoke) {
+                /* OMNI answered and spoke: the panel already carries the
+                 * streamed transcript + reply (rendered by the RT module). */
+                robodog_ui_set_agent_state("idle");
+                s_turn_active = false;
+                return;
+            }
+            /* AGENT shape: the RT module already transcribed the utterance
+             * (and rendered it on the RLCD); hand it to the Phase 2 chain,
+             * which owns the claw_core run and the Qwen3-TTS read-out.  Skip
+             * its capture + ASR legs — the utterance is already transcribed. */
+            s_rt_transcript = strdup(rt.transcript);
+        } else if (rterr != ESP_OK || rt.fault) {
+            /* NEVER fall back into the Phase 2 capture here.  The user has
+             * already spoken: opening a second listen window finds silence,
+             * ends in a clean `idle`, and looks exactly like the reported
+             * "hit listen, it goes idle and says nothing".  End visibly, and
+             * let the next turn reconnect (rt_send drops the cached session
+             * on failure; the server side is healed by the omni watchdog). */
+            ESP_LOGE(TAG, "RT path failed (%s); ending turn in error (no "
+                     "re-capture)", esp_err_to_name(rterr));
+            robodog_ui_set_agent_state("error");
+            s_turn_active = false;
+            return;
+        } else {
+            /* Nothing was captured.  This used to end in a plain `idle`, which
+             * is indistinguishable from a broken turn — the reported "hits
+             * idle and no response".  Say so out loud and show a distinct
+             * state so the user knows the mic (not the assistant) missed it. */
+            ESP_LOGW(TAG, "RT captured no utterance; prompting");
+            robodog_ui_set_agent_state("no speech");
+            if (robodog_voice_speak("Sorry, I didn't hear that.") != ESP_OK) {
+                ESP_LOGW(TAG, "RT no-speech prompt failed");
+            }
+            robodog_ui_set_agent_state("idle");
+            s_turn_active = false;
+            return;
+        }
+    }
+
+    /* When the realtime session already transcribed the utterance, the
+     * Phase 2 capture + Whisper legs must not run: capturing again would open
+     * a second listen window (and end the turn idle with no speech). */
     size_t samples = 0;
     bool cap_fault = false;
-    int16_t *pcm = voice_capture(&samples, &cap_fault);
-    if (pcm == NULL || samples < VOICE_FRAME_SAMPLES * 2) {
+    int16_t *pcm = NULL;
+    if (s_rt_transcript == NULL) {
+        pcm = voice_capture(&samples, &cap_fault);
+    }
+    if (s_rt_transcript == NULL && (pcm == NULL || samples < VOICE_FRAME_SAMPLES * 2)) {
         if (pcm != NULL) {
             heap_caps_free(pcm);
         }
@@ -1405,8 +1393,21 @@ static void voice_turn(void)
     }
 
     robodog_asr_meta_t meta;
-    char *text = robodog_voice_asr(pcm, samples, &meta);
-    heap_caps_free(pcm);
+    char *text;
+    const bool from_rt = (s_rt_transcript != NULL);
+    if (from_rt) {
+        /* The realtime module already transcribed this utterance AND rendered
+         * it on the RLCD (robodog_ui_show_user) — do not render it twice. */
+        memset(&meta, 0, sizeof(meta));
+        text = s_rt_transcript;
+        s_rt_transcript = NULL;
+        ESP_LOGI(TAG, "ASR text=\"%s\" (from the realtime ASR)", text);
+    } else {
+        text = robodog_voice_asr(pcm, samples, &meta);
+    }
+    if (pcm != NULL) {
+        heap_caps_free(pcm);
+    }
     if (text == NULL) {
         /* ASR round-trip failed (or OOM): a real fault, not "user silent" —
          * surface it instead of collapsing to the success idle state. */
@@ -1425,8 +1426,12 @@ static void voice_turn(void)
 
     /* Render the user transcript (same role/timing as a user message
      * finalizing), then mark the agent as reasoning while the LLM is in
-     * flight; the reply is appended when it finalizes (stale-caption safe). */
-    robodog_ui_show_user(text);
+     * flight; the reply is appended when it finalizes (stale-caption safe).
+     * The realtime path already rendered it — rendering again would duplicate
+     * the user line on the panel. */
+    if (!from_rt) {
+        robodog_ui_show_user(text);
+    }
 
     /* Auto-title the conversation session from the FIRST question (friendly
      * name for the top-middle RLCD label); a no-op once a title exists. */
@@ -1667,12 +1672,7 @@ static void voice_turn(void)
                             rc = terr;
                             robodog_ui_set_agent_state("error");
                         } else {
-                            voice_enable_pa();
-                            esp_codec_dev_handle_t dac = voice_dac_dev();
-                            if (dac != NULL) {
-                                (void)esp_codec_dev_set_out_mute(dac, false);
-                                (void)esp_codec_dev_set_out_vol(dac, 80);
-                            }
+                            (void)robodog_speaker_assert_output();
                             for (size_t i = 1; i <= n && rc == ESP_OK; i++) {
                                 const char *chunk = arena + offs[i - 1];
                                 /* Arm every fetch the pipeline allows BEFORE
@@ -1945,6 +1945,30 @@ static int cmd_rd_listen(int argc, char **argv)
     return 0;
 }
 
+/* `rd_voice_mode [classic|auto|omni]` — which path a turn takes.  `auto` and
+ * `omni` drive the Phase 3 realtime session; `classic` keeps the Phase 2
+ * chain (capture -> Whisper -> claw_core -> Qwen3-TTS).  Runtime switchable so
+ * the two paths can be measured back to back on the same board. */
+static int cmd_rd_voice_mode(int argc, char **argv)
+{
+    if (argc >= 2) {
+        if (strcmp(argv[1], "classic") == 0) {
+            s_voice_path = VOICE_PATH_CLASSIC;
+        } else if (strcmp(argv[1], "omni") == 0) {
+            s_voice_path = VOICE_PATH_OMNI;
+        } else if (strcmp(argv[1], "auto") == 0) {
+            s_voice_path = VOICE_PATH_AUTO;
+        } else {
+            ESP_LOGW(TAG, "unknown mode '%s' (classic|auto|omni)", argv[1]);
+            return 1;
+        }
+    }
+    ESP_LOGI(TAG, "voice mode=%s",
+             s_voice_path == VOICE_PATH_CLASSIC ? "classic"
+             : s_voice_path == VOICE_PATH_OMNI ? "omni" : "auto");
+    return 0;
+}
+
 static int cmd_rd_session(int argc, char **argv)
 {
     if (argc > 1 && strcmp(argv[1], "reset") == 0) {
@@ -2033,6 +2057,23 @@ esp_err_t robodog_voice_init(void)
     };
     if (esp_console_cmd_register(&diag) != ESP_OK) {
         ESP_LOGW(TAG, "failed to register 'rd_audio_diag' console command");
+    }
+    const esp_console_cmd_t mode = {
+        .command = "rd_voice_mode",
+        .help = "voice path: rd_voice_mode [classic|auto|omni]",
+        .func = &cmd_rd_voice_mode,
+    };
+    if (esp_console_cmd_register(&mode) != ESP_OK) {
+        ESP_LOGW(TAG, "failed to register 'rd_voice_mode' console command");
+    }
+    /* Phase 3: the omni realtime session (playback slots + WS client).  A
+     * failure is not fatal — the turn then falls through to the Phase 2
+     * chain, which is what the board shipped before. */
+    if (robodog_rt_init() == ESP_OK) {
+        (void)robodog_rt_register_commands();
+    } else {
+        ESP_LOGW(TAG, "omni realtime unavailable; Phase 2 chain only");
+        s_voice_path = VOICE_PATH_CLASSIC;
     }
     const esp_console_cmd_t sess = {
         .command = "rd_session",

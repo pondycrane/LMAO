@@ -23,6 +23,6 @@ idf_component_register(
     INCLUDE_DIRS "include"
     REQUIRES claw_manager claw_core esp_http_client
         esp_lvgl_adapter lvgl esp_board_manager esp_netif
-        audio_hub wifi_manager
+        audio_hub wifi_manager esp_websocket_client mbedtls json
     PRIV_REQUIRES console nvs_flash esp_common
 )

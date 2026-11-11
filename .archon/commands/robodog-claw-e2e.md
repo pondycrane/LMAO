@@ -23,10 +23,12 @@ argument-hint: (no arguments - detects the board + test audio, drives the autono
    current kernel the raw node **`hw:2` fails with EIO on both directions** —
    the working device is **`RD_ALSA_DEVICE=plughw:2`** (verified 2026-10-27:
    play + capture OK, full voice loop ran through it).  Node needs the `audio`
-   group; `robodog_claw_e2e.py` runs audio ops through `sg audio` (or set
-   `E2E_AUDIO_SG=""` when ALSA perms are granted).  A `default`-named card
-   appears where a real ALSA default exists — the script parametrizes either
-   way.
+   group; `robodog_claw_e2e.py` runs audio ops through `sg audio` **only when
+   `sg` exists** (it defaults `E2E_AUDIO_SG` to `""` otherwise — op4 has no
+   `sg`, and wrapping playback there exits 127 before ffmpeg runs).  Set
+   `E2E_AUDIO_SG=""` explicitly to force the unwrapped path, or a value to
+   force the wrapper.  A `default`-named card appears where a real ALSA default
+   exists — the script parametrizes either way.
 4. **Never write `$ARTIFACTS_DIR/.gate-head`** — only `robodog-production-health`
    owns that marker (issue #100 guard).
 
@@ -112,8 +114,31 @@ curl -s -m 8 -o /dev/null -w '%{http_code}\n' -H 'Content-Type: application/json
 ## Phase 2: DETECT — board + test audio
 
 `robodog_claw_e2e.py` detects the board (`ROBODOG_PORT` wins, else
-`0x303A:0x1001`) and the ALSA USB test card. Absent either → LOUD SKIP (writes
-`SKIPPED.txt`, returns 0, never writes `.gate-head`).
+`0x303A:0x1001`) and probes for an ALSA test node (`resolve_alsa()`: card-id
+form, then indices, with and without `sg audio -c`).
+
+The firmware under test must also name the model the server actually serves
+(`/v1/models`): build with `payload.env
+{"CLAW_RT_MODEL":"Qwen/Qwen3-Omni-30B-A3B-Instruct",
+"CLAW_RT_DISABLE_THINKING":"n"}`.  A mismatched id is rejected by the realtime
+handler, which closes the socket (`RT append failed: socket down`), and the
+explicit-ASR post uses the same id.
+
+The two absences have different verdicts:
+
+- **No board** → the documented loud-skip convention: `SKIPPED.txt`, returns
+  0, never writes `.gate-head` (a dev machine cannot verify anything).
+- **Board present, no ALSA node opens** → a **rig fault**, not a skip: prints
+  `RIG FAULT, NOT A PASS`, writes `RIG_UNUSABLE.txt`, returns **4**. benchd
+  maps rc==0 to `passed`, so a skip that returned 0 would let a missing
+  acoustic rig read as a green voice_loop job in CI; exit 4 makes the job
+  report failed. The gate's own `hardware-e2e.md` is still authored only by
+  the gate node, never by the bench job.
+
+A node that opens but is not acoustically coupled to the board (e.g. op4's
+onboard `default:CARD=sndi2s4`) still fails honestly on the ASR legs — the
+console shows `RT no speech within 12000 ms (vad_max=… peak=…)` with
+`ever_speech=0`.
 
 ## Phase 3: RUN THE LOOP
 
@@ -179,6 +204,29 @@ faster-whisper may emit either script; a script-dependent phrase would make
 ASR_MATCH flap. The *reply* is Traditional (the directive), rendered by the
 generated Noto Sans CJK TC font and spoken by the Beijing-native `dylan`
 timbre with the Beijing instruct and fixed seed.
+
+### Realtime (Phase 3 omni) lane
+
+The same gate runs against the Phase 3 realtime firmware.  It detects the lane
+from the console (`robodog_rt:` tag) and only asserts what that lane can prove:
+
+- `OPEN_SESSION`, `ASR_MATCH` and `ASR_LANG` are the same lines (`RT listen
+  started`, `RT ASR text=`, `RT ASR language=`); the transcript and the language
+  tag come from the explicit chat-completions ASR the firmware performs.
+- `REPLY_LANG`, `TTS_POLICY` and `TTS` are `SKIP` on the omni route: there is no
+  reply-language directive, no claw_core, and no Qwen3-TTS bracket — the model
+  answers and speaks the turn itself.
+- `REPLY` reads `RT reply text=` (the model's full, line-safe reply).
+- `RING` captures the board speaker from `RT first audio` and re-ASRs it with the
+  omni chat-completions `input_audio` backend (`RD_OMNI_ASR_URL`, default
+  `http://192.168.50.27:8099/v1/chat/completions`) — Whisper is retired on this
+  lane.
+- `SUBTITLE` requires BOTH the reply and the user transcript on the RLCD (the
+  panel-transcription contract), not only the reply.
+
+The agent route (`RT route=agent`) keeps the Phase 2 legs: the realtime module
+transcribes and the claw_core chain answers, so `agent reply:` / `TTS start/stop`
+/ `TTS_POLICY` / `voice reply language=` are asserted as before.
 
 Write `$ARTIFACTS_DIR/robodog-claw-e2e/robodog-claw-e2e.md` (under the run
 subdir where the verbatim transcripts also live), plus a top-level

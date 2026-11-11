@@ -25,6 +25,7 @@ import contextlib
 import json
 import os
 import re
+import shutil
 import sys
 import threading
 import time
@@ -40,12 +41,33 @@ import e2e_rig  # noqa: E402  (shared rig: board/audio/ASR/console scaffolding)
 
 BOARD_VID, BOARD_PID = 0x303A, 0x1001
 SOUND_CARD = os.environ.get("RD_SOUND_CARD", "Device")
-# ALSA device for the test rig (test speaker out + test mic in).  The
-# bidirectional USB PnP Audio device is card 2 (hw:2) on the workspace host;
-# there is no `default` alias.  Override with RD_ALSA_DEVICE.
-ALSA_DEV = os.environ.get("RD_ALSA_DEVICE", "hw:2")
+# ALSA device for the test rig (test speaker out + test mic in).  On the
+# workspace host the bidirectional USB PnP Audio device is card 2 and the
+# working node is `plughw:2` — the raw `hw:2` node fails with EIO on that
+# kernel (verified 2026-10-27).  The bench host (op4) has NO USB audio: only
+# card 0 `sndi2s4` (onboard ES8389, not coupled to the board) and card 1
+# `allwinnerhdmi`, so on op4 the probe finds `default:CARD=sndi2s4` and the
+# acoustic legs cannot pass.  `resolve_alsa()` probes candidates and overrides
+# this; RD_ALSA_DEVICE pins it.
+ALSA_DEV = os.environ.get("RD_ALSA_DEVICE", "")
+# `sg audio -c` is a convenience for hosts whose user is not in the `audio`
+# group, not a portable requirement: op4 has no `sg` at all, so wrapping the
+# playback there makes the shell exit 127 ("command not found") before ffmpeg
+# runs - the old gate ignored the rc and logged "playing corpus" while the
+# board heard only its noise floor (#301).  Default to the wrapper only when
+# `sg` exists; an explicit E2E_AUDIO_SG always wins (including "" = no wrapper).
+if "E2E_AUDIO_SG" in os.environ:
+    ALSA_SG = os.environ["E2E_AUDIO_SG"]
+elif shutil.which("sg"):
+    ALSA_SG = "sg audio -c"
+else:
+    ALSA_SG = ""
 PLAY_VOL = float(os.environ.get("RD_PLAY_VOL", "0.7"))
 N_RUNS = int(os.environ.get("E2E_RUNS", "1"))
+# Exit code for "the board is here but the acoustic rig is not".  benchd maps
+# rc==0 to EXIT_PASS, so a skip that returned 0 would let a missing test-audio
+# node read as a passing voice_loop job in CI.  A rig fault is a FAILURE.
+RIG_FAULT_EXIT = 4
 ASR_TIMEOUT = int(os.environ.get("E2E_ASR_TIMEOUT", "90"))
 REPLY_TIMEOUT = int(os.environ.get("E2E_REPLY_TIMEOUT", "180"))
 CONSOLE_BAUD = 115200
@@ -59,6 +81,13 @@ CONSOLE_BAUD = 115200
 ASR_URL = os.environ.get("RD_ASR_URL",
                          "http://192.168.50.27:8001/v1/audio/transcriptions")
 ASR_MODEL = os.environ.get("RD_ASR_MODEL", "whisper-1")
+# The realtime (omni) lane has no Whisper: the model endpoint itself is the ASR
+# backend (chat-completions `input_audio`).  Used for the RING/FULL_READOUT
+# acoustic legs on that lane.  Defaults match the deployed Qwen3-Omni lane.
+OMNI_ASR_URL = os.environ.get(
+    "RD_OMNI_ASR_URL", "http://192.168.50.27:8099/v1/chat/completions")
+OMNI_ASR_MODEL = os.environ.get(
+    "RD_OMNI_ASR_MODEL", "Qwen/Qwen3-Omni-30B-A3B-Instruct")
 # Playback settle after `listen started` before the test speaker plays the
 # corpus into the board mic (mic/ADC ramp).  Too early -> attenuated below the
 # energy-VAD threshold (no utterance); a couple of seconds is safe here.
@@ -123,6 +152,11 @@ def remote_asr(wav_path):
     return e2e_rig.remote_asr(wav_path, ASR_URL, ASR_MODEL)
 
 
+def remote_asr_omni(wav_path):
+    """Transcribe a WAV via the omni model's chat-completions input_audio."""
+    return e2e_rig.remote_asr_omni(wav_path, OMNI_ASR_URL, OMNI_ASR_MODEL)
+
+
 def shell_ok(cmd, timeout):
     r = shell_run(cmd, timeout=timeout)
     if r.returncode != 0:
@@ -135,14 +169,77 @@ def play_wav(path: Path, volume: float = PLAY_VOL):
     # The board's mic sits far from the test speaker (marginal coupling, the
     # documented RING PASS-WEAK rig): stream the corpus TWICE back-to-back at
     # realtime so the energy-VAD and Whisper get a clear, repeatable signal.
-    e2e_rig.play_wav(path, ALSA_DEV, volume=volume, loop=2, channels=2,
-                     rate=None, sg=e2e_rig.SILENCE)
+    r = e2e_rig.play_wav(path, ALSA_DEV, volume=volume, loop=2, channels=2,
+                         rate=None, sg=ALSA_SG)
+    if r.returncode != 0:
+        # A failed playback used to be silent, so the gate blamed the board's
+        # capture/VAD for hearing nothing (#301).  Make it loud.
+        log(f"corpus playback FAILED rc={r.returncode} dev={ALSA_DEV!r} "
+            f"sg={ALSA_SG!r}: {r.stderr[-240:].strip()}")
+        return False
+    return True
 
 
 def capture_mic(path: Path, seconds: float):
-    e2e_rig.capture_mic(path, ALSA_DEV, seconds, channels=1, rate=16000,
-                        sg=e2e_rig.SILENCE)
+    r = e2e_rig.capture_mic(path, ALSA_DEV, seconds, channels=1, rate=16000,
+                            sg=ALSA_SG)
+    if r.returncode != 0:
+        log(f"mic capture FAILED rc={r.returncode} dev={ALSA_DEV!r} "
+            f"sg={ALSA_SG!r}: {r.stderr[-240:].strip()}")
     return path
+
+
+def audio_env_report():
+    """One console line with the rig's ALSA reality: a bench job can run in a
+    sandbox with no /dev/snd at all, and that must be visible, not inferred."""
+    snd = sorted(p.name for p in Path("/dev/snd").glob("*")) \
+        if Path("/dev/snd").is_dir() else []
+    try:
+        cards = Path("/proc/asound/cards").read_text().strip() or "(empty)"
+    except OSError:
+        cards = "(missing)"
+    try:
+        r = shell_run("aplay -l", timeout=10)
+        pcm = " / ".join(r.stdout.strip().splitlines()[:6]) or "(none)"
+    except Exception:  # noqa: BLE001
+        pcm = "(aplay failed)"
+    log(f"audio env: /dev/snd={snd} /proc/asound/cards={cards!r} "
+        f"aplay-l={pcm!r}")
+
+
+def resolve_alsa():
+    """Pick the ALSA device + `sg` wrapper the rig can actually OPEN.
+
+    The documented rig node is `plughw:2` (raw `hw:2` returns EIO on the
+    current kernel), but the card id/index differs per host, so probe each
+    candidate with a 0.3 s null-source playback and take the first that exits
+    0.  Every attempt is logged: a silent open failure is what made the bench
+    gate read "the board heard nothing" as a firmware stall (#301).
+    """
+    card = detect_sound_card()
+    cands = []
+    if ALSA_DEV:
+        cands.append(ALSA_DEV)
+    if card:
+        cands += [f"plughw:CARD={card}", f"hw:CARD={card}"]
+    cands += ["plughw:2", "hw:2", "plughw:1", "hw:1", "plughw:0", "hw:0",
+              "default"]
+    seen = set()
+    for dev in cands:
+        if dev in seen:
+            continue
+        seen.add(dev)
+        for sg in (ALSA_SG, ""):
+            try:
+                r = e2e_rig.probe_alsa_device(dev, sg=sg)
+            except subprocess.TimeoutExpired:
+                log(f"alsa probe dev={dev} sg={sg!r} TIMEOUT")
+                continue
+            log(f"alsa probe dev={dev} sg={sg!r} rc={r.returncode}"
+                + (f" err={r.stderr.strip()[-160:]}" if r.returncode else ""))
+            if r.returncode == 0:
+                return dev, sg
+    return None, None
 
 
 def trim_loudest_window(path: Path, out: Path, seconds: float):
@@ -464,11 +561,20 @@ def run_loop(n, instr, artifacts, voice_verify):
     tail = ConsoleTail(DETECTED_PORT, on_line=note_panic)
     try:
         # ---- OPEN_SESSION: trigger + confirm listen ------
+        open_start = tail.mark()
         tail.write("rd_listen")
         m, cur = wait_for_log(tail, [r"listen started"], timeout=15, label="OPEN")
         res["asserts"]["OPEN_SESSION"] = (
             "PASS listen started" if m else "FAIL (no 'listen started' after rd_listen)"
         )
+        # Which voice lane answered?  The Phase 3 realtime module logs through
+        # the `robodog_rt` tag (`RT listen started`, `RT ASR text=`); the Phase 2
+        # loop logs through `robodog_voice`.  The lane decides which downstream
+        # legs are meaningful (the omni lane has no claw_core reply/Qwen3-TTS).
+        rt_lane = any("robodog_rt:" in ln
+                      for ln in tail.take(open_start, 0)[0])
+        res["artifacts"]["lane"] = "realtime" if rt_lane else "classic"
+        log(f"lane: {'realtime (Phase 3 omni)' if rt_lane else 'classic (Phase 2)'}")
 
         # ---- ASR_MATCH: play the corpus into the mic ------
         time.sleep(PLAY_SETTLE)
@@ -476,7 +582,12 @@ def run_loop(n, instr, artifacts, voice_verify):
         # The corpus pins its own drive level: the rig's speaker->board-mic
         # coupling needs a louder drive for Chinese (0.7 decoded one word,
         # 0.9 the whole sentence), while English is fine at the default.
-        play_wav(target_wav, volume=instr.get("play_vol", PLAY_VOL))
+        played = play_wav(target_wav, volume=instr.get("play_vol", PLAY_VOL))
+        res["artifacts"]["playback"] = "ok" if played else "FAILED"
+        if not played:
+            res["asserts"]["PLAYBACK"] = (
+                f"FAIL (corpus playback failed on {ALSA_DEV} — rig audio, "
+                "not the board's capture/VAD)")
 
         asr_start = cur
         m_asr, cur = wait_for_log(
@@ -506,11 +617,30 @@ def run_loop(n, instr, artifacts, voice_verify):
             # capture fault.  The tail keeps every line, so nothing scrolled
             # past (the old byte spill lost this evidence behind the RD_SHOT
             # dump).
+            # Persist the WHOLE ASR-window console (minus the RD_SHOT dumps)
+            # as an artifact: the last-12 keyword filter below is a summary,
+            # but a wedged turn needs the full sequence — `RT pump` /
+            # `RT capture done` / `RT utterance capped` / `RT no speech` /
+            # `RT capture fault` — which the keyword filter drops (the pump
+            # line carries none of the keywords, and the exit reason scrolls
+            # past the last-12 window).
+            # From the LISTEN, not from the playback: `RT turn start: mode=`
+            # and the uplink/WS decisions precede the capture, and a turn that
+            # dies before the ASR is exactly what a missing `ASR text=` hides.
+            window = [ln for ln in tail.take(0, 0)[0][open_start:cur]
+                      if "RD_SHOT" not in ln]
+            (run_dir / "console_asr.log").write_text("\n".join(window) + "\n")
+            res["artifacts"]["console_log"] = str(run_dir / "console_asr.log")
+            if window:
+                log(f"board console from listen ({len(window)} lines, tail):")
+                for bl in window[-80:]:
+                    log("   | " + bl.strip()[:200])
             board_lines = [
-                ln for ln in tail.take(0, 0)[0][asr_start:cur]
+                ln for ln in window
                 if any(k in ln for k in ("robodog_voice", "ASR", "utterance",
-                                         "speech", "bail", "SPIRAM", "capture"))
-                and "RD_SHOT" not in ln
+                                         "speech", "bail", "SPIRAM", "capture",
+                                         "append", "socket", "websocket",
+                                         "uplink", "turn start", "watchdog"))
             ]
             if board_lines:
                 log("board capture/VAD/ASR decisions (no `ASR text=`):")
@@ -547,27 +677,52 @@ def run_loop(n, instr, artifacts, voice_verify):
                 "surface the endpoint's detected language)"
             )
 
+        # ---- ROUTE: which realtime shape answered this turn ----------------
+        # AUTO logs `RT route=<omni|agent>` right after the explicit ASR.  The
+        # omni shape is the model's own answer (no claw_core, no Qwen3-TTS);
+        # the agent shape hands the transcript to the Phase 2 chain.  A pinned
+        # OMNI path logs no route (it can only be omni).
+        route = ""
+        if rt_lane:
+            m_route, cur = wait_for_log(
+                tail, [r"RT route=(\S+)"], timeout=15, label="ROUTE",
+                start=asr_start
+            )
+            if m_route:
+                route = m_route.group(1)
+            res["artifacts"]["route"] = route or "omni (pinned/no route line)"
+        rt_omni = rt_lane and route != "agent"
+
         # ---- REPLY_LANG: the turn chose the reply-language directive ------
         # Console evidence that the dual-language wiring ran: a Chinese
         # utterance must select the Traditional-Chinese directive, everything
         # else the English prose directive.
         want_dir = "zh-TW" if want_lang == "zh" else "en"
-        m_dir, cur = wait_for_log(
-            tail, [r"voice reply language=(\S+)"], timeout=10,
-            label="REPLY_LANG", start=asr_start
-        )
-        got_dir = m_dir.group(1) if m_dir else ""
-        res["artifacts"]["reply_lang"] = got_dir
-        if m_dir:
+        if rt_omni:
+            # The omni lane has no reply-language DIRECTIVE: the model answers
+            # in the user's own language, so the Phase 2 directive leg is not
+            # applicable (the reply's script is checked by REPLY below).
             res["asserts"]["REPLY_LANG"] = (
-                f"PASS directive={got_dir}"
-                if got_dir == want_dir
-                else f"FAIL directive={got_dir}, want {want_dir}"
+                "SKIP (omni realtime lane: no reply-language directive — the "
+                "model answers in the user's language)"
             )
         else:
-            res["asserts"]["REPLY_LANG"] = (
-                "FAIL (no `voice reply language=` on console)"
+            m_dir, cur = wait_for_log(
+                tail, [r"voice reply language=(\S+)"], timeout=10,
+                label="REPLY_LANG", start=asr_start
             )
+            got_dir = m_dir.group(1) if m_dir else ""
+            res["artifacts"]["reply_lang"] = got_dir
+            if m_dir:
+                res["asserts"]["REPLY_LANG"] = (
+                    f"PASS directive={got_dir}"
+                    if got_dir == want_dir
+                    else f"FAIL directive={got_dir}, want {want_dir}"
+                )
+            else:
+                res["asserts"]["REPLY_LANG"] = (
+                    "FAIL (no `voice reply language=` on console)"
+                )
 
         # ---- TTS_POLICY: explicit language + native timbre + fixed seed ----
         # Console evidence that every chunk is synthesized under the turn's
@@ -575,28 +730,35 @@ def run_loop(n, instr, artifacts, voice_verify):
         # use dylan + the Beijing instruct, English must use aiden.
         want_tts_lang = "chinese" if want_lang == "zh" else "english"
         want_voice = "dylan" if want_lang == "zh" else "aiden"
-        m_pol, cur = wait_for_log(
-            tail, [r"TTS request language=(\S+) voice=(\S+) seed=(\d+)"],
-            timeout=10, label="TTS_POLICY", start=asr_start
-        )
-        if m_pol:
-            got_tts_lang, got_voice, got_seed = m_pol.groups()
-            res["artifacts"]["tts_policy"] = (
-                f"language={got_tts_lang} voice={got_voice} seed={got_seed}")
-            ok = (got_tts_lang == want_tts_lang and got_voice == want_voice
-                  and int(got_seed) == 8)
+        if rt_omni:
+            # The omni lane plays the model's OWN audio; Qwen3-TTS (and its
+            # language/timbre/seed policy) is not on this path at all.
             res["asserts"]["TTS_POLICY"] = (
-                f"PASS language={got_tts_lang} voice={got_voice} seed={got_seed}"
-                if ok else
-                f"FAIL language={got_tts_lang} voice={got_voice} "
-                f"seed={got_seed}; want language={want_tts_lang} "
-                f"voice={want_voice} seed=8"
+                "SKIP (omni realtime lane: model audio, no Qwen3-TTS policy)"
             )
         else:
-            res["asserts"]["TTS_POLICY"] = (
-                "FAIL (no `TTS request language=` on console — the firmware "
-                "does not pin the TTS language/timbre/seed)"
+            m_pol, cur = wait_for_log(
+                tail, [r"TTS request language=(\S+) voice=(\S+) seed=(\d+)"],
+                timeout=10, label="TTS_POLICY", start=asr_start
             )
+            if m_pol:
+                got_tts_lang, got_voice, got_seed = m_pol.groups()
+                res["artifacts"]["tts_policy"] = (
+                    f"language={got_tts_lang} voice={got_voice} seed={got_seed}")
+                ok = (got_tts_lang == want_tts_lang and got_voice == want_voice
+                      and int(got_seed) == 8)
+                res["asserts"]["TTS_POLICY"] = (
+                    f"PASS language={got_tts_lang} voice={got_voice} seed={got_seed}"
+                    if ok else
+                    f"FAIL language={got_tts_lang} voice={got_voice} "
+                    f"seed={got_seed}; want language={want_tts_lang} "
+                    f"voice={want_voice} seed=8"
+                )
+            else:
+                res["asserts"]["TTS_POLICY"] = (
+                    "FAIL (no `TTS request language=` on console — the firmware "
+                    "does not pin the TTS language/timbre/seed)"
+                )
 
         # Fail fast: no ASR means no agent run / TTS / subtitle in this turn —
         # waiting for the reply would just burn the full 180 s REPLY_TIMEOUT.
@@ -614,11 +776,108 @@ def run_loop(n, instr, artifacts, voice_verify):
             tail.close()
             return res
 
-        # ---- REPLY: native agent LLM ------
+        # ---- REPLY: the turn's answer ------
         # The cursor after `ASR text=` is handed forward, so the `voice chunk
         # 1/n` line that lands right behind `agent reply:` is scanned by the
         # collector instead of being discarded (no byte-level spill).
         reply_start = cur
+        if rt_omni:
+            # The omni lane's answer is the model's OWN reply, logged in full
+            # (line-safe) as `RT reply text=` after response.done.  There is no
+            # claw_core `agent reply:` on this lane.
+            m_rep, cur = wait_for_log(
+                tail, [r"RT reply text=(.+)"], timeout=REPLY_TIMEOUT,
+                label="REPLY", start=reply_start
+            )
+            reply = unescape_reply(m_rep.group(1).strip()) if m_rep else ""
+            res["artifacts"]["reply"] = reply
+            if not reply:
+                res["asserts"]["REPLY"] = "FAIL (no `RT reply text=` on console)"
+            elif want_lang == "zh" and not has_cjk(reply):
+                res["asserts"]["REPLY"] = (
+                    f"FAIL reply is not Chinese: {reply!r}"
+                )
+            elif want_lang == "en" and dominant_script(reply) != "latin":
+                res["asserts"]["REPLY"] = (
+                    f"FAIL reply is Chinese-dominant on an English turn: {reply!r}"
+                )
+            else:
+                res["asserts"]["REPLY"] = f"PASS reply={reply!r}"
+
+            # ---- TTS / RING / SUBTITLE on the omni lane ---------------------
+            # No Qwen3-TTS brackets here: the model's audio IS the reply.
+            # Capture the board speaker from `RT first audio` and re-ASR with
+            # the omni chat-completions backend (Whisper is retired on this
+            # lane); then read the panel — BOTH the user transcript (the
+            # explicit ASR) and the reply must be on the RLCD.
+            res["asserts"]["TTS"] = (
+                "SKIP (omni realtime lane: model audio, no `TTS start/stop`)")
+            if voice_verify:
+                # The dedicated voice-verification gate asserts the chunked
+                # Qwen3-TTS readout; that path does not exist on the omni lane.
+                for k in ("CHUNKED_QUEUE", "PIPELINE_AHEAD", "GAP_VERIFY",
+                          "FULL_READOUT"):
+                    res["asserts"][k] = (
+                        "SKIP (omni realtime lane: no chunked Qwen3-TTS readout)")
+            mic_path = run_dir / "speaker.wav"
+            ring_txt = ""
+            with contextlib.suppress(Exception):
+                mic_path.unlink(missing_ok=True)
+            m_audio, _ = wait_for_log(
+                tail, [r"RT first audio"], timeout=10, label="RT_AUDIO",
+                start=reply_start
+            )
+            if m_audio:
+                try:
+                    capture_mic(mic_path, RING_CAP_SECS)
+                    ring_txt = remote_asr_omni(mic_path)
+                except Exception as e:  # noqa: BLE001 — a rig hiccup is not a silent reply
+                    log(f"omni ring capture/re-ASR failed: {e}")
+            (run_dir / "ring_reasr.txt").write_text(ring_txt or "")
+            if ring_txt and reply:
+                ok = token_overlap(ring_txt, reply) >= 0.3
+                res["asserts"]["RING"] = (
+                    f"PASS re-asr={ring_txt!r} (overlaps reply)"
+                    if ok else
+                    f"PASS-WEAK re-asr={ring_txt!r} (audible, no verbatim overlap)"
+                )
+            elif ring_txt:
+                res["asserts"]["RING"] = (
+                    f"PASS-WEAK re-asr={ring_txt!r} (no reply to compare)"
+                )
+            else:
+                res["asserts"]["RING"] = (
+                    "FAIL (no re-ASR of the omni model audio)" if m_audio
+                    else "FAIL (no `RT first audio` — the omni reply was silent)"
+                )
+
+            time.sleep(1.0)
+            sub_txt, sub_err = capture_subtitle(tail, run_dir)
+            read_tok = set(norm(sub_txt)) if sub_txt else set()
+            reply_shared = len(set(norm(reply)) & read_tok) if reply else 0
+            asr_shared = len(set(norm(asr_txt)) & read_tok) if asr_txt else 0
+            shown = (bool(sub_txt) and len(read_tok) >= 3
+                     and reply_shared >= 2 and asr_shared >= 2)
+            if shown:
+                res["asserts"]["SUBTITLE"] = (
+                    "PASS " + sub_txt.replace("\n", " | "))
+            elif sub_txt:
+                res["asserts"]["SUBTITLE"] = (
+                    "FAIL-no-transcript " + sub_txt.replace("\n", " | ")
+                    + f" (reply_tokens={reply_shared} "
+                      f"transcript_tokens={asr_shared}"
+                    + (f"; {sub_err}" if sub_err else "") + ")"
+                )
+            else:
+                res["asserts"]["SUBTITLE"] = (
+                    "FAIL (panel readback failed"
+                    + (f": {sub_err}" if sub_err else "") + ")"
+                )
+            set_no_reset(res)
+            tail.close()
+            return res
+
+        # ---- REPLY: native agent LLM (Phase 2 lane) ------
         m_rep, cur = wait_for_log(
             tail, [r"agent reply: (.+)"], timeout=REPLY_TIMEOUT, label="REPLY",
             start=reply_start
@@ -959,19 +1218,35 @@ def main():
     artifacts = Path(args.artifacts) / tag
     artifacts.mkdir(parents=True, exist_ok=True)
 
-    global DETECTED_PORT
+    global DETECTED_PORT, ALSA_DEV, ALSA_SG
     DETECTED_PORT = detect_board_port()
+    audio_env_report()
     card = detect_sound_card()
-    log(f"board={DETECTED_PORT or 'NONE'} sound='{card}' runs={N_RUNS} corpus={args.corpus}")
-    skips = []
+    dev, sg = resolve_alsa()
+    if dev is not None:
+        ALSA_DEV, ALSA_SG = dev, sg
+    log(f"board={DETECTED_PORT or 'NONE'} sound='{card}' alsa={ALSA_DEV!r} "
+        f"sg={ALSA_SG!r} runs={N_RUNS} corpus={args.corpus}")
+    # Two different absences, two different verdicts:
+    #  * no board -> the documented loud-skip convention for dev machines
+    #    (SKIPPED.txt, exit 0, never .gate-head): nothing can be verified.
+    #  * board present but no ALSA test node opens -> a RIG FAULT, not a skip.
+    #    benchd maps rc==0 to EXIT_PASS, so exiting 0 here would let a missing
+    #    acoustic rig read as a passing voice_loop job in CI.  Exit 4 instead
+    #    so the job reports failed.
     if not DETECTED_PORT:
-        skips.append("ROBODOG BOARD NOT DETECTED")
-    if not card:
-        skips.append("TEST AUDIO CARD NOT DETECTED (ALSA USB)")
-    if skips:
-        print("\nLOUD SKIP: " + "; ".join(skips) + "\n")
-        (artifacts / "SKIPPED.txt").write_text("; ".join(skips) + "\n")
+        msg = "ROBODOG BOARD NOT DETECTED"
+        print(f"\nLOUD SKIP: {msg}\n")
+        (artifacts / "SKIPPED.txt").write_text(msg + "\n")
         return 0
+    if dev is None:
+        msg = (
+            "TEST AUDIO DEVICE UNUSABLE (no ALSA node opens) — RIG FAULT, "
+            "NOT A PASS: the corpus cannot reach the board's mic"
+        )
+        print(f"\nLOUD SKIP: {msg}\n")
+        (artifacts / "RIG_UNUSABLE.txt").write_text(msg + "\n")
+        return RIG_FAULT_EXIT
 
     man = json.loads((HERE.parent / "voice" / "corpus" / "corpus.json").read_text())
     if args.corpus not in man:
