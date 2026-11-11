@@ -38,7 +38,8 @@ description: |
   7. robodog-production-health gate (.gate-head owner)
   8. Create PR with template + the robodog-claw-e2e evidence
      ($ARTIFACTS_DIR/hardware-e2e.md / robodog-claw-e2e.md verbatim), mark ready
-  9. Comprehensive code review (5 parallel agents with scope limit awareness)
+  9. Comprehensive code review, ONE LENS AT A TIME (serialized: no concurrent
+     node runs — a 5-agent fan-out took down the local gx10 cluster)
   10. Synthesize and fix review findings
   11. RE-RUNS the full gate chain after any fix commits (fast-pass only when
       HEAD is unchanged — the #87 regression guard)
@@ -179,6 +180,11 @@ nodes:
     context: fresh
     model: large
 
+  # The five review lenses run ONE AT A TIME, chained (never as a concurrent
+  # fan-out): five agents hitting the local gx10 cluster at once took it down.
+  # trigger_rule: all_done keeps each lens independent of the previous lens's
+  # outcome, so one failing lens never skips the rest; synthesize still needs
+  # at least one lens to have succeeded.
   - id: code-review
     command: archon-code-review-agent
     depends_on: [sync]
@@ -187,25 +193,29 @@ nodes:
 
   - id: error-handling
     command: archon-error-handling-agent
-    depends_on: [sync]
+    depends_on: [code-review]
+    trigger_rule: all_done
     context: fresh
     model: large
 
   - id: test-coverage
     command: archon-test-coverage-agent
-    depends_on: [sync]
+    depends_on: [error-handling]
+    trigger_rule: all_done
     context: fresh
     model: large
 
   - id: comment-quality
     command: archon-comment-quality-agent
-    depends_on: [sync]
+    depends_on: [test-coverage]
+    trigger_rule: all_done
     context: fresh
     model: large
 
   - id: docs-impact
     command: archon-docs-impact-agent
-    depends_on: [sync]
+    depends_on: [comment-quality]
+    trigger_rule: all_done
     context: fresh
     model: large
 
