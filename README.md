@@ -596,6 +596,17 @@ dropped), the single-headline `pic_data` rule and the weather attach rule are
 identical everywhere.  A delta fetch keeps the store's `updated_ms` ordering
 and its tombstones (that is what the watermark contract requires).
 
+**`pic_data` rides the TRUE headline, on every reply shape.** A delta carries
+only changed rows, so its earliest-starting row is usually *not* the headline;
+serving that row's tile made the panel drop its cached headline drawing (a
+`pic_uid` mismatch clears the tile) and the picture vanished until the next
+full fetch.  On a delta the assembler therefore resolves the headline from a
+full snapshot read and serves its tile only when that event is itself among
+the changed rows; otherwise the reply carries no tile and the panel keeps its
+cached one.  The panel additionally force-refetches fully while its headline
+has no tile, so a headline rollover self-heals at the next sync instead of
+never (robodog.c `sync_once`).
+
 `temp_c10` stays in tenths of a degree **Celsius** on the wire so the panel
 does the °F conversion with no float and no locale; the WMO code is passed
 through raw and each display maps it to its own label. An absent `Weather`

@@ -86,8 +86,12 @@ async def test_request_returns_calendar_bundle(monkeypatch):
     finally:
         server.close()
         await server.wait_closed()
-    # the store was asked for the delta with the request's args
-    store.sync.assert_called_once()  # calendar_id "family", since_ms 5
+    # the store was asked for the delta with the request's args, then for the
+    # full snapshot that resolves the TRUE headline (delta pic_data rule)
+    assert store.sync.call_count == 2
+    assert store.sync.call_args_list[0].kwargs["since_ms"] == 5
+    assert store.sync.call_args_list[0].kwargs["calendar_id"] == "family"
+    assert store.sync.call_args_list[1].kwargs["since_ms"] == 0
 
 
 @pytest.mark.asyncio
@@ -135,9 +139,12 @@ async def test_request_participant_threaded_to_store():
     try:
         length, bundle = await _sync(port, "family", 5, participant="juliet")
         assert length > 0
-        assert store.sync.call_args.kwargs["participant"] == "juliet"
-        assert store.sync.call_args.kwargs["calendar_id"] == "family"
-        assert store.sync.call_args.kwargs["since_ms"] == 5
+        # first call = the delta itself; second = the headline snapshot read
+        assert store.sync.call_count == 2
+        assert store.sync.call_args_list[0].kwargs["participant"] == "juliet"
+        assert store.sync.call_args_list[0].kwargs["calendar_id"] == "family"
+        assert store.sync.call_args_list[0].kwargs["since_ms"] == 5
+        assert store.sync.call_args_list[1].kwargs["participant"] == "juliet"
     finally:
         server.close()
         await server.wait_closed()

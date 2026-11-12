@@ -105,6 +105,7 @@ def build_bundle(
     )
     if now_ms is None:
         now_ms = int(time.time() * 1000)
+    headline_uid: str | None = None
     if since_ms == 0:
         # A FULL fetch is the display's complete truth: the panel lists what
         # is ongoing or upcoming, so tombstones and events that already ended
@@ -119,12 +120,33 @@ def build_bundle(
         events.sort(key=lambda e: e["start_ms"])
         if request.max_events:
             events = events[: request.max_events]
+        headline = pick_headline_idx(events, now_ms)
+        if headline is not None:
+            headline_uid = events[headline]["uid"]
+    else:
+        # A DELTA carries only CHANGED rows.  Picking the headline among them
+        # crowns the "headline of the delta" — some unrelated edited event —
+        # and serving ITS tile made the panel drop its cached headline drawing
+        # (pic_uid mismatch), so the picture vanished until the next full
+        # fetch.  Resolve the TRUE headline from a full snapshot instead and
+        # serve its tile only when that event is itself among the delta rows;
+        # otherwise serve no tile and the panel keeps its cached one.
+        full_events, _ = store.sync(
+            calendar_id=calendar_id,
+            since_ms=0,
+            max_events=0,
+            participant=request.participant or "",
+        )
+        full_events = [e for e in full_events
+                       if not e["deleted"] and (e.get("end_ms") or 0) >= now_ms]
+        headline = pick_headline_idx(full_events, now_ms)
+        if headline is not None:
+            headline_uid = full_events[headline]["uid"]
 
     bundle = CalendarBundle()
     bundle.format = 1
     bundle.calendar_id = calendar_id
-    headline = pick_headline_idx(events, now_ms)
-    for i, ev in enumerate(events):
+    for ev in events:
         entry = bundle.events.add()
         entry.uid = ev["uid"]
         entry.title = ev["title"]
@@ -133,7 +155,7 @@ def build_bundle(
         entry.end_ms = ev["end_ms"]
         entry.deleted = ev["deleted"]
         entry.pic = ev["pic"]
-        if i == headline:
+        if ev["uid"] == headline_uid:
             fill_pic_data(pic_store, ev["pic"], entry)
     bundle.watermark_ms = watermark
     if weather is not None:

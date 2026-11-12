@@ -118,6 +118,20 @@ static bool sync_once(rd_state_t *state)
         snprintf(req.participant, sizeof(req.participant), "%s",
                  s_cfg.kid_name);
     }
+    /* Headline rollover between full fetches: once the cached headline ends
+     * (or an earlier event appears), the renderer hides the cached tile
+     * (pic_uid mismatch) and draws the placeholder.  A delta cannot re-serve
+     * the new headline's drawing unless that event itself changed (the
+     * server attaches pic_data to the true headline only when it is among
+     * the changed rows), so force a full fetch while the headline would
+     * render without its tile.  Cost when art is genuinely missing: one
+     * extra reply per sync interval, and the panel self-heals as soon as
+     * the picture exists. */
+    const uint64_t now_ms = rd_render_now_ms();
+    const char *hl = rd_cache_headline_uid(&s_cache, now_ms);
+    if (hl != NULL && s_cache.pic_data_len != LMA_PB_PIC_TILE_BYTES) {
+        req.since_ms = 0;
+    }
     const bool is_full = (req.since_ms == 0);
 
     if (!rd_net_sync(&s_cfg, &req, &s_bundle)) {
