@@ -43,6 +43,34 @@ void draw_right(u8g2_t* u8g2, int right_x, int baseline, const char* s) {
     u8g2_DrawStr(u8g2, right_x - u8g2_GetStrWidth(u8g2, s), baseline, s);
 }
 
+/* Left-aligned text clipped to `avail` px of MEASURED width (u8g2 is
+ * un-kerned, so GetStrWidth is exact).  A device name that would run under the
+ * right-aligned reading is truncated with the widest marker the face can draw
+ * — these faces carry Latin-1 only, so U+2026 falls back to "...". */
+void draw_clipped(u8g2_t* u8g2, int x, int baseline, const char* s, int avail) {
+    if (avail <= 0) return;
+    if (u8g2_GetStrWidth(u8g2, s) <= avail) {
+        u8g2_DrawStr(u8g2, x, baseline, s);
+        return;
+    }
+    const char* ell = u8g2_IsGlyph(u8g2, 0x2026) ? "\xE2\x80\xA6" : "...";
+    const size_t ell_len = strlen(ell);
+    const int ell_w = u8g2_GetStrWidth(u8g2, ell);
+    if (ell_w > avail) return;   /* not even the marker fits */
+    char buf[64];
+    size_t n = strlen(s);
+    const size_t max_n = sizeof(buf) - ell_len - 1;
+    if (n > max_n) n = max_n;
+    while (n > 0) {
+        memcpy(buf, s, n);
+        buf[n] = '\0';
+        if (u8g2_GetStrWidth(u8g2, buf) + ell_w <= avail) break;
+        n--;
+    }
+    memcpy(buf + n, ell, ell_len + 1);
+    u8g2_DrawStr(u8g2, x, baseline, buf);
+}
+
 void rd_shot_dump(u8g2_t* u8g2) {
     const uint8_t* buf = u8g2_GetBufferPtr(u8g2);
     const size_t n = u8g2_GetBufferSize(u8g2);
@@ -71,20 +99,23 @@ void draw_trace(u8g2_t* u8g2, const rd_point_t* pts, size_t n, bool dotted) {
     }
 }
 
-/* The "now" endpoint marker.  Drawn AFTER the end-of-line labels, which knock
- * a paper-coloured box out of the trace (the marker would otherwise be erased
- * by that box where it overlaps). */
-void draw_marker(u8g2_t* u8g2, const rd_point_t* pts, size_t n) {
-    if (n > 0) {
-        u8g2_DrawBox(u8g2, pts[n - 1].x - 2, pts[n - 1].y - 2, 5, 5);
-    }
-}
-
 int clamp_int(int v, int lo, int hi) {
     return v < lo ? lo : (v > hi ? hi : v);
 }
 
-/* Degree sign only when the 6x10 face actually carries it; otherwise plain
+/* The "now" endpoint marker.  Drawn AFTER the end-of-line labels, which knock
+ * a paper-coloured box out of the trace (the marker would otherwise be erased
+ * by that box where it overlaps).  The 5x5 box is kept inside the plot frame:
+ * the newest sample sits ON the right edge, so an unclamped box would spill
+ * two pixels past the border. */
+void draw_marker(u8g2_t* u8g2, const rd_point_t* pts, size_t n) {
+    if (n > 0) {
+        u8g2_DrawBox(u8g2, clamp_int(pts[n - 1].x - 2, PLOT_X0, PLOT_X1 - 4),
+                     clamp_int(pts[n - 1].y - 2, PLOT_Y0, PLOT_Y1 - 4), 5, 5);
+    }
+}
+
+/* Degree sign only when the active face actually carries it; otherwise plain
  * "C".  NOTE: the escape must not be followed by a hex digit ("\xB0C" would
  * parse as one long hex escape), hence the split literal. */
 const char* deg_suffix(u8g2_t* u8g2) {
@@ -133,10 +164,12 @@ void draw_axes(u8g2_t* u8g2, const rd_chart_plan_t* plan, size_t samples) {
      * edge ("now"), each labelled with the local clock time of that sample
      * (ChartBundle.start_ms + i*period_ms, offset by RH_TZ_OFFSET_MINUTES).
      *
-     * Ticks that land on the SAME x are collapsed: with one or two samples
-     * all three anchors coincide and three labels would overprint into
-     * unreadable garbage.  A single surviving tick shows the newest sample's
-     * time, right-aligned at the edge it sits on. */
+     * Ticks that land on the SAME x are collapsed (a one-sample history puts
+     * all three anchors on the right edge; a two-sample one puts the middle
+     * anchor on the newest sample, i.e. on the right edge too).  Labels are
+     * then placed relative to the surviving set: the leftmost left-aligned,
+     * the middle centred, the last right-aligned at its own tick so it never
+     * runs off the panel. */
     char labels[RD_CHART_TICKS][RD_CHART_LABEL_LEN];
     rd_chart_time_labels(plan, samples, RH_TZ_OFFSET_MINUTES, labels);
     const size_t idx[RD_CHART_TICKS] = {0, samples / 2, samples ? samples - 1 : 0};
@@ -211,16 +244,11 @@ void render(const char* device_name, const lma_chart::ChartBundle* bundle,
 
     /* Header: the CURRENT READING is the panel's primary element (helvB18,
      * bold) — the number a person walks over to read.  The device name is
-     * the label (10x20), so it never competes with the reading. */
+     * the label (10x20), clipped to the space the reading leaves so a long
+     * NVS name can never run under it. */
     char line[64];
-    set_font(u8g2, u8g2_font_10x20_tf);
-    snprintf(line, sizeof(line), "%s", device_name && device_name[0]
-                                            ? device_name
-                                            : "LMAO env");
-    u8g2_DrawStr(u8g2, 4, 22, line);
-
     char right[48] = "";
-    set_font(u8g2, u8g2_font_helvB18_tf);
+    int right_w = 0;
     if (have_data && bundle != nullptr) {
         char t[16] = "", h[16] = "";
         if (!bundle->temp.empty()) {
@@ -235,8 +263,16 @@ void render(const char* device_name, const lma_chart::ChartBundle* bundle,
         else if (h[0]) snprintf(right, sizeof(right), "%s", h);
     }
     if (right[0]) {
+        set_font(u8g2, u8g2_font_helvB18_tf);
+        right_w = u8g2_GetStrWidth(u8g2, right);
         draw_right(u8g2, W - 4, 24, right);
     }
+
+    set_font(u8g2, u8g2_font_10x20_tf);
+    snprintf(line, sizeof(line), "%s", device_name && device_name[0]
+                                            ? device_name
+                                            : "LMAO env");
+    draw_clipped(u8g2, 4, 22, line, W - 4 - right_w - 4 - 8);
 
     /* Status row: state is carried by a SHAPE plus a WORD — never colour,
      * never motion.  Filled square = live/now; hollow square = frozen,
@@ -253,7 +289,8 @@ void render(const char* device_name, const lma_chart::ChartBundle* bundle,
     u8g2_DrawStr(u8g2, 13, 40, line);
 
     char counts[48] = "";
-    if (have_data && bundle != nullptr) {
+    if (have_data && bundle != nullptr &&
+        (!bundle->temp.empty() || !bundle->hum.empty())) {
         snprintf(counts, sizeof(counts), "%u samples",
                  (unsigned)bundle->temp.size());
     }
@@ -263,7 +300,9 @@ void render(const char* device_name, const lma_chart::ChartBundle* bundle,
     u8g2_DrawHLine(u8g2, 0, 50, W);
 
     rd_chart_plan_t plan;
-    if (have_data && bundle != nullptr) {
+    const bool has_trace = have_data && bundle != nullptr &&
+                           (!bundle->temp.empty() || !bundle->hum.empty());
+    if (has_trace) {
         rd_chart_plan(bundle->temp.data(), bundle->temp.size(),
                       bundle->hum.data(), bundle->hum.size(), PLOT_X0,
                       PLOT_Y0, PLOT_X1, PLOT_Y1, &plan);

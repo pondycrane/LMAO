@@ -4,18 +4,18 @@
 Two frame formats, fetched over the USB-JTAG console and auto-detected by the
 RD_SHOT header / buffer size:
 
-- Calendar app (robodog_client/main/, u8g2): buffer reads 304x50 tiles
-  (300x400 portrait panel memory) and the octet/bit order is the reference
-  u8g2_st7305 driver's.
+- u8g2 firmwares (calendar `robodog_client`, home `robodog_home_client`):
+  the SAME 304x50-tile (15200-byte) u8g2 buffer, both drawn through
+  `U8G2_R1` over the ST7305's native 300x400 portrait memory.  The logical
+  screen is therefore 400x300 landscape in BOTH, and the same dihedral
+  (`raw.rotate(90)`) recovers it — the buffer size and the RD_SHOT header
+  (both announce w=400 h=300) cannot tell the two firmwares apart, and they
+  do not need to: the decode is identical, only the vision prompt differs
+  (see PANEL_VISION_PROMPT).
 - Hermes voice app (XiaoZhi rebuilt with the RoboDog capture hook): the
   ST7305 landscape panel memory (400x300) produced by the upstream
   custom_lcd_display.cc landscape LUT — inverted here so the PNG is the
-  logical screen the app drew.
-- Home env client (robodog_home_client): the u8g2 buffer (304x50 tiles, same
-  15200-byte size as the calendar) drawn with U8G2_R1, i.e. a 400x300 LOGICAL
-  landscape screen in the panel's native portrait memory.  Its RD_SHOT header
-  announces w=400 h=300, so the orientation is chosen by the header's
-  w/h — never by the buffer size, which the calendar shares.
+  logical screen the app drew.  Its 15000-byte frame is unambiguous.
 
 No re-rendering, no XML interpretation: the dumped bytes are literally what
 the firmware pushed to the ST7305.
@@ -24,10 +24,10 @@ the firmware pushed to the ST7305.
 
 Outputs (into --out, default robodog_client/shots/):
   panel_raw_portrait.png  300x400 — the panel's native pixel memory
-  panel_landscape.png     400x300 — the same panel held in landscape (the
-                            orientation the app draws; auto-detected so the
-                            date/time text reads upright)
-  <frame>.i1              raw 15200-byte buffer for reuse/record
+  panel_landscape.png     400x300 — the logical screen the app drew (u8g2
+                            frames are always U8G2_R1, so this is a fixed
+                            rotation, not an OCR guess)
+  <frame>.i1              raw buffer (15200 B u8g2 / 15000 B hermes) for reuse
 
 --reset re-runs the app into a fresh boot (esptool default_reset/hard_reset —
 the same sequence flash.sh uses) so the firmware emits its capture frames
@@ -87,14 +87,20 @@ class ShotAssembler:
 
         `bufsize` is the size the header announced, so a caller can tell a
         complete dump from a truncated one (with validate=False)."""
-        if not self._in_shot:
-            m = SHOT_RE.search(line)
-            if not m:
-                return None
+        # A BEGIN while a dump is open means its END was lost (the serial read
+        # raced the firmware's self-tick dump).  The partial frame is unusable
+        # either way, so resync on the new header instead of swallowing it and
+        # losing the following frame's hex too.
+        m = SHOT_RE.search(line)
+        if m:
+            if self._in_shot:
+                self.dropped += 1
             self._in_shot = True
             self._want = int(m.group(1))
             self._w, self._h = int(m.group(2)), int(m.group(3))
             self._hex = []
+            return None
+        if not self._in_shot:
             return None
         if "RD_SHOT_END" in line:
             data = bytes.fromhex("".join(self._hex))
@@ -148,14 +154,20 @@ def decode_raw(buf):
     return img
 
 
-def dihedral(img):
-    """All 8 orientations: 4 rotations x mirror — one matches the panel held
-    in landscape with the app's intended rotation."""
-    out = {}
-    for m, mir in [(0, img), (1, img.transpose(Image.FLIP_LEFT_RIGHT))]:
-        for r in range(4):
-            out[f"mirror{1 if m else 0}_rot{r*90}"] = mir.rotate(r * 90, expand=True)
-    return out
+LANDSCAPE_W, LANDSCAPE_H = PANEL_H, PANEL_W   # 400x300: the u8g2 logical screen
+
+
+def landscape_view(raw):
+    """u8g2 U8G2_R1 -> the 400x300 logical screen the firmware drew.
+
+    R1 maps logical (x, y) to native (H_native-1-y, x) (`u8g2_draw_l90_r1`),
+    so the inverse is a single 90 deg counter-clockwise rotation of the native
+    portrait image.  Both u8g2 firmwares (calendar and home) use R1, so this is
+    fixed — never an OCR guess over the dihedral group (tesseract scored
+    rotated gibberish higher than short upright text and picked a sideways
+    frame).
+    """
+    return raw.rotate(90, expand=True)
 
 
 # Vision readback — "read the screenshot so the agent can reason": the same
@@ -165,25 +177,18 @@ def dihedral(img):
 VISION_BASE = os.environ.get("RD_VISION_BASE_URL", "http://spark-eebf:8000/v1")
 VISION_MODEL = os.environ.get("RD_VISION_MODEL",
                               "Qwen/Qwen2.5-VL-72B-Instruct")
-VISION_PROMPT = (
-    "This is a monochrome RLCD family-calendar screen. Transcribe exactly:\n"
-    "1) the header date/time line (or say BLANK),\n"
-    "2) each visible row as 'title HH:MM',\n"
-    "3) any status words like 'no wifi'/'stale'/'offline'.\n"
-    "Reply as a short list.")
-
-HOME_VISION_PROMPT = (
-    "This is the monochrome RLCD screen of a home temperature/humidity panel. "
-    "Transcribe exactly, in the ORIGINAL language/script:\n"
-    "1) the device name at the top left and the current reading at the top "
-    "right (e.g. '22.6C 55%'),\n"
-    "2) the status line under it (e.g. 'updated', 'stale', 'no reply') and the "
-    "sample count,\n"
-    "3) the plot's axis labels (temperature on the left in C, humidity on the "
-    "right in %), the unit markers at the trace ends, and the x-axis clock "
-    "labels.\n"
-    "Report only text that is actually drawn; do not infer a status word that "
-    "is absent. If the screen is blank, say BLANK.\n"
+# The u8g2 frames (calendar and home) share a buffer size and a decode, so one
+# prompt must serve both: transcribe EVERY drawn line verbatim and let the
+# caller's assertions pick what matters (clock + rows for the calendar, name +
+# reading + status for the env panel).
+PANEL_VISION_PROMPT = (
+    "This is a monochrome reflective LCD screen (400x300, one ink). Transcribe "
+    "exactly, in the ORIGINAL language/script, every line of text actually "
+    "drawn, top to bottom — e.g. a device name, a date/time or clock label, "
+    "event rows, a temperature/humidity reading with its unit, a status word "
+    "('updated', 'stale', 'no wifi', 'no reply'), a sample count, or plot axis "
+    "labels. Do not translate and do not infer a word that is absent; if the "
+    "screen has no text, say BLANK.\n"
     "Reply as a short list.")
 
 HERMES_VISION_PROMPT = (
@@ -196,7 +201,7 @@ HERMES_VISION_PROMPT = (
     "Reply as a short list.")
 
 
-def describe_image(path, prompt=VISION_PROMPT):
+def describe_image(path, prompt=PANEL_VISION_PROMPT):
     """Vision-model transcription of a captured frame (OpenAI-compatible)."""
     img = base64.b64encode(Path(path).read_bytes()).decode()
     body = {
@@ -216,21 +221,6 @@ def describe_image(path, prompt=VISION_PROMPT):
         out = json.load(resp)
     return out["choices"][0]["message"]["content"]
 
-
-
-HOUR_RE = re.compile(r"\d{1,2}:\d{2}")
-DATE_RE = re.compile(r"\d{4}[-\s/]\d{1,2}[-\s/]\d{1,2}")
-
-
-def ocr_score(im):
-    """3x upscale + tesseract; score an orientation by how much real calendar
-    text it yields — HH:MM times dominate the native row layout."""
-    im = im.resize((im.width * 3, im.height * 3), Image.Resampling.NEAREST)
-    tmp = Path("/tmp/rdshot_ocr.png")
-    im.convert("L").save(tmp)
-    txt = subprocess.run(["tesseract", str(tmp), "-", "--psm", "6"],
-                         capture_output=True, text=True).stdout
-    return (len(HOUR_RE.findall(txt)), len(DATE_RE.findall(txt)), txt)
 
 
 def wait_for_port(port, timeout=15.0):
@@ -321,12 +311,6 @@ def main():
     ap.add_argument("--timeout", type=int, default=30)
     ap.add_argument("--i1", metavar="FILE", default=None,
                     help="decode an already-captured .i1 dump (no device)")
-    ap.add_argument("--i1-format", choices=["auto", "calendar", "hermes", "home"],
-                    default="auto",
-                    help="frame type for --i1; 'auto' infers it from the byte "
-                         "size, which cannot tell calendar (300x400 portrait) "
-                         "from home (400x300 landscape) apart — they share the "
-                         "15200-byte buffer")
     ap.add_argument("--describe", action="store_true",
                     help="vision-model transcription of each captured frame "
                          "(Qwen2.5-VL via the hermes vision endpoint)")
@@ -337,22 +321,16 @@ def main():
 
     if args.i1:
         data = Path(args.i1).read_bytes()
-        # no RD_SHOT header on an offline dump — pick the decoder by size,
-        # unless the caller names the format (calendar and home share 15200 B)
-        fmt = args.i1_format
-        if fmt == "auto":
-            fmt = ("hermes" if len(data) == HERMES_BUF_SIZE else
-                   "calendar" if len(data) == BUF_SIZE else "")
-        if fmt == "calendar":
-            frames = [(data, BUF_SIZE, PANEL_W, PANEL_H)]
-        elif fmt == "home":
-            frames = [(data, BUF_SIZE, HERMES_W, HERMES_H)]
-        elif fmt == "hermes":
+        # No RD_SHOT header on an offline dump; the buffer size is unambiguous
+        # (15000 B hermes landscape LUT, 15200 B u8g2 tiles) and both u8g2
+        # firmwares share the 15200-byte size AND the R1 decode.
+        if len(data) == HERMES_BUF_SIZE:
             frames = [(data, HERMES_BUF_SIZE, HERMES_W, HERMES_H)]
+        elif len(data) == BUF_SIZE:
+            frames = [(data, BUF_SIZE, LANDSCAPE_W, LANDSCAPE_H)]
         else:
-            sys.exit(f"cannot infer frame type from {len(data)} bytes "
-                     f"(calendar/home={BUF_SIZE} / hermes={HERMES_BUF_SIZE}); "
-                     f"pass --i1-format")
+            sys.exit(f"cannot decode {len(data)} bytes "
+                     f"(u8g2={BUF_SIZE} / hermes={HERMES_BUF_SIZE})")
     else:
         if args.reset:
             reset_board(args.port)
@@ -388,30 +366,18 @@ def main():
         else:
             raw = decode_raw(data)
             raw.save(out / "panel_raw_portrait.png")
-            # The RD_SHOT header carries the LOGICAL screen size: the home
-            # client draws 400x300 landscape (w>h) into the same 15200-byte
-            # portrait buffer the calendar fills with 300x400.  Buffer size
-            # cannot tell them apart, the header can.
-            landscape = w > h
-            if landscape:
-                # The home firmware draws through u8g2 U8G2_R1, so the logical
-                # screen is ALWAYS this dihedral of the native portrait memory.
-                # Do not OCR-guess: tesseract scores rotated/mirrored gibberish
-                # higher than short upright text and picked a sideways frame.
-                best = ((0, 0), "mirror0_rot90", dihedral(raw)["mirror0_rot90"])
-            else:
-                best = None
-                for name, im in dihedral(raw).items():
-                    s = ocr_score(im)
-                    if best is None or s[:2] > best[0][:2]:
-                        best = (s, name, im)
-            best[2].save(out / "panel_landscape.png")
-            print(f"frame {i}: landscape view = {best[1]} "
-                  f"(score={best[0][0]}/{best[0][1]}) -> "
+            # u8g2 firmwares (calendar and home) both draw through U8G2_R1 into
+            # the native 300x400 portrait memory, so the logical 400x300 screen
+            # is ALWAYS this rotation of it.  The RD_SHOT header (w=400 h=300)
+            # and the buffer size (15200 B) are identical for both, so neither
+            # identifies the firmware — and neither needs to.
+            best = landscape_view(raw)
+            best.save(out / "panel_landscape.png")
+            print(f"frame {i}: landscape view = rot90 (u8g2 R1) -> "
                   f"panel_raw_portrait.png / panel_landscape.png",
                   file=sys.stderr)
             shot_for_vision = out / "panel_landscape.png"
-            prompt = HOME_VISION_PROMPT if landscape else VISION_PROMPT
+            prompt = PANEL_VISION_PROMPT
         if args.describe:
             print(f"frame {i}: vision readback ...", file=sys.stderr)
             try:

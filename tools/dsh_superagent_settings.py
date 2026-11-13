@@ -80,12 +80,28 @@ RULES = [
 SKILL_FILES = {"robodog-ui": "robodog-ui/SKILL.md"}
 
 
+def repo_root() -> Path:
+    """The workspace root, whether run from a checkout or `bazel run`.
+
+    `bazel run` executes this file from the runfiles tree (no `.omp/`), so the
+    root comes from BUILD_WORKSPACE_DIRECTORY; a plain `python3 tools/...`
+    resolves it from the script's own location.  Never silently fall back to a
+    runfiles path that lacks the skills — a missing skill must be loud.
+    """
+    ws = os.environ.get("BUILD_WORKSPACE_DIRECTORY")
+    if ws:
+        return Path(ws)
+    return Path(__file__).resolve().parent.parent
+
+
 def team_skills() -> dict:
-    root = Path(__file__).resolve().parent.parent / ".omp" / "skills"
+    root = repo_root() / ".omp" / "skills"
     out = {}
     for name, rel in SKILL_FILES.items():
         path = root / rel
         if not path.exists():
+            print(f"warning: skill {name!r} not found at {path} — "
+                  f"it will not reach the dsh prompts", file=sys.stderr)
             continue
         text = path.read_text(encoding="utf-8")
         if text.startswith("---"):

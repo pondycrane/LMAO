@@ -34,9 +34,12 @@ Read this before touching `robodog_client/main/rd_render.c` (calendar),
   LVGL's path has exactly one generated face: Noto Sans CJK TC 16 px 1 bpp
   (`gen_font_tc_16.sh`). **There is no type scale** — hierarchy comes from
   weight, position, rules and inversion, not size.
-- **CJK is not free.** The u8g2 faces carry ASCII only; the LVGL face carries
-  ASCII + CJK. Never assume a glyph exists — probe with `u8g2_IsGlyph` and
-  fall back (see `ellipsis_for` / `deg_suffix`).
+- **Latin-1, no CJK.** The u8g2 faces carry 32–255 (ASCII + Latin-1, so `°`
+  U+00B0 and `·` U+00B7 render); U+2026 `…` and CJK do **not**. The LVGL face
+  carries ASCII + CJK. Never assume a glyph exists — probe with
+  `u8g2_IsGlyph` and fall back (see `ellipsis_for` / `deg_suffix`), and prefer
+  ASCII for status words (`stale -`, not `stale ·`) so a face swap cannot
+  silently drop a separator.
 
 ## Hierarchy rules
 
@@ -47,7 +50,10 @@ Read this before touching `robodog_client/main/rd_render.c` (calendar),
 2. **A reading is the primary element, not a decoration.** If the panel's job
    is "what is it now", the number is the biggest thing on the panel; the
    chart/rows support it. Do not repeat the same number in two places at two
-   sizes (it reads as two competing facts).
+   sizes (it reads as two competing facts). The one exception is a **series
+   identity label**: when two traces share a plot box and cross, the value at
+   each trace's own end (`28.1°C` / `27%`) is what tells them apart — draw it
+   at meta size, on a knockout box, and only when the trace exists.
 3. **Rules are real borders.** A separator is a 1 px `DrawHLine`/`DrawFrame`,
    never a light fill. Two solid pixels beat four grey ones.
 4. **Group by proximity, not by boxes.** Do not frame every row. One frame
@@ -85,13 +91,19 @@ discrete count ("3 of 8") if progress must be shown.
 
 ## Layout defaults (400×300 landscape)
 
-- Outer margin 4 px; header baseline 22; status/meta baseline 40; a 1 px rule
-  under the header at y≈48; plot box from y=66 to y=250.
-- Chart: left gutter for the temperature scale, right gutter for humidity;
-  x-axis labels below the frame, first left-aligned, middle centred, last
-  right-aligned. End-of-line values sit on a **paper knockout box** so a trace
-  cannot strike through the digits.
+- Outer margin 4 px; header baselines **22** (`10x20` name) and **24**
+  (`helvB18` reading) — the two faces have different ascents, so the
+  baselines are offset to align their optical bottoms (ink ends at y≈23 for
+  both); status/meta baseline 40; a 1 px rule under the header at **y=50**;
+  plot box from y=66 to y=250; x-axis label baseline 265.
+- Chart: left gutter for the temperature scale (labels right-aligned to the
+  frame), right gutter for humidity; x-axis labels below the frame, first
+  left-aligned, middle centred, last right-aligned; **ticks that land on the
+  same x collapse** (a one-sample history shows one right-aligned "now").
 - Keep volatile values out of reflow: fixed-width slots, stable gutters.
+- Clipping: measure with `u8g2_GetStrWidth` against the space that is actually
+  free (a left label must stop before a right-aligned value), never assume the
+  text fits.
 - No scrolling on this panel. Prefer a page/one-shot render over a feed; the
   LVGL transcript scroller is the one exception and it must bottom-snap so the
   newest chunk is what stays visible.
@@ -99,13 +111,17 @@ discrete count ("3 of 8") if progress must be shown.
 ## Anti-patterns (rewrite on sight)
 
 - A mid-grey or `LV_OPA_*` fill used for meaning.
-- The same reading drawn twice at two sizes.
+- The same reading drawn twice at two sizes (series-identity labels at a
+  trace's end are the one exception — meta size, knockout box).
 - A status word with no shape channel, or a shape with no word.
 - Every row boxed; nested frames.
 - Axis labels colliding with end-of-line values (draw the values last, on
   knockout boxes, and push them apart when they nearly coincide).
-- Assuming a glyph exists (degree sign, ellipsis, CJK) without probing.
+- Assuming a glyph exists (ellipsis, CJK) without probing — and assuming one
+  does *not* exist (`°`, `·` are present in every u8g2 face used here).
 - A placeholder reading (`0 °C`) when the server sent none — draw nothing.
+- An empty reply drawn as an empty chart frame (a bare box with `0 samples`
+  reads as a broken panel): show the waiting word instead.
 
 ## Verification loop (pixel-driven — this is the design review)
 
@@ -123,11 +139,16 @@ bench submit flash_capture --family home --head <sha> --build <build-id> \
 bench wait <job-id>; bench evidence <job-id>
 ```
 
-Acceptance for a UI change: the landscape PNG is **upright** (the RD_SHOT
-header carries the logical `w`/`h`; decode by those, not by buffer size), the
-primary element is the largest thing on the panel, every state word has a
-shape, and the vision readback transcribes the intended text without inventing
-status words.
+Acceptance for a UI change: the landscape PNG is **upright** — every u8g2
+firmware draws through `U8G2_R1`, so `capture.py` always applies the same
+fixed rotation (never an OCR guess); the primary element is the largest thing
+on the panel, every state word has a shape, and the vision readback transcribes
+the intended text without inventing status words.
+
+A `home` flash needs the device's pinned identity or the server drops its
+reports: pass `RH_NODE_IDENTITY_HEX` in the build payload (benchd reads
+`BENCH_HOME_NODE_IDENTITIES` for a `device_name` it knows; a name it does not
+know builds announce-only and renders the degraded state).
 
 ## Where the design lives
 
