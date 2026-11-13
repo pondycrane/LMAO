@@ -414,8 +414,41 @@ menu "RoboDog Phase 3 omni realtime (vLLM-Omni OpenAI-Realtime)"
         string "Model id sent in session.update"
         default "openbmb/MiniCPM-o-4_5"
         help
-            Must match the model the server was started with; the duplex
-            handler validates it against the served model.
+            MUST match the model the server was started with — the handler
+            validates it and rejects a mismatch with `unsupported_model`.  The
+            default tracks the DEPLOYED lane (cluster-ops omni-realtime serves
+            MiniCPM-o 4.5 in turn mode), so an unqualified build always works
+            against the live endpoint.
+
+            The Qwen3-Omni lane is an opt-in build, because switching it is a
+            SERVER change plus a rebuild (the id is compiled in):
+              CLAW_RT_MODEL=Qwen/Qwen3-Omni-30B-A3B-Instruct \
+              CLAW_RT_DISABLE_THINKING=0 \
+              bash robodog_client/esp-claw/build_esp_claw.sh
+            The wire contract is identical either way (24 kHz mono PCM16 both
+            directions, transcript + PCM deltas, one session per turn), so the
+            only device-side differences are this string and the
+            ROBODOG_RT_DISABLE_THINKING switch below.
+
+    config ROBODOG_RT_DISABLE_THINKING
+        bool "Send chat_template_kwargs.enable_thinking=false"
+        default y
+        help
+            A TEMPLATE switch, not a prompt request: MiniCPM-o's chat template
+            emits an empty `think` block when it is false, so the model skips
+            reasoning entirely.  Load-bearing there — when MiniCPM-o DOES emit
+            a think block it produces no `<|tts_bos|>` span and the Talker
+            stage dies (`ValueError: MiniCPM-o Talker requires tensor
+            tts_token_ids and tts_hidden_states conditioning`), killing
+            Stage-1 for the whole engine.
+
+            MUST be n for Qwen3-Omni: its handler ignores `reasoning.effort`
+            for audio responses and upstream states explicitly disabling
+            thinking corrupts Qwen3-Omni audio generation.  Set
+            CLAW_RT_DISABLE_THINKING=0 when the endpoint serves Qwen3-Omni.
+            voice_think.c stays the deterministic backstop either way (it
+            strips a `think` block from the text and discards that turn's
+            server audio).
 
     config ROBODOG_RT_INSTRUCTIONS
         string "Session instructions (persona + spoken-prose rule)"

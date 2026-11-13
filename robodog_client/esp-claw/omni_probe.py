@@ -31,7 +31,7 @@ SESS = {
     "type": "session.update",
     "session": {
         "type": "realtime",
-        "model": "openbmb/MiniCPM-o-4_5",
+        "model": "Qwen/Qwen3-Omni-30B-A3B-Instruct",
         "instructions": (
             "You are RoboDog, a friendly voice assistant on a desk display. "
             "Answer immediately in plain spoken prose, in one short sentence. "
@@ -41,7 +41,9 @@ SESS = {
 }
 
 
-async def run(url, wav, out_pcm, chunk_ms):
+async def run(url, wav, out_pcm, chunk_ms, model):
+    sess = json.loads(json.dumps(SESS))
+    sess["session"]["model"] = model
     with wave.open(wav, "rb") as w:
         rate = w.getframerate()
         chans = w.getnchannels()
@@ -83,7 +85,7 @@ async def run(url, wav, out_pcm, chunk_ms):
     listen_retries = 0
 
     async with websockets.connect(url, max_size=None) as ws:
-        await ws.send(json.dumps(SESS))
+        await ws.send(json.dumps(sess))
         while True:
             msg = json.loads(await ws.recv())
             if msg.get("type") == "session.created":
@@ -207,8 +209,13 @@ def main():
     )
     ap.add_argument("--out", default="/tmp/omni_out.pcm")
     ap.add_argument("--chunk-ms", type=int, default=100)
+    ap.add_argument(
+        "--model",
+        default="Qwen/Qwen3-Omni-30B-A3B-Instruct",
+        help="model id sent in session.update (must match the served model)",
+    )
     a = ap.parse_args()
-    asyncio.run(run(a.url, a.wav, a.out, a.chunk_ms))
+    asyncio.run(run(a.url, a.wav, a.out, a.chunk_ms, a.model))
 
 
 if __name__ == "__main__":

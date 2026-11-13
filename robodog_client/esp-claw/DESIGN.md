@@ -1358,3 +1358,94 @@ arrive BEFORE the text (measured: the first audio delta came 14.5 s after
 commit, before the text), so a timed fallback would start playing a reasoning
 block the stripper has not seen yet. The turn releases the gate at
 `response.done` so a text-less stream cannot mute the turn or hang the drain.
+
+### Model lane — MiniCPM-o 4.5 vs Qwen3-Omni-30B-A3B
+
+The endpoint, not the model, provides delta streaming: both vLLM-Omni models
+emit `response.output_audio_transcript.delta` + `response.output_audio.delta`
+from one session, and both have a duplex and a turn lane. The board therefore
+does not change with the model — only `CONFIG_ROBODOG_RT_MODEL` (and the
+`ROBODOG_RT_DISABLE_THINKING` switch below) do, plus the server's
+`OMNI_MODEL` / `OMNI_DEPLOY_CONFIG` (cluster-ops `use-omni-model.sh`).
+
+| | MiniCPM-o-4_5 | Qwen3-Omni-30B-A3B-Instruct |
+|---|---|---|
+| Checkpoint | 18.7 GB bf16 | 70.5 GB bf16 |
+| Licence | Apache-2.0 | Qwen licence |
+| Weights resident (GB10) | ~23 GiB thinker + 0.65 + 3.26 | ~62 GiB thinker + audio stages |
+| `ref_audio` voice cloning | yes | **no** |
+| Think-block behaviour | template emits an empty block when disabled; a real block kills Stage-1 | handler ignores `reasoning.effort` for audio; **disabling thinking corrupts audio** |
+| Turn handler | `minicpmo_4_5_turn.yaml`, plain `/v1/realtime` | `qwen3_omni_moe.yaml` + site overlay, plain `/v1/realtime`, **`async_chunk` must be false** |
+| `input_audio_transcription` | accepted, echoed | cleared (not implemented) — same net effect for AGENT routing |
+
+**`ROBODOG_RT_DISABLE_THINKING`.** The `extra_body.chat_template_kwargs
+.enable_thinking=false` field is a MiniCPM-o template switch (load-bearing
+there: without it the model emits a block, the Talker stage dies with
+`ValueError: MiniCPM-o Talker requires tensor tts_token_ids and
+tts_hidden_states conditioning`, and every later turn fails). Qwen3-Omni's
+handler ignores the effort override for audio and upstream states that
+explicitly disabling thinking corrupts its audio generation, so the field MUST
+NOT be sent to it — `CLAW_RT_DISABLE_THINKING=0` on that lane. `voice_think.c`
+stays the deterministic backstop either way.
+
+**Qwen3-Omni on one GB10 — DEPLOYED AND VERIFIED (2026-11-07).**
+`qwen3_omni_moe.yaml` is written for 2×H100 (stage 0 on `cuda:0`, stages 1+2 on
+`cuda:1`, 0.9/0.6/0.1 budgets, `max_num_seqs 64`). The site overlay
+`cluster-ops/omni-realtime/qwen3_omni_30b_single_gpu_turn.yaml` pins every stage
+to device 0, sets `session_mode: turn` + `async_chunk: false`, and uses
+**0.60 / 0.12 / 0.08** budgets with `max_num_seqs 4` (97.4 GiB of the 121.69 GiB
+unified pool).
+
+Measured end-to-end on `count.wav` (host probe, turn mode, `/v1/realtime`):
+
+| Leg | Value |
+|---|---|
+| cold probe (first turn after load) | 30.1 s end-of-speech → first audio |
+| **warm probe** | **3.93 s** end-of-speech → first audio |
+| connect → first audio | 6.86 s |
+| reply audio | 10.94 s @ 24 kHz |
+| transcript | exact ("Twenty, twenty-one, … thirty") |
+
+Cold load: **620 s** (stage 0 = 401 s of weight streaming + 65 s init, stage 1
+= 52 s + graphs, stage 2 = 16 s + graph capture).
+
+Five things the packaged config does not give you, each found by a failed
+start:
+
+1. **`--stage-init-timeout 1800`.** Stage 0 alone streams 65.68 GiB at disk
+   speed (auto-prefetch is disabled: checkpoint > 90 % of available RAM) for
+   ~400 s, past the 300 s default, so the orchestrator kills it and systemd
+   crash-loops the unit every 5 minutes.
+2. **`--init-timeout 3600`.** The default 600 s bounds the WHOLE orchestrator
+   bring-up and expires before stage 1 finishes.
+3. **Stage 1 needs ≥ 1.25 GiB of KV.** At `max_model_len=65536` vLLM aborts
+   with "1.25 GiB KV cache is needed, which is larger than the available KV
+   cache memory (0.65 GiB)". With 6.26 GiB of weights + 0.23 GiB of CUDA
+   graphs, the floor is 7.74 GiB ⇒ ≥ 0.064 of the device; 0.12 is used.
+4. **A page-cache janitor during load.** GB10 memory is UNIFIED: the 65 GiB of
+   weights read off disk ALSO fill the page cache, competing with the CUDA
+   allocations for the same pool. Measured: with `Cached` at 48 GiB, stage 1
+   died in `init_device` with `torch.AcceleratorError: CUDA error: out of
+   memory` from `cudaMemGetInfo`. Dropping caches every 15 s while loading
+   keeps `Cached` at ~1 GiB and the load succeeds.
+5. **`drop_caches` before start** for the same reason (a warm cache makes a
+   legal budget look impossible).
+
+**Retired on this node (2026-11-07)** to make room: the idle ComfyUI worker
+(27.3 GiB GPU, 0 % util for 14 days, with FLUX/SDXL weights on disk),
+CosyVoice (`:8002`, 2.2 GiB, unusable on ARM64 GB10), and **`whisper.service`**
+— the omni session does the ASR now (Qwen3-Omni transcribes the user turn
+itself), so its probe was removed from `speech.env` as well. `qwen3-tts.service`
+stays: the AGENT-shaped turn still has claw_core answers spoken by it.
+
+**Consequence of removing whisper:** the `rd_asr` probe and `rd_voice_mode
+classic` no longer have an ASR endpoint, so the classic Phase-2 lane is
+text-less. AUTO never reaches it (the omni session supplies the transcript),
+and a realtime fault now ends the turn in `error` rather than falling back.
+
+**Rates.** Both handlers are 24 kHz mono PCM16 in and out (the Qwen turn
+handler hardcodes `SAMPLE_RATE_HZ = 24000`). `robodog_realtime.c` already
+resamples the 16 kHz capture hub up to 24 kHz on append and reads
+`sample_rate_hz` per audio delta with a 24 kHz default, so neither lane needs a
+code change. Qwen's turn handler never emits `response.listen`, so the
+`listen` retry branch simply goes unused there.

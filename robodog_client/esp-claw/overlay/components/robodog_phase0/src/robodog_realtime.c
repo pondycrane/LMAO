@@ -635,7 +635,13 @@ static esp_err_t rt_session_update(void)
      * tts_hidden_states conditioning` — killing Stage-1 for the whole engine,
      * after which EVERY later turn fails and the board falls back to idle with
      * no answer.  Measured: this also halves time-to-first-audio (2.5 s ->
-     * 1.06 s) because the think tokens are no longer generated. */
+     * 1.06 s) because the think tokens are no longer generated.
+     *
+     * It is MiniCPM-o-specific: Qwen3-Omni's handler ignores `reasoning.effort`
+     * for audio responses and upstream states that explicitly disabling
+     * thinking CORRUPTS Qwen3-Omni audio generation, so the block must not be
+     * sent there (CONFIG_ROBODOG_RT_DISABLE_THINKING=n). */
+#if CONFIG_ROBODOG_RT_DISABLE_THINKING
     cJSON *extra = cJSON_AddObjectToObject(session, "extra_body");
     if (extra != NULL) {
         cJSON *tmpl = cJSON_AddObjectToObject(extra, "chat_template_kwargs");
@@ -643,6 +649,7 @@ static esp_err_t rt_session_update(void)
             cJSON_AddBoolToObject(tmpl, "enable_thinking", false);
         }
     }
+#endif
     /* Input transcription: the AGENT shape routes on the USER's words, and a
      * turn-mode session does not produce them otherwise.  The handler accepts
      * this field and echoes it (its own docs note no separate ASR stage runs,
