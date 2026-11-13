@@ -1501,10 +1501,10 @@ enough — pin the name in `/etc/hosts` on every node (the LAN address is DHCP):
 echo "192.168.50.202 op4" | sudo tee -a /etc/hosts
 ```
 
-`tp2`, `tp3` and `tp4` carry that pin plus the `op4:5000` mirror stanza. `tp1`
-currently has neither (and no mirror for the old registry either) — a pod
-scheduled there still fails `ImagePullBackOff`; keep `nodeSelector` pins until it
-is fixed.
+All four nodes (`tp1`…`tp4`) carry that pin plus the `op4:5000` mirror stanza.
+`tp1` additionally runs the `cluster-ops/net-watchdog` timer: its `wlan0` had
+been down since 2026-11-02, which left the node with no LAN route at all (so no
+registry and no DNS — every pull failed `ImagePullBackOff`).
 
 #### Deploying from the registry
 

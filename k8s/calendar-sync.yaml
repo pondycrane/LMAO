@@ -94,9 +94,8 @@ spec:
           # Pinned to tp4, where the rest of LMAO already runs (lmao-server,
           # postgres, iot-ingest-consumer): the registry HTTP mirror
           # (op4:5000 in /etc/rancher/k3s/registries.yaml + the op4 /etc/hosts
-          # pin) is configured on tp2/tp3/tp4 but NOT on tp1 — a pod scheduled
-          # there fails ImagePullBackOff on op4:5000.  Pinning also keeps the
-          # DB traffic node-local.
+          # pin) is configured on all four nodes, so tp1 pulls too.  The pin
+          # still keeps the DB traffic node-local.
           # Proper fix (if tp4 is ever retired): add the mirror stanza from
           # docs/cluster-setup.md to /etc/rancher/k3s/registries.yaml on every
           # node and restart k3s-agent.

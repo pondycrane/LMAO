@@ -154,11 +154,14 @@ echo "192.168.50.202 op4" | sudo tee -a /etc/hosts   # on every node
 
 > **Per-node, and easy to miss.** A node without this stanza cannot pull from
 > the local registry: its pods fail `ImagePullBackOff` on
-> `op4:5000/<image>`.  This bit the calendar-sync CronJob when it
-> first scheduled onto **tp1** (which lacks the mirror) — the manifest now pins
-> `nodeSelector: kubernetes.io/hostname: tp4`, where lmao-server, postgres and
-> iot-ingest already run.  Apply the stanza to **every** node before relying on
-> the scheduler's free placement.
+> `op4:5000/<image>`.  This bit the calendar-sync CronJob when it first
+> scheduled onto **tp1**, which had no mirror *and* whose `wlan0` was down (no
+> LAN route at all, so pulls failed on DNS, not on the mirror).  All four nodes
+> now carry the stanza and the `/etc/hosts` pin; tp1 also runs
+> `cluster-ops/net-watchdog`, which re-activates `wlan0` if NetworkManager
+> parks it disconnected.  The manifest still pins
+> `nodeSelector: kubernetes.io/hostname: tp4` to keep postgres traffic
+> node-local.
 
 ---
 
