@@ -248,7 +248,7 @@ void render(const char* device_name, const lma_chart::ChartBundle* bundle,
     } else {
         u8g2_DrawFrame(u8g2, 4, 34, 5, 5);
     }
-    snprintf(line, sizeof(line), "%s%s", stale ? "stale · " : "",
+    snprintf(line, sizeof(line), "%s%s", stale ? "stale - " : "",
              status ? status : "");
     u8g2_DrawStr(u8g2, 13, 40, line);
 

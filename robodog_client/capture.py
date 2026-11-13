@@ -402,14 +402,18 @@ def main():
             # portrait buffer the calendar fills with 300x400.  Buffer size
             # cannot tell them apart, the header can.
             landscape = w > h
-            score = text_score if landscape else ocr_score
-            best = None
-            for name, im in dihedral(raw).items():
-                if landscape and im.size != (w, h):
-                    continue      # only 400x300 rotations are candidates
-                s = score(im)
-                if best is None or s[:2] > best[0][:2]:
-                    best = (s, name, im)
+            if landscape:
+                # The home firmware draws through u8g2 U8G2_R1, so the logical
+                # screen is ALWAYS this dihedral of the native portrait memory.
+                # Do not OCR-guess: tesseract scores rotated/mirrored gibberish
+                # higher than short upright text and picked a sideways frame.
+                best = ((0, 0), "mirror0_rot90", dihedral(raw)["mirror0_rot90"])
+            else:
+                best = None
+                for name, im in dihedral(raw).items():
+                    s = ocr_score(im)
+                    if best is None or s[:2] > best[0][:2]:
+                        best = (s, name, im)
             best[2].save(out / "panel_landscape.png")
             print(f"frame {i}: landscape view = {best[1]} "
                   f"(score={best[0][0]}/{best[0][1]}) -> "
