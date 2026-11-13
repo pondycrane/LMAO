@@ -11,6 +11,11 @@ RD_SHOT header / buffer size:
   ST7305 landscape panel memory (400x300) produced by the upstream
   custom_lcd_display.cc landscape LUT — inverted here so the PNG is the
   logical screen the app drew.
+- Home env client (robodog_home_client): the u8g2 buffer (304x50 tiles, same
+  15200-byte size as the calendar) drawn with U8G2_R1, i.e. a 400x300 LOGICAL
+  landscape screen in the panel's native portrait memory.  Its RD_SHOT header
+  announces w=400 h=300, so the orientation is chosen by the header's
+  w/h — never by the buffer size, which the calendar shares.
 
 No re-rendering, no XML interpretation: the dumped bytes are literally what
 the firmware pushed to the ST7305.
@@ -165,6 +170,20 @@ VISION_PROMPT = (
     "3) any status words like 'no wifi'/'stale'/'offline'.\n"
     "Reply as a short list.")
 
+HOME_VISION_PROMPT = (
+    "This is the monochrome RLCD screen of a home temperature/humidity panel. "
+    "Transcribe exactly, in the ORIGINAL language/script:\n"
+    "1) the device name at the top left and the current reading at the top "
+    "right (e.g. '22.6C 55%'),\n"
+    "2) the status line under it (e.g. 'updated', 'stale', 'no reply') and the "
+    "sample count,\n"
+    "3) the plot's axis labels (temperature on the left in C, humidity on the "
+    "right in %), the unit markers at the trace ends, and the x-axis clock "
+    "labels.\n"
+    "Report only text that is actually drawn; do not infer a status word that "
+    "is absent. If the screen is blank, say BLANK.\n"
+    "Reply as a short list.")
+
 HERMES_VISION_PROMPT = (
     "This is the monochrome RLCD screen of an AI voice-assistant device "
     "(XiaoZhi). Transcribe exactly any visible text (labels, dates, status or "
@@ -210,6 +229,26 @@ def ocr_score(im):
     txt = subprocess.run(["tesseract", str(tmp), "-", "--psm", "6"],
                          capture_output=True, text=True).stdout
     return (len(HOUR_RE.findall(txt)), len(DATE_RE.findall(txt)), txt)
+
+
+WORD_RE = re.compile(r"[A-Za-z]{3,}|\d+(?:[.,]\d+)?\s*%?", re.ASCII)
+
+
+def text_score(im):
+    """Orientation score for a panel with no clock labels (the home env
+    chart): how many real words/readings the rotation yields.
+
+    The calendar's HH:MM/DATE heuristic scores 0 on every home orientation, so
+    `max()` over it silently kept the FIRST candidate (mirror0_rot0) — the
+    sideways frame.  This counts actual text instead, which is what tells the
+    upright rotation apart."""
+    im = im.resize((im.width * 3, im.height * 3), Image.Resampling.NEAREST)
+    tmp = Path("/tmp/rdshot_ocr.png")
+    im.convert("L").save(tmp)
+    txt = subprocess.run(["tesseract", str(tmp), "-", "--psm", "6"],
+                         capture_output=True, text=True).stdout
+    words = WORD_RE.findall(txt)
+    return (len(words), sum(len(w) for w in words), txt)
 
 
 def wait_for_port(port, timeout=15.0):
@@ -344,19 +383,26 @@ def main():
         else:
             raw = decode_raw(data)
             raw.save(out / "panel_raw_portrait.png")
-            # pick the orientation where the date/time text reads upright
+            # The RD_SHOT header carries the LOGICAL screen size: the home
+            # client draws 400x300 landscape (w>h) into the same 15200-byte
+            # portrait buffer the calendar fills with 300x400.  Buffer size
+            # cannot tell them apart, the header can.
+            landscape = w > h
+            score = text_score if landscape else ocr_score
             best = None
             for name, im in dihedral(raw).items():
-                hhmm, dates, _ = ocr_score(im)
-                if best is None or (hhmm, dates) > best[0]:
-                    best = ((hhmm, dates), name, im)
+                if landscape and im.size != (w, h):
+                    continue      # only 400x300 rotations are candidates
+                s = score(im)
+                if best is None or s[:2] > best[0][:2]:
+                    best = (s, name, im)
             best[2].save(out / "panel_landscape.png")
             print(f"frame {i}: landscape view = {best[1]} "
-                  f"(OCR hh:mm={best[0][0]}, dates={best[0][1]}) -> "
+                  f"(score={best[0][0]}/{best[0][1]}) -> "
                   f"panel_raw_portrait.png / panel_landscape.png",
                   file=sys.stderr)
             shot_for_vision = out / "panel_landscape.png"
-            prompt = VISION_PROMPT
+            prompt = HOME_VISION_PROMPT if landscape else VISION_PROMPT
         if args.describe:
             print(f"frame {i}: vision readback ...", file=sys.stderr)
             try:

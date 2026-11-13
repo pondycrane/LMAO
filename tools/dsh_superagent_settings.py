@@ -17,6 +17,7 @@ import os
 import sys
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 PORT = int(os.environ.get("DSH_SUPERAGENT_PORT", "3082"))
 API = f"http://127.0.0.1:{PORT}/orchestrator/api"
@@ -72,6 +73,26 @@ RULES = [
         ),
     },
 ]
+
+# Team skills: the repo's own `.omp/skills/<name>/SKILL.md` bodies (frontmatter
+# stripped).  dsh carries skill TEXT, not files, so the body is inlined into the
+# prompts config — the same source omp loads, one definition.
+SKILL_FILES = {"robodog-ui": "robodog-ui/SKILL.md"}
+
+
+def team_skills() -> dict:
+    root = Path(__file__).resolve().parent.parent / ".omp" / "skills"
+    out = {}
+    for name, rel in SKILL_FILES.items():
+        path = root / rel
+        if not path.exists():
+            continue
+        text = path.read_text(encoding="utf-8")
+        if text.startswith("---"):
+            # strip the YAML frontmatter: name/description are dsh metadata
+            text = text.split("---", 2)[2].lstrip("\n")
+        out[name] = text
+    return out
 
 
 def call(method: str, path: str, body: dict | None = None) -> dict:
@@ -145,7 +166,7 @@ def desired() -> dict:
         "communication": defaults["communication"],
         "scope": defaults["scope"],
         "delivery": defaults["delivery"] + "\n\n" + DEVICE_CONTRACT + "\n",
-        "skills": {},
+        "skills": team_skills(),
     }
 
     return {
