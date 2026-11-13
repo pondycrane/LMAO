@@ -160,6 +160,25 @@ Capture/verify the panel exactly like the calendar firmware:
 python3 robodog_client/capture.py --port /dev/ttyACM0 --reset --n 2 --describe
 ```
 
+## Flash via the bench (op4)
+
+The bench (`cluster-ops/benchd`, `BENCH_URL=http://op4:8099`) owns the board;
+flash through it instead of running `flash.sh` on the bench host by hand:
+
+```sh
+bench submit build --family home --head <sha> --class dev
+bench submit flash_capture --family home --head <sha> --build <build-id> \
+    --payload '{"device_name":"main bedroom","frames":6}'
+bench wait <job-id>; bench evidence <job-id>
+```
+
+The build needs no secrets from the caller: the bench holds the server
+delivery hash and the pinned per-device identity
+(`BENCH_HOME_DEST_HASH` / `BENCH_HOME_NODE_IDENTITIES` in `/etc/benchd.env`,
+mirroring the local `~/.local/share/lmao_client/devs/<name>/identity` store),
+and the flash step takes the WiFi credentials from `BENCH_HOME_*`. The device
+name still comes from the job (`payload.device_name` → NVS `device_name`).
+
 ## Configuration
 
 | Flag | Env | Default | Meaning |
