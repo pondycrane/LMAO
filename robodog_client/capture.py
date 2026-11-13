@@ -7,7 +7,7 @@ RD_SHOT header / buffer size:
 - u8g2 firmwares (calendar `robodog_client`, home `robodog_home_client`):
   the SAME 304x50-tile (15200-byte) u8g2 buffer, both drawn through
   `U8G2_R1` over the ST7305's native 300x400 portrait memory.  The logical
-  screen is therefore 400x300 landscape in BOTH, and the same dihedral
+  screen is therefore 400x300 landscape in BOTH, and the same single rotation
   (`raw.rotate(90)`) recovers it — the buffer size and the RD_SHOT header
   (both announce w=400 h=300) cannot tell the two firmwares apart, and they
   do not need to: the decode is identical, only the vision prompt differs
