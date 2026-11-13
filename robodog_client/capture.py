@@ -231,26 +231,6 @@ def ocr_score(im):
     return (len(HOUR_RE.findall(txt)), len(DATE_RE.findall(txt)), txt)
 
 
-WORD_RE = re.compile(r"[A-Za-z]{3,}|\d+(?:[.,]\d+)?\s*%?", re.ASCII)
-
-
-def text_score(im):
-    """Orientation score for a panel with no clock labels (the home env
-    chart): how many real words/readings the rotation yields.
-
-    The calendar's HH:MM/DATE heuristic scores 0 on every home orientation, so
-    `max()` over it silently kept the FIRST candidate (mirror0_rot0) — the
-    sideways frame.  This counts actual text instead, which is what tells the
-    upright rotation apart."""
-    im = im.resize((im.width * 3, im.height * 3), Image.Resampling.NEAREST)
-    tmp = Path("/tmp/rdshot_ocr.png")
-    im.convert("L").save(tmp)
-    txt = subprocess.run(["tesseract", str(tmp), "-", "--psm", "6"],
-                         capture_output=True, text=True).stdout
-    words = WORD_RE.findall(txt)
-    return (len(words), sum(len(w) for w in words), txt)
-
-
 def wait_for_port(port, timeout=15.0):
     """Block until `port` exists again after a reset.
 
