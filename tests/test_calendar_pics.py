@@ -100,6 +100,7 @@ def mock_pg():
     real_psycopg = sys.modules.get("psycopg")
     fake_module = types.ModuleType("psycopg")
     fake_module.connect = connect
+    fake_module.OperationalError = type("OperationalError", (Exception,), {})
     sys.modules["psycopg"] = fake_module
     pics.psycopg = fake_module
     real_dsn = pics.compose_postgres_dsn
@@ -149,6 +150,41 @@ class TestPicStore:
         cursor.fetchone_value = None
         store._conn.cursor = staticmethod(lambda: cursor)
         assert store.get("nope") is None
+
+    def test_get_reconnects_after_dead_connection(self, mock_pg):
+        pics, _, make_cursor = mock_pg
+        store = PicStore("postgresql://lmao:pw@pg:5432/lmao")
+
+        class _DeadConn:
+            def cursor(self):
+                raise pics.psycopg.OperationalError("the connection is closed")
+
+            def close(self):
+                pass
+
+        store._conn = _DeadConn()
+
+        cursor = make_cursor()
+        cursor.fetchone_value = (
+            "swim", 176, 176, "image/png", TINY_PNG, None,
+            1700000000000, 1700000000000,
+        )
+        good = type(
+            "_FakeConn",
+            (),
+            {"cursor": staticmethod(lambda: cursor), "close": lambda self: None},
+        )()
+        connects = []
+
+        def connect(dsn, autocommit=False):
+            connects.append(dsn)
+            return good
+
+        pics.psycopg.connect = connect
+
+        assert store.get("swim")["pic_key"] == "swim"
+        assert connects == ["postgresql://lmao:pw@pg:5432/lmao"]
+        assert store._conn is good
 
     def test_open_none_without_dsn(self, mock_pg):
         pics, _, _ = mock_pg

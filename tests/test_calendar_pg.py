@@ -67,6 +67,7 @@ def mock_pg():
 
     fake_module = types.ModuleType("psycopg")
     fake_module.connect = connect
+    fake_module.OperationalError = type("OperationalError", (Exception,), {})
     sys.modules["psycopg"] = fake_module
 
     import lma_core.calendar_pg as cal  # noqa: E402  (re-imports vs. fake psycopg)
@@ -214,6 +215,57 @@ class TestSync:
         assert "participants @> %s::jsonb" not in select_sql
         select_params = [p for s, p in captures["executes"] if "FROM cal_events" in s]
         assert [list(p) for p in select_params] == [["family", 500, 11]]
+
+
+# ---------------------------------------------------------------------------
+# reconnect
+# ---------------------------------------------------------------------------
+
+
+class TestReconnect:
+    def test_sync_reconnects_once_after_dead_connection(self, mock_pg):
+        """A terminated Postgres connection must not wedge the calendar forever.
+
+        Reproduces the live failure: psycopg raises OperationalError("the
+        connection is closed") on every poll after the DB drops the one
+        long-lived connection.  The store must reconnect and retry the sync.
+        """
+        cal, captures, make_cursor = mock_pg
+        store = _make_store(cal)
+
+        class _DeadConn:
+            def cursor(self):
+                raise cal.psycopg.OperationalError("the connection is closed")
+
+            def close(self):
+                pass
+
+        store._conn = _DeadConn()
+
+        cursor = make_cursor()
+        cursor.fetchall_rows = [
+            ("u1", "family", "Swim class", "", 1, 2, False, "", []),
+        ]
+        good = type(
+            "_FakeConn",
+            (),
+            {"cursor": staticmethod(lambda: cursor), "close": lambda self: None},
+        )()
+        connects = []
+
+        def connect(dsn, autocommit=False):
+            connects.append(dsn)
+            captures["dsn"] = dsn
+            return good
+
+        cal.psycopg.connect = connect
+
+        events, watermark = store.sync(calendar_id="family", since_ms=0, max_events=10)
+
+        assert connects == ["postgresql://lmao:pw@postgres.default:5432/lmao"]
+        assert store._conn is good
+        assert watermark == 1000
+        assert [e["uid"] for e in events] == ["u1"]
 
 
 # ---------------------------------------------------------------------------

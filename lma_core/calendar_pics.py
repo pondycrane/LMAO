@@ -26,6 +26,7 @@ connection + lock, ensure-schema on init, DSN from
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import threading
 from typing import Any
@@ -112,9 +113,26 @@ class PicStore:
                 "Install with: pip install 'psycopg[binary]'"
             )
         self._lock = threading.Lock()
+        self._dsn = dsn
         self._conn = psycopg.connect(dsn, autocommit=True)
-        with self._lock, self._conn.cursor() as cur:
+        with self._lock:
+            self._init_schema()
+
+    def _init_schema(self) -> None:
+        with self._conn.cursor() as cur:
             cur.execute(_SCHEMA)
+
+    def _reconnect_locked(self) -> None:
+        """Replace a dead connection. Caller must hold ``_lock``.
+
+        Same failure mode as ``CalendarStore``: the DB can terminate the one
+        long-lived connection after a network blip, and psycopg then raises
+        ``OperationalError`` on every use until the pod restarts.
+        """
+        with contextlib.suppress(Exception):
+            self._conn.close()
+        self._conn = psycopg.connect(self._dsn, autocommit=True)
+        self._init_schema()
 
     def put(self, pic_key: str, png_bytes: bytes, width: int, height: int) -> dict[str, Any]:
         """Upsert a picture by key (idempotent; regenerating a key overwrites).
@@ -129,7 +147,19 @@ class PicStore:
         """
         tile = _png_bytes_to_tile_1bpp(png_bytes)  # None if Pillow absent
         now_ms = _now_ms()
-        with self._lock, self._conn.cursor() as cur:
+        with self._lock:
+            try:
+                row = self._put_locked(pic_key, png_bytes, width, height, tile, now_ms)
+            except psycopg.OperationalError:
+                _logger.warning("picture store connection lost — reconnecting")
+                self._reconnect_locked()
+                row = self._put_locked(pic_key, png_bytes, width, height, tile, now_ms)
+        return _row_to_pic(row)
+
+    def _put_locked(self, pic_key: str, png_bytes: bytes, width: int,
+                    height: int, tile: bytes | None, now_ms: int) -> tuple:
+        """Idempotent upsert. Caller holds ``_lock``."""
+        with self._conn.cursor() as cur:
             cur.execute(
                 """
                     INSERT INTO cal_pics(
@@ -157,17 +187,36 @@ class PicStore:
                 (pic_key,),
             )
             cur.execute(_GET_SQL, (pic_key,))
-            row = cur.fetchone()
-        return _row_to_pic(row)
+            return cur.fetchone()
 
     def get(self, pic_key: str) -> dict[str, Any] | None:
-        with self._lock, self._conn.cursor() as cur:
-            cur.execute(_GET_SQL, (pic_key,))
-            row = cur.fetchone()
+        with self._lock:
+            try:
+                row = self._get_locked(pic_key)
+            except psycopg.OperationalError:
+                _logger.warning("picture store connection lost — reconnecting")
+                self._reconnect_locked()
+                row = self._get_locked(pic_key)
         return _row_to_pic(row) if row else None
 
+    def _get_locked(self, pic_key: str) -> tuple | None:
+        """Read one picture. Caller holds ``_lock``."""
+        with self._conn.cursor() as cur:
+            cur.execute(_GET_SQL, (pic_key,))
+            return cur.fetchone()
+
     def keys(self) -> list[str]:
-        with self._lock, self._conn.cursor() as cur:
+        with self._lock:
+            try:
+                return self._keys_locked()
+            except psycopg.OperationalError:
+                _logger.warning("picture store connection lost — reconnecting")
+                self._reconnect_locked()
+                return self._keys_locked()
+
+    def _keys_locked(self) -> list[str]:
+        """List picture keys. Caller holds ``_lock``."""
+        with self._conn.cursor() as cur:
             cur.execute("SELECT pic_key FROM cal_pics ORDER BY pic_key")
             return [r[0] for r in cur.fetchall()]
 

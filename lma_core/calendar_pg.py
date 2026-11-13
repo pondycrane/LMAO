@@ -23,6 +23,7 @@ the LXMF delivery callback, no ORM/migrations.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import threading
@@ -132,14 +133,32 @@ class CalendarStore:
                 "Install with: pip install 'psycopg[binary]'"
             )
         self._lock = threading.Lock()
+        self._dsn = dsn
         self._conn = psycopg.connect(dsn, autocommit=True)
         with self._lock:
-            with self._conn.cursor() as cur:
-                cur.execute(_SCHEMA)
-                cur.execute(_MIGRATE_PARTICIPANTS)
-                cur.execute(_TOUCH_FN)
-                cur.execute(_TOMBSTONE_FN)
-                cur.execute(_TRIGGERS)
+            self._init_schema()
+
+    def _init_schema(self) -> None:
+        """Apply the idempotent DDL on the current connection."""
+        with self._conn.cursor() as cur:
+            cur.execute(_SCHEMA)
+            cur.execute(_MIGRATE_PARTICIPANTS)
+            cur.execute(_TOUCH_FN)
+            cur.execute(_TOMBSTONE_FN)
+            cur.execute(_TRIGGERS)
+
+    def _reconnect_locked(self) -> None:
+        """Replace a dead connection. Caller must hold ``_lock``.
+
+        The store keeps ONE long-lived connection, and the DB (or the pod
+        network) can terminate it after a blip: psycopg then raises
+        ``OperationalError`` on every subsequent use.  Without this, the
+        calendar service stays broken until the server pod restarts.
+        """
+        with contextlib.suppress(Exception):
+            self._conn.close()
+        self._conn = psycopg.connect(self._dsn, autocommit=True)
+        self._init_schema()
 
     def sync(
         self,
@@ -174,22 +193,12 @@ class CalendarStore:
             params.append(json.dumps(participant))
         params.append(max_events + 1)
         with self._lock:
-            with self._conn.cursor() as cur:
-                cur.execute(
-                    "SELECT (EXTRACT(epoch FROM clock_timestamp()) * 1000)::bigint"
-                )
-                watermark = int(cur.fetchone()[0])
-                cur.execute(
-                    f"""
-                    SELECT uid, calendar_id, title, notes, start_ms, end_ms, deleted, pic, participants
-                    FROM cal_events
-                    {where}
-                    ORDER BY updated_ms
-                    LIMIT %s
-                    """,
-                    tuple(params),
-                )
-                rows = cur.fetchall()
+            try:
+                watermark, rows = self._sync_locked(where, params)
+            except psycopg.OperationalError:
+                _logger.warning("calendar store connection lost — reconnecting")
+                self._reconnect_locked()
+                watermark, rows = self._sync_locked(where, params)
         if len(rows) > max_events:
             _logger.warning(
                 "Calendar sync window exceeds %d events (truncated) — "
@@ -198,6 +207,26 @@ class CalendarStore:
             )
             rows = rows[:max_events]
         return [_row_to_event(r) for r in rows], watermark
+
+    def _sync_locked(self, where: str, params: list[Any]) -> tuple[int, list[tuple]]:
+        """Run the watermark + delta query. Caller holds ``_lock``."""
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT (EXTRACT(epoch FROM clock_timestamp()) * 1000)::bigint"
+            )
+            watermark = int(cur.fetchone()[0])
+            cur.execute(
+                f"""
+                SELECT uid, calendar_id, title, notes, start_ms, end_ms, deleted, pic, participants
+                FROM cal_events
+                {where}
+                ORDER BY updated_ms
+                LIMIT %s
+                """,
+                tuple(params),
+            )
+            rows = cur.fetchall()
+        return watermark, rows
 
     def close(self) -> None:
         with self._lock:
@@ -222,7 +251,21 @@ class CalendarStore:
         ``rev`` on every insert/update so the delta sync re-delivers changed
         rows.  ``participants`` is stored as JSONB (``["juliet","wesley"]``).
         """
-        with self._lock, self._conn.cursor() as cur:
+        with self._lock:
+            try:
+                self._upsert_locked(calendar_id, uid, title, notes, start_ms,
+                                    end_ms, pic, participants)
+            except psycopg.OperationalError:
+                _logger.warning("calendar store connection lost — reconnecting")
+                self._reconnect_locked()
+                self._upsert_locked(calendar_id, uid, title, notes, start_ms,
+                                    end_ms, pic, participants)
+
+    def _upsert_locked(self, calendar_id: str, uid: str, title: str, notes: str,
+                       start_ms: int, end_ms: int, pic: str,
+                       participants: list[str]) -> None:
+        """Idempotent insert/update. Caller holds ``_lock``."""
+        with self._conn.cursor() as cur:
             cur.execute(
                 """
                 INSERT INTO cal_events(
@@ -249,7 +292,17 @@ class CalendarStore:
 
     def tombstone(self, calendar_id: str, uid: str) -> None:
         """Mark an event deleted (propagates to clients as a tombstone)."""
-        with self._lock, self._conn.cursor() as cur:
+        with self._lock:
+            try:
+                self._tombstone_locked(calendar_id, uid)
+            except psycopg.OperationalError:
+                _logger.warning("calendar store connection lost — reconnecting")
+                self._reconnect_locked()
+                self._tombstone_locked(calendar_id, uid)
+
+    def _tombstone_locked(self, calendar_id: str, uid: str) -> None:
+        """Mark deleted. Caller holds ``_lock``."""
+        with self._conn.cursor() as cur:
             cur.execute(
                 "UPDATE cal_events SET deleted = TRUE"
                 " WHERE uid = %s AND calendar_id = %s",
