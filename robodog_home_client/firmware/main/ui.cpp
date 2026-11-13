@@ -113,11 +113,14 @@ void draw_axes(u8g2_t* u8g2, const rd_chart_plan_t* plan, size_t samples) {
 
     set_font(u8g2, u8g2_font_6x10_tf);
     if (plan->temp_n > 0) {
+        /* Unit rides IN the scale label ("32.0C"), not on a dangling line
+         * below the axis: one label, one fact, no orphan glyph. */
         fmt_temp(buf, sizeof(buf), plan->temp_max);
+        strncat(buf, "C", sizeof(buf) - strlen(buf) - 1);
         u8g2_DrawStr(u8g2, 2, PLOT_Y0 + 8, buf);
         fmt_temp(buf, sizeof(buf), plan->temp_min);
+        strncat(buf, "C", sizeof(buf) - strlen(buf) - 1);
         u8g2_DrawStr(u8g2, 2, PLOT_Y1, buf);
-        u8g2_DrawStr(u8g2, 2, PLOT_Y1 + 12, "C");
     }
     if (plan->hum_n > 0) {
         snprintf(buf, sizeof(buf), "%u%%", (unsigned)plan->hum_max);
@@ -128,21 +131,42 @@ void draw_axes(u8g2_t* u8g2, const rd_chart_plan_t* plan, size_t samples) {
 
     /* Time axis: a tick under the left edge, the middle sample and the right
      * edge ("now"), each labelled with the local clock time of that sample
-     * (ChartBundle.start_ms + i*period_ms, offset by RH_TZ_OFFSET_MINUTES). */
+     * (ChartBundle.start_ms + i*period_ms, offset by RH_TZ_OFFSET_MINUTES).
+     *
+     * Ticks that land on the SAME x are collapsed: with one or two samples
+     * all three anchors coincide and three labels would overprint into
+     * unreadable garbage.  A single surviving tick shows the newest sample's
+     * time, right-aligned at the edge it sits on. */
     char labels[RD_CHART_TICKS][RD_CHART_LABEL_LEN];
     rd_chart_time_labels(plan, samples, RH_TZ_OFFSET_MINUTES, labels);
     const size_t idx[RD_CHART_TICKS] = {0, samples / 2, samples ? samples - 1 : 0};
     const int label_base = PLOT_Y1 + 15;
+    int tick_x[RD_CHART_TICKS];
+    int tick_k[RD_CHART_TICKS];
+    int n_ticks = 0;
     for (int k = 0; k < RD_CHART_TICKS; k++) {
         const int x = rd_chart_x(plan, idx[k], samples);
+        bool dup = false;
+        for (int j = 0; j < n_ticks; j++) {
+            if (tick_x[j] == x) dup = true;
+        }
+        if (dup) continue;
+        tick_x[n_ticks] = x;
+        tick_k[n_ticks] = k;
+        n_ticks++;
+    }
+    for (int j = 0; j < n_ticks; j++) {
+        const int x = tick_x[j];
         u8g2_DrawVLine(u8g2, x, PLOT_Y1 + 1, 4);  /* tick mark below the axis */
-        if (k == 0) {
-            u8g2_DrawStr(u8g2, x, label_base, labels[k]);
-        } else if (k == RD_CHART_TICKS - 1) {
-            draw_right(u8g2, x, label_base, labels[k]);
+        if (n_ticks == 1) {
+            draw_right(u8g2, x, label_base, labels[RD_CHART_TICKS - 1]);
+        } else if (j == 0) {
+            u8g2_DrawStr(u8g2, x, label_base, labels[tick_k[j]]);
+        } else if (j == n_ticks - 1) {
+            draw_right(u8g2, x, label_base, labels[RD_CHART_TICKS - 1]);
         } else {
-            const int w = u8g2_GetStrWidth(u8g2, labels[k]);
-            u8g2_DrawStr(u8g2, x - w / 2, label_base, labels[k]);
+            const int w = u8g2_GetStrWidth(u8g2, labels[tick_k[j]]);
+            u8g2_DrawStr(u8g2, x - w / 2, label_base, labels[tick_k[j]]);
         }
     }
 }
@@ -185,6 +209,9 @@ void render(const char* device_name, const lma_chart::ChartBundle* bundle,
     u8g2_DrawBox(u8g2, 0, 0, W_disp, H_disp);
     u8g2_SetDrawColor(u8g2, 0);
 
+    /* Header: the CURRENT READING is the panel's primary element (helvB18,
+     * bold) — the number a person walks over to read.  The device name is
+     * the label (10x20), so it never competes with the reading. */
     char line[64];
     set_font(u8g2, u8g2_font_10x20_tf);
     snprintf(line, sizeof(line), "%s", device_name && device_name[0]
@@ -193,24 +220,37 @@ void render(const char* device_name, const lma_chart::ChartBundle* bundle,
     u8g2_DrawStr(u8g2, 4, 22, line);
 
     char right[48] = "";
+    set_font(u8g2, u8g2_font_helvB18_tf);
     if (have_data && bundle != nullptr) {
         char t[16] = "", h[16] = "";
         if (!bundle->temp.empty()) {
             fmt_temp(t, sizeof(t), bundle->temp.back());
+            strncat(t, deg_suffix(u8g2), sizeof(t) - strlen(t) - 1);
         }
         if (!bundle->hum.empty()) {
             snprintf(h, sizeof(h), "%u%%", (unsigned)bundle->hum.back());
         }
-        if (t[0] && h[0]) snprintf(right, sizeof(right), "%sC %s", t, h);
-        else if (t[0]) snprintf(right, sizeof(right), "%sC", t);
+        if (t[0] && h[0]) snprintf(right, sizeof(right), "%s %s", t, h);
+        else if (t[0]) snprintf(right, sizeof(right), "%s", t);
         else if (h[0]) snprintf(right, sizeof(right), "%s", h);
     }
-    if (right[0]) draw_right(u8g2, W - 4, 22, right);
+    if (right[0]) {
+        draw_right(u8g2, W - 4, 24, right);
+    }
 
+    /* Status row: state is carried by a SHAPE plus a WORD — never colour,
+     * never motion.  Filled square = live/now; hollow square = frozen,
+     * failed or pre-sync.  The sample count keeps a right-aligned slot. */
     set_font(u8g2, u8g2_font_6x10_tf);
+    const bool live = have_data && !stale;
+    if (live) {
+        u8g2_DrawBox(u8g2, 4, 34, 5, 5);
+    } else {
+        u8g2_DrawFrame(u8g2, 4, 34, 5, 5);
+    }
     snprintf(line, sizeof(line), "%s%s", stale ? "stale · " : "",
              status ? status : "");
-    u8g2_DrawStr(u8g2, 4, 40, line);
+    u8g2_DrawStr(u8g2, 13, 40, line);
 
     char counts[48] = "";
     if (have_data && bundle != nullptr) {
@@ -218,6 +258,9 @@ void render(const char* device_name, const lma_chart::ChartBundle* bundle,
                  (unsigned)bundle->temp.size());
     }
     if (counts[0]) draw_right(u8g2, W - 4, 40, counts);
+
+    /* One real 1 px rule separates the header block from the plot. */
+    u8g2_DrawHLine(u8g2, 0, 50, W);
 
     rd_chart_plan_t plan;
     if (have_data && bundle != nullptr) {
@@ -233,16 +276,16 @@ void render(const char* device_name, const lma_chart::ChartBundle* bundle,
         draw_trace(u8g2, plan.temp, plan.temp_n, /*dotted=*/false);
         draw_trace(u8g2, plan.hum, plan.hum_n, /*dotted=*/true);
 
-        // Value at the end of each line.  Positioned just above the temp
-        // endpoint and just below the humidity one; when the two endpoints are
-        // close, the labels are pushed apart so neither is lost.
+        // Value at the end of each line — only when there IS a line.  With a
+        // single sample the header already carries the reading; repeating it
+        // inside the plot would state the same fact twice.
         char temp_lbl[16] = "";
         char hum_lbl[16] = "";
         int temp_base = 0;
         int hum_base = 0;
         const int label_lo = PLOT_Y0 + 9;
         const int label_hi = PLOT_Y1 - 1;
-        if (plan.temp_n > 0) {
+        if (plan.temp_n > 1) {
             fmt_temp(temp_lbl, sizeof(temp_lbl), bundle->temp.back());
             const char* suffix = deg_suffix(u8g2);
             strncat(temp_lbl, suffix,
@@ -250,7 +293,7 @@ void render(const char* device_name, const lma_chart::ChartBundle* bundle,
             temp_base = clamp_int(plan.temp[plan.temp_n - 1].y - 3,
                                   label_lo, label_hi);
         }
-        if (plan.hum_n > 0) {
+        if (plan.hum_n > 1) {
             snprintf(hum_lbl, sizeof(hum_lbl), "%u%%",
                      (unsigned)bundle->hum.back());
             hum_base = clamp_int(plan.hum[plan.hum_n - 1].y + 10,
@@ -270,8 +313,11 @@ void render(const char* device_name, const lma_chart::ChartBundle* bundle,
     } else {
         u8g2_DrawFrame(u8g2, PLOT_X0, PLOT_Y0, PLOT_X1 - PLOT_X0 + 1,
                        PLOT_Y1 - PLOT_Y0 + 1);
-        u8g2_DrawStr(u8g2, PLOT_X0 + 60, (PLOT_Y0 + PLOT_Y1) / 2,
-                     "waiting for data...");
+        set_font(u8g2, u8g2_font_10x20_tf);
+        const char* msg = "waiting for data";
+        u8g2_DrawStr(u8g2, (PLOT_X0 + PLOT_X1) / 2 -
+                              u8g2_GetStrWidth(u8g2, msg) / 2,
+                     (PLOT_Y0 + PLOT_Y1) / 2, msg);
     }
 
     u8g2_SendBuffer(u8g2);
