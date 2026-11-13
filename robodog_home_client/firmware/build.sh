@@ -42,6 +42,27 @@ IDF_IMG="${IDF_IMG:-espressif/idf:v5.3.1}"
 # firmwares share the one pinned upstream copy.
 "$ROBODOG/u8g2_prepare.sh" "$ROBODOG"
 
+# RTReticulum must be the SAME pinned rev the Bazel host path uses (WORKSPACE
+# @rtreticulum, dab4362) WITH rtreticulum_fixes.patch applied: unpatched RTR
+# rejects the server's ratcheted announce ("invalid announce sig" in
+# transport.cpp), so the board never learns the delivery destination. The
+# marker grep makes re-application idempotent on a checkout that predates
+# this fix.
+RTRET_PATCH="$APP/../../smart_irrigation/native-client/rtreticulum_fixes.patch"
+RTR_REV=dab4362cf3577e464e98e85b71abc5cb26185224
+if [ ! -d "$RTR/.git" ]; then
+    echo "cloning RTReticulum (pinned ${RTR_REV:0:7}) -> $RTR"
+    rm -rf "$RTR"
+    git init -q "$RTR"
+    git -C "$RTR" remote add origin https://github.com/0xSeren/RTReticulum
+    git -C "$RTR" fetch -q --depth 1 origin "$RTR_REV"
+    git -C "$RTR" checkout -q FETCH_HEAD
+fi
+if ! grep -q "create_ratchet" "$RTR/include/rtreticulum/destination.h"; then
+    echo "applying rtreticulum_fixes.patch -> $RTR"
+    git -C "$RTR" apply "$RTRET_PATCH"
+fi
+
 DEST="$RTR/firmware/robodog_home"
 mkdir -p "$DEST"
 rm -rf "$DEST/main" "$DEST/components" 2>/dev/null || true
