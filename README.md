@@ -323,7 +323,7 @@ bazel run //tools:install_all -- --skip-rnode
 
 # Also deploy Pi server and K8s services
 # (internal services are released through the local Docker registry at
-#  192.168.50.153:5000 and deployed via Docker from the registry image)
+#  op4:5000 and deployed via Docker from the registry image)
 bazel run //tools:install_all -- --include-services
 bazel run //tools:install_all -- --include-services --skip-server
 bazel run //tools:install_all -- --include-services --skip-k8s
@@ -558,12 +558,17 @@ The optional `pic` field on each event is a line-drawing pack key (e.g.
 **1-bit black & white tiles** — formatted for the 4.2" RLCD calendar display
 (400×300 landscape canvas) at a default 176×176 so the headline drawing fills
 the left of the panel while the right column keeps the title, time range and
-forecast — generated and stored in Postgres (`cal_pics` table) by the
+forecast — **fetched as line drawings from the internet** and stored in
+Postgres (`cal_pics` table) by the
 **line-drawing skill** for agent use (see
 `.archon/skills/line-drawing/SKILL.md`) via `bazel run //tools:calendar_pics --
 --key <key>` — either from a pack SVG or a small line drawing found online and
-fetched as a URL (`--source https://…`). The client resolves the key to the
-stored tile for display.
+fetched as a URL (`--source https://…`). The hourly calendar-sync CronJob's
+picture stage does the same automatically: it searches Wikimedia Commons and
+the DuckDuckGo image index (biased to `line drawing` / `coloring page`),
+crops/gates the hit with the local vision model and rejects anything that is
+not sparse line art (an ink-fraction check) — there is no image generator.
+The client resolves the key to the stored tile for display.
 
 **Weather rides the same reply.** When the deployment sets
 `LMAO_WEATHER_LAT`/`LMAO_WEATHER_LON` (the in-cluster manifest pins the
@@ -919,7 +924,7 @@ See [`robodog_home_client/README.md`](robodog_home_client/README.md).
 
 The server Docker image is the release artifact for the in-cluster
 Deployment (§9). Internal services are always released through the
-[local Docker registry](#13-local-docker-registry) (`192.168.50.153:5000`);
+[local Docker registry](#13-local-docker-registry) (`op4:5000`);
 `bazel run //tools:install_all -- --include-services` performs the full
 build → push → `kubectl apply` cycle automatically.
 
@@ -928,8 +933,8 @@ build → push → `kubectl apply` cycle automatically.
 docker build -t lmao-server .
 
 # Push to the local registry
-docker tag lmao-server 192.168.50.153:5000/lmao-server:latest
-docker push 192.168.50.153:5000/lmao-server:latest
+docker tag lmao-server op4:5000/lmao-server:latest
+docker push op4:5000/lmao-server:latest
 ```
 
 Running the container standalone (e.g. on a laptop for development) still
@@ -1197,7 +1202,7 @@ bazel run //tools:install_all -- --include-services
 
 > **Using the local registry:** The Deployment manifest references the
 > [local Docker registry](#13-local-docker-registry) image
-> (`192.168.50.153:5000/lmao-iot-ingest:latest`) directly.  Release a new
+> (`op4:5000/lmao-iot-ingest:latest`) directly.  Release a new
 > version by pushing the image, then re-apply:
 > ```bash
 > ./docker/registry/manage.sh push-ingest
@@ -1397,10 +1402,18 @@ For the server to accept a wifi client's envelopes, the client's
 
 ### 13. Local Docker Registry
 
-A **self-hosted Docker registry** runs on the Pi server (`selfhost`, `192.168.50.153:5000`)
-for local image storage and distribution to the K3s cluster. This eliminates the need to
-pull from Docker Hub on cluster nodes or use the manual `docker save | k3s ctr image import -`
-workflow.
+A **self-hosted Docker registry** runs on the bench host (`op4`, `op4:5000`) for
+local image storage and distribution to the K3s cluster. This eliminates the need
+to pull from Docker Hub on cluster nodes or use the manual
+`docker save | k3s ctr image import -` workflow.
+
+`op4` owns the registry because it has an NVMe root (938 GB, ~850 GB free) versus
+`selfhost`'s 235 GB SD card. The container is managed from this repo but runs on
+`op4`'s Docker daemon: `manage.sh` sends its lifecycle commands
+(`start`/`stop`/`status`/`list`) over `DOCKER_HOST=ssh://pondycrane@op4`, while
+`build`/`push` stay on the local daemon.
+Images are pulled from `op4:5000` — always by **hostname**, never its DHCP LAN
+address (`tools/check_node_addresses.py` fails the build on a hardcoded node IP).
 
 #### Quick start
 
@@ -1412,12 +1425,13 @@ workflow.
 ./docker/registry/manage.sh push
 
 # 3. Verify
-curl http://192.168.50.153:5000/v2/_catalog
-# → {"repositories":["lmao-server","lmao-iot-ingest"]}
+curl http://op4:5000/v2/_catalog
+# → {"repositories":["lmao-server","lmao-iot-ingest",...]}
 ```
 
-The registry runs as a Docker container managed by docker-compose and restarts
-automatically on reboot (`restart: unless-stopped`).
+The registry runs as a Docker container managed by docker-compose on `op4` and
+restarts automatically on reboot (`restart: unless-stopped` + `docker` enabled).
+Its storage is the `registry_registry-data` volume on `op4`'s NVMe.
 
 #### Usage
 
@@ -1440,15 +1454,20 @@ automatically on reboot (`restart: unless-stopped`).
 #### Pushing images
 
 ```bash
-docker tag lmao-server 192.168.50.153:5000/lmao-server:latest
-docker push 192.168.50.153:5000/lmao-server:latest
+docker tag lmao-server op4:5000/lmao-server:latest
+docker push op4:5000/lmao-server:latest
 ```
 
-#### Pulling from the Pi itself
+#### Pulling from selfhost
 
-The Pi's Docker daemon is configured to trust `192.168.50.153:5000` as an insecure
-registry (see `/etc/docker/daemon.json`). Images pushed to the registry are
-immediately pullable on the Pi without any extra setup.
+`selfhost`'s Docker daemon trusts `op4:5000` as an insecure registry (see
+`/etc/docker/daemon.json`), so images pushed to the registry are immediately
+pullable here without extra setup.
+
+#### Pulling from op4 itself
+
+`op4`'s daemon trusts `op4:5000` as insecure too (`/etc/docker/daemon.json`), so
+images can be tagged and pushed from `op4` directly.
 
 #### Pulling from K3s cluster nodes
 
@@ -1471,15 +1490,27 @@ Or generate the config with the helper:
 ./docker/registry/manage.sh k3s-config | sudo tee /etc/rancher/k3s/registries.yaml
 ```
 
-The config tells containerd to reach the Pi's registry (`192.168.50.153:5000`)
-via plain HTTP. After restarting K8s services, update your Deployments to
-reference `192.168.50.153:5000/lmao-server:latest` instead of `lmao-server:latest`.
+The config tells containerd to reach the registry (`op4:5000`) via plain HTTP.
+After restarting K8s services, update your Deployments to reference
+`op4:5000/lmao-server:latest` instead of `lmao-server:latest`.
+
+Cluster nodes have **no DNS record** for `op4`, so the mirror stanza alone is not
+enough — pin the name in `/etc/hosts` on every node (the LAN address is DHCP):
+
+```bash
+echo "192.168.50.202 op4" | sudo tee -a /etc/hosts
+```
+
+`tp2`, `tp3` and `tp4` carry that pin plus the `op4:5000` mirror stanza. `tp1`
+currently has neither (and no mirror for the old registry either) — a pod
+scheduled there still fails `ImagePullBackOff`; keep `nodeSelector` pins until it
+is fixed.
 
 #### Deploying from the registry
 
 ```yaml
 # In your K8s Deployment YAML:
-image: 192.168.50.153:5000/lmao-server:latest
+image: op4:5000/lmao-server:latest
 imagePullPolicy: Always
 ```
 
@@ -1502,8 +1533,9 @@ The registry is configured via environment variables:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `REGISTRY_HOST` | `192.168.50.153` | Registry hostname/IP |
+| `REGISTRY_HOST` | `op4` | Registry hostname (never its DHCP IP) |
 | `REGISTRY_PORT` | `5000` | Registry port |
+| `DOCKER_HOST` | `ssh://pondycrane@op4` | Docker endpoint that owns the registry container |
 
 ---
 

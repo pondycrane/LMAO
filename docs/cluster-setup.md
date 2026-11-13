@@ -19,6 +19,7 @@ Each node has **two network interfaces**:
 | `tp4` | worker | `192.168.10.19` | `192.168.50.68` (DHCP) | RK1 module slot 3 | Debian 11 (bullseye), kernel 5.15.84-v8+ |
 | `turing-bmc` | BMC | — | `192.168.0.47` (verify — moves w/ LAN) | ESP32 on Turing Pi 2 | BMC firmware (default `root:turing`) |
 | `selfhost` | workstation | — | `192.168.50.153` (eth0) | Raspberry Pi 5 | Ubuntu 26.04 LTS (Resolute Raccoon), aarch64 |
+| `op4` | bench host | `192.168.10.20` | `192.168.50.202` (DHCP) | Orange Pi 4 (RK3399) | Ubuntu, NVMe root — **hosts the Docker registry** |
 
 **Address the nodes by hostname, never by LAN IP.** `wlan0` is DHCP and has
 already moved (`tp3` .90→.91, `tp4` .67→.68 on 2026-11-02, which silently broke
@@ -141,14 +142,19 @@ ExecStart=/usr/local/bin/k3s \
 **`/etc/rancher/k3s/registries.yaml`:**
 ```yaml
 mirrors:
-  192.168.50.153:5000:
+  op4:5000:
     endpoint:
-      - "http://192.168.50.153:5000"
+      - "http://op4:5000"
+```
+
+Plus the name pin, since no DNS zone resolves `op4` for the nodes:
+```bash
+echo "192.168.50.202 op4" | sudo tee -a /etc/hosts   # on every node
 ```
 
 > **Per-node, and easy to miss.** A node without this stanza cannot pull from
 > the local registry: its pods fail `ImagePullBackOff` on
-> `192.168.50.153:5000/<image>`.  This bit the calendar-sync CronJob when it
+> `op4:5000/<image>`.  This bit the calendar-sync CronJob when it
 > first scheduled onto **tp1** (which lacks the mirror) — the manifest now pins
 > `nodeSelector: kubernetes.io/hostname: tp4`, where lmao-server, postgres and
 > iot-ingest already run.  Apply the stanza to **every** node before relying on
@@ -203,8 +209,8 @@ use `POST /query`, `GET /tables`, `GET /schema/<table>` (see README
 ### Option A: Push to local registry
 ```bash
 cd /home/pondycrane/LMAO
-docker build -f Dockerfile.iot-ingest -t 192.168.50.153:5000/lmao-iot-ingest:latest .
-docker push 192.168.50.153:5000/lmao-iot-ingest:latest
+docker build -f Dockerfile.iot-ingest -t op4:5000/lmao-iot-ingest:latest .
+docker push op4:5000/lmao-iot-ingest:latest
 ```
 
 ### Option B: Load directly into containerd
@@ -381,9 +387,9 @@ LMAO_CONTACTS_URL=... bazel run //tools:calendar_pics_sync -- \
 
 In-cluster, derive a one-off Job from the CronJob template (so the env,
 Secret mounts and node pin stay identical), add the backfill flags to stage 2
-and lift the 900 s job deadline — a tile costs ~60-90 s (FLUX.1-schnell
-generation + vision crop/gate), so the CronJob's `activeDeadlineSeconds: 900`
-only covers ~10 events:
+and lift the 900 s job deadline — a tile costs ~20-40 s (search + vision
+crop/gate + download), so the CronJob's `activeDeadlineSeconds: 900` only
+covers ~20-40 events:
 
 ```bash
 kubectl create job --from=cronjob/lmao-calendar-sync lmao-cal-backfill \
@@ -400,19 +406,23 @@ The backfill only lands on the panel for events the RoboDog re-syncs: each
 regenerated tile bumps `updated_ms` on the events using that `pic`
 (`PicStore.put`), so the panel picks them up on its next 30-min delta sync.
 
-**PAW Patrol tiles are generated, never searched.** Wesley's PAW-theme events
-come from ComfyUI/FLUX (`192.168.50.27:8188` — spark-5307). The ConfigMap used
-to point at spark-5307's *old wired IP* `192.168.10.37`, which is dead: every
-event fell through to Wikimedia Commons, and because Commons carries no
-licensed PAW art, Wesley's PAW-themed events silently kept whatever tile they
-had (usually a sea animal). Verify the address before a backfill:
+**There is no image generator.** Tiles are fetched **line drawings** from the
+internet: Wikimedia Commons (public-domain line art) plus DuckDuckGo's image
+index queried with a `line drawing` / `coloring page` bias — that is what
+reaches character art (Pokémon, PAW Patrol) which Commons has no licensed copy
+of. The vision box (`192.168.50.200:8000`) crops each candidate to its subject
+and gates it against the theme's subject pool; a final geometric gate rejects
+anything that is not outline work — ink fraction 0.02–0.45 and ≥ 0.15 of the
+tile as enclosed white interior (a filled silhouette or a badly cropped blank
+page fails the second test). A rejected subject retries once with another
+subject from the same pool, and an event with no acceptable hit stays artless
+and retries on the next hourly run. To place a specific tile by hand, use the
+skill tool with an explicit source URL:
 
 ```bash
-curl -s -m 5 http://192.168.50.27:8188/system_stats | head -c 120
+bazel run //tools:calendar_pics -- --key <pic-key> \
+    --source https://commons.wikimedia.org/wiki/Special:FilePath/<File>.svg
 ```
-
-Verified working 2026-11-02: `marshall`/`chase`/`skye` all generate a clean
-1-bit dog-character line drawing and pass the vision gate in 48-75 s.
 
 **The fix must be in the deployed image.** Rebuild/push
 `lmao-calendar-sync` before a backfill or the next hourly run
@@ -425,9 +435,10 @@ Networking notes (measured from an in-cluster pod on tp4):
 | Target | Reachable | Effect when down |
 |---|---|---|
 | `postgres.default.svc.cluster.local:5432` | yes | stage 1 fails |
-| `192.168.50.200:8000` (vision) | yes | tile QC skipped |
+| `192.168.50.200:8000` (vision) | yes | tile crop/gate skipped (candidate accepted as-is) |
 | `192.168.50.138:8000` (gx10 LLM) | refused (box down) | deterministic "reasoned" search queries |
-| `192.168.10.37:8188` (ComfyUI, **stale**) | no route — this was spark-5307's old wired IP; the ConfigMap now uses `192.168.50.27:8188` | PAW Patrol tiles silently never generated (Commons has no PAW art), sea/pokemon fell back to Commons photos |
+| `commons.wikimedia.org` (tile source) | yes | no Commons line art that run |
+| `duckduckgo.com` (tile source) | yes | no character line art that run (events retry next hour) |
 
 LAN hostnames do **not** resolve under cluster DNS, so the ConfigMap addresses
-these by IP (`gx10-f156` == `192.168.50.138`).
+the model endpoints by IP (`gx10-f156` == `192.168.50.138`).

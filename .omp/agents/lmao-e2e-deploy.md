@@ -27,7 +27,7 @@ bazel run //tools:install_all -- --setup-registry --include-services --skip-rnod
 ```
 
 - `--setup-registry` - build + push ALL LMAO images to the local registry
-  (192.168.50.153:5000) FIRST.
+  (op4:5000) FIRST.
 - `--include-services` - build/push `lmao-server` + `lmao-iot-ingest`, `kubectl apply`
   K8s manifests, deploy the in-cluster `lmao-server`.
 - Missing `--setup-registry` skips the publish step; passing only `--include-services`
@@ -35,10 +35,11 @@ bazel run //tools:install_all -- --setup-registry --include-services --skip-rnod
   you need BOTH.
 
 ## Known deploy gotchas (encode so you don't re-derive them)
-- `manage.sh start` is NOT idempotent: if the `lmao-registry` container already
-  exists it fails with a name Conflict. That `[FAIL]` for the registry is a FALSE
-  ALARM - the registry is fine. Confirm with
-  `curl -s -o /dev/null -w "%{http_code}" http://192.168.50.153:5000/v2/_catalog`
+- The registry lives on the bench host **op4** (`op4:5000`), driven from selfhost
+  over `DOCKER_HOST=ssh://pondycrane@op4` (lifecycle commands only; builds and
+  pushes stay local). `manage.sh start` is IDEMPOTENT (`docker compose up -d`
+  reuses a running `lmao-registry`). Confirm with
+  `curl -s -o /dev/null -w "%{http_code}" http://op4:5000/v2/_catalog`
   (200 = up).
 - The `k8s/lmao-server.yaml` Deployment uses mutable `...:latest`. `kubectl apply`
   of an UNCHANGED spec does NOT roll the running pod ("Deployment rolled out" is

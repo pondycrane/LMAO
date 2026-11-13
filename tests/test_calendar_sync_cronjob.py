@@ -46,7 +46,7 @@ def test_cronjob_manifest_contract():
     assert re.search(r'schedule:\s*"0 \* \* \* \*"', src)
     assert "concurrencyPolicy: Forbid" in src
     # Registry image, pinned to the node whose k3s has the registry mirror.
-    assert "192.168.50.153:5000/lmao-calendar-sync:latest" in src
+    assert "op4:5000/lmao-calendar-sync:latest" in src
     assert "kubernetes.io/hostname: tp4" in src
     # Both stages of the retired host cron run, in order.
     assert "tools/calendar_sync.py --window-days 14" in src

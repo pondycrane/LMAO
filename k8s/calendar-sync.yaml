@@ -26,7 +26,7 @@
 #   - Image published to the local registry:
 #       bazel run //tools:install_all -- --setup-registry --include-services
 #     (or: docker build -f Dockerfile.calendar-sync -t lmao-calendar-sync . ;
-#          docker tag … 192.168.50.153:5000/lmao-calendar-sync:latest ;
+#          docker tag … op4:5000/lmao-calendar-sync:latest ;
 #          docker push …)
 #
 # Usage:
@@ -92,10 +92,11 @@ spec:
             app: lmao-calendar-sync
         spec:
           # Pinned to tp4, where the rest of LMAO already runs (lmao-server,
-          # postgres, iot-ingest-consumer): the local-registry HTTP mirror in
-          # /etc/rancher/k3s/registries.yaml is configured on tp3/tp4 but NOT
-          # on tp1 — a pod scheduled there fails ImagePullBackOff on
-          # 192.168.50.153:5000.  Pinning also keeps the DB traffic node-local.
+          # postgres, iot-ingest-consumer): the registry HTTP mirror
+          # (op4:5000 in /etc/rancher/k3s/registries.yaml + the op4 /etc/hosts
+          # pin) is configured on tp2/tp3/tp4 but NOT on tp1 — a pod scheduled
+          # there fails ImagePullBackOff on op4:5000.  Pinning also keeps the
+          # DB traffic node-local.
           # Proper fix (if tp4 is ever retired): add the mirror stanza from
           # docs/cluster-setup.md to /etc/rancher/k3s/registries.yaml on every
           # node and restart k3s-agent.
@@ -104,7 +105,7 @@ spec:
           restartPolicy: Never
           containers:
             - name: calendar-sync
-              image: 192.168.50.153:5000/lmao-calendar-sync:latest
+              image: op4:5000/lmao-calendar-sync:latest
               imagePullPolicy: Always
               command: ["/bin/sh", "-c"]
               args:

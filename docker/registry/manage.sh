@@ -15,23 +15,36 @@
 #   ./docker/registry/manage.sh k3s-config   # Print K3s registries.yaml
 #   ./docker/registry/manage.sh status       # Check registry health
 #
+# The registry container itself runs on the bench host op4 (NVMe-backed,
+# 850 GB free) and is driven from here over `DOCKER_HOST=ssh://…`.  Cluster
+# nodes pull from `op4:5000` (hostname, never its DHCP LAN IP).
+#
 # Config:
-#   REGISTRY_HOST  - Registry host (default: 192.168.50.153)
+#   REGISTRY_HOST  - Registry host (default: op4)
 #   REGISTRY_PORT  - Registry port (default: 5000)
+#   DOCKER_HOST    - Docker endpoint owning the registry container
+#                    (default: ssh://pondycrane@op4)
 # ──────────────────────────────────────────────────────────────────────────────
 
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-REGISTRY_HOST="${REGISTRY_HOST:-192.168.50.153}"
+REGISTRY_HOST="${REGISTRY_HOST:-op4}"
 REGISTRY_PORT="${REGISTRY_PORT:-5000}"
 REGISTRY="${REGISTRY_HOST}:${REGISTRY_PORT}"
+# The registry container lives on the registry host; build/push stay on the
+# local daemon (same as tools/install_services.py) so image builds do not
+# depend on the remote host.  Lifecycle commands go through docker_remote().
+REGISTRY_DOCKER_HOST="${DOCKER_HOST:-ssh://pondycrane@${REGISTRY_HOST}}"
 
 # ── Colors ──
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
+
+# Run a docker command against the registry host's daemon.
+docker_remote() { DOCKER_HOST="${REGISTRY_DOCKER_HOST}" docker "$@"; }
 
 info()  { echo -e "${GREEN}[INFO]${NC} $*"; }
 warn()  { echo -e "${YELLOW}[WARN]${NC} $*"; }
@@ -47,17 +60,17 @@ check_prereqs() {
 
 # ── Start the registry ──
 start() {
-    info "Starting local Docker registry on ${REGISTRY_HOST}:${REGISTRY_PORT}..."
-    docker compose -f "${REPO_ROOT}/docker/registry/docker-compose.yml" up -d
+    info "Starting local Docker registry on ${REGISTRY_HOST}:${REGISTRY_PORT} (docker host ${REGISTRY_DOCKER_HOST})..."
+    docker_remote compose -f "${REPO_ROOT}/docker/registry/docker-compose.yml" up -d
     info "Waiting for registry to be ready..."
     sleep 3
-    if curl -s "http://localhost:${REGISTRY_PORT}/v2/" > /dev/null 2>&1; then
+    if curl -s "http://${REGISTRY}/v2/" > /dev/null 2>&1; then
         info "Registry is running at http://${REGISTRY_HOST}:${REGISTRY_PORT}"
         info "API:    http://${REGISTRY_HOST}:${REGISTRY_PORT}/v2/"
         info "Images: http://${REGISTRY_HOST}:${REGISTRY_PORT}/v2/_catalog"
     else
         error "Registry failed to start. Check docker logs:"
-        docker compose -f "${REPO_ROOT}/docker/registry/docker-compose.yml" logs
+        docker_remote compose -f "${REPO_ROOT}/docker/registry/docker-compose.yml" logs
         exit 1
     fi
 }
@@ -65,7 +78,7 @@ start() {
 # ── Stop the registry ──
 stop() {
     info "Stopping local Docker registry..."
-    docker compose -f "${REPO_ROOT}/docker/registry/docker-compose.yml" down
+    docker_remote compose -f "${REPO_ROOT}/docker/registry/docker-compose.yml" down
     info "Registry stopped."
 }
 
@@ -151,6 +164,10 @@ mirrors:
   docker.io:
     endpoint:
       - "https://registry-1.docker.io"
+
+# The registry host is addressed by hostname.  Cluster nodes have no DNS
+# record for it, so pin it in /etc/hosts (LAN address is DHCP):
+#   echo "192.168.50.202 ${REGISTRY_HOST}" | sudo tee -a /etc/hosts
 YAML
 }
 
@@ -158,17 +175,17 @@ YAML
 status() {
     info "Registry status:"
     local running
-    running="$(docker ps --filter name=lmao-registry --format '{{.Status}}' 2>/dev/null || true)"
+    running="$(docker_remote ps --filter name=lmao-registry --format '{{.Status}}' 2>/dev/null || true)"
     if [ -n "$running" ]; then
-        echo "  Container: ${GREEN}running${NC} — ${running}"
+        echo -e "  Container: ${GREEN}running${NC} — ${running}"
     else
-        echo "  Container: ${RED}NOT running${NC}"
+        echo -e "  Container: ${RED}NOT running${NC}"
     fi
 
-    if curl -sf "http://localhost:${REGISTRY_PORT}/v2/" > /dev/null 2>&1; then
-        echo "  API:       ${GREEN}responding${NC} at http://localhost:${REGISTRY_PORT}/v2/"
+    if curl -sf "http://${REGISTRY}/v2/" > /dev/null 2>&1; then
+        echo -e "  API:       ${GREEN}responding${NC} at http://${REGISTRY}/v2/"
     else
-        echo "  API:       ${RED}not responding${NC}"
+        echo -e "  API:       ${RED}not responding${NC}"
     fi
 
     echo ""
@@ -176,7 +193,7 @@ status() {
 
     echo ""
     info "Volume usage:"
-    docker volume inspect registry-data 2>/dev/null | python3 -c "
+    docker_remote volume inspect registry_registry-data 2>/dev/null | python3 -c "
 import sys, json
 try:
     d = json.load(sys.stdin)
@@ -233,7 +250,8 @@ main() {
             echo "  status       Check registry health"
             echo ""
             echo "Environment:"
-            echo "  REGISTRY_HOST  (default: 192.168.50.153)"
+            echo "  REGISTRY_HOST  (default: op4)"
+            echo "  DOCKER_HOST    (default: ssh://pondycrane@op4 — registry container only)"
             echo "  REGISTRY_PORT  (default: 5000)"
             ;;
     esac

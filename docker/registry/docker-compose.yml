@@ -1,7 +1,8 @@
 # LMAO Local Docker Registry
 #
-# A self-hosted Docker registry running on the Pi server for local image
-# storage and distribution to the K3s cluster.
+# A self-hosted Docker registry running on the bench host op4 (NVMe root) for
+# local image storage and distribution to the K3s cluster.  Driven from
+# selfhost by `manage.sh` over DOCKER_HOST=ssh://pondycrane@op4.
 #
 # Usage:
 #   # Start the registry
@@ -11,11 +12,11 @@
 #   docker compose -f docker/registry/docker-compose.yml down
 #
 #   # Push the LMAO images
-#   docker tag lmao-server localhost:5000/lmao-server:latest
-#   docker push localhost:5000/lmao-server:latest
+#   docker tag lmao-server op4:5000/lmao-server:latest
+#   docker push op4:5000/lmao-server:latest
 #
-#   docker tag lmao-iot-ingest localhost:5000/lmao-iot-ingest:latest
-#   docker push localhost:5000/lmao-iot-ingest:latest
+#   docker tag lmao-iot-ingest op4:5000/lmao-iot-ingest:latest
+#   docker push op4:5000/lmao-iot-ingest:latest
 #
 # The registry is served on port 5000 without TLS (plain HTTP). All K3s
 # cluster nodes need to be configured to trust it as an insecure registry

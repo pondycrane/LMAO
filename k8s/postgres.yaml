@@ -42,7 +42,7 @@ spec:
         kubernetes.io/hostname: tp4
       containers:
         - name: postgres
-          image: 192.168.50.153:5000/postgres:16-alpine
+          image: op4:5000/postgres:16-alpine
           imagePullPolicy: IfNotPresent
           ports:
             - name: postgres

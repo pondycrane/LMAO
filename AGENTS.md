@@ -92,7 +92,7 @@ bazel run //tools:install_all -- --setup-registry --include-services --skip-rnod
   applies the K8s manifests, and deploys the in-cluster `lmao-server`.
 
 Given the Deployment references the mutable tag
-`192.168.50.153:5000/lmao-server:latest`, `install_all` **force-restarts**
+`op4:5000/lmao-server:latest`, `install_all` **force-restarts**
 (`kubectl rollout restart`) each Deployment after applying, so a `:latest`
 change actually goes live instead of silently keeping the old pod (the
 "unchanged spec ⇒ no rollout" trap — fixed in
@@ -107,11 +107,14 @@ kubectl logs "$POD" | grep -E "Reply sent|DATA .*" | tail -1 # confirm the new s
 ```
 
 Notes:
-- `--setup-registry`'s `manage.sh start` is **not idempotent**: if the
-  `lmao-registry` container already exists it fails with a name Conflict,
-  even though the registry is fine and the image is still published by the
-  `--include-services` build steps. A registry `[FAIL]` of that shape is a
-  false alarm — verify with `curl -s -XGET http://192.168.50.153:5000/v2/_catalog`.
+- The registry runs on the bench host **op4** (`op4:5000`, NVMe-backed), not
+  on selfhost. `manage.sh` drives its container over
+  `DOCKER_HOST=ssh://pondycrane@op4` (lifecycle only — `docker build`/`push`
+  stay on the local daemon), so `--setup-registry` needs ssh access to op4.
+  Verify with `curl -s -XGET http://op4:5000/v2/_catalog`.
+- `manage.sh start` is idempotent (`docker compose up -d`): an existing
+  `lmao-registry` container is reused, not a name Conflict. A registry
+  `[FAIL]` is real — check the API URL above.
 - `DEST_HASH` continuity is critical (#70, #93): the flashed Cardputer only
   works if the rolled pod serves the same delivery destination. The identity
   persists in the `lmao-server-identity` PVC, so a rollover keeps it.

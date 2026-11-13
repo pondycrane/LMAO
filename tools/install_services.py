@@ -10,7 +10,7 @@ Usage (via Bazel):
 
 Release flow (internal services):
     All internal services are released through the local Docker registry
-    (default ``192.168.50.153:5000``) and deployed via Docker from the
+    (default ``op4:5000``) and deployed via Docker from the
     registry image — a single, consistent release path:
 
     - Pi server: build → push ``lmao-server`` → ``docker pull`` +
@@ -56,7 +56,10 @@ if TYPE_CHECKING:
     from tools.install_all import DeviceResult
 
 # Default local Docker registry address (used when --setup-registry is set).
-DEFAULT_REGISTRY_HOST = "192.168.50.153"
+# Hosted on the bench host op4 (NVMe-backed), addressed by hostname: its LAN
+# interface is DHCP, so an IP here would drift-break every pull (see
+# tools/check_node_addresses.py).
+DEFAULT_REGISTRY_HOST = "op4"
 DEFAULT_REGISTRY_PORT = 5000
 
 # ---------------------------------------------------------------------------
