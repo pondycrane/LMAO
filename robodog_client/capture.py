@@ -330,6 +330,12 @@ def main():
     ap.add_argument("--timeout", type=int, default=30)
     ap.add_argument("--i1", metavar="FILE", default=None,
                     help="decode an already-captured .i1 dump (no device)")
+    ap.add_argument("--i1-format", choices=["auto", "calendar", "hermes", "home"],
+                    default="auto",
+                    help="frame type for --i1; 'auto' infers it from the byte "
+                         "size, which cannot tell calendar (300x400 portrait) "
+                         "from home (400x300 landscape) apart — they share the "
+                         "15200-byte buffer")
     ap.add_argument("--describe", action="store_true",
                     help="vision-model transcription of each captured frame "
                          "(Qwen2.5-VL via the hermes vision endpoint)")
@@ -340,14 +346,22 @@ def main():
 
     if args.i1:
         data = Path(args.i1).read_bytes()
-        # no RD_SHOT header on an offline dump — pick the decoder by size
-        if len(data) == BUF_SIZE:
+        # no RD_SHOT header on an offline dump — pick the decoder by size,
+        # unless the caller names the format (calendar and home share 15200 B)
+        fmt = args.i1_format
+        if fmt == "auto":
+            fmt = ("hermes" if len(data) == HERMES_BUF_SIZE else
+                   "calendar" if len(data) == BUF_SIZE else "")
+        if fmt == "calendar":
             frames = [(data, BUF_SIZE, PANEL_W, PANEL_H)]
-        elif len(data) == HERMES_BUF_SIZE:
+        elif fmt == "home":
+            frames = [(data, BUF_SIZE, HERMES_W, HERMES_H)]
+        elif fmt == "hermes":
             frames = [(data, HERMES_BUF_SIZE, HERMES_W, HERMES_H)]
         else:
             sys.exit(f"cannot infer frame type from {len(data)} bytes "
-                     f"(calendar={BUF_SIZE} / hermes={HERMES_BUF_SIZE})")
+                     f"(calendar/home={BUF_SIZE} / hermes={HERMES_BUF_SIZE}); "
+                     f"pass --i1-format")
     else:
         if args.reset:
             reset_board(args.port)
