@@ -1098,10 +1098,11 @@ and stores validated SensorReport payloads into DuckDB at `/data/sensors.db`
 #### Deploy Pipeline Monitor (silence alerting)
 
 The `k8s/pipeline-monitor.yaml` CronJob checks every hour whether the
-``LMAO_MESSAGES`` JetStream stream has received a message within
-``SILENCE_THRESHOLD_HOURS`` (default 3). On silence it logs
-``PIPELINE SILENCE`` and fails the job (exit 1); it publishes a
-best-effort alert to ``ALERT_SUBJECT`` (default ``lmao.alerts.silence``).
+ingest pipeline has written a row within ``SILENCE_THRESHOLD_HOURS``
+(default 3). It reads the **server-side** ``ingested_at`` clock through the
+ingest query API — the device's own ``timestamp_ms`` runs hours off, so it
+cannot prove freshness. On silence it logs ``PIPELINE SILENCE`` and fails the
+job (exit 1), which `tools/cluster_watchdog` escalates and alerts on.
 
 ```bash
 kubectl apply -f k8s/pipeline-monitor.yaml
@@ -1111,9 +1112,8 @@ Configuration (ConfigMap ``pipeline-monitor-config``):
 
 | Env var | Default | Description |
 |---------|---------|-------------|
-| ``NATS_SERVER`` | ``nats://nats-server.default.svc.cluster.local:4222`` | NATS JetStream URL |
-| ``SILENCE_THRESHOLD_HOURS`` | ``3`` | Max gap since last message (hours) |
-| ``ALERT_SUBJECT`` | ``lmao.alerts.silence`` | NATS subject for silence alerts |
+| ``QUERY_URL`` | ``http://iot-query.default.svc.cluster.local:8080`` | Ingest query API base URL |
+| ``SILENCE_THRESHOLD_HOURS`` | ``3`` | Max gap since the last ingested row (hours) |
 
 Exit codes: ``0`` = healthy, ``1`` = silent or fatal error.
 
@@ -1536,6 +1536,55 @@ The registry is configured via environment variables:
 | `REGISTRY_HOST` | `op4` | Registry hostname (never its DHCP IP) |
 | `REGISTRY_PORT` | `5000` | Registry port |
 | `DOCKER_HOST` | `ssh://pondycrane@op4` | Docker endpoint that owns the registry container |
+
+---
+
+### 14. Cluster Watchdog (health checks + self-recovery)
+
+`tools/cluster_watchdog/` runs on `selfhost` as `cluster-watchdog.timer`
+(every 15 min) and has two deliberately separate layers:
+
+1. **Deterministic checks** — no model involved, so the verdict never depends
+   on an LLM being reachable. It verifies: the K8s API; every node `Ready`;
+   the expected workloads (`lmao-server`, `iot-ingest-consumer`, `nats-server`,
+   `postgres`) at full replicas; no pod stuck in `CrashLoopBackOff` /
+   `ImagePullBackOff` / `Pending` > 10 min; `op4:5000` reachable from selfhost
+   **and each node**; the server's RNode/LXMF lines and `DEST_HASH`; pipeline
+   freshness from the server-side `ingested_at`; and node disk headroom.
+2. **Agentic recovery** — runs only when a check fails. A headless agent
+   (`spark-73dd/qwen3.8-flash-next`, cloud fallback) gets the report, the
+   runbook (`tools/cluster_watchdog/runbook.md`) and a **whitelisted** action
+   CLI. It cannot mutate anything else: every action goes through
+   `watchdog.py recover`, which enforces a 900 s cooldown and a
+   3-attempts-per-hour cap, then gives up and alerts.
+
+```bash
+# Run the checks by hand
+bazel run //tools/cluster_watchdog:cluster_watchdog -- check
+bazel run //tools/cluster_watchdog:cluster_watchdog -- check --json
+
+# Whitelisted recovery actions (guarded)
+bazel run //tools/cluster_watchdog:cluster_watchdog -- recover restart-deployment default/lmao-server
+bazel run //tools/cluster_watchdog:cluster_watchdog -- recover restart-k3s tp1
+bazel run //tools/cluster_watchdog:cluster_watchdog -- recover delete-job default/<job>
+
+# Full loop (agent escalation), and a dry run that forbids mutations
+bazel run //tools/cluster_watchdog:cluster_watchdog -- watch --dry-run
+
+# Install / remove the timer
+sudo bash tools/cluster_watchdog/install.sh
+sudo bash tools/cluster_watchdog/install.sh --remove
+```
+
+Config lives at `~/.config/lmao/cluster-watchdog.env` (see
+`tools/cluster_watchdog/watchdog.env.example`); reports and agent logs at
+`~/.local/state/lmao-watchdog/`. Alerts go through the same Matrix path as the
+other cluster tooling (`MATRIX_ALERT_TARGET` in
+`~/spark-recovery/matrix-target.env`).
+
+Actions are **never** taken for: `DEST_HASH` drift (a replaced identity PVC
+means every client must be re-flashed), pipeline silence (the device stopped
+transmitting — the server cannot fix that), or a node that just rebooted.
 
 ---
 

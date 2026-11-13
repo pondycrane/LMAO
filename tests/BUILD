@@ -380,6 +380,15 @@ py_test(
 )
 
 py_test(
+    name = "test_cluster_watchdog",
+    srcs = ["test_cluster_watchdog.py"],
+    deps = [
+        "//tools/cluster_watchdog:watchdog_lib",
+        "@lmao_pip//pytest",
+    ],
+)
+
+py_test(
     name = "test_weather",
     srcs = ["test_weather.py"],
     deps = [

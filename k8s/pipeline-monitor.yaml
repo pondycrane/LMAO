@@ -1,15 +1,16 @@
 # Pipeline Silence Monitor — K8s CronJob
 #
-# Periodically checks whether the LMAO_MESSAGES JetStream stream has
-# received new messages within the configured silence threshold.
-# Reuses the lmao-iot-ingest Docker image (which already bundles nats-py).
+# Checks whether the ingest pipeline has written a row recently, using the
+# server-side `ingested_at` clock (the device clock is routinely hours off).
+# Reuses the lmao-iot-ingest image and asks its query API — no extra deps.
 #
-# If the pipeline has been silent longer than the threshold, the job
-# logs an ERROR and exits with code 1 (failing the CronJob).  Operators
-# can see the alert via `kubectl logs job/pipeline-monitor-<ts>`.
+# If nothing has been ingested within the threshold, the job logs
+# PIPELINE SILENCE and exits 1 (failing the CronJob).  Operators can see it
+# via `kubectl logs job/pipeline-monitor-<ts>`; tools/cluster_watchdog escalates
+# on it and alerts through Matrix.
 #
 # Prerequisites:
-#   - NATS server running in the cluster (k8s/nats-server.yaml)
+#   - iot-ingest-consumer running with its query API (k8s/iot-ingest.yaml)
 #   - lmao-iot-ingest Docker image pushed to local registry:
 #       ./docker/registry/manage.sh push-ingest
 #   - K3s nodes configured to pull from the local registry
@@ -18,9 +19,8 @@
 #   kubectl apply -f k8s/pipeline-monitor.yaml
 #
 # Configuration env vars (via ConfigMap pipeline-monitor-config):
-#   NATS_SERVER              NATS server URL
-#   SILENCE_THRESHOLD_HOURS  Max gap in hours before alerting (default: 3)
-#   ALERT_SUBJECT            NATS subject for optional alert publication
+#   QUERY_URL                Ingest query API base URL
+#   SILENCE_THRESHOLD_HOURS  Max gap since the last ingested row (default: 3)
 
 ---
 apiVersion: v1
@@ -31,9 +31,8 @@ metadata:
   labels:
     app: pipeline-monitor
 data:
-  NATS_SERVER: "nats://nats-server.default.svc.cluster.local:4222"
+  QUERY_URL: "http://iot-query.default.svc.cluster.local:8080"
   SILENCE_THRESHOLD_HOURS: "3"
-  ALERT_SUBJECT: "lmao.alerts.silence"
 
 ---
 apiVersion: batch/v1

@@ -1,223 +1,158 @@
-"""Pipeline Silence Monitor — periodically checks whether the
-``LMAO_MESSAGES`` JetStream stream has received new messages within
-the last N hours.
+"""Pipeline Silence Monitor — fails when the LMAO ingest pipeline goes quiet.
 
-Designed to run as a K8s CronJob.  If the pipeline has been silent
-longer than the configured threshold, the script logs an ERROR and
-exits with code 1 (failing the CronJob).  It also publishes an alert
-to a dedicated NATS subject (best-effort — delivery failures are
-logged and do not affect the exit code).
+Runs as a K8s CronJob. It asks the in-cluster ingest query API for the newest
+``ingested_at`` row and compares it with the wall clock. If nothing has been
+ingested within ``SILENCE_THRESHOLD_HOURS``, it logs ``PIPELINE SILENCE`` and
+exits 1 (failing the CronJob), which is what surfaces the outage.
 
-This catches the "Cardputer wedged → RNode TX wedged" failure mode
-that caused a 4.5-day unnoticed outage (issue #96).
+Why ``ingested_at`` and not the device timestamp: ``ingested_at`` is written by
+the consumer with the *server's* ``CURRENT_TIMESTAMP``, so it is authoritative.
+The device-side ``timestamp_ms`` is whatever the client's clock says, and those
+clocks are routinely hours off — using them made a healthy pipeline look silent
+(and a silent one look fresh). The JetStream stream state is not usable either:
+the pinned ``nats-py`` 0.2.0 ``StreamState`` carries sequence numbers only, no
+timestamps.
+
+This catches the "Cardputer wedged → RNode TX wedged" failure mode that caused
+a 4.5-day unnoticed outage (issue #96).
 
 Configuration (environment variables):
-    NATS_SERVER              NATS server URL
-                             (default: nats://nats-server.default.svc.cluster.local:4222)
-    SILENCE_THRESHOLD_HOURS  Max allowed gap since last message, in hours
-                             (default: 3)
-    ALERT_SUBJECT            Optional NATS subject to publish alert to on silence
-                             (default: lmao.alerts.silence)
+    QUERY_URL                Ingest query API base URL
+                             (default http://iot-query.default.svc.cluster.local:8080)
+    SILENCE_THRESHOLD_HOURS  Max allowed gap since the last ingested row, in hours
+                             (default 3)
 
 Usage::
 
     python k8s-app/pipeline_monitor.py
 
-    NATS_SERVER=nats://localhost:4222 SILENCE_THRESHOLD_HOURS=2 \
+    QUERY_URL=http://localhost:8080 SILENCE_THRESHOLD_HOURS=2 \
         python k8s-app/pipeline_monitor.py
 """
 
 from __future__ import annotations
 
-import asyncio
+import datetime as dt
+import json
 import logging
 import os
 import sys
-from datetime import datetime, timezone
+import urllib.error
+import urllib.request
 
 _logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Defaults
-# ---------------------------------------------------------------------------
-
-_DEFAULT_NATS_SERVER = "nats://nats-server.default.svc.cluster.local:4222"
-_DEFAULT_SILENCE_THRESHOLD_HOURS = 3
-_DEFAULT_ALERT_SUBJECT = "lmao.alerts.silence"
-_STREAM_NAME = "LMAO_MESSAGES"
+_DEFAULT_QUERY_URL = "http://iot-query.default.svc.cluster.local:8080"
+_DEFAULT_SILENCE_THRESHOLD_HOURS = 3.0
+_TABLES = ("sensor_readings", "text_messages")
 
 
-async def main() -> None:
-    """Entry point for the pipeline silence monitor.
-
-    Reads configuration from environment variables, connects to NATS,
-    queries the ``LMAO_MESSAGES`` stream state, and compares the
-    timestamp of the last published message with the current time.
-
-    Exits 0 if the pipeline is healthy (recent messages received).
-    Exits 1 if the pipeline is silent (no recent messages or stream
-    never received a message).
-    """
-    nats_server = os.environ.get("NATS_SERVER", _DEFAULT_NATS_SERVER)
-    silence_hours_str = os.environ.get(
-        "SILENCE_THRESHOLD_HOURS", str(_DEFAULT_SILENCE_THRESHOLD_HOURS)
+def _query(url: str, sql: str, timeout: float = 15.0) -> list[list[object]]:
+    """POST *sql* to the ingest query API and return its rows."""
+    body = json.dumps({"sql": sql}).encode()
+    req = urllib.request.Request(
+        url.rstrip("/") + "/query", data=body, headers={"Content-Type": "application/json"}
     )
-    alert_subject = os.environ.get("ALERT_SUBJECT", _DEFAULT_ALERT_SUBJECT)
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read())["rows"]
 
-    # Validate threshold
-    try:
-        silence_hours = float(silence_hours_str)
-    except ValueError:
-        _logger.critical(
-            "Invalid SILENCE_THRESHOLD_HOURS value: %s (must be numeric)",
-            silence_hours_str,
-        )
-        sys.exit(1)
 
-    if silence_hours <= 0:
-        _logger.critical(
-            "SILENCE_THRESHOLD_HOURS must be positive, got %s",
-            silence_hours,
-        )
-        sys.exit(1)
-
-    nq = None
-
-    try:
-        from lma_core.queue import NatsQueue
-
-        nq = NatsQueue(name="pipeline-monitor")
-
-        _logger.info(
-            "Pipeline monitor starting: NATS=%s, threshold=%.1fh, stream=%s",
-            nats_server,
-            silence_hours,
-            _STREAM_NAME,
-        )
-
-        await nq.connect(servers=nats_server)
-
-        # Query stream state — stream_info() returns a StreamInfo whose
-        # .state dataclass has last_ts (datetime | None, UTC).
+def _parse_ts(value: object) -> dt.datetime | None:
+    if value is None:
+        return None
+    text = str(value).strip().replace("+00", "+00:00")
+    for fmt in ("%Y-%m-%d %H:%M:%S.%f%z", "%Y-%m-%d %H:%M:%S%z"):
         try:
-            stream_info = await nq.stream_info(_STREAM_NAME)
-        except Exception as exc:
-            _logger.critical(
-                "Could not query stream '%s' on '%s' — "
-                "verify it exists and that iot-ingest has run once: %s",
-                _STREAM_NAME,
-                nats_server,
-                exc,
-            )
-            sys.exit(1)
-        last_ts = stream_info.state.last_ts
-
-        if last_ts is None:
-            _logger.error(
-                "PIPELINE SILENCE: Stream '%s' has never received a message — "
-                "pipeline may have never started. Alert.",
-                _STREAM_NAME,
-            )
-            await _maybe_alert(nq, alert_subject, silence_hours, never_started=True)
-            sys.exit(1)
-
-        now = datetime.now(timezone.utc)
-        # NATS timestamps are server-side UTC — ensure last_ts is offset-aware
-        if last_ts.tzinfo is None:
-            last_ts = last_ts.replace(tzinfo=timezone.utc)
-
-        gap = now - last_ts
-        if gap.total_seconds() < 0:
-            _logger.warning(
-                "Monitor clock appears %s seconds behind NATS server time "
-                "(last_ts=%s, now=%s) — gap may be unreliable; check clock sync",
-                abs(gap.total_seconds()),
-                last_ts.isoformat(),
-                now.isoformat(),
-            )
-        gap_hours = gap.total_seconds() / 3600.0
-
-        if gap_hours > silence_hours:
-            _logger.error(
-                "PIPELINE SILENCE: Last message was %.1f hours ago "
-                "(threshold: %.1f hours). Stream '%s' appears silent. "
-                "Last message at %s, now is %s.",
-                gap_hours,
-                silence_hours,
-                _STREAM_NAME,
-                last_ts.isoformat(),
-                now.isoformat(),
-            )
-            await _maybe_alert(nq, alert_subject, silence_hours, gap_hours=gap_hours)
-            sys.exit(1)
-
-        _logger.info(
-            "Pipeline OK: last message %.1f hours ago (threshold: %.1fh)",
-            gap_hours,
-            silence_hours,
-        )
-        sys.exit(0)
-
-    except ImportError as exc:
-        _logger.critical("Missing dependency: %s", exc)
-        sys.exit(1)
-    except Exception:
-        _logger.critical("Fatal error in monitor", exc_info=True)
-        sys.exit(1)
-    finally:
-        if nq is not None:
-            await nq.close()
-
-
-async def _maybe_alert(
-    nq,
-    alert_subject: str,
-    silence_hours: float,
-    *,
-    never_started: bool = False,
-    gap_hours: float | None = None,
-) -> None:
-    """Optionally publish an alert to the configured NATS subject.
-
-    This is a best-effort operation — failures are logged but do not
-    affect the exit code.
-    """
-    if never_started:
-        payload = (
-            f"PIPELINE SILENCE: Stream has never received a message. "
-            f"Threshold: {silence_hours:.1f}h."
-        ).encode()
-    else:
-        payload = (
-            f"PIPELINE SILENCE: Last message was {gap_hours:.1f} hours ago. "
-            f"Threshold: {silence_hours:.1f}h."
-        ).encode()
-
+            return dt.datetime.strptime(text, fmt)
+        except ValueError:
+            continue
     try:
-        await nq.publish(alert_subject, payload)
-        _logger.info("Alert published to '%s'", alert_subject)
-    except Exception:
-        _logger.error(
-            "Alert delivery FAILED for subject '%s' — "
-            "silence reported but not published. "
-            "Relying on CronJob exit status for visibility.",
-            alert_subject,
-            exc_info=True,
-        )
+        ts = dt.datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    return ts if ts.tzinfo else ts.replace(tzinfo=dt.timezone.utc)
 
 
-if __name__ == "__main__":
+def newest_ingest(rows_by_table: dict[str, list[list[object]]]) -> dt.datetime | None:
+    """Newest ``ingested_at`` across every table (pure; unit-tested)."""
+    newest: dt.datetime | None = None
+    for rows in rows_by_table.values():
+        for row in rows:
+            if not row:
+                continue
+            ts = _parse_ts(row[0])
+            if ts is None:
+                continue
+            if newest is None or ts > newest:
+                newest = ts
+    return newest
+
+
+def main() -> None:
+    """Entry point: query the ingest clock and fail the job on silence.
+
+    Exits 0 when a row was ingested within the threshold, 1 when the pipeline
+    is silent, has never run, or the query API cannot be reached.
+    """
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        stream=sys.stdout,
     )
 
+    query_url = os.environ.get("QUERY_URL", _DEFAULT_QUERY_URL)
+    raw_threshold = os.environ.get(
+        "SILENCE_THRESHOLD_HOURS", str(_DEFAULT_SILENCE_THRESHOLD_HOURS)
+    )
     try:
-        asyncio.run(main())
-    except ImportError as e:
-        print(f"ERROR: {e}", file=sys.stderr)
+        threshold = float(raw_threshold)
+    except ValueError:
+        _logger.critical("Invalid SILENCE_THRESHOLD_HOURS value: %s", raw_threshold)
         sys.exit(1)
-    except Exception:
-        _logger.exception("Monitor failed")
+    if threshold <= 0:
+        _logger.critical("SILENCE_THRESHOLD_HOURS must be positive, got %s", threshold)
         sys.exit(1)
+
+    _logger.info("Pipeline monitor starting: query=%s, threshold=%.1fh", query_url, threshold)
+
+    try:
+        rows_by_table = {
+            table: _query(query_url, f"SELECT max(ingested_at) FROM {table}")
+            for table in _TABLES
+        }
+    except (urllib.error.URLError, OSError, ValueError, KeyError) as exc:
+        _logger.critical("Could not query %s — is iot-ingest running? %s", query_url, exc)
+        sys.exit(1)
+
+    newest = newest_ingest(rows_by_table)
+    if newest is None:
+        _logger.error(
+            "PIPELINE SILENCE: no rows have ever been ingested — the pipeline never ran."
+        )
+        sys.exit(1)
+
+    now = dt.datetime.now(dt.timezone.utc)
+    gap = now - newest
+    if gap.total_seconds() < 0:
+        _logger.warning(
+            "Monitor clock appears %s seconds behind the ingest clock — gap may be unreliable",
+            abs(gap.total_seconds()),
+        )
+    gap_hours = gap.total_seconds() / 3600.0
+
+    if gap_hours > threshold:
+        _logger.error(
+            "PIPELINE SILENCE: last row ingested %.1f hours ago (threshold %.1f h). "
+            "Newest ingested_at=%s, now=%s.",
+            gap_hours,
+            threshold,
+            newest.isoformat(),
+            now.isoformat(),
+        )
+        sys.exit(1)
+
+    _logger.info("Pipeline OK: last row ingested %.1f hours ago (threshold %.1fh)", gap_hours, threshold)
+    sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()
