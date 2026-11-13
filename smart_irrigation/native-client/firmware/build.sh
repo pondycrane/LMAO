@@ -65,9 +65,23 @@ PARENT="$(dirname "$APP")"
 RTR="$PARENT/.rtreticulum"
 IDF_IMG="${IDF_IMG:-espressif/idf:v5.3.1}"
 
-if [ ! -d "$RTR" ]; then
-    echo "cloning RTReticulum -> $RTR"
-    git clone -q --depth 1 https://github.com/0xSeren/RTReticulum "$RTR"
+# RTReticulum must be the SAME pinned rev the Bazel host path uses (WORKSPACE
+# @rtreticulum, dab4362) WITH rtreticulum_fixes.patch applied: unpatched RTR
+# rejects ratcheted announces ("invalid announce sig"), breaking the mesh.
+# The marker grep makes re-application idempotent on an older checkout.
+RTRET_PATCH="$PARENT/rtreticulum_fixes.patch"
+RTR_REV=dab4362cf3577e464e98e85b71abc5cb26185224
+if [ ! -d "$RTR/.git" ]; then
+    echo "cloning RTReticulum (pinned ${RTR_REV:0:7}) -> $RTR"
+    rm -rf "$RTR"
+    git init -q "$RTR"
+    git -C "$RTR" remote add origin https://github.com/0xSeren/RTReticulum
+    git -C "$RTR" fetch -q --depth 1 origin "$RTR_REV"
+    git -C "$RTR" checkout -q FETCH_HEAD
+fi
+if ! grep -q "create_ratchet" "$RTR/include/rtreticulum/destination.h"; then
+    echo "applying rtreticulum_fixes.patch -> $RTR"
+    git -C "$RTR" apply "$RTRET_PATCH"
 fi
 
 DEST="$RTR/firmware/sprout"
