@@ -5,9 +5,15 @@ For each *upcoming* kid event (``participants`` non-empty) whose ``pic`` key is
 not yet in ``cal_pics``, this stage:
 
 1. reasons about the best SEARCH QUERIES for that event (seeded per event),
-2. searches one or more image sources (Wikimedia Commons, optional Google),
-3. thresholds the best normal image to a 1-bit black-and-white 176x176 tile,
+2. searches the internet for LINE DRAWINGS of that subject (Wikimedia
+   Commons, plus DuckDuckGo image search biased to line art / coloring pages),
+3. thresholds the best line drawing to a 1-bit black-and-white 176x176 tile,
 4. stores it under the event's ``pic`` key.
+
+There is no image GENERATION step: the tiles are fetched line drawings.  A
+subject with no acceptable online line drawing stays artless and is retried on
+the next hourly run (or stored by hand with
+``bazel run //tools:calendar_pics -- --key <key> --source <url>``).
 
 Subjects are paired with the event's ACTION and are kept physically coherent
 (a legless dolphin is not asked to ice-skate; Wesley's sea-animal theme falls
@@ -72,8 +78,9 @@ SEA_SUBJECTS = [
     "dolphin", "orca", "sea turtle", "octopus", "crab", "jellyfish",
     "whale", "shark", "lobster", "seal", "sea lion", "otter", "penguin",
 ]
-# Wesley's alternate theme (PAW Patrol): proprietary IP, local-only (never
-# source from Wikimedia). Alternates with sea animals, seed-chosen per event.
+# Wesley's alternate theme (PAW Patrol): proprietary IP, so Wikimedia Commons
+# carries no licensed art — the DuckDuckGo line-art/coloring-page search is
+# what reaches it. Alternates with sea animals, seed-chosen per event.
 PAW_SUBJECTS = [
     "chase", "marshall", "skye", "rubble", "rocky", "zuma", "everest", "tracker",
 ]
@@ -105,7 +112,7 @@ _UA = "LMAO-calendar-pics/1.0 (family calendar)"
 # Kept in lockstep with lma_core.calendar_pics.TILE_W/H (the panel's headline
 # slot); the module's pick_tile_size() is the authority at run time.
 _TILE_W, _TILE_H = 176, 176
-_THRESHOLD = 140  # generous white so photos don't go fully black
+_THRESHOLD = 140  # generous white so anti-aliased line art stays clean (no gray ink)
 
 # Local Qwen-VL vision box for subject cropping. Default is the ML endpoint IP
 # (the `spark-eefb` hostname fails to resolve from this Pi even though it is in
@@ -206,6 +213,19 @@ def build_combo(title: str, participant: str, uid: str) -> dict:
 
 def _primary_query(subject: str, action: str) -> str:
     return f"{subject} {action}".strip() if action else subject
+
+
+def theme_query(subject: str, theme: str, action: str) -> str:
+    """Disambiguate a character name from an everyday word for a web search.
+
+    ``chase tennis`` finds a tennis player named Chase; ``chase paw patrol
+    tennis`` finds the PAW Patrol dog's coloring page.  Character themes carry
+    no licensed Commons art, so the web index needs the theme name to land on
+    the character rather than on a namesake.
+    """
+    if theme in ("paw patrol", "pokemon"):
+        return f"{subject} {theme} {action}".strip()
+    return _primary_query(subject, action)
 
 
 def _mentions(query: str, subject: str) -> bool:
@@ -344,107 +364,89 @@ def search_commons(query: str, limit: int = 12):
     return out
 
 
-# ComfyUI (FLUX.1-schnell) lives on spark-5307, currently 192.168.50.27.  The
-# LAN hostname works from a host but NOT from an in-cluster pod (cluster DNS
-# doesn't resolve LAN names), so the IP is the portable default.
-_GEN_URL_DEFAULT = "http://192.168.50.27:8188"
+# ComfyUI / any local image generator is NOT used: tiles are fetched line
+# drawings from the internet.  DuckDuckGo's image JSON API is keyless and is
+# queried with a line-art bias so character tiles come back as coloring-page /
+# line-drawing art rather than photographs.
+_DDG_IMAGES = "https://duckduckgo.com/i.js"
+_DDG_HOME = "https://duckduckgo.com/"
+# Web-search line-art hints: "coloring page" for characters, "line drawing" for
+# everything else (see search_sources).
+_VQD_CACHE: dict[str, str] = {}
+# Title/URL signals that a candidate is line art (coloring book, clipart,
+# sketch) vs. a photograph.  Used by the ranker and the ink gate.
+_LINE_ART_TITLE_HINTS = (
+    "coloring", "lineart", "line art", "line-art", "line drawing",
+    "line-drawing", "sketch", "clipart", "clip art", "outline", "vector",
+)
+_PHOTO_TITLE_HINTS = ("photo", "photograph", "real life", "stock photo")
 
 
-def search_sources(query: str):
-    """Wikimedia Commons only — Google CSE is discontinued for new signups;
-    on-demand themed art comes from local generation instead."""
-    return list(search_commons(query))
+def _ddg_vqd(query: str) -> str:
+    """Fetch the DuckDuckGo ``vqd`` token required by the image API.
 
-
-def _subject_phrase(subject_word: str, theme_label: str) -> str:
-    """Name the subject so the generator renders the intended character."""
-    if theme_label == "pokemon":
-        return f"{subject_word} (Pokemon character)"
-    if theme_label == "paw patrol":
-        return f"{subject_word} from PAW Patrol"
-    return subject_word
-
-
-def build_gen_prompt(subject_word: str, theme_label: str, action: str) -> str:
-    activity = f" doing {action}" if action else " doing a fun activity"
-    return (
-        f"black and white line art of {_subject_phrase(subject_word, theme_label)}{activity}, "
-        "pure line drawing, only thick bold black contour lines on plain white background, "
-        "no color, no fill, no shading, no gray, empty interior, vector line art, minimal"
-    )
-
-
-def generate_local(prompt: str, width: int, height: int) -> bytes | None:
-    """Generate an image on the local ComfyUI node; return PNG bytes or None.
-
-    Uses the FLUX.1-schnell checkpoint the node is set up with (falls back to
-    the caller's search path if ComfyUI is down, the checkpoint isn't ready, or
-    generation fails).
+    Cached per query: one hourly run searches many events, and the token is
+    valid for the session, so re-fetching it per call only burns rate limit.
     """
-    base = os.environ.get("LMAO_IMAGE_GEN_URL", _GEN_URL_DEFAULT).rstrip("/")
-    # FLUX.1-schnell: transformer-only checkpoint + separate clip/t5/vae models.
-    # This exact graph is verified on the node (ComfyUI docs FLUX template).
-    # Reverted from MOSS-Image on 2026-10-23: MOSS matched FLUX quality on line
-    # art and photo edits but is ~7-10x slower. Kept MOSS as an opt-in text/layout
-    # generator (worst case for text-in-image; not needed for kid tiles).
-    workflow = {
-        "1": {"class_type": "UNETLoader",
-              "inputs": {"unet_name": "flux1-schnell.safetensors", "weight_dtype": "default"}},
-        "2": {"class_type": "DualCLIPLoader",
-              "inputs": {"clip_name1": "clip_l.safetensors",
-                         "clip_name2": "t5xxl_fp8_e4m3fn.safetensors",
-                         "type": "flux"}},
-        "3": {"class_type": "VAELoader",
-              "inputs": {"vae_name": "ae.safetensors"}},
-        "4": {"class_type": "CLIPTextEncode",
-              "inputs": {"text": prompt, "clip": ["2", 0]}},
-        "5": {"class_type": "CLIPTextEncode",
-              "inputs": {"text": "text, watermark, logo, lowres, blurry, photograph, shading, gray, realistic", "clip": ["2", 0]}},
-        "6": {"class_type": "EmptyLatentImage",
-              "inputs": {"width": width, "height": height, "batch_size": 1}},
-        "7": {"class_type": "KSampler",
-              "inputs": {
-                  "model": ["1", 0], "positive": ["4", 0], "negative": ["5", 0],
-                  "latent_image": ["6", 0], "seed": 0, "steps": 4, "cfg": 1.0,
-                  "sampler_name": "euler", "scheduler": "simple", "denoise": 1.0}},
-        "8": {"class_type": "VAEDecode", "inputs": {"samples": ["7", 0], "vae": ["3", 0]}},
-        "9": {"class_type": "SaveImage",
-              "inputs": {"images": ["8", 0], "filename_prefix": "kids"}},
-    }
-    try:
-        req = urllib.request.Request(
-            f"{base}/prompt", data=json.dumps({"prompt": workflow}).encode(),
-            headers={"Content-Type": "application/json", "User-Agent": _UA},
-        )
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            pid = json.load(resp)["prompt_id"]
-        # poll /history until the job completes and an image is written
-        out_image = None
-        for _ in range(600):  # up to ~10 min (MOSS is ~5-6 min at 30 steps)
-            time.sleep(1)
-            try:
-                with urllib.request.urlopen(f"{base}/history/{pid}", timeout=20) as r:
-                    hist = json.load(r)
-            except Exception:
+    import re
+
+    if query in _VQD_CACHE:
+        return _VQD_CACHE[query]
+    url = _DDG_HOME + "?" + urllib.parse.urlencode(
+        {"q": query, "iax": "images", "ia": "images"})
+    req = urllib.request.Request(url, headers={"User-Agent": _UA})
+    with urllib.request.urlopen(req, timeout=25) as resp:
+        html = resp.read().decode("utf-8", "replace")
+    m = re.search(r"vqd=([0-9][0-9-]*)", html)
+    if not m:
+        raise RuntimeError("DuckDuckGo did not return a vqd token")
+    _VQD_CACHE[query] = m.group(1)
+    return m.group(1)
+
+
+def search_web_images(query: str, limit: int = 20):
+    """DuckDuckGo image search -> [(title, url, width, height)]."""
+    vqd = _ddg_vqd(query)
+    url = _DDG_IMAGES + "?" + urllib.parse.urlencode(
+        {"l": "us-en", "o": "json", "q": query, "vqd": vqd, "f": ",,,", "p": "1"})
+    req = urllib.request.Request(
+        url, headers={"User-Agent": _UA, "Referer": _DDG_HOME})
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(req, timeout=25) as resp:
+                data = json.load(resp)
+            break
+        except urllib.error.HTTPError as e:
+            if e.code == 429 and attempt < 2:
+                time.sleep(5 * (attempt + 1))
                 continue
-            entry = (hist.get(pid) or {})
-            outputs = entry.get("outputs", {})
-            for node in outputs.values():
-                for im in node.get("images", []) or []:
-                    out_image = im
-            st = entry.get("status", {})
-            if st.get("completed") or st.get("status_str") in ("success", "error"):
-                break
-        if not out_image:
-            return None
-        view = (f"{base}/view?filename={urllib.parse.quote(out_image['filename'])}"
-                f"&subfolder={urllib.parse.quote(out_image.get('subfolder', ''))}"
-                f"&type={out_image.get('type', 'output')}")
-        with urllib.request.urlopen(view, timeout=30) as r:
-            return r.read()
+            raise
+    out = []
+    for r in (data.get("results") or [])[:limit]:
+        if not r.get("image"):
+            continue
+        out.append((r.get("title", ""), r["image"],
+                    int(r.get("width") or 0), int(r.get("height") or 0)))
+    return out
+
+
+def search_sources(query: str, theme: str = ""):
+    """Internet line-drawing sources for one query.
+
+    Wikimedia Commons carries public-domain line art (animals, objects); the
+    DuckDuckGo image index reaches character line drawings (coloring pages)
+    that Commons has no licensed copy of.  The web query is biased with ONE
+    line-art hint — "coloring page" for characters, "line drawing" otherwise —
+    to keep the hourly run inside DuckDuckGo's rate limit.  Ranking + the
+    vision gate + the ink gate then pick the usable tile.
+    """
+    hint = "coloring page" if theme in ("paw patrol", "pokemon") else "line drawing"
+    out = list(search_commons(query))
+    try:
+        out += search_web_images(f"{query} {hint}")
     except Exception as exc:  # noqa: BLE001
-        print(f"  (local generation unavailable: {exc})")
-        return None
+        print(f"  (web image search unavailable for {query!r}: {exc})")
+    return out
 
 
 def _norm_title(t: str) -> str:
@@ -459,6 +461,8 @@ def _score_result(r, query: str = ""):
     title, url, w, h = r
     if not url or not w or not h:
         return None
+    if url.lower().split("?")[0].endswith(".svg"):
+        return None  # no SVG rasterizer in the sync image; Commons PNG/JPEG only
     if w > 6000 or h > 6000 or max(w, h) / max(1, min(w, h)) > 3.0:
         return None
     words = (query or "").split()
@@ -475,6 +479,15 @@ def _score_result(r, query: str = ""):
             s += 25  # matches the action / other query words too
     if "map" in tn or "diagram" in tn or "seating" in tn:
         s -= 20
+    # Line drawings are the ONLY acceptable tile source now (no image
+    # generator), so a line-art signal must outrank a photo of the same
+    # subject: "Chase Paw Patrol Coloring Page" beats a photo of a person
+    # named Chase.  Photos survive the title filter but fail the ink gate.
+    line_art = any(h in tn or h in url.lower() for h in _LINE_ART_TITLE_HINTS)
+    if line_art:
+        s += 80
+    if any(h in tn for h in _PHOTO_TITLE_HINTS):
+        s -= 40
     if 300 <= w <= 4000:
         s += 2
     if 0.5 <= min(w, h) / max(1, max(w, h)):
@@ -510,13 +523,104 @@ def download(url: str) -> bytes:
     raise RuntimeError("image download rate-limited")
 
 
-def to_1bit_png(raw: bytes, width: int, height: int, threshold: int) -> bytes:
+def to_1bit_png(raw: bytes, width: int, height: int, threshold: int,
+                coverage: float = 0.09) -> bytes:
+    """Rasterize a line drawing to a 1-bit tile.
+
+    Thresholding AFTER a LANCZOS downscale turns a detailed line drawing into
+    gray mush (anti-aliased lines average above the threshold and vanish, while
+    textured areas speckle).  Instead: threshold the source at full resolution
+    to an ink mask, area-average that mask down to the tile (BOX = mean ink
+    coverage per cell), then mark a cell as ink when it holds a real amount of
+    ink (``coverage``).  Thin 1-px lines survive; gray noise does not.
+
+    ``coverage`` is 0.09 so a single-pixel line in a 10x-downscaled source
+    (BOX averages it to 25/255 ≈ 0.098 of the cell) still registers; photo /
+    dither noise cells average far below that and drop out.
+    """
     img = Image.open(io.BytesIO(raw)).convert("L")
-    img = img.resize((width, height), Image.Resampling.LANCZOS)
-    img = img.point(lambda v: 255 if v >= threshold else 0, mode="1")
+    mask = img.point(lambda v: 255 if v < threshold else 0)
+    small = mask.resize((width, height), Image.Resampling.BOX)
+    tile = small.point(lambda v: 0 if v >= coverage * 255 else 255, mode="1")
     buf = io.BytesIO()
-    img.save(buf, format="PNG", bits=1, optimize=True)
+    tile.save(buf, format="PNG", bits=1, optimize=True)
     return buf.getvalue()
+
+
+# A line drawing is SPARSE ink around ENCLOSED white regions.  Measured on the
+# live cal_pics tiles: real line art has an ink fraction of 0.05-0.17 and
+# 0.33-0.70 of the tile as white interior (the character's body).  Two failure
+# modes the ink range alone cannot catch:
+#   - a big white coloring page cropped badly -> almost no ink (0.027) and no
+#     interior (0.000): a blank tile;
+#   - a coloring page with FILLED shapes -> 0.349 ink but only 0.019 interior:
+#     a solid silhouette, not line work.
+# So the gate is: some ink, not mostly ink, and real enclosed white area.
+LINE_ART_MIN_INK = 0.02
+LINE_ART_MAX_INK = 0.45
+LINE_ART_MIN_ENCLOSED = 0.15
+
+
+def _bits(png_bytes: bytes) -> tuple[bytes, int, int]:
+    """Decode a 1-bit PNG into (row-major MSB-first bits, width, height)."""
+    with Image.open(io.BytesIO(png_bytes)) as im:
+        im = im.convert("1")
+        w, h = im.size
+        px = im.load()
+        out = bytearray((w * h + 7) // 8)
+        for y in range(h):
+            for x in range(w):
+                if px[x, y] == 0:  # black = ink
+                    idx = y * w + x
+                    out[idx // 8] |= 0x80 >> (idx % 8)
+        return bytes(out), w, h
+
+
+def _is_ink(bits: bytes, i: int) -> bool:
+    return bool(bits[i // 8] & (0x80 >> (i % 8)))
+
+
+def ink_fraction(png_bytes: bytes) -> float:
+    """Fraction of ink pixels in a 1-bit tile (black = ink)."""
+    bits, w, h = _bits(png_bytes)
+    return sum(bin(b).count("1") for b in bits) / max(1, w * h)
+
+
+def enclosed_white_fraction(png_bytes: bytes) -> float:
+    """Fraction of the tile that is white and NOT reachable from the border.
+
+    That is the "inside" of a line drawing.  A filled silhouette or a blank
+    page has almost none; a real outline drawing has plenty.
+    """
+    from collections import deque
+
+    bits, w, h = _bits(png_bytes)
+    seen = bytearray(w * h)
+    queue = deque()
+    for i in range(w * h):
+        x, y = i % w, i // w
+        if (x in (0, w - 1) or y in (0, h - 1)) and not _is_ink(bits, i):
+            seen[i] = 1
+            queue.append(i)
+    while queue:
+        i = queue.popleft()
+        x, y = i % w, i // w
+        for nx, ny in ((x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)):
+            if 0 <= nx < w and 0 <= ny < h:
+                j = ny * w + nx
+                if not seen[j] and not _is_ink(bits, j):
+                    seen[j] = 1
+                    queue.append(j)
+    enclosed = sum(1 for i in range(w * h) if not _is_ink(bits, i) and not seen[i])
+    return enclosed / max(1, w * h)
+
+
+def is_line_art(png_bytes: bytes) -> bool:
+    """True when the 1-bit tile is outline line work, not a photo or a blob."""
+    return (
+        LINE_ART_MIN_INK <= ink_fraction(png_bytes) <= LINE_ART_MAX_INK
+        and enclosed_white_fraction(png_bytes) >= LINE_ART_MIN_ENCLOSED
+    )
 
 
 def _parse_bbox(text: str, width: int, height: int):
@@ -811,15 +915,13 @@ def main(argv: list[str] | None = None) -> int:
         pool, theme_label = combo["pool"], combo["theme"]
         print(f"== {pic} ({','.join(participants)}): '{title}' "
               f"-> [{kw}] {subject_word} ({theme_label}) {queries} "
-              f"[local-gen + commons]")
+              f"[commons + web line-art]")
         try:
             stored = False
-            # 1) on-demand local generation first (bespoke themed art). The vision
-            #    content gate can false-negative on obscure subjects (an
-            #    unrecognized pokemon like alakazam/goldeen), so on rejection
-            #    retry with a different subject from the SAME theme pool — a
-            #    fresh generated tile should land rather than leaving the event
-            #    stale/artless.
+            # Search the internet for a LINE DRAWING of the chosen subject.
+            # On a vision-gate rejection, retry one alternate subject from the
+            # SAME theme pool: an obscure subject (an unrecognized pokemon) may
+            # have no clean line drawing online while its pool-mates do.
             base_seed = int(hashlib.sha1(uid.encode()).hexdigest(), 16)
             order = [subject_word] + [pool[(base_seed + i) % len(pool)]
                                       for i in range(1, len(pool))]
@@ -828,53 +930,35 @@ def main(argv: list[str] | None = None) -> int:
                 if s_ not in seen_s:
                     seen_s.add(s_)
                     uniq_order.append(s_)
-            generated_any = False
-            for subj in uniq_order[:4]:
-                gen = generate_local(build_gen_prompt(subj, theme_label, action),
-                                     1024, 1024)
-                if not gen:
-                    break
-                generated_any = True
-                gen = crop_to_subject(gen)  # tighten to the subject (vision)
-                if verify_subject(gen, subj, theme_label, accept=pool):
-                    png = to_1bit_png(gen, tw, th, args.threshold)
-                    rec = pic_store.put(pic, png, tw, th)
-                    print(f"   stored {pic} [generated]: {subj} {theme_label}"
-                          f" ({action or 'general'}) -> "
-                          f"{rec['width']}x{rec['height']} {len(rec['bytes'])}B")
-                    done += 1
-                    stored = True
-                    break
-                print(f"   gate rejected {subj!r}: trying another {theme_label} subject...")
-            if not stored and not generated_any:
-                print("   (local generation unavailable — falling back to Commons)")
-            # 2) fall back to Wikimedia search if generation didn't land.
-            #    PAW Patrol is proprietary IP: Commons only carries photographs
-            #    (e.g. Jacob Zuma for "zuma"), so searching it is wasted work.
-            #    Those tiles must come from local generation; an event that
-            #    misses here is retried on the next hourly run.
-            if not stored and theme_label == "paw patrol":
-                print("   (PAW Patrol is local-generation only — Commons skipped;"
-                      " will retry next run)")
-            elif not stored:
+            for subj in uniq_order[:2]:
+                subj_queries = [theme_query(subj, theme_label, action)]
+                if subj == subject_word:
+                    subj_queries += [q for q in queries if q != primary]
+                subj_queries.append(subj)
+                subj_queries = _dedupe(subj_queries)
                 allres = []
-                for q in queries:
-                    allres += search_sources(q)
+                for q in subj_queries:
+                    allres += search_sources(q, theme_label)
                 seen, uniq = set(), []
                 for r in allres:
                     if r[1] and r[1] not in seen:
                         seen.add(r[1])
                         uniq.append(r)
-                candidates = rank_candidates(uniq, primary)
-                for cand in candidates:
+                candidates = rank_candidates(uniq, subj_queries[0])
+                for cand in candidates[:8]:
                     _, url, w, h = cand
                     try:
                         raw = download(url)
                         raw = crop_to_subject(raw)  # tighten to the subject (vision)
-                        if not verify_subject(raw, subject_word, theme_label, accept=pool):
+                        if not verify_subject(raw, subj, theme_label, accept=pool):
                             print(f"   gate rejected candidate ({w}x{h}): {cand[0]!r}")
                             continue
                         png = to_1bit_png(raw, tw, th, args.threshold)
+                        if not is_line_art(png):
+                            print(f"   not line art (ink {ink_fraction(png):.2f},"
+                                  f" enclosed {enclosed_white_fraction(png):.2f})"
+                                  f" — skipping {cand[0]!r}")
+                            continue
                         rec = pic_store.put(pic, png, tw, th)
                         print(f"   stored {pic}: {cand[0]} ({w}x{h}) -> "
                               f"{rec['width']}x{rec['height']} {rec['mime']} {len(rec['bytes'])}B")
@@ -884,6 +968,11 @@ def main(argv: list[str] | None = None) -> int:
                     except Exception as exc2:  # noqa: BLE001
                         print(f"   candidate failed ({cand[0]!r}): {exc2}")
                         continue
+                if stored:
+                    break
+                if subj == subject_word:
+                    print(f"   no acceptable {subject_word!r} line drawing —"
+                          " trying another subject from the same theme...")
             if not stored:
                 print(f"   no acceptable image for {primary!r}")
                 failed += 1

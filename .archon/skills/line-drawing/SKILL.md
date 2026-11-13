@@ -78,3 +78,21 @@ The `cal_pics` table is created on first use; rerunning a key overwrites
 3. Run the tool (above). Verify the `Stored '<key>': WxH…` line.
 4. Optionally also write `--out <png>` if the display client vendors local
    assets instead of reading Postgres directly.
+
+## Automated stage (hourly CronJob)
+
+`tools/calendar_pics_sync.py` fills missing keys for upcoming kid events
+without an agent: it searches Wikimedia Commons and the DuckDuckGo image
+index (queries biased with `line drawing` / `coloring page`, and with the
+theme name for character tiles — `chase paw patrol tennis`, not `chase
+tennis`), crops the hit to its subject with the local vision model, gates it
+against the theme's subject pool, and finally rejects anything that is not
+outline line art: ink fraction 0.02–0.45 **and** at least 0.15 of the tile as
+enclosed white interior. The interior check is what separates a drawing from
+a filled silhouette (0.35 ink, ~0.02 interior) or a badly cropped blank page
+(0.03 ink, no interior). Rasterizing thresholds at full resolution first and
+area-averages the ink mask, so thin lines survive the downscale. There is **no
+image generator**: a character with no acceptable online line drawing stays
+artless and retries on the next hourly run; place it by hand with `--source`
+above when the web has nothing usable. SVG URLs are skipped (the sync image
+has no cairosvg).
