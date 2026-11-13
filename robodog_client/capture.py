@@ -76,6 +76,7 @@ class ShotAssembler:
 
     def __init__(self, validate=True):
         self.validate = validate
+        self.dropped = 0
         self._in_shot = False
         self._want = 0
         self._w = self._h = 0
@@ -100,6 +101,7 @@ class ShotAssembler:
             self._in_shot = False
             self._hex = []
             if self.validate and len(data) != self._want:
+                self.dropped += 1
                 return None      # truncated: keep scanning
             return data, self._want, self._w, self._h
         if HEX_RE.match(line):
@@ -252,7 +254,13 @@ def read_frames(port, n=1, timeout=30):
     s = serial.Serial(port, 115200, timeout=1)
     try:
         deadline = time.time() + timeout
-        assembler = ShotAssembler(validate=False)
+        # validate=True: a truncated dump is discarded and scanning continues
+        # for the next complete frame.  The 16 KiB chunked read races the
+        # boot-log + dump burst, so the first frame after a reset is regularly
+        # short (observed 15168..15183 of 15200 B); accepting it produced a
+        # frame that failed the length check downstream and left a capture job
+        # with no decoded panel at all.
+        assembler = ShotAssembler(validate=True)
         while len(frames) < n and time.time() < deadline:
             # 16 KiB chunks keep up with the ~11.5 KB/s RD_SHOT dump rate
             # (a 4096-byte read onto the USB-JTAG CDC buffer overran and
@@ -281,6 +289,9 @@ def read_frames(port, n=1, timeout=30):
                 print(f"captured frame {len(frames)} "
                       f"({len(data)} bytes, {w}x{h})",
                       file=sys.stderr)
+        if assembler.dropped:
+            print(f"discarded {assembler.dropped} truncated frame(s)",
+                  file=sys.stderr)
     finally:
         s.close()
     return frames
