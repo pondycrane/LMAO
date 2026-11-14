@@ -41,9 +41,9 @@ uint64_t rd_render_now_ms(void);
 
 /* Draw the whole panel for `state` from `cache`, push it to the panel and
  * (when a USB host is attached) stream the exact frame as RD_SHOT.  `cfg`
- * supplies the kid name (kid panels print it LEFT of the clock) and
- * `current` the conditions from the last reply (RAM only; never persisted,
- * so a boot render shows none). */
+ * supplies the calendar identity label (`family`, or the kid name on a kid
+ * panel, drawn LEFT of the clock) and `current` the conditions from the last
+ * reply (RAM only; never persisted, so a boot render shows none). */
 void rd_render_screen(rd_state_t state, const rd_config_t *cfg,
                       const lma_weather_t *current, const rd_cache_t *cache);
 
