@@ -94,3 +94,68 @@ class TestPicKey:
         assert cs.build_pic_key("a") == cs.build_pic_key("a")
         assert cs.build_pic_key("a") != cs.build_pic_key("b")
         assert len(cs.build_pic_key("a")) == 3 + 12
+
+
+class _FakeStore:
+    """Records upserts / prunes; no Postgres."""
+
+    def __init__(self, existing=()):
+        self.upserts = []
+        self.pruned_calls = []
+        self.existing = list(existing)
+
+    def upsert(self, **kw):
+        self.upserts.append(kw)
+
+    def gcal_rows_in_window(self, calendar_id, from_ms, to_ms):
+        return self.existing
+
+    def tombstone_missing(self, calendar_id, keep_uids, from_ms, to_ms):
+        keep = set(keep_uids)
+        hit = [r["uid"] for r in self.existing if r["uid"] not in keep]
+        self.pruned_calls.append((calendar_id, list(keep_uids), from_ms, to_ms))
+        return hit
+
+
+class TestRetraction:
+    """A moved/re-created Google occurrence must not leave a ghost row.
+
+    Regression: the chess occurrence was moved 214500Z -> 223000Z and both
+    rows stayed live, so the panel listed the same event twice.
+    """
+
+    def test_moved_occurrence_is_retracted(self):
+        store = _FakeStore(existing=[
+            {"uid": "moved_old", "title": "J new Chess 4:45"},
+            {"uid": "moved_new", "title": "J new Chess 5:45pm"},
+        ])
+        events = [_ev(uid="moved_new")]
+        _, pruned = cs.sync(store, events, dry_run=False, now_ms=1_000,
+                            window_days=14)
+        assert [r["uid"] for r in pruned] == ["moved_old"]
+        assert [u["uid"] for u in store.upserts] == ["moved_new"]
+        # the keep-set is every id Google still lists, not just kid-mapped ones
+        assert store.pruned_calls == [("family", ["moved_new"], 1_000,
+                                       1_000 + 14 * 86_400_000)]
+
+    def test_unrelated_events_are_kept(self):
+        store = _FakeStore(existing=[{"uid": "keep", "title": "Swim"}])
+        _, pruned = cs.sync(store, [_ev(uid="keep")], dry_run=False,
+                            now_ms=0, window_days=14)
+        assert pruned == []
+
+    def test_empty_fetch_retracts_everything_sync_owned(self):
+        # Google lists nothing in the window -> every sync-owned row is stale.
+        store = _FakeStore(existing=[{"uid": "a"}, {"uid": "b"}])
+        _, pruned = cs.sync(store, [], dry_run=False, now_ms=5,
+                            window_days=7)
+        assert sorted(r["uid"] for r in pruned) == ["a", "b"]
+
+    def test_dry_run_writes_nothing_but_reports_the_prune(self):
+        store = _FakeStore(existing=[{"uid": "ghost"}])
+        planned, pruned = cs.sync(store, [_ev(uid="live")], dry_run=True,
+                                  now_ms=0, window_days=14)
+        assert store.upserts == []
+        assert store.pruned_calls == []
+        assert [r["uid"] for r in planned] == ["live"]
+        assert [r["uid"] for r in pruned] == ["ghost"]

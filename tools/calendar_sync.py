@@ -13,6 +13,15 @@ Identity / dedup
   own row — exactly what the kids' display shows).
 - Upsert is ``ON CONFLICT (uid)`` (see ``CalendarStore.upsert``), so reruns
   refresh times/participants without duplicating.
+- **Retraction.**  Upsert alone is additive, so a Google occurrence that MOVED
+  or was re-created keeps its old ``uid`` row behind and the panel showed the
+  same event twice (old time + old title, new time + new title).  After the
+  upserts, every sync-owned row starting inside the window whose id Google no
+  longer lists is tombstoned (``CalendarStore.tombstone_missing``); the
+  tombstone trigger stamps ``updated_ms`` so clients receive the retraction as
+  a delta.  Sync-owned is decided by the uid SHAPE
+  (``calendar_pg.GCAL_UID_PATTERN``: Google's base32hex ids, optionally with
+  ``_YYYYMMDDTHHMMSSZ``), so an operator's hand-written row is never deleted.
 - ``pic`` is a stable per-event key (``ev_<sha1(uid)[:12]>``) so the picture
   pipeline generates/targets the same key across runs.
 
@@ -41,7 +50,8 @@ import argparse
 import hashlib
 import os
 import sys
-from datetime import datetime, timedelta, timezone
+import time
+from datetime import datetime, timezone
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _REPO_ROOT not in sys.path:
@@ -183,13 +193,14 @@ def build_event(event: dict, tz_name: str = _TZ) -> dict | None:
     }
 
 
-def fetch_kid_events(token_path: str, window_days: int):
+def fetch_kid_events(token_path: str, window_days: int, now_ms: int):
     """Return upcoming Google event dicts (singleEvents) in the window.
 
     Fetches all events (a family calendar is small) and lets ``build_event``
     decide which are a tracked kid's — so both attendee-matched and
     title-heuristic-matched events are considered.  Future-only (no backfill):
-    ``timeMin`` is now.
+    ``timeMin`` is ``now_ms``, the SAME instant the caller prunes against, so
+    the keep-set and the prune window cannot disagree by a few milliseconds.
     """
     from google.oauth2.credentials import Credentials
     from googleapiclient.discovery import build
@@ -197,9 +208,10 @@ def fetch_kid_events(token_path: str, window_days: int):
     creds = Credentials.from_authorized_user_file(token_path)
     service = build("calendar", "v3", credentials=creds)
 
-    now = datetime.now(timezone.utc)
-    tmin = now.isoformat()
-    tmax = (now + timedelta(days=window_days)).isoformat()
+    tmin = datetime.fromtimestamp(now_ms / 1000, tz=timezone.utc).isoformat()
+    tmax = datetime.fromtimestamp(
+        (now_ms + window_days * 86_400_000) / 1000, tz=timezone.utc
+    ).isoformat()
 
     out = []
     page_token = None
@@ -216,8 +228,20 @@ def fetch_kid_events(token_path: str, window_days: int):
     return out
 
 
-def sync(store, events: list[dict], dry_run: bool) -> list[dict]:
-    """Upsert mapped events; returns the rows that would be written."""
+def sync(store, events: list[dict], dry_run: bool, now_ms: int,
+         window_days: int) -> tuple[list[dict], list[dict]]:
+    """Upsert mapped events, then retract sync-owned rows Google dropped.
+
+    Returns ``(planned_rows, pruned_rows)``.  Upsert alone is additive: a
+    Google occurrence that MOVED or was re-created keeps its old ``uid`` row
+    behind (the upsert only touches ids it is handed), so the panel showed the
+    same event twice — once at the old time with the old title, once at the new
+    one.  Google is the source of truth for the window, so every sync-owned row
+    starting inside it whose id Google no longer lists is tombstoned.
+
+    "Sync-owned" is decided by the uid SHAPE (``calendar_pg.GCAL_UID_PATTERN``)
+    in the store query, so an operator's hand-written row is never retracted.
+    """
     planned = []
     for ev in events:
         row = build_event(ev)
@@ -231,7 +255,16 @@ def sync(store, events: list[dict], dry_run: bool) -> list[dict]:
                 start_ms=row["start_ms"], end_ms=row["end_ms"],
                 pic=row["pic"], participants=row["participants"],
             )
-    return planned
+
+    to_ms = now_ms + window_days * 86_400_000
+    keep = [ev["id"] for ev in events if ev.get("id")]
+    if dry_run:
+        existing = store.gcal_rows_in_window(_CALENDAR_ID, now_ms, to_ms)
+        keep_set = set(keep)
+        return planned, [r for r in existing if r["uid"] not in keep_set]
+
+    pruned = store.tombstone_missing(_CALENDAR_ID, keep, now_ms, to_ms)
+    return planned, [{"uid": u} for u in pruned]
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -247,8 +280,12 @@ def main(argv: list[str] | None = None) -> int:
 
     _prefer_ipv4()  # host quirk: no IPv6 route on this Pi
 
+    # One instant for BOTH the fetch's timeMin and the prune window, so the
+    # keep-set cannot straddle the boundary.
+    now_ms = int(time.time() * 1000)
+
     try:
-        events = fetch_kid_events(args.token, args.window_days)
+        events = fetch_kid_events(args.token, args.window_days, now_ms)
     except Exception as exc:  # noqa: BLE001
         print(f"ERROR: Google fetch failed: {exc}", file=sys.stderr)
         return 1
@@ -260,6 +297,10 @@ def main(argv: list[str] | None = None) -> int:
         print("ERROR: no Postgres reachable (LMAO_CONTACTS_URL / LMAO_CONTACTS_PG_*)",
               file=sys.stderr)
         return 1
+    if store is None:
+        print("ERROR: --dry-run still needs Postgres (it reports the prune plan)",
+              file=sys.stderr)
+        return 1
 
     fmt = "PLAN" if args.dry_run else "UPSERT"
     print(f"=== {fmt}: {len(events)} matching Google event(s) in next {args.window_days}d ===")
@@ -269,18 +310,23 @@ def main(argv: list[str] | None = None) -> int:
         if row is None:
             continue
         planned.append(row)
-        from datetime import datetime as _dt
-
-        st = _dt.fromtimestamp(row["start_ms"] / 1000, tz=timezone.utc).isoformat()
+        st = datetime.fromtimestamp(row["start_ms"] / 1000,
+                                    tz=timezone.utc).isoformat()
         print(
             f"  {row['uid']:<34} {st}  {','.join(row['participants']):<14} "
             f"pic={row['pic']}  {row['title']}"
         )
 
-    if not args.dry_run and store is not None:
-        sync(store, events, dry_run=False)
-        store.close()
-        print(f"=== wrote {len(planned)} row(s) ===")
+    planned, pruned = sync(store, events, args.dry_run, now_ms,
+                           args.window_days)
+    for r in pruned:
+        print(f"  RETRACT {r['uid']}")
+    store.close()
+
+    if args.dry_run:
+        print(f"=== plan: {len(planned)} upsert(s), {len(pruned)} retraction(s) ===")
+    else:
+        print(f"=== wrote {len(planned)} row(s), retracted {len(pruned)} ===")
     return 0
 
 

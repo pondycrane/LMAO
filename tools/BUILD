@@ -69,6 +69,32 @@ py_binary(
     ],
 )
 
+# Calendar CronJob stage 1: Google Calendar -> cal_events.  Upserts each kid
+# event, then RETRACTS sync-owned rows Google no longer lists (a moved or
+# re-created occurrence would otherwise leave a ghost row, and the panel showed
+# the same event twice).  Google's client libs are imported lazily inside the
+# fetch, so only the store deps are declared here.
+#   bazel run //tools:calendar_sync
+#   bazel run //tools:calendar_sync -- --dry-run
+py_library(
+    name = "calendar_sync_lib",
+    srcs = ["calendar_sync.py"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//lma_core",
+        "@lmao_pip//psycopg",
+        "@lmao_pip//psycopg_binary",
+    ],
+)
+
+py_binary(
+    name = "calendar_sync",
+    srcs = ["calendar_sync.py"],
+    main = "calendar_sync.py",
+    visibility = ["//visibility:public"],
+    deps = [":calendar_sync_lib"],
+)
+
 # Calendar CronJob stage 2: for each upcoming kid event without a picture,
 # pick a seeded theme subject (Juliet: random pokemon; Wesley: alternating
 # random PAW Patrol character / coherent sea animal), generate or fetch line

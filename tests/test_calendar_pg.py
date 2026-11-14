@@ -257,6 +257,71 @@ class TestUpsert:
         assert updates == [("gcal_abc123", "family")]
 
 
+class TestTombstoneMissing:
+    """Retraction: rows Google dropped, without touching operator rows.
+
+    The uid-shape guard is the safety property that matters: a hand-written
+    family row ("fc-fixture-yyyymmdd") must survive any prune, so it is
+    enforced in SQL (``uid ~ pattern``) rather than in Python filtering.
+    """
+
+    def test_prune_is_scoped_to_sync_owned_uids(self, mock_pg):
+        cal, captures, make_cursor = mock_pg
+        store = _make_store(cal)
+        cursor = make_cursor()
+        store._conn.cursor = staticmethod(lambda: cursor)
+        cursor.fetchall_rows = [("ghost",), ("gone",)]
+
+        pruned = store.tombstone_missing(
+            "family", ["live"], 1_000, 2_000
+        )
+        assert pruned == ["ghost", "gone"]
+        sql, params = [
+            (s, p) for s, p in captures["executes"]
+            if "RETURNING uid" in s
+        ][0]
+        assert "uid ~ %s" in sql and "NOT (uid = ANY(%s))" in sql
+        assert "deleted = TRUE" in sql
+        assert list(params) == ["family", 1_000, 2_000, cal.GCAL_UID_PATTERN,
+                                ["live"]]
+
+    def test_window_read_reports_sync_owned_rows(self, mock_pg):
+        cal, captures, make_cursor = mock_pg
+        store = _make_store(cal)
+        cursor = make_cursor()
+        store._conn.cursor = staticmethod(lambda: cursor)
+        cursor.fetchall_rows = [
+            ("gcal1", "Swim", 1_500, 1_600),
+            ("gcal2", "Dentist", 1_700, 1_800),
+        ]
+
+        rows = store.gcal_rows_in_window("family", 1_000, 2_000)
+        assert rows == [
+            {"uid": "gcal1", "title": "Swim", "start_ms": 1_500, "end_ms": 1_600},
+            {"uid": "gcal2", "title": "Dentist", "start_ms": 1_700, "end_ms": 1_800},
+        ]
+        sql, params = [
+            (s, p) for s, p in captures["executes"]
+            if "start_ms >= %s" in s and "uid ~ %s" in s
+        ][0]
+        assert "deleted = FALSE" in sql
+        assert list(params) == ["family", 1_000, 2_000, cal.GCAL_UID_PATTERN]
+
+    def test_pattern_matches_google_ids_only(self):
+        import re
+
+        pat = re.compile(__import__("lma_core.calendar_pg", fromlist=["x"])
+                         .GCAL_UID_PATTERN)
+        # masters + recurring instances
+        assert pat.match("lo11v1bs3g20l7k1tdl8ann0hk")
+        assert pat.match("8714d9kefam0oi8roa66q36brc_20261117T214500Z")
+        assert pat.match("cdj32e3374rjebb16tim8b9kc8o38b9o70q66b9pccrjeohgcph32e32cg")
+        # operator / fixture rows are NOT sync-owned
+        assert not pat.match("fc-fixture-yyyymmdd")
+        assert not pat.match("swim")
+        assert not pat.match("")
+
+
 # ---------------------------------------------------------------------------
 # open_calendar_store
 # ---------------------------------------------------------------------------

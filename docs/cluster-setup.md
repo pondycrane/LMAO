@@ -323,7 +323,10 @@ replaced a host Hermes cron (`lmao-kids-calendar-sync` →
 Two stages per run, matching the old script:
 
 1. `tools/calendar_sync.py --window-days 14` — Google Calendar → `cal_events`
-   (Postgres), upsert keyed by event `uid`.
+   (Postgres), upsert keyed by event `uid`, **then retraction**: a sync-owned
+   row inside the window whose id Google no longer lists is tombstoned, so a
+   moved/re-created occurrence cannot leave a ghost row behind.  `--dry-run`
+   prints the retraction plan.
 2. `tools/calendar_pics_sync.py` — themed art → 1-bit 176×176 RLCD tiles in
    `cal_pics`.
 

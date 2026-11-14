@@ -101,6 +101,14 @@ CREATE TRIGGER lmao_cal_tombstone_trg
 # again after picking a larger max_events — the store logs when it happens.
 DEFAULT_MAX_EVENTS = 100
 
+# Google Calendar event ids: base32hex (``0-9a-v``) masters of 20-64 chars, and
+# recurring instances = master + ``_YYYYMMDDTHHMMSSZ``.  The Google->Postgres
+# sync is the only writer of such rows; the operator's out-of-band SQL rows use
+# any other shape.  ``tombstone_missing`` prunes ONLY ids matching this, so a
+# moved/re-created Google occurrence is retracted without ever being able to
+# delete a hand-written row.
+GCAL_UID_PATTERN = r"^[a-v0-9]{20,64}(_[0-9]{8}T[0-9]{6}Z)?$"
+
 
 def _row_to_event(row: tuple) -> dict[str, Any]:
     """Map a cal_events row to the CalEvent proposal fields (schema order).
@@ -249,12 +257,75 @@ class CalendarStore:
 
     def tombstone(self, calendar_id: str, uid: str) -> None:
         """Mark an event deleted (propagates to clients as a tombstone)."""
-        with self._lock, self._conn.cursor() as cur:
-            cur.execute(
-                "UPDATE cal_events SET deleted = TRUE"
-                " WHERE uid = %s AND calendar_id = %s",
-                (uid, calendar_id),
-            )
+        with self._lock:
+            with self._conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE cal_events SET deleted = TRUE"
+                    " WHERE uid = %s AND calendar_id = %s",
+                    (uid, calendar_id),
+                )
+
+    def gcal_rows_in_window(
+        self, calendar_id: str, from_ms: int, to_ms: int
+    ) -> list[dict[str, Any]]:
+        """Sync-owned rows that START inside ``[from_ms, to_ms)``.
+
+        "Sync-owned" = the uid has Google's id shape (``GCAL_UID_PATTERN``);
+        rows the operator wrote by hand are never returned, so a dry-run prune
+        report and the real prune see exactly the same set.
+        """
+        with self._lock:
+            with self._conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT uid, title, start_ms, end_ms
+                    FROM cal_events
+                    WHERE calendar_id = %s AND deleted = FALSE
+                      AND start_ms >= %s AND start_ms < %s
+                      AND uid ~ %s
+                    ORDER BY start_ms
+                    """,
+                    (calendar_id, int(from_ms), int(to_ms), GCAL_UID_PATTERN),
+                )
+                rows = cur.fetchall()
+        return [
+            {"uid": r[0], "title": r[1], "start_ms": r[2], "end_ms": r[3]}
+            for r in rows
+        ]
+
+    def tombstone_missing(
+        self, calendar_id: str, keep_uids: list[str], from_ms: int, to_ms: int
+    ) -> list[str]:
+        """Tombstone sync-owned rows in the window that Google no longer lists.
+
+        Google is the source of truth for the kid events, and a *moved* or
+        re-created occurrence keeps its old ``uid`` row behind: the upsert only
+        ever adds/refreshes ids it is given, so without this the panel shows the
+        same event twice (the old instance at its old time and the new one).
+        Only rows whose ``uid`` matches ``GCAL_UID_PATTERN`` are eligible, so
+        operator rows survive.  ``keep_uids`` is the full set returned by the
+        fetch (an empty list means "Google lists no kid events in the window"
+        and everything sync-owned is retracted).
+
+        Returns the uids actually tombstoned (the trigger stamps ``updated_ms``,
+        so clients receive them as deltas on their next sync).
+        """
+        with self._lock:
+            with self._conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE cal_events SET deleted = TRUE
+                    WHERE calendar_id = %s AND deleted = FALSE
+                      AND start_ms >= %s AND start_ms < %s
+                      AND uid ~ %s
+                      AND NOT (uid = ANY(%s))
+                    RETURNING uid
+                    """,
+                    (calendar_id, int(from_ms), int(to_ms), GCAL_UID_PATTERN,
+                     list(keep_uids)),
+                )
+                rows = cur.fetchall()
+        return [r[0] for r in rows]
 
 
 def open_calendar_store() -> CalendarStore | None:

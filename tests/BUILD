@@ -352,6 +352,15 @@ py_test(
 )
 
 py_test(
+    name = "test_calendar_sync",
+    srcs = ["test_calendar_sync.py"],
+    deps = [
+        "//tools:calendar_sync_lib",
+        "@lmao_pip//pytest",
+    ],
+)
+
+py_test(
     name = "test_calendar_pics_sync",
     srcs = ["test_calendar_pics_sync.py"],
     deps = [

@@ -588,6 +588,18 @@ unconditional `ON CONFLICT DO UPDATE` makes `lmao_cal_touch_trg` stamp every
 in-window row each run, which is what re-delivers each event with a fresh
 forecast as its date approaches. Stopping the job freezes per-event weather.
 
+**The sync RETRACTS, not just upserts.** `ON CONFLICT (uid)` alone is
+additive: a Google occurrence that was **moved** or re-created keeps its old
+`uid` row behind (the upsert only touches ids it is handed), so the panel listed
+the same event twice — at the old time with the old title and at the new time
+with the new one.  After the upserts, every *sync-owned* row starting inside
+the fetch window whose id Google no longer lists is tombstoned
+(`CalendarStore.tombstone_missing`), and `lmao_cal_touch_trg` stamps
+`updated_ms` so clients receive the retraction as a delta.  Sync-owned is
+decided by the **uid shape** (`GCAL_UID_PATTERN`: Google's base32hex ids,
+optionally `_YYYYMMDDTHHMMSSZ`), so an operator's hand-written row is never
+deleted.  `--dry-run` reports the retraction plan and writes nothing.
+
 **One reply assembler.** All three transports (gRPC `GetCalendar`, framed TCP
 :4247 and the LXMF envelope) build their `CalendarBundle` through
 `lma_core.calendar_bundle.build_bundle`, so the full-fetch rule (the
