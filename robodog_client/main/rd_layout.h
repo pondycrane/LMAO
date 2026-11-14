@@ -26,39 +26,75 @@ extern "C" {
 #define RD_PANEL_W 400
 #define RD_PANEL_H 300
 
+/* One outer margin for every band (the skill's 4 px): text never starts at
+ * the bezel, and every right-aligned value lands on the same edge. */
+#define RD_LEFT_X   4
+#define RD_RIGHT_X  (RD_PANEL_W - RD_LEFT_X)                /* 396 */
+
 /* ---- Header band ---- */
-/* Live clock / kid name, and the weather + stale/no-wifi hint beneath it. */
-#define RD_HEADER_BASE 24
-#define RD_STATUS_BASE 46
+/* ONE header row: the calendar identity LEFT (kid name, or "family" in family
+ * mode) and the live clock RIGHT in a fixed-width slot, so the clock never
+ * reflows the label.  Baselines are the skill's documented pair (10x20 header
+ * at 22, meta/status at 40); the 10x20 ALL-mode box is asc 16 / desc 4, so
+ * the header ink ends at y=26 and the status ink starts at y=24 -- their
+ * actual glyphs (digits, lowercase without descenders) stay 4 px apart. */
+#define RD_HEADER_BASE 22
+#define RD_STATUS_BASE 40
+/* Minimum clearance between the LEFT identity label and the RIGHT clock: the
+ * label is clipped to the space the clock actually leaves, never assumed to
+ * fit (a long kid name must not run into the date). */
+#define RD_HEADER_SLOT_GAP 8
+
+/* The header rule is a real 1 px border between the meta band and the content
+ * (the skill's "rules are real borders").  It sits at 48: 4 px below the
+ * status ink bottom (44) and 4 px above the headline tile (52), so the band
+ * reads as one section instead of two floating lines. */
+#define RD_HEADER_RULE_Y 48
+
+/* ---- Status band state channel ---- */
+/* State is word + shape (never a word alone, never a shape alone): a filled
+ * square = live, a hollow square = stale/frozen, a crossed box = failed
+ * (offline).  The 7 px square is vertically centred on the 10x20 ink box
+ * (baseline-16 .. baseline+4), so its top is baseline-9. */
+#define RD_STATUS_SHAPE_SZ  7
+#define RD_STATUS_SHAPE_GAP 4
+#define RD_STATUS_SHAPE_DY  9
 
 /* ---- Headline block ---- */
 /* The served 1-bit tile is RD_PIC_TILE px square and is drawn at its native
- * size (never scaled: u8g2 has no bitmap scaler).  It starts below the status
- * band and leaves the right column for the headline text. */
-#define RD_PIC_X    6
+ * size (never scaled: u8g2 has no bitmap scaler).  It starts below the header
+ * rule and leaves the right column for the headline text.  When the server
+ * serves no tile the renderer drops the art slot entirely and gives the
+ * headline the FULL width (no bare placeholder frame -- an empty frame reads
+ * as a broken panel). */
+#define RD_PIC_X    4
 #define RD_PIC_Y    52
 #define RD_PIC_TILE 176
 #define RD_TXT_GAP  12
-#define RD_TXT_X    (RD_PIC_X + RD_PIC_TILE + RD_TXT_GAP)   /* 194 */
-#define RD_RIGHT_X  (RD_PANEL_W - 6)                        /* 394 */
-#define RD_TXT_W    (RD_RIGHT_X - RD_TXT_X)                 /* 200 */
+#define RD_TXT_X    (RD_PIC_X + RD_PIC_TILE + RD_TXT_GAP)   /* 192 */
+#define RD_TXT_W    (RD_RIGHT_X - RD_TXT_X)                 /* 204 */
 
 /* Headline text column, in reading order: wrapped title (top), range/qualifier
  * meta, forecast (bottom).  The title is BOTTOM-ANCHORED against the meta line
  * so its last line always clears the meta glyphs; the number of lines that fit
  * is COMPUTED (rd_layout_title_lines), never assumed.  All three stay inside
- * the picture's vertical band (52..228). */
-#define RD_TITLE_TOP_ANCHOR (RD_PIC_Y + 4)   /* 56: below the status band */
-#define RD_HEAD_META_BASE  190
-#define RD_FORECAST_BASE   216
+ * the picture's vertical band (52..228): meta ink 184..204, forecast ink
+ * 206..226. */
+#define RD_TITLE_TOP_ANCHOR (RD_PIC_Y + 4)   /* 56: below the header rule */
+#define RD_HEAD_META_BASE  200
+#define RD_FORECAST_BASE   222
 
 /* ---- Compact event rows (below the picture) ---- */
 /* Rows use the 9x15B face (claw-parity density: 15 px line height) and are
  * laid out from RD_ROWS_FIRST_BASE down to RD_ROWS_BOTTOM_LIMIT; how many fit
- * is computed from the measured line height (rd_layout_rows). */
+ * is computed from the measured line height (rd_layout_rows).  The section
+ * rule above the rows is drawn ONLY when there are compact rows to show (a
+ * rule for an absent section is noise): it sits 3 px below the tile bottom
+ * (228) and 3 px above the first row's glyph top (234). */
+#define RD_ROW_RULE_Y        231
 #define RD_ROWS_FIRST_BASE  (RD_PIC_Y + RD_PIC_TILE + 18)    /* 246 */
 #define RD_ROWS_BOTTOM_LIMIT (RD_PANEL_H - 2)                /* 298 */
-#define RD_ROWS_LEFT_X      6
+#define RD_ROWS_LEFT_X      RD_LEFT_X
 #define RD_ROWS_META_MARGIN 6
 
 /* Hard cap on drawn event rows (headline + compact).  The compact rows are

@@ -195,48 +195,92 @@ static void draw_wrapped_final(u8g2_t *u8g2, int x, int base,
 }
 
 /* ---- Render ------------------------------------------------------------ */
+/* ONE header row, two fixed slots: the calendar identity LEFT (kid name on a
+ * kid panel, "family" in family mode) and the live clock RIGHT.  The label is
+ * clipped to the space the clock's measured width leaves, so a long kid name
+ * can never run into the date, and the clock never reflows the label.  Before
+ * the first sync there is no clock to show: the label still draws, so the
+ * panel identifies itself while the sync is in flight. */
 static void draw_header(u8g2_t *u8g2, const rd_config_t *cfg, uint64_t now)
 {
-    if (now == 0) {
-        return;   /* pre-first-sync: no clock to show */
-    }
-    char line[32];
     set_font(u8g2, RD_FONT_UI);
-    rd_utc_ms_to_datetime(now, RD_TZ_OFFSET_MINUTES, line, sizeof(line));
-    if (cfg->kid_name[0] != '\0') {
-        u8g2_DrawStr(u8g2, 6, RD_HEADER_BASE, cfg->kid_name);
-        draw_right(u8g2, RD_RIGHT_X, RD_HEADER_BASE, line);
-    } else {
-        draw_centered(u8g2, RD_HEADER_BASE, line);
+    const char *label = (cfg->kid_name[0] != '\0') ? cfg->kid_name : "family";
+
+    char clock[32];
+    clock[0] = '\0';
+    if (now != 0) {
+        rd_utc_ms_to_datetime(now, RD_TZ_OFFSET_MINUTES, clock, sizeof(clock));
+    }
+    const int clock_w = (clock[0] != '\0') ? u8g2_GetStrWidth(u8g2, clock) : 0;
+    const int label_budget = RD_RIGHT_X - RD_LEFT_X - clock_w -
+                             RD_HEADER_SLOT_GAP;
+    draw_clipped(u8g2, RD_LEFT_X, RD_HEADER_BASE, label, label_budget);
+    if (clock[0] != '\0') {
+        draw_right(u8g2, RD_RIGHT_X, RD_HEADER_BASE, clock);
     }
 }
 
-/* Status/weather band: current conditions LEFT ("now 44°F clear"), the
- * stale/no-wifi hint RIGHT.  Nothing is drawn when the server sent no
- * Weather -- never a placeholder reading. */
+/* The word for each state (a word beats an icon, and it is what the vision
+ * readback can verify). */
+static const char *state_word(rd_state_t state)
+{
+    switch (state) {
+    case RD_STATE_FRESH: return "updated";
+    case RD_STATE_STALE: return "stale";
+    default:             return "no wifi";
+    }
+}
+
+/* The shape channel, drawn at the same baseline as its word so the two read
+ * as one unit: filled square = live, hollow square = stale/frozen, crossed
+ * box = failed.  Never a shape without its word (see draw_status). */
+static void draw_state_shape(u8g2_t *u8g2, int x, int baseline_y,
+                             rd_state_t state)
+{
+    const int sz = RD_STATUS_SHAPE_SZ;
+    const int y = baseline_y - RD_STATUS_SHAPE_DY;
+    if (state == RD_STATE_FRESH) {
+        u8g2_DrawBox(u8g2, x, y, sz, sz);
+        return;
+    }
+    u8g2_DrawFrame(u8g2, x, y, sz, sz);
+    if (state == RD_STATE_OFFLINE) {
+        u8g2_DrawLine(u8g2, x, y, x + sz - 1, y + sz - 1);
+        u8g2_DrawLine(u8g2, x + sz - 1, y, x, y + sz - 1);
+    }
+}
+
+/* Status band: current conditions LEFT ("now 44°F clear"), the state word +
+ * shape RIGHT.  Nothing weather-side is drawn when the server sent no
+ * Weather -- never a placeholder reading.  The state slot is ALWAYS drawn:
+ * a synced panel says "updated" with a filled square instead of showing
+ * nothing, so the frame states its own freshness. */
 static void draw_status(u8g2_t *u8g2, rd_state_t state,
                         const lma_weather_t *current)
 {
     set_font(u8g2, RD_FONT_UI);
-    const char *hint = (state == RD_STATE_STALE) ? "stale" :
-                       (state == RD_STATE_OFFLINE) ? "no wifi" : NULL;
-    int right = RD_RIGHT_X;
-    if (hint != NULL) {
-        draw_right(u8g2, RD_RIGHT_X, RD_STATUS_BASE, hint);
-        right -= u8g2_GetStrWidth(u8g2, hint) + 8;
-    }
+    const char *word = state_word(state);
+    draw_right(u8g2, RD_RIGHT_X, RD_STATUS_BASE, word);
+    const int shape_x = RD_RIGHT_X - u8g2_GetStrWidth(u8g2, word) -
+                        RD_STATUS_SHAPE_GAP - RD_STATUS_SHAPE_SZ;
+    draw_state_shape(u8g2, shape_x, RD_STATUS_BASE, state);
+
     char wx[24];
     if (current->present && rd_format_weather(current, wx, sizeof(wx))) {
         char band[32];
         snprintf(band, sizeof(band), "now %s", wx);
-        draw_clipped(u8g2, 6, RD_STATUS_BASE, band, right - 6);
+        draw_clipped(u8g2, RD_LEFT_X, RD_STATUS_BASE, band,
+                     shape_x - RD_LEFT_X - RD_HEADER_SLOT_GAP);
     }
 }
 
 /* Headline title: word-wrapped helvB18 block in the text column, bottom-
  * anchored above the forecast line.  The ellipsis lands on the final SHOWN
- * line only when the wrapped block overflows the band. */
-static void draw_headline_title(u8g2_t *u8g2, const char *title)
+ * line only when the wrapped block overflows the band.  The column (x, width)
+ * is passed in so the no-tile frame can give the headline the full panel
+ * width instead of a 204 px column beside an empty art slot. */
+static void draw_headline_title(u8g2_t *u8g2, const char *title,
+                                int txt_x, int max_px)
 {
     set_font(u8g2, RD_FONT_TITLE);
     const int t_asc = u8g2_GetAscent(u8g2);
@@ -257,7 +301,6 @@ static void draw_headline_title(u8g2_t *u8g2, const char *title)
     }
     set_font(u8g2, RD_FONT_TITLE);
 
-    const int max_px = RD_TXT_W;
     rd_wrap_line_t wl[RD_WRAP_MAX_LINES];
     const size_t nl = rd_wrap_lines(title, strlen(title), max_px,
                                     rd_u8g2_width, u8g2, wl,
@@ -281,9 +324,9 @@ static void draw_headline_title(u8g2_t *u8g2, const char *title)
         memcpy(tmp, title + lo, ln);
         tmp[ln] = '\0';
         if (k == n_fit - 1 && truncated) {
-            draw_wrapped_final(u8g2, RD_TXT_X, base, tmp, ln, max_px);
+            draw_wrapped_final(u8g2, txt_x, base, tmp, ln, max_px);
         } else {
-            u8g2_DrawStr(u8g2, RD_TXT_X, base, tmp);
+            u8g2_DrawStr(u8g2, txt_x, base, tmp);
         }
     }
     if (truncated) {
@@ -296,10 +339,14 @@ static void draw_headline(u8g2_t *u8g2, const rd_cache_t *cache,
                           const lma_cal_event_t *hl,
                           int64_t day_now, int yr_now)
 {
-    /* Picture: the served 176x176 tile, or a tidy empty slot when the server
-     * served none (or the cached tile belongs to another event). */
+    /* Picture: the served 176x176 tile at its native size.  When the server
+     * served none (or the cached tile belongs to another event) the art slot
+     * is DROPPED, not filled with a bare placeholder frame -- an empty box
+     * reads as a broken panel -- and the headline text takes the full width. */
     const bool tile_ok = cache->pic_data_len == LMA_PB_PIC_TILE_BYTES &&
                          strcmp(cache->pic_uid, hl->uid) == 0;
+    int txt_x = RD_TXT_X;
+    int txt_w = RD_TXT_W;
     if (tile_ok) {
         /* u8g2_DrawBitmap (MSB-first, bit 7 = leftmost), NOT DrawXBM
          * (LSB-first): the served tile is MSB-first row-major, "1 = ink". */
@@ -307,26 +354,36 @@ static void draw_headline(u8g2_t *u8g2, const rd_cache_t *cache,
                         RD_PIC_TILE, cache->pic_data);
     } else {
         ESP_LOGW(TAG, "headline uid=%s has no tile (len=%u, expected %u); "
-                      "drawing placeholder",
+                      "full-width headline",
                  hl->uid, (unsigned)cache->pic_data_len,
                  (unsigned)LMA_PB_PIC_TILE_BYTES);
-        u8g2_DrawFrame(u8g2, RD_PIC_X, RD_PIC_Y, RD_PIC_TILE, RD_PIC_TILE);
+        txt_x = RD_LEFT_X;
+        txt_w = RD_RIGHT_X - RD_LEFT_X;
     }
 
-    /* Range + day qualifier, right-aligned in the text column. */
+    /* Range + day qualifier, right-aligned in the text column when it fits;
+     * a qualifier long enough to overrun the column ("YYYY/MM/DD HH:MM-HH:MM")
+     * is clipped at the column's left edge rather than pushed off the panel. */
     set_font(u8g2, RD_FONT_UI);
     char meta[32];
     rd_format_event_meta(hl, RD_TZ_OFFSET_MINUTES, day_now, yr_now,
                          meta, sizeof(meta));
-    draw_right(u8g2, RD_RIGHT_X, RD_HEAD_META_BASE, meta);
+    if (u8g2_GetStrWidth(u8g2, meta) <= txt_w) {
+        draw_right(u8g2, RD_RIGHT_X, RD_HEAD_META_BASE, meta);
+    } else {
+        draw_clipped(u8g2, txt_x, RD_HEAD_META_BASE, meta, txt_w);
+    }
 
-    draw_headline_title(u8g2, hl->title);
+    draw_headline_title(u8g2, hl->title, txt_x, txt_w);
 
-    /* Forecast at the headline event's start (absent -> nothing drawn). */
+    /* Forecast at the headline event's start, labelled so it cannot be read
+     * as the current reading in the status band (absent -> nothing drawn). */
     set_font(u8g2, RD_FONT_UI);
     char wx[24];
     if (hl->weather.present && rd_format_weather(&hl->weather, wx, sizeof(wx))) {
-        draw_clipped(u8g2, RD_TXT_X, RD_FORECAST_BASE, wx, RD_TXT_W);
+        char line[40];
+        snprintf(line, sizeof(line), "forecast %s", wx);
+        draw_clipped(u8g2, txt_x, RD_FORECAST_BASE, line, txt_w);
     }
 }
 
@@ -347,12 +404,20 @@ void rd_render_screen(rd_state_t state, const rd_config_t *cfg,
     const uint64_t now = rd_render_now_ms();
     draw_header(u8g2, cfg, now);
     draw_status(u8g2, state, current);
+    /* The header rule is the one real border separating the meta band from
+     * the content; it is drawn on every frame (the band always exists). */
+    u8g2_DrawHLine(u8g2, RD_LEFT_X, RD_HEADER_RULE_Y, RD_RIGHT_X - RD_LEFT_X);
 
     if (cache->count == 0) {
-        const char *msg = (state == RD_STATE_OFFLINE) ? "no wifi  :  offline"
-                                                      : "no calendar events";
+        /* Waiting words, not a bare blank: the state word + shape in the
+         * status band already says WHY, so the body says WHAT is being waited
+         * for.  Centred in the content band (below the header rule). */
+        const char *msg = (state == RD_STATE_OFFLINE)
+                              ? "waiting for wifi"
+                              : "waiting for calendar";
         set_font(u8g2, RD_FONT_UI);
-        draw_centered(u8g2, (H / 2) + 7, msg);
+        draw_centered(u8g2, RD_HEADER_RULE_Y + (H - RD_HEADER_RULE_Y) / 2 + 7,
+                      msg);
         u8g2_SendBuffer(u8g2);
         rd_shot_dump(u8g2);
         return;
@@ -381,7 +446,8 @@ void rd_render_screen(rd_state_t state, const rd_config_t *cfg,
     }
     if (nvis == 0) {
         set_font(u8g2, RD_FONT_UI);
-        draw_centered(u8g2, (H / 2) + 7, "no upcoming events");
+        draw_centered(u8g2, RD_HEADER_RULE_Y + (H - RD_HEADER_RULE_Y) / 2 + 7,
+                      "nothing upcoming");
         u8g2_SendBuffer(u8g2);
         rd_shot_dump(u8g2);
         return;
@@ -402,15 +468,28 @@ void rd_render_screen(rd_state_t state, const rd_config_t *cfg,
                                         RD_MAX_EVENT_ROWS - 1);
 
     size_t rendered = 1;   /* the headline */
+    if (nrows > 0 && nvis > 1) {
+        /* The compact-section rule appears ONLY when there is a compact
+         * section (a rule for an absent band is noise). */
+        u8g2_DrawHLine(u8g2, RD_LEFT_X, RD_ROW_RULE_Y,
+                       RD_RIGHT_X - RD_LEFT_X);
+    }
     for (size_t v = 1, r = 0; v < nvis && r < nrows; v++, r++) {
         const lma_cal_event_t *ev = vis[v];
         char meta[32];
         rd_format_event_meta(ev, RD_TZ_OFFSET_MINUTES, day_now, yr_now,
                              meta, sizeof(meta));
-        draw_right(u8g2, RD_RIGHT_X, rows[r].baseline, meta);
         const int meta_w = u8g2_GetStrWidth(u8g2, meta);
-        const int avail = RD_RIGHT_X - RD_ROWS_LEFT_X - meta_w -
-                          RD_ROWS_META_MARGIN;
+        const int row_w = RD_RIGHT_X - RD_ROWS_LEFT_X;
+        if (meta_w > row_w) {
+            /* A qualifier wider than the whole row ("YYYY/MM/DD HH:MM-HH:MM")
+             * would start left of the margin; clip it at the row's left edge
+             * instead of drawing it off-panel. */
+            draw_clipped(u8g2, RD_ROWS_LEFT_X, rows[r].baseline, meta, row_w);
+        } else {
+            draw_right(u8g2, RD_RIGHT_X, rows[r].baseline, meta);
+        }
+        const int avail = row_w - meta_w - RD_ROWS_META_MARGIN;
         draw_clipped(u8g2, RD_ROWS_LEFT_X, rows[r].baseline, ev->title, avail);
         rendered++;
     }

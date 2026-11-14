@@ -97,9 +97,10 @@ static int test_title_lines(void)
     const int bottom_last = RD_HEAD_META_BASE - META_ASCENT - 3 - 5;
     size_t n = rd_layout_title_lines(RD_TITLE_TOP_ANCHOR, bottom_last,
                                      TITLE_LINE_H, TITLE_ASCENT, 8);
-    /* helvB18 in a 200 px column: 3 lines (baselines 166/137/108). */
-    CHECK(n == 3);
-    CHECK(bottom_last == 166);
+    /* helvB18 in a 204 px column: 4 lines (baselines 176/147/118/89), the
+     * first line's ink top at 65 >= the 56 anchor. */
+    CHECK(n == 4);
+    CHECK(bottom_last == 176);
     CHECK(bottom_last - (int)(n - 1) * TITLE_LINE_H - TITLE_ASCENT
           >= RD_TITLE_TOP_ANCHOR);
 
@@ -143,6 +144,22 @@ static int test_geometry_constants(void)
     CHECK(RD_HEAD_META_BASE > RD_TITLE_TOP_ANCHOR);
     CHECK(RD_FORECAST_BASE > RD_HEAD_META_BASE);
     CHECK(RD_FORECAST_BASE < RD_PIC_Y + RD_PIC_TILE);
+
+    /* The header rule is a real border in the 4 px gap between the status
+     * band's ink bottom (baseline + 10x20 descent 4 = 44) and the tile top. */
+    CHECK(RD_HEADER_RULE_Y > RD_STATUS_BASE + 4);
+    CHECK(RD_HEADER_RULE_Y < RD_PIC_Y);
+
+    /* The compact-section rule only appears with rows, and must clear both
+     * the tile bottom (228) and the first row's glyph top (246 - 12 = 234). */
+    CHECK(RD_ROW_RULE_Y > RD_PIC_Y + RD_PIC_TILE);
+    CHECK(RD_ROW_RULE_Y < RD_ROWS_FIRST_BASE - ROW_ASCENT);
+
+    /* Every band starts on the same margin and ends on the same right edge. */
+    CHECK(RD_LEFT_X == RD_ROWS_LEFT_X);
+    CHECK(RD_LEFT_X == RD_PIC_X);
+    CHECK(RD_RIGHT_X <= RD_PANEL_W - RD_LEFT_X);
+    CHECK(RD_HEADER_SLOT_GAP > 0);
 
     printf("test_geometry_constants: %d checks passed\n", passed);
     return 0;
