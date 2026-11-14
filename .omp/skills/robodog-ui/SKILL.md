@@ -139,6 +139,10 @@ bench submit flash_capture --family home --head <sha> --build <build-id> \
 bench wait <job-id>; bench evidence <job-id>
 ```
 
+The bench is the default verification path — read `skill://benchd` for the
+job kinds, ref transport, exit codes and the quarantine protocol before
+submitting anything.
+
 Acceptance for a UI change: the landscape PNG is **upright** — every u8g2
 firmware draws through `U8G2_R1`, so `capture.py` always applies the same
 fixed rotation (never an OCR guess); the primary element is the largest thing
