@@ -138,19 +138,29 @@ static void hold_sleep(uint32_t ms)
         vTaskDelay(pdMS_TO_TICKS(ms));
         return;
     }
-    if (!s_sleep_logged) {
-        s_sleep_logged = true;
-        ESP_LOGW(TAG, "no USB host: light-sleeping the hold "
-                      "(the USB console is unavailable until reset)");
-    }
     const int64_t t0 = esp_timer_get_time();
     esp_sleep_enable_timer_wakeup((uint64_t)ms * 1000u);
-    esp_light_sleep_start();
-    const int64_t slept_ms = (esp_timer_get_time() - t0) / 1000;
-    if (slept_ms < (int64_t)ms / 2) {
-        /* A stray wake source cut the sleep short: finish the chunk awake
-         * instead of spinning on repeated short sleeps. */
-        vTaskDelay(pdMS_TO_TICKS(ms - (uint32_t)slept_ms));
+    const esp_err_t err = esp_light_sleep_start();
+    const uint32_t slept_ms =
+        (uint32_t)((esp_timer_get_time() - t0) / 1000);
+    if (!s_sleep_logged) {
+        s_sleep_logged = true;
+        if (err == ESP_OK) {
+            ESP_LOGW(TAG, "no USB host: light-sleeping the hold (%u ms); the "
+                          "USB console is unavailable until reset",
+                     (unsigned)ms);
+        } else {
+            /* ESP_ERR_SLEEP_REJECT: some PM lock forbids light sleep (e.g. a
+             * peripheral that did not stop).  Say so once instead of silently
+             * burning the battery at full speed. */
+            ESP_LOGW(TAG, "light sleep refused (%s): a PM lock forbids it, the "
+                          "hold stays awake", esp_err_to_name(err));
+        }
+    }
+    if (slept_ms < ms) {
+        /* Rejected, or a stray wake source cut it short: finish the chunk
+         * awake so the tick cadence and the WDT feed stay predictable. */
+        vTaskDelay(pdMS_TO_TICKS(ms - slept_ms));
     }
 }
 
