@@ -15,6 +15,9 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 
+#include "driver/gpio.h"
+#include "driver/usb_serial_jtag.h"
+
 #include "config.h"
 #include "lma_proto.h"
 #include "rd_clip.h"
@@ -72,12 +75,20 @@ uint64_t rd_render_now_ms(void)
 }
 
 /* ---- Shot capture ------------------------------------------------------ */
-/* Always-on: stream the exact u8g2 full-frame buffer (== the bytes pushed to
- * the ST7305) over the USB-JTAG console so a host tool can reconstruct the
- * image the firmware drew, pixel for pixel.  Protocol: RD_SHOT_BEGIN
- * /<bufsize,w,h>/lowercase-hex/RD_SHOT_END. */
+/* Always-on verification channel: stream the exact u8g2 full-frame buffer
+ * (== the bytes pushed to the ST7305) over the USB-JTAG console so a host
+ * tool can reconstruct the image the firmware drew, pixel for pixel.
+ * Protocol: RD_SHOT_BEGIN /<bufsize,w,h>/lowercase-hex/RD_SHOT_END.
+ *
+ * Gated on a host actually being attached (the USB-Serial/JTAG SOF monitor
+ * tracks it): the dump is 15,200 B of binary -> ~31 KB of console traffic per
+ * render, and on battery there is no reader for it.  capture.py holds the port
+ * open, so verification still gets every frame. */
 static void rd_shot_dump(u8g2_t *u8g2)
 {
+    if (!usb_serial_jtag_is_connected()) {
+        return;
+    }
     const uint8_t *buf = u8g2_GetBufferPtr(u8g2);
     const size_t n = u8g2_GetBufferSize(u8g2);
     printf("\nRD_SHOT_BEGIN bufsize=%u w=%d h=%d\n", (unsigned)n,
@@ -406,7 +417,9 @@ void rd_render_screen(rd_state_t state, const rd_config_t *cfg,
 
     u8g2_SendBuffer(u8g2);
     rd_shot_dump(u8g2);
-    ESP_LOGI(TAG, "rendered %u of %u cached (%u visible, %u row slots; row "
+    /* DEBUG: this runs once a minute while holding the frame; an INFO line
+     * here would put ~50 chars/minute on the UART for no diagnostic value. */
+    ESP_LOGD(TAG, "rendered %u of %u cached (%u visible, %u row slots; row "
                   "asc=%d desc=%d) headline uid=%s tile=%s weather now=%s "
                   "headline=%s",
              (unsigned)rendered, (unsigned)cache->count, (unsigned)nvis,
@@ -414,6 +427,24 @@ void rd_render_screen(rd_state_t state, const rd_config_t *cfg,
              cache->pic_data_len ? "yes" : "no",
              current->present ? "yes" : "no",
              vis[0]->weather.present ? "yes" : "no");
+}
+
+void rd_render_sleep_prepare(void)
+{
+    /* The panel is powered from the board rail, so light sleep does not cut
+     * it; what could still disturb it is the sleep state machine driving the
+     * SPI pins.  Disable sleep-select for every pin the panel sees and park
+     * them at their idle level (CS deasserted, RST high), so a sleep/wake
+     * cycle never looks like a bus transaction or a reset. */
+    static const gpio_num_t pins[] = {
+        RD_MOSI_PIN, RD_SCK_PIN, RD_DC_PIN, RD_CS_PIN, RD_RST_PIN,
+    };
+    for (size_t i = 0; i < sizeof(pins) / sizeof(pins[0]); i++) {
+        gpio_sleep_sel_dis(pins[i]);
+    }
+    gpio_set_level(RD_CS_PIN, 1);
+    gpio_set_level(RD_RST_PIN, 1);
+    ESP_LOGI(TAG, "display pins held across light sleep");
 }
 
 bool rd_render_init(void)
@@ -426,7 +457,10 @@ bool rd_render_init(void)
     cfg.reset_io = RD_RST_PIN;
     cfg.rotation = U8G2_R1;             /* 400x300 logical landscape */
     cfg.tile_buf_height = U8G2_ST7305_TILE_BUF_FULL;
-    cfg.prefer_psram = true;
+    /* Internal SRAM, not PSRAM: the 15,200-byte frame buffer is small, and an
+     * idle PSRAM is powered (and self-refreshed through light sleep) for no
+     * benefit here.  This is also why sdkconfig.defaults turns SPIRAM off. */
+    cfg.prefer_psram = false;
     esp_err_t err = u8g2_st7305_init(&s_display, &cfg);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "display init failed: %s", esp_err_to_name(err));

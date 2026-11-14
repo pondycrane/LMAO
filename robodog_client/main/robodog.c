@@ -6,8 +6,11 @@
  *   2. framed-TCP calendar sync with the LMAO server (:4247, rd_net)
  *   3. merge the delta into the NVS-persisted cache (rd_store)
  *   4. render the 400x300 landscape panel (rd_render)
- *   5. hold the frame (no light-sleep: the reflective ST7305 loses its image
- *      in sleep), redrawing every 30 s so the clock stays live, then repeat
+ *   5. hold the frame (explicit light sleep between minute ticks when no USB
+ *      host is attached: the reflective ST7305 keeps its image because the
+ *      panel is fed from the board rail and the SPI pins keep their level),
+ *      redrawing the header only when the displayed minute changes, then
+ *      repeat
  *
  * The pieces this file used to contain now live in their own units:
  *   rd_store.c   NVS config + cache (schema-versioned)
@@ -26,7 +29,13 @@
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_netif.h"
+#include "esp_pm.h"
+#include "esp_sleep.h"
+#include "esp_system.h"
 #include "esp_task_wdt.h"
+#include "esp_timer.h"
+
+#include "driver/usb_serial_jtag.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "nvs.h"
@@ -83,22 +92,104 @@ static void nvs_boot(void)
     ESP_ERROR_CHECK(ret);
 }
 
+/* Minute the panel currently shows (0 = no clock drawn yet).  The hold loop
+ * redraws only when this changes: the RLCD holds its frame, so re-rendering
+ * on every 30 s tick burned CPU + SPI for a clock that moves once a minute. */
+static uint32_t s_shown_minute;
+static bool s_sleep_logged;
+
+/* DFS only: the CPU drops to RD_PM_MIN_FREQ_MHZ when idle.  Automatic light
+ * sleep is deliberately NOT enabled here (CONFIG_FREERTOS_USE_TICKLESS_IDLE is
+ * off).  USB-Serial/JTAG cannot survive light sleep, and automatic sleep is
+ * entered from the idle task -- during the boot dump, before the host has
+ * enumerated, the IDF SOF monitor's grace period expires and the first idle
+ * window slept mid-frame, which tore down the CDC interface for good (the
+ * bench then saw a truncated frame and a board that no longer enumerates).
+ * The hold loop therefore sleeps EXPLICITLY, and only when no host is
+ * attached; see hold_sleep(). */
+static void power_init(void)
+{
+    esp_pm_config_t pm = {
+        .max_freq_mhz = RD_PM_MAX_FREQ_MHZ,
+        .min_freq_mhz = RD_PM_MIN_FREQ_MHZ,
+        .light_sleep_enable = false,
+    };
+    esp_err_t err = esp_pm_configure(&pm);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "esp_pm_configure(%u/%u MHz) failed: %s (no DFS)",
+                 (unsigned)RD_PM_MAX_FREQ_MHZ, (unsigned)RD_PM_MIN_FREQ_MHZ,
+                 esp_err_to_name(err));
+        return;
+    }
+    ESP_LOGI(TAG, "pm: %u/%u MHz DFS; light sleep is explicit (hold loop)",
+             (unsigned)RD_PM_MAX_FREQ_MHZ, (unsigned)RD_PM_MIN_FREQ_MHZ);
+}
+
+/* Park the SoC for `ms`.  A USB host on the console keeps it awake: the
+ * USB-Serial/JTAG peripheral cannot work across light sleep, so sleeping while
+ * a host is attached would silently kill the capture/console path (and the
+ * board would stop enumerating until a power cycle).  With no host -- the
+ * battery case -- an explicit light sleep costs ~1 mA instead of the ~40-80 mA
+ * of an active wait.  The RTC timer wakes it; esp_timer is compensated across
+ * light sleep, so the display clock stays correct. */
+static void hold_sleep(uint32_t ms)
+{
+    if (usb_serial_jtag_is_connected()) {
+        vTaskDelay(pdMS_TO_TICKS(ms));
+        return;
+    }
+    const int64_t t0 = esp_timer_get_time();
+    esp_sleep_enable_timer_wakeup((uint64_t)ms * 1000u);
+    const esp_err_t err = esp_light_sleep_start();
+    const uint32_t slept_ms =
+        (uint32_t)((esp_timer_get_time() - t0) / 1000);
+    if (!s_sleep_logged) {
+        s_sleep_logged = true;
+        if (err == ESP_OK) {
+            ESP_LOGW(TAG, "no USB host: light-sleeping the hold (%u ms); the "
+                          "USB console is unavailable until reset",
+                     (unsigned)ms);
+        } else {
+            /* ESP_ERR_SLEEP_REJECT: some PM lock forbids light sleep (e.g. a
+             * peripheral that did not stop).  Say so once instead of silently
+             * burning the battery at full speed. */
+            ESP_LOGW(TAG, "light sleep refused (%s): a PM lock forbids it, the "
+                          "hold stays awake", esp_err_to_name(err));
+        }
+    }
+    if (slept_ms < ms) {
+        /* Rejected, or a stray wake source cut it short: finish the chunk
+         * awake so the tick cadence and the WDT feed stay predictable. */
+        vTaskDelay(pdMS_TO_TICKS(ms - slept_ms));
+    }
+}
+
 static void hold_until_next_sync(rd_state_t state)
 {
     rd_net_disconnect();
-    /* Reflective ST7305 loses its image when the ESP32 light-sleeps the
-     * display power ("screen went blank"), so stay active and let the RLCD
-     * keep the last rendered frame visible.  Redraw every 30 s so the header
-     * clock stays live (it advances via esp_timer). */
-    ESP_LOGI(TAG, "holding screen %u s (no light-sleep)",
+    ESP_LOGI(TAG, "holding screen %u s (minute ticks)",
              (unsigned)RD_SYNC_INTERVAL_SECONDS);
+    const uint64_t now = rd_render_now_ms();
+    s_shown_minute = (uint32_t)(now / 60000u);   /* 0 before the first sync */
+
     uint32_t left_ms = (uint32_t)RD_SYNC_INTERVAL_SECONDS * 1000u;
     while (left_ms > 0) {
-        uint32_t chunk = left_ms > 30000u ? 30000u : left_ms;
-        vTaskDelay(pdMS_TO_TICKS(chunk));
+        uint32_t chunk = left_ms > RD_CLOCK_TICK_MS ? RD_CLOCK_TICK_MS
+                                                    : left_ms;
+        /* The chunk stays below RD_WDT_TIMEOUT_S so a wedged task is still
+         * caught while the board sleeps between ticks. */
+        hold_sleep(chunk);
         left_ms -= chunk;
         esp_task_wdt_reset();
-        rd_render_screen(state, &s_cfg, &s_current_wx, &s_cache);
+        const uint64_t tick_now = rd_render_now_ms();
+        if (tick_now == 0) {
+            continue;   /* no clock yet: the header is blank either way */
+        }
+        const uint32_t minute = (uint32_t)(tick_now / 60000u);
+        if (minute != s_shown_minute) {
+            s_shown_minute = minute;
+            rd_render_screen(state, &s_cfg, &s_current_wx, &s_cache);
+        }
     }
 }
 
@@ -181,6 +272,11 @@ void robodog_app_main(void)
     if (!rd_render_init()) {
         ESP_LOGE(TAG, "display init failed");
     }
+    /* Keep the panel's SPI pins at their idle level across light sleep: the
+     * ST7305 keeps its GRAM (and therefore the picture) as long as it is
+     * powered and not reset, which is what makes the hold cheap. */
+    rd_render_sleep_prepare();
+    power_init();
 
     /* Task watchdog: the main task is the only long-running one, and a wedged
      * network call must reboot the board rather than freeze the panel. */
@@ -198,9 +294,9 @@ void robodog_app_main(void)
     esp_task_wdt_add(NULL);
 
     rd_render_screen(RD_STATE_OFFLINE, &s_cfg, &s_current_wx, &s_cache);
-    ESP_LOGI(TAG, "booted: %u cached events, watermark=%llu, server=%s "
-                  "(main stack high-water %u B free)",
-             (unsigned)s_cache.count,
+    ESP_LOGI(TAG, "booted: reset=%d, %u cached events, watermark=%llu, "
+                  "server=%s (main stack high-water %u B free)",
+             (int)esp_reset_reason(), (unsigned)s_cache.count,
              (unsigned long long)s_cache.watermark_ms, s_cfg.server_host,
              (unsigned)uxTaskGetStackHighWaterMark(NULL));
 

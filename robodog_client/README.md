@@ -12,8 +12,26 @@ reads the family calendar over the server's **framed-TCP calendar service
 └──────────────────────────────────────────────────────────┘
             ▲ plain lwIP socket, one request/reply per sync
 ESP32-S3 ───┘   → decode → merge δ into NVS cache → render ST7305
-                → hold the frame ~30 min (redraw the clock every 30 s) → repeat
+                → hold the frame ~60 min (light sleep; redraw on a new minute) → repeat
 ```
+
+**Power.** The hold is not an active spin. `esp_pm_configure()` runs DFS at
+80/40 MHz, and the hold loop calls `esp_light_sleep_start()` **explicitly** for
+each tick when no USB host is attached, so the board sits at ~1 mA instead of
+~40-80 mA between syncs (WiFi is stopped for the hold; the panel is fed from the
+board rail and keeps its GRAM, so the picture stays up). Automatic light sleep
+(`CONFIG_FREERTOS_USE_TICKLESS_IDLE`) is deliberately **off**: USB-Serial/JTAG
+cannot survive light sleep, and the idle task would sleep during the boot dump
+before the host had enumerated, which tore down the CDC interface permanently
+(the board then stops enumerating until a power cycle — observed on the bench).
+Sleeping explicitly only after `usb_serial_jtag_is_connected()` says "no host"
+keeps the capture/console path safe. The RD_SHOT dump is likewise gated on a
+host being attached: on battery it is skipped, which removes ~31 KB of console
+traffic per render. **Caveat:** on battery the USB console is unavailable while
+the panel sleeps (the USB-JTAG peripheral is off across light sleep); attach USB
+before powering/resetting the board to capture. See `main/config.h`
+(`RD_SYNC_INTERVAL_SECONDS`, `RD_CLOCK_TICK_MS`, `RD_PM_MAX_FREQ_MHZ`) and
+`build.sh`'s stale-`sdkconfig` guard.
 
 **Transport decision.** An earlier build spoke a hand-rolled HTTP/2 + gRPC
 client for `lma.LMAO/GetCalendar` on `:50051`.  That bought nothing for one
@@ -133,11 +151,11 @@ in RAM only, so a boot render or an offline cycle never shows a stale reading.
 Refresh cadence differs between the two slots, and it is worth knowing why:
 
 - **`now`** is bundle-level, so it is NOT gated by the delta — it arrives on
-  every reply, i.e. every `RD_SYNC_INTERVAL_SECONDS` (30 min).  The server's
-  15-min cache means a sync usually triggers a fresh Open-Meteo fetch, so the
-  on-screen reading is ~0-45 min old (typically 15-45).  The 30-second redraw
-  inside the hold loop only advances the header clock; the temperature does not
-  change until the next sync.
+  every reply, i.e. every `RD_SYNC_INTERVAL_SECONDS` (60 min).  The server's
+  15-min cache means a sync triggers a fresh Open-Meteo fetch, so the on-screen
+  reading is ~0-75 min old (typically 15-75).  The minute-tick redraw inside the
+  hold loop only advances the header clock; the temperature does not change
+  until the next sync.
 - **The headline event's forecast** IS gated by the delta: a row only re-ships
   when its `updated_ms` moves.  The hourly in-cluster calendar-sync CronJob
   (`k8s/calendar-sync.yaml`) touches every in-window row on each run, so an

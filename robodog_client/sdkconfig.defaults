@@ -1,5 +1,5 @@
 # RoboDog native display — ESP32-S3 minimal configuration.
-# Board: Waveshare ESP32-S3 (16MB flash / octal 8MB PSRAM) + RLCD-4.2 (ST7305).
+# Board: Waveshare ESP32-S3 (16MB flash) + RLCD-4.2 (ST7305).
 #
 CONFIG_IDF_TARGET="esp32s3"
 CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
@@ -9,17 +9,30 @@ CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 
-# Octal PSRAM so the u8g2 full-frame tile buffer lives outside internal SRAM.
-CONFIG_SPIRAM=y
-CONFIG_SPIRAM_MODE_OCT=y
-CONFIG_SPIRAM_SPEED_80M=y
+# No PSRAM: the 15,200-byte u8g2 frame buffer lives in internal SRAM (the
+# Waveshare low-power demo does the same).  An idle PSRAM is powered and
+# self-refreshed through light sleep for no benefit here, and skipping its
+# init also shortens boot.  rd_render_init() asks for internal RAM.
+# CONFIG_SPIRAM is not set
 
-# WiFi station into a sleepy 1 kHz tick loop.
+# 1 kHz tick so the USB-Serial/JTAG SOF monitor can resolve connect/disconnect
+# within a few ms (USJ_DISCONNECT_CONFIRM_PERIOD_MS = 3 ticks).
 CONFIG_FREERTOS_HZ=1000
 CONFIG_ESP_WIFI_ENABLED=y
 
-# Allow light-sleep frequency scaling between calendar syncs.
+# Power management: DFS (80/40 MHz) only.  Automatic light sleep is
+# deliberately OFF: USB-Serial/JTAG cannot survive light sleep, and the idle
+# task would sleep during the boot dump before the host has enumerated, which
+# killed the CDC interface for good.  The hold loop calls
+# esp_light_sleep_start() explicitly, and only when no USB host is attached.
 CONFIG_PM_ENABLE=y
+# 80 MHz is ample for a protobuf decode + u8g2 render + 24 MHz SPI push.
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_80=y
+
+# Belt for the explicit sleep: if a future change re-enables automatic light
+# sleep, hold a NO_LIGHT_SLEEP lock while a USB host is attached (SOF monitor),
+# so the bench/capture console still survives.
+CONFIG_USJ_NO_AUTO_LS_ON_CONNECTION=y
 
 # The main task runs the whole display loop: WiFi connect, the framed-TCP
 # calendar sync (lwIP getaddrinfo + esp_log formatting), the u8g2 render and

@@ -665,10 +665,12 @@ FLASH_PORT=/dev/ttyACM0 bash robodog_client/flash.sh
 bash robodog_client/build.sh && bash flash.sh --port /dev/ttyACM0
 ```
 
-WiFi/server credentials and `RD_SYNC_INTERVAL_SECONDS` are NVS-backed
+WiFi/server credentials and the per-board `kid_name` are NVS-backed
 (namespace `robodog`, keys `wifi_ssid`/`wifi_pass`/`server_host`/`kid_name`);
 `kid_name` is set per board at flash time with `flash_firmware --kid-name <kid>`
-(non-empty = kid panel; empty/absent = family). Writing NVS WIPES the whole
+(non-empty = kid panel; empty/absent = family).  Everything else (sync cadence
+`RD_SYNC_INTERVAL_SECONDS`, the PM band, timeouts) is a build-time macro in
+`main/config.h`.  Writing NVS WIPES the whole
 24 KB partition (event cache + any NVS keys), so the flash image always carries
 the credentials too — they are provisioned from
 `--wifi-ssid`/`--wifi-pass`, `LMAO_WIFI_SSID`/`LMAO_WIFI_PASS`, or a local
@@ -1002,7 +1004,7 @@ when running in Docker):
 | `LMAO_TCP_PORT` | `4246` | Server's RNS `TCPServerInterface` listen port (hostNetwork) — the deterministic home-network transport for wifi/human clients (multicast AutoInterface is unreliable through the home AP) |
 | `LMAO_CAL_TCP_PORT` | `4247` | Framed-TCP family-calendar read service (the RoboDog native client's transport, no RNS): 4-byte-length-prefixed `CalendarRequest`→`CalendarBundle`. Assembled by the same `lma_core.calendar_bundle.build_bundle` as the gRPC and LXMF paths, so it serves the headline `pic_data` too. |
 | `LMAO_WEATHER_LAT` / `LMAO_WEATHER_LON` | unset (weather off) | Household coordinates for the Open-Meteo forecast the server rides on every calendar reply (`CalendarBundle.current` + `CalEvent.weather`). Unset ⇒ no `Weather` message, i.e. byte-identical pre-weather replies. |
-| `LMAO_WEATHER_TTL_S` | `900` | Server-side forecast cache TTL. The panel syncs every 30 min, so a sync almost always triggers a refresh. |
+| `LMAO_WEATHER_TTL_S` | `900` | Server-side forecast cache TTL. The panel syncs hourly (`RD_SYNC_INTERVAL_SECONDS`), so a sync always triggers a refresh. |
 | `LMAO_WEATHER_URL` | Open-Meteo | Override for a self-hosted forecast endpoint. |
 | `LMAO_GCAL_TOKEN` | `~/.hermes/google_token.json` | **Deploy-time only** (never in a pod env): the Google authorized-user token `install_all` copies into the `lmao-gcal-token` Secret for the calendar-sync CronJob. |
 | `LMAO_TCP_BIND` | `0.0.0.0` | Server's RNS TCP bind IP |
