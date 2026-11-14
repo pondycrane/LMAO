@@ -189,7 +189,9 @@ PANEL_VISION_PROMPT = (
     "('updated', 'stale', 'no wifi', 'no reply'), a sample count, or plot axis "
     "labels. Do not translate and do not infer a word that is absent; if the "
     "screen has no text, say BLANK.\n"
-    "Reply as a short list.")
+    "Output ONLY lines that are physically drawn on the panel: one per line, "
+    "no commentary, no summary, no 'none'/'absent'/'not shown' lines, and "
+    "never repeat this instruction's example words back.")
 
 HERMES_VISION_PROMPT = (
     "This is the monochrome RLCD screen of an AI voice-assistant device "
