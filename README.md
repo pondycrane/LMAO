@@ -745,13 +745,16 @@ Outputs in `robodog_client/shots/` (gitignored):
   lives in one block, `robodog_client/main/rd_layout.h`; the title-line and row
   counts are computed from measured font metrics, not assumed.
 - **Weather**: with the server's `LMAO_WEATHER_LAT/LON` set, the status band
-  reads `now 44°F clear` on the LEFT (baseline 40), and the headline event's
-  forecast prints bare in the text column directly under its range meta
-  (`27°F snow`, baseline 222 — no prefix word: the 204 px column holds only
-  20 chars at 10x20, and a label would clip the conditions themselves). Both
-  come from the reply's `Weather` slots; when the server sends none, neither
-  line is drawn (never a placeholder `0°F`). Forecasts are Fahrenheit,
-  rounded.
+  shows `now` + a 16×16 weather icon + `37°F` on the LEFT (baseline 40), and the
+  headline event's forecast is the same icon + bare reading (`43°F`,
+  right-aligned at baseline 222 under its range meta). Both come from the
+  reply's `Weather` slots; when the server sends none, neither line is drawn
+  (never a placeholder `0°F`). Forecasts are Fahrenheit, rounded.
+  The condition is a **shape, not a word**: `rd_weather_icon_kind` maps the WMO
+  code to one of seven icons (sun, sun+cloud, cloud, fog, rain, snow, thunder)
+  drawn from u8g2 primitives in `rd_render.c`; intensity (drizzle vs rain) is
+  carried by the temperature, not a second glyph. An unmapped code draws no
+  icon and still prints the reading.
 - Row meta reads `HH:MM-HH:MM` (start–end range) right-aligned on every row;
   the headline title is a word-wrapped `helvB18` block (bottom-anchored, with
   an ellipsis on the final shown line when it overflows). Non-today events

@@ -519,12 +519,22 @@ margin, one right edge, one rule under the header:
 
 | Band | Content |
 |---|---|
-| header (baseline 22) | calendar identity LEFT (`kid name`, or `family` in family mode; clipped to the space the clock leaves) + live clock `YYYY-MM-DD HH:MM` RIGHT |
+| header (baseline 22) | calendar identity LEFT (`Family`, or the kid name on a kid panel, first letter capitalised for display; clipped to the space the clock leaves) + live clock `YYYY-MM-DD HH:MM` RIGHT |
 | rule | 1 px border at y=48 under the header band |
-| status (baseline 40) | `now 44°F clear` LEFT; state word + shape RIGHT — filled square `updated`, hollow square `stale`, crossed box `no wifi` |
-| headline | 176×176 served tile at x=4/y=52; right column (204 px): wrapped `helvB18` title block (4 lines), `HH:MM-HH:MM` range meta at baseline 200, the event's forecast at 222. **No served tile ⇒ the art slot is dropped and the headline takes the full width** (never a bare placeholder frame) |
+| status (baseline 40) | `now` + **weather icon** (16×16) + `37°F` LEFT; state word + shape RIGHT — filled square `updated`, hollow square `stale`, crossed box `no wifi` |
+| headline | 176×176 served tile at x=4/y=52; right column (204 px): wrapped `helvB18` title block (4 lines), `HH:MM-HH:MM` range meta at baseline 200, the event's forecast as icon + `43°F` right-aligned at 222. **No served tile ⇒ the art slot is dropped and the headline takes the full width** (never a bare placeholder frame) |
 | rule | 1 px border at y=231 above the compact section, drawn only when compact rows exist |
 | compact rows | `9x15B` rows from baseline 246, stride 16, up to 4 rows (headline + 4 = 5 events) |
+
+The condition is a **shape, not a word**: seven 16×16 icons drawn from u8g2
+primitives (`wx_sun`, `wx_sun_cloud`, `wx_cloud`, `wx_fog`, `wx_rain`,
+`wx_snow`, `wx_thunder` in `rd_render.c`), mapped from the WMO code by
+`rd_weather_icon_kind` (sun 0/1, sun+cloud 2, cloud 3, fog 45/48, rain
+51-67+80-82, snow 71-77+85/86, thunder 95/96/99). Intensity (drizzle vs rain,
+light vs heavy snow) is not drawn — at 16 px it is a few pixels of noise; the
+temperature carries the magnitude. An unmapped code draws **no icon** and still
+prints the reading. The temperature text stays on both lines: a reading is the
+primary element, only the long label is gone.
 
 State is carried by word **and** shape on every frame (a synced panel says
 `updated`, it does not stay silent), and empty/offline frames show waiting
@@ -610,12 +620,14 @@ python3 capture.py --port /dev/ttyACM0 --reset --n 4 --timeout 100 --describe
 - `waiting for wifi` / `waiting for calendar` body text ⇒ no cached events and
   no fresh reply; `nothing upcoming` ⇒ the reply was fine but every event has
   already ended.
-- Weather (`now 44°F clear`) → the reply carried `CalendarBundle.current`; the
-  headline event's forecast (`27°F snow`) sits bare in the info column directly
-  under its range meta, so it reads as part of the event block (title, when,
-  weather then) rather than a second current reading. **Neither line is drawn**
-  when the server sent no `Weather` (weather disabled / no sync yet), so a
-  blank band is "no forecast", not "0°F".
+- Weather: the status band's LEFT shows `now` + an icon + `37°F` → the reply
+  carried `CalendarBundle.current`; the headline event's forecast is the same
+  icon + bare reading (`43°F`), right-aligned in the info column under its range
+  meta, so it reads as part of the event block (title, when, weather then)
+  rather than a second current reading. **Neither line is drawn** when the
+  server sent no `Weather` (weather disabled / no sync yet), so a blank band is
+  "no forecast", not "0°F".  The icon is a shape, so verify it by eye on the
+  PNG; the readback only transcribes the temperature.
 - Row set == Postgres/`CalendarBundle` output → data path live; a stale/different
   set means the cache is being shown (compare timestamps against the header).
 - At most 5 event rows are drawn: the headline (176×176 picture, LEFT;

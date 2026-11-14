@@ -354,14 +354,16 @@ The transcription looks like:
 ```
 
 **Reading the device state from the screenshot (README):**
-- Header LEFT is the calendar identity (`family`, or the kid name on a kid
-  panel); the RIGHT slot shows `YYYY-MM-DD HH:MM` → WiFi up + calendar
-  (framed-TCP :4247) sync healthy.
+- Header LEFT is the calendar identity (`Family`, or the kid name on a kid
+  panel, first letter capitalised for display); the RIGHT slot shows
+  `YYYY-MM-DD HH:MM` → WiFi up + calendar (framed-TCP :4247) sync healthy.
 - Status band RIGHT is always word + shape: filled square `updated`, hollow
   square `stale` (connected but the last sync failed, showing the NVS cache),
   crossed box `no wifi` (not connected: pre-sync boot frame, or WiFi/AP
   unreachable). Body text `waiting for wifi` / `waiting for calendar` /
-  `nothing upcoming` says what is being waited for.
+  `nothing upcoming` says what is being waited for.  LEFT is `now` + a 16×16
+  weather icon + the temperature — the icon is a shape, so read it off the PNG
+  (the vision readback only transcribes the temperature).
 
 **Assertions (on the LAST frame captured):**
 
