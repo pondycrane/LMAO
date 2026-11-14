@@ -1,6 +1,7 @@
 /*
  * rd_weather_selftest.c -- host-only self-test for rd_weather.c (the panel's
- * weather formatting).  NOT part of the ESP-IDF build (defines main()).
+ * weather presentation: WMO -> icon kind, Celsius -> Fahrenheit, the bare
+ * temperature string).  NOT part of the ESP-IDF build (defines main()).
  *
  * Build & run (from robodog_client/):
  *   cc -std=c11 -Wall -Wextra main/rd_weather_selftest.c main/rd_weather.c \
@@ -20,39 +21,45 @@
         passed++;                                                          \
     } while (0)
 
-/* Every label the panel can print must fit the row budget: the widest footer
- * is "at HH:MM " (9) + "<t>°F " (6 with a minus sign) + label = 28 chars, and
- * the panel's text band is 388 px at the 10x20 font's 10 px/char -- 38 chars.
- * Labels must stay <= 13 so that budget holds.  Asserted here so a new WMO
- * branch cannot silently widen the layout. */
-static int test_labels(void)
+/* Every WMO code the server can forward must land on a DRAWN icon (only a
+ * genuinely unmapped code may fall through to RD_WX_UNKNOWN), and each group
+ * must land on the shape a person expects: intensity collapses to one shape
+ * per group, so a new branch cannot silently turn rain into snow. */
+static int test_icon_kinds(void)
 {
     int passed = 0;
-    const unsigned codes[] = {
-        0, 1, 2, 3, 45, 48, 51, 53, 55, 56, 57, 61, 63, 65, 66, 67,
-        71, 73, 75, 77, 80, 81, 82, 85, 86, 95, 96, 99,
-    };
-    for (size_t i = 0; i < sizeof(codes) / sizeof(codes[0]); i++) {
-        const char *l = rd_wmo_label(codes[i]);
-        CHECK(l != NULL);
-        CHECK(l[0] != '\0');
-        CHECK(strlen(l) <= 13);
+
+    CHECK(rd_weather_icon_kind(0) == RD_WX_SUN);
+    CHECK(rd_weather_icon_kind(1) == RD_WX_SUN);
+    CHECK(rd_weather_icon_kind(2) == RD_WX_SUN_CLOUD);
+    CHECK(rd_weather_icon_kind(3) == RD_WX_CLOUD);
+    CHECK(rd_weather_icon_kind(45) == RD_WX_FOG);
+    CHECK(rd_weather_icon_kind(48) == RD_WX_FOG);
+
+    /* Drizzle (51/53/55), freezing drizzle (56/57), rain (61/63/65),
+     * freezing rain (66/67) and showers (80/81/82) are all RAIN shapes. */
+    const unsigned rain[] = {51, 53, 55, 56, 57, 61, 63, 65, 66, 67, 80, 81, 82};
+    for (size_t i = 0; i < sizeof(rain) / sizeof(rain[0]); i++) {
+        CHECK(rd_weather_icon_kind(rain[i]) == RD_WX_RAIN);
     }
 
-    /* Representative branches (intensity collapses to one word each). */
-    CHECK(strcmp(rd_wmo_label(0), "clear") == 0);
-    CHECK(strcmp(rd_wmo_label(2), "partly cloudy") == 0);
-    CHECK(strcmp(rd_wmo_label(53), "drizzle") == 0);
-    CHECK(strcmp(rd_wmo_label(65), "rain") == 0);
-    CHECK(strcmp(rd_wmo_label(73), "snow") == 0);
-    CHECK(strcmp(rd_wmo_label(82), "showers") == 0);
-    CHECK(strcmp(rd_wmo_label(99), "thunder hail") == 0);
+    /* Snow (71/73/75/77) and snow showers (85/86). */
+    const unsigned snow[] = {71, 73, 75, 77, 85, 86};
+    for (size_t i = 0; i < sizeof(snow) / sizeof(snow[0]); i++) {
+        CHECK(rd_weather_icon_kind(snow[i]) == RD_WX_SNOW);
+    }
 
-    /* Unknown / out-of-range codes degrade visibly, never to NULL. */
-    CHECK(strcmp(rd_wmo_label(4), "wx?") == 0);
-    CHECK(strcmp(rd_wmo_label(1000), "wx?") == 0);
+    CHECK(rd_weather_icon_kind(95) == RD_WX_THUNDER);
+    CHECK(rd_weather_icon_kind(96) == RD_WX_THUNDER);
+    CHECK(rd_weather_icon_kind(99) == RD_WX_THUNDER);
 
-    printf("test_labels: %d checks passed\n", passed);
+    /* Unmapped / out-of-range codes degrade to NO icon (the temperature still
+     * prints), never to a wrong shape and never to a crash. */
+    CHECK(rd_weather_icon_kind(4) == RD_WX_UNKNOWN);
+    CHECK(rd_weather_icon_kind(1000) == RD_WX_UNKNOWN);
+    CHECK(rd_weather_icon_kind(0xFFFFFFFFu) == RD_WX_UNKNOWN);
+
+    printf("test_icon_kinds: %d checks passed\n", passed);
     return 0;
 }
 
@@ -88,37 +95,35 @@ static int test_format(void)
     lma_weather_t wx = {0};
 
     /* Absent forecast: nothing written, nothing drawn. */
-    CHECK(rd_format_weather(&wx, out, sizeof out) == 0);
+    CHECK(rd_format_temp(&wx, out, sizeof out) == 0);
     CHECK(out[0] == '\0');
 
     wx.present = true;
     wx.temp_c10 = 67;
     wx.code = 0;
-    CHECK(rd_format_weather(&wx, out, sizeof out) == 1);
-    CHECK(strcmp(out, "44\xB0" "F clear") == 0);
+    CHECK(rd_format_temp(&wx, out, sizeof out) == 1);
+    CHECK(strcmp(out, "44\xB0" "F") == 0);
 
+    /* Negative readings keep their sign; the widest reading the wire can
+     * carry is 5 glyphs at 10 px = 50 px. */
     wx.temp_c10 = -25;
-    wx.code = 71;
-    CHECK(rd_format_weather(&wx, out, sizeof out) == 1);
-    CHECK(strcmp(out, "27\xB0" "F snow") == 0);
+    CHECK(rd_format_temp(&wx, out, sizeof out) == 1);
+    CHECK(strcmp(out, "27\xB0" "F") == 0);
 
-    /* The widest label at the coldest reading still fits a row buffer. */
     wx.temp_c10 = -500;
-    wx.code = 85;
-    CHECK(rd_format_weather(&wx, out, sizeof out) == 1);
-    CHECK(strcmp(out, "-58\xB0" "F snow showers") == 0);
-    CHECK(strlen(out) <= 20);
+    CHECK(rd_format_temp(&wx, out, sizeof out) == 1);
+    CHECK(strcmp(out, "-58\xB0" "F") == 0);
+    CHECK(strlen(out) == 5);
 
     /* A too-small buffer yields NO output (never a truncated fragment). */
     wx.temp_c10 = 67;
-    wx.code = 0;
-    CHECK(rd_format_weather(&wx, out, 5) == 0);
+    CHECK(rd_format_temp(&wx, out, 4) == 0);
     CHECK(out[0] == '\0');
 
     /* NULL-safety contract. */
-    CHECK(rd_format_weather(NULL, out, sizeof out) == 0);
-    CHECK(rd_format_weather(&wx, NULL, sizeof out) == 0);
-    CHECK(rd_format_weather(&wx, out, 0) == 0);
+    CHECK(rd_format_temp(NULL, out, sizeof out) == 0);
+    CHECK(rd_format_temp(&wx, NULL, sizeof out) == 0);
+    CHECK(rd_format_temp(&wx, out, 0) == 0);
 
     printf("test_format: %d checks passed\n", passed);
     return 0;
@@ -127,7 +132,7 @@ static int test_format(void)
 int main(void)
 {
     printf("rd_weather self-test\n");
-    if (test_labels() != 0 ||
+    if (test_icon_kinds() != 0 ||
         test_celsius_to_fahrenheit() != 0 ||
         test_format() != 0) {
         printf("RESULT: FAIL\n");

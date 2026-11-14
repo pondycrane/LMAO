@@ -195,16 +195,36 @@ static void draw_wrapped_final(u8g2_t *u8g2, int x, int base,
 }
 
 /* ---- Render ------------------------------------------------------------ */
+/* Display-only capitalisation of the identity label's first letter (ASCII
+ * lowercase only; a UTF-8 lead byte is left alone).  The stored and SENT kid
+ * name is never touched: it is the server's `participant` filter key and must
+ * match the calendar rows byte for byte, so this runs at draw time only. */
+static void label_title_case(const char *in, char *out, size_t cap)
+{
+    size_t i = 0;
+    for (; in[i] != '\0' && i + 1 < cap; i++) {
+        char c = in[i];
+        if (i == 0 && c >= 'a' && c <= 'z') {
+            c = (char)(c - 'a' + 'A');
+        }
+        out[i] = c;
+    }
+    out[i] = '\0';
+}
+
 /* ONE header row, two fixed slots: the calendar identity LEFT (kid name on a
- * kid panel, "family" in family mode) and the live clock RIGHT.  The label is
- * clipped to the space the clock's measured width leaves, so a long kid name
- * can never run into the date, and the clock never reflows the label.  Before
- * the first sync there is no clock to show: the label still draws, so the
- * panel identifies itself while the sync is in flight. */
+ * kid panel, "family" in family mode; first letter capitalised for display)
+ * and the live clock RIGHT.  The label is clipped to the space the clock's
+ * measured width leaves, so a long kid name can never run into the date, and
+ * the clock never reflows the label.  Before the first sync there is no clock
+ * to show: the label still draws, so the panel identifies itself while the
+ * sync is in flight. */
 static void draw_header(u8g2_t *u8g2, const rd_config_t *cfg, uint64_t now)
 {
     set_font(u8g2, RD_FONT_UI);
-    const char *label = (cfg->kid_name[0] != '\0') ? cfg->kid_name : "family";
+    const char *raw = (cfg->kid_name[0] != '\0') ? cfg->kid_name : "family";
+    char label[sizeof(cfg->kid_name) + 1];
+    label_title_case(raw, label, sizeof(label));
 
     char clock[32];
     clock[0] = '\0';
@@ -250,11 +270,115 @@ static void draw_state_shape(u8g2_t *u8g2, int x, int baseline_y,
     }
 }
 
-/* Status band: current conditions LEFT ("now 44°F clear"), the state word +
- * shape RIGHT.  Nothing weather-side is drawn when the server sent no
- * Weather -- never a placeholder reading.  The state slot is ALWAYS drawn:
- * a synced panel says "updated" with a filled square instead of showing
- * nothing, so the frame states its own freshness. */
+/* ---- Weather icons ------------------------------------------------------ */
+/* The panel has no icon font and cannot carry a raster per condition, so each
+ * shape is a few u8g2 primitives inside ONE 16x16 box whose origin is its
+ * top-left.  Everything stays inside [x, x+15] x [y, y+15]; ink is the current
+ * draw colour (0 after the white-paper fill).  Shapes are deliberately coarse:
+ * at this size a drizzle-vs-rain distinction is a few pixels of noise, so the
+ * vocabulary is seven groups (see rd_wx_icon_t) and the intensity is carried by
+ * the temperature. */
+static void wx_flake(u8g2_t *u8g2, int cx, int cy)
+{
+    u8g2_DrawPixel(u8g2, cx, cy - 1);
+    u8g2_DrawPixel(u8g2, cx - 1, cy);
+    u8g2_DrawPixel(u8g2, cx, cy);
+    u8g2_DrawPixel(u8g2, cx + 1, cy);
+    u8g2_DrawPixel(u8g2, cx, cy + 1);
+}
+
+static void wx_sun(u8g2_t *u8g2, int x, int y)
+{
+    u8g2_DrawDisc(u8g2, x + 8, y + 8, 3, U8G2_DRAW_ALL);
+    u8g2_DrawLine(u8g2, x + 8, y + 0, x + 8, y + 2);     /* up */
+    u8g2_DrawLine(u8g2, x + 8, y + 13, x + 8, y + 15);   /* down */
+    u8g2_DrawLine(u8g2, x + 0, y + 8, x + 2, y + 8);     /* left */
+    u8g2_DrawLine(u8g2, x + 13, y + 8, x + 15, y + 8);   /* right */
+    u8g2_DrawLine(u8g2, x + 2, y + 2, x + 3, y + 3);
+    u8g2_DrawLine(u8g2, x + 12, y + 2, x + 13, y + 3);
+    u8g2_DrawLine(u8g2, x + 2, y + 13, x + 3, y + 12);
+    u8g2_DrawLine(u8g2, x + 12, y + 13, x + 13, y + 12);
+}
+
+/* Three overlapping discs on a flat base: the standard cloud silhouette.  Every
+ * disc stays inside the box (top y+4, bottom y+12), so nothing pokes below the
+ * base as a stray pixel. */
+static void wx_cloud(u8g2_t *u8g2, int x, int y)
+{
+    u8g2_DrawBox(u8g2, x + 2, y + 10, 12, 3);
+    u8g2_DrawDisc(u8g2, x + 5, y + 9, 3, U8G2_DRAW_ALL);
+    u8g2_DrawDisc(u8g2, x + 9, y + 8, 4, U8G2_DRAW_ALL);
+    u8g2_DrawDisc(u8g2, x + 12, y + 9, 3, U8G2_DRAW_ALL);
+}
+
+static void wx_sun_cloud(u8g2_t *u8g2, int x, int y)
+{
+    /* Sun peeking over the cloud's upper left (two rays; at 16 px more read
+     * as noise).  Cloud below-right: one dome on a flat base. */
+    u8g2_DrawDisc(u8g2, x + 4, y + 3, 2, U8G2_DRAW_ALL);
+    u8g2_DrawPixel(u8g2, x + 4, y + 0);
+    u8g2_DrawPixel(u8g2, x + 0, y + 3);
+    u8g2_DrawBox(u8g2, x + 6, y + 11, 9, 3);
+    u8g2_DrawDisc(u8g2, x + 9, y + 10, 3, U8G2_DRAW_ALL);
+}
+
+static void wx_fog(u8g2_t *u8g2, int x, int y)
+{
+    u8g2_DrawLine(u8g2, x + 2, y + 4, x + 13, y + 4);
+    u8g2_DrawLine(u8g2, x + 4, y + 8, x + 15, y + 8);
+    u8g2_DrawLine(u8g2, x + 1, y + 12, x + 11, y + 12);
+}
+
+static void wx_rain(u8g2_t *u8g2, int x, int y)
+{
+    wx_cloud(u8g2, x, y - 2);      /* cloud base at y+8..y+10 */
+    u8g2_DrawLine(u8g2, x + 5, y + 12, x + 5, y + 14);
+    u8g2_DrawLine(u8g2, x + 9, y + 12, x + 9, y + 14);
+    u8g2_DrawLine(u8g2, x + 12, y + 12, x + 12, y + 14);
+}
+
+static void wx_snow(u8g2_t *u8g2, int x, int y)
+{
+    wx_cloud(u8g2, x, y - 2);
+    wx_flake(u8g2, x + 3, y + 13);
+    wx_flake(u8g2, x + 8, y + 13);
+    wx_flake(u8g2, x + 13, y + 13);
+}
+
+static void wx_thunder(u8g2_t *u8g2, int x, int y)
+{
+    wx_cloud(u8g2, x, y - 2);
+    /* Bolt out of the cloud's base: slant down-left, crossbar, tail. */
+    u8g2_DrawLine(u8g2, x + 11, y + 10, x + 8, y + 13);
+    u8g2_DrawLine(u8g2, x + 8, y + 13, x + 11, y + 13);
+    u8g2_DrawLine(u8g2, x + 11, y + 13, x + 8, y + 15);
+}
+
+/* Draw the condition icon for `kind` in the box at (x, y).  RD_WX_UNKNOWN
+ * draws NOTHING: the temperature still prints, so an unmapped code degrades to
+ * a reading instead of a wrong picture. */
+static void draw_wx_icon(u8g2_t *u8g2, int x, int y, rd_wx_icon_t kind)
+{
+    switch (kind) {
+    case RD_WX_SUN:       wx_sun(u8g2, x, y); break;
+    case RD_WX_SUN_CLOUD: wx_sun_cloud(u8g2, x, y); break;
+    case RD_WX_CLOUD:     wx_cloud(u8g2, x, y); break;
+    case RD_WX_FOG:       wx_fog(u8g2, x, y); break;
+    case RD_WX_RAIN:      wx_rain(u8g2, x, y); break;
+    case RD_WX_SNOW:      wx_snow(u8g2, x, y); break;
+    case RD_WX_THUNDER:   wx_thunder(u8g2, x, y); break;
+    case RD_WX_UNKNOWN:
+    default:              break;
+    }
+}
+
+/* Status band: current conditions LEFT ("now" + icon + "37°F"), the state word
+ * + shape RIGHT.  Nothing weather-side is drawn when the server sent no
+ * Weather -- never a placeholder reading.  The state slot is ALWAYS drawn: a
+ * synced panel says "updated" with a filled square instead of showing nothing,
+ * so the frame states its own freshness.  "now" is the ONE word that separates
+ * this reading from the headline event's forecast, which is the same
+ * icon+reading pair drawn inside the event block. */
 static void draw_status(u8g2_t *u8g2, rd_state_t state,
                         const lma_weather_t *current)
 {
@@ -265,12 +389,16 @@ static void draw_status(u8g2_t *u8g2, rd_state_t state,
                         RD_STATUS_SHAPE_GAP - RD_STATUS_SHAPE_SZ;
     draw_state_shape(u8g2, shape_x, RD_STATUS_BASE, state);
 
-    char wx[24];
-    if (current->present && rd_format_weather(current, wx, sizeof(wx))) {
-        char band[32];
-        snprintf(band, sizeof(band), "now %s", wx);
-        draw_clipped(u8g2, RD_LEFT_X, RD_STATUS_BASE, band,
-                     shape_x - RD_LEFT_X - RD_HEADER_SLOT_GAP);
+    char temp[8];
+    if (current->present && rd_format_temp(current, temp, sizeof(temp))) {
+        int x = RD_LEFT_X;
+        u8g2_DrawStr(u8g2, x, RD_STATUS_BASE, "now");
+        x += u8g2_GetStrWidth(u8g2, "now") + RD_WX_ICON_GAP;
+        draw_wx_icon(u8g2, x, RD_STATUS_BASE - RD_WX_ICON_DY,
+                     rd_weather_icon_kind(current->code));
+        x += RD_WX_ICON_SZ + RD_WX_ICON_GAP;
+        draw_clipped(u8g2, x, RD_STATUS_BASE, temp,
+                     shape_x - RD_HEADER_SLOT_GAP - x);
     }
 }
 
@@ -377,16 +505,22 @@ static void draw_headline(u8g2_t *u8g2, const rd_cache_t *cache,
     draw_headline_title(u8g2, hl->title, txt_x, txt_w);
 
     /* Forecast at the headline event's start (absent -> nothing drawn).  It is
-     * drawn BARE, directly under the range meta: the column holds 20 chars at
-     * 10x20, and the longest WMO label ("43°F partly cloudy" = 17) leaves no
-     * room for a prefix word -- a prefixed line clipped the label itself
-     * ("forecast 43°F ove...").  Proximity is what marks it as part of the
-     * event block (title, when, weather then); the ONLY labelled current
-     * reading is the status band's "now". */
+     * the same icon + bare reading as the status band, right-aligned under the
+     * range meta so the event block reads title / when / weather top to
+     * bottom: the ONLY labelled current reading is the status band's "now". */
     set_font(u8g2, RD_FONT_UI);
-    char wx[24];
-    if (hl->weather.present && rd_format_weather(&hl->weather, wx, sizeof(wx))) {
-        draw_clipped(u8g2, txt_x, RD_FORECAST_BASE, wx, txt_w);
+    char temp[8];
+    if (hl->weather.present && rd_format_temp(&hl->weather, temp, sizeof(temp))) {
+        const int tw = u8g2_GetStrWidth(u8g2, temp);
+        const int ix = RD_RIGHT_X - tw - RD_WX_ICON_GAP - RD_WX_ICON_SZ;
+        if (ix >= txt_x) {
+            draw_wx_icon(u8g2, ix, RD_FORECAST_BASE - RD_WX_ICON_DY,
+                         rd_weather_icon_kind(hl->weather.code));
+            u8g2_DrawStr(u8g2, RD_RIGHT_X - tw, RD_FORECAST_BASE, temp);
+        } else {
+            /* Column too narrow for icon + reading: the reading still wins. */
+            draw_clipped(u8g2, txt_x, RD_FORECAST_BASE, temp, txt_w);
+        }
     }
 }
 

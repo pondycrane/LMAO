@@ -60,6 +60,20 @@ extern "C" {
 #define RD_STATUS_SHAPE_GAP 4
 #define RD_STATUS_SHAPE_DY  9
 
+/* ---- Weather icon slot ---- */
+/* The condition is a SHAPE, not a word: a 16x16 icon drawn from u8g2
+ * primitives, vertically centred on the 10x20 ink box, so the icon and its
+ * temperature read as one unit.  The temperature still prints -- a reading is
+ * the primary element -- only the long WMO label is gone (it was the widest
+ * thing on the panel and clipped its own content).
+ *
+ * DY 13 puts the box at baseline-13 .. baseline+2: 1 px below the header's
+ * descender ink (baseline+4 on the line above) and 4 px above the tile bottom
+ * on the forecast line. */
+#define RD_WX_ICON_SZ  16
+#define RD_WX_ICON_GAP 4
+#define RD_WX_ICON_DY  13   /* icon top = baseline - RD_WX_ICON_DY */
+
 /* ---- Headline block ---- */
 /* The served 1-bit tile is RD_PIC_TILE px square and is drawn at its native
  * size (never scaled: u8g2 has no bitmap scaler).  It starts below the header

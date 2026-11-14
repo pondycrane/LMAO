@@ -161,6 +161,20 @@ static int test_geometry_constants(void)
     CHECK(RD_RIGHT_X <= RD_PANEL_W - RD_LEFT_X);
     CHECK(RD_HEADER_SLOT_GAP > 0);
 
+    /* The weather icon box is a real 16x16 slot on BOTH lines that carry it,
+     * and it clears the ink of the line above on each:
+     *   status  -> below the header's descender ink (header baseline + 4)
+     *   forecast-> below the range meta's ink (meta baseline + 4) and inside
+     *              the picture band (tile bottom). */
+    CHECK(RD_WX_ICON_SZ > 0);
+    CHECK(RD_WX_ICON_GAP > 0);
+    CHECK(RD_STATUS_BASE - RD_WX_ICON_DY > RD_HEADER_BASE + 4);
+    CHECK(RD_STATUS_BASE - RD_WX_ICON_DY + RD_WX_ICON_SZ < RD_HEADER_RULE_Y);
+    CHECK(RD_FORECAST_BASE - RD_WX_ICON_DY > RD_HEAD_META_BASE + 4);
+    CHECK(RD_FORECAST_BASE - RD_WX_ICON_DY + RD_WX_ICON_SZ
+          <= RD_PIC_Y + RD_PIC_TILE);
+    CHECK(RD_LEFT_X + RD_WX_ICON_SZ <= RD_RIGHT_X);
+
     printf("test_geometry_constants: %d checks passed\n", passed);
     return 0;
 }
