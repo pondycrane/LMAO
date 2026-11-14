@@ -24,6 +24,7 @@ idf_component_register(
         esp_pm
         esp_timer
         esp_system   # esp_task_wdt.h lives here in IDF 5.x (no separate component)
+        esp_driver_usb_serial_jtag  # usb_serial_jtag_is_connected() gates RD_SHOT
         lwip
         u8g2_st7305
 )

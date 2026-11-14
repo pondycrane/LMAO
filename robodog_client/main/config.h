@@ -65,8 +65,24 @@
 #endif
 
 /* ---- Timing / robustness ---- */
-#define RD_SYNC_INTERVAL_SECONDS   1800u /* active hold between syncs */
+/* Hold between syncs.  The in-cluster calendar-sync CronJob touches every
+ * in-window row hourly (k8s/calendar-sync.yaml), so a 30-min cadence fetched
+ * the same reply twice: one sync per hour is the natural floor for both the
+ * event delta and the `now` weather slot.  Every sync pays a full WiFi
+ * start/assoc/DHCP/DNS, which is the most expensive thing the board does. */
+#define RD_SYNC_INTERVAL_SECONDS   3600u
 #define RD_WIFI_CONNECT_TIMEOUT_S  15u
+/* Hold-loop tick.  The reflective ST7305 keeps its image (the panel is fed
+ * from the board rail, not an ESP32 GPIO) and light sleep retains the GPIO
+ * state, so the loop sleeps between ticks instead of spinning at 160 MHz.
+ * The header clock only moves once a minute, so a tick that lands on an
+ * unchanged minute does no render at all. */
+#define RD_CLOCK_TICK_MS           30000u
+/* CPU frequency band for esp_pm_configure().  80 MHz is ample for a
+ * protobuf decode + a u8g2 render + a 24 MHz SPI push; 160 MHz only added
+ * heat.  40 MHz (XTAL) is the DFS floor. */
+#define RD_PM_MAX_FREQ_MHZ         80u
+#define RD_PM_MIN_FREQ_MHZ         40u
 /* Separate budgets: connect (non-blocking + select) and the WHOLE reply read
  * (SO_RCVTIMEO per recv plus a total deadline).  One shared value let a
  * slow-drip server stall a full sync cycle. */

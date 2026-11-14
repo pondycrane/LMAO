@@ -27,6 +27,12 @@ typedef enum {
 /* Initialise the ST7305 + u8g2 full-frame buffer. */
 bool rd_render_init(void);
 
+/* Pin the display's SPI pins to their idle level and keep them there across
+ * light sleep (gpio_sleep_sel_dis), so the ST7305 is never reset or clocked
+ * by the sleep state machine and its GRAM -- the picture -- survives the
+ * hold.  Call once after rd_render_init(). */
+void rd_render_sleep_prepare(void);
+
 /* Set the display clock base from the server's watermark (epoch ms). */
 void rd_render_set_clock(uint64_t utc_ms);
 
@@ -34,9 +40,10 @@ void rd_render_set_clock(uint64_t utc_ms);
 uint64_t rd_render_now_ms(void);
 
 /* Draw the whole panel for `state` from `cache`, push it to the panel and
- * stream the exact frame as RD_SHOT.  `cfg` supplies the kid name (kid panels
- * print it LEFT of the clock) and `current` the conditions from the last
- * reply (RAM only; never persisted, so a boot render shows none). */
+ * (when a USB host is attached) stream the exact frame as RD_SHOT.  `cfg`
+ * supplies the kid name (kid panels print it LEFT of the clock) and
+ * `current` the conditions from the last reply (RAM only; never persisted,
+ * so a boot render shows none). */
 void rd_render_screen(rd_state_t state, const rd_config_t *cfg,
                       const lma_weather_t *current, const rd_cache_t *cache);
 
