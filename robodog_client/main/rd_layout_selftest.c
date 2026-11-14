@@ -145,15 +145,16 @@ static int test_geometry_constants(void)
     CHECK(RD_FORECAST_BASE > RD_HEAD_META_BASE);
     CHECK(RD_FORECAST_BASE < RD_PIC_Y + RD_PIC_TILE);
 
-    /* The header rule is a real border in the 4 px gap between the status
-     * band's ink bottom (baseline + 10x20 descent 4 = 44) and the tile top. */
-    CHECK(RD_HEADER_RULE_Y > RD_STATUS_BASE + 4);
-    CHECK(RD_HEADER_RULE_Y < RD_PIC_Y);
+    /* Bands are grouped by proximity, not by rules: the content band's top
+     * clears the status band's ink bottom (baseline + 10x20 descent 4 = 44)
+     * and leaves room above the tile. */
+    CHECK(RD_CONTENT_TOP > RD_STATUS_BASE + 4);
+    CHECK(RD_CONTENT_TOP < RD_PIC_Y);
 
-    /* The compact-section rule only appears with rows, and must clear both
-     * the tile bottom (228) and the first row's glyph top (246 - 12 = 234). */
-    CHECK(RD_ROW_RULE_Y > RD_PIC_Y + RD_PIC_TILE);
-    CHECK(RD_ROW_RULE_Y < RD_ROWS_FIRST_BASE - ROW_ASCENT);
+    /* The compact list is grouped by proximity: its first glyph top must sit
+     * clearly below the tile bottom, with a gap wider than the 1 px inter-row
+     * gap (the face change does the rest). */
+    CHECK(RD_ROWS_FIRST_BASE - ROW_ASCENT > RD_PIC_Y + RD_PIC_TILE + 3);
 
     /* Every band starts on the same margin and ends on the same right edge. */
     CHECK(RD_LEFT_X == RD_ROWS_LEFT_X);
@@ -169,7 +170,7 @@ static int test_geometry_constants(void)
     CHECK(RD_WX_ICON_SZ > 0);
     CHECK(RD_WX_ICON_GAP > 0);
     CHECK(RD_STATUS_BASE - RD_WX_ICON_DY > RD_HEADER_BASE + 4);
-    CHECK(RD_STATUS_BASE - RD_WX_ICON_DY + RD_WX_ICON_SZ < RD_HEADER_RULE_Y);
+    CHECK(RD_STATUS_BASE - RD_WX_ICON_DY + RD_WX_ICON_SZ < RD_CONTENT_TOP);
     CHECK(RD_FORECAST_BASE - RD_WX_ICON_DY > RD_HEAD_META_BASE + 4);
     CHECK(RD_FORECAST_BASE - RD_WX_ICON_DY + RD_WX_ICON_SZ
           <= RD_PIC_Y + RD_PIC_TILE);

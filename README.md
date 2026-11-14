@@ -740,8 +740,10 @@ Outputs in `robodog_client/shots/` (gitignored):
   column to its right (wrapped `helvB18` title, `HH:MM-HH:MM` range meta,
   `forecast`), and the compact rows below. **No served tile ⇒ the art slot is
   dropped and the headline takes the full width** (never a bare placeholder
-  frame). One 4 px outer margin, a 1 px rule under the header (y=48), and a
-  1 px rule above the compact section (y=231, only when rows exist). Geometry
+  frame). One 4 px outer margin and **no rules**: the header+status band, the
+  headline and the compact list are grouped by proximity and by the face
+  change — an edge-to-edge line would be the heaviest mark on the panel after
+  the tile and chop it into strips. Geometry
   lives in one block, `robodog_client/main/rd_layout.h`; the title-line and row
   counts are computed from measured font metrics, not assumed.
 - **Weather**: with the server's `LMAO_WEATHER_LAT/LON` set, the status band

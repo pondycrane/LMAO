@@ -45,11 +45,12 @@ extern "C" {
  * fit (a long kid name must not run into the date). */
 #define RD_HEADER_SLOT_GAP 8
 
-/* The header rule is a real 1 px border between the meta band and the content
- * (the skill's "rules are real borders").  It sits at 48: 4 px below the
- * status ink bottom (44) and 4 px above the headline tile (52), so the band
- * reads as one section instead of two floating lines. */
-#define RD_HEADER_RULE_Y 48
+/* The content band starts here: 4 px below the status ink bottom (44) and
+ * 4 px above the headline tile (52).  There is NO rule under the header --
+ * the gap groups the band, and a full-width line at 400 px would be the
+ * heaviest mark on the panel after the tile.  This constant is the band's
+ * top edge, used to centre the waiting words. */
+#define RD_CONTENT_TOP 48
 
 /* ---- Status band state channel ---- */
 /* State is word + shape (never a word alone, never a shape alone): a filled
@@ -76,9 +77,9 @@ extern "C" {
 
 /* ---- Headline block ---- */
 /* The served 1-bit tile is RD_PIC_TILE px square and is drawn at its native
- * size (never scaled: u8g2 has no bitmap scaler).  It starts below the header
- * rule and leaves the right column for the headline text.  When the server
- * serves no tile the renderer drops the art slot entirely and gives the
+ * size (never scaled: u8g2 has no bitmap scaler).  It starts below the
+ * status band and leaves the right column for the headline text.  When the
+ * server serves no tile the renderer drops the art slot entirely and gives the
  * headline the FULL width (no bare placeholder frame -- an empty frame reads
  * as a broken panel). */
 #define RD_PIC_X    4
@@ -94,18 +95,17 @@ extern "C" {
  * is COMPUTED (rd_layout_title_lines), never assumed.  All three stay inside
  * the picture's vertical band (52..228): meta ink 184..204, forecast ink
  * 206..226. */
-#define RD_TITLE_TOP_ANCHOR (RD_PIC_Y + 4)   /* 56: below the header rule */
+#define RD_TITLE_TOP_ANCHOR (RD_PIC_Y + 4)   /* 56: below the status band */
 #define RD_HEAD_META_BASE  200
 #define RD_FORECAST_BASE   222
 
 /* ---- Compact event rows (below the picture) ---- */
 /* Rows use the 9x15B face (claw-parity density: 15 px line height) and are
  * laid out from RD_ROWS_FIRST_BASE down to RD_ROWS_BOTTOM_LIMIT; how many fit
- * is computed from the measured line height (rd_layout_rows).  The section
- * rule above the rows is drawn ONLY when there are compact rows to show (a
- * rule for an absent section is noise): it sits 3 px below the tile bottom
- * (228) and 3 px above the first row's glyph top (234). */
-#define RD_ROW_RULE_Y        231
+ * is computed from the measured line height (rd_layout_rows).  The list is
+ * grouped by PROXIMITY, not by a rule: the gap above the first row (6 px) is
+ * six times the 1 px inter-row gap, and the face drops from helvB18 to 9x15B,
+ * which is what says "these are the other events". */
 #define RD_ROWS_FIRST_BASE  (RD_PIC_Y + RD_PIC_TILE + 18)    /* 246 */
 #define RD_ROWS_BOTTOM_LIMIT (RD_PANEL_H - 2)                /* 298 */
 #define RD_ROWS_LEFT_X      RD_LEFT_X

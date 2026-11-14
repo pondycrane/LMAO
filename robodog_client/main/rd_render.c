@@ -541,19 +541,19 @@ void rd_render_screen(rd_state_t state, const rd_config_t *cfg,
     const uint64_t now = rd_render_now_ms();
     draw_header(u8g2, cfg, now);
     draw_status(u8g2, state, current);
-    /* The header rule is the one real border separating the meta band from
-     * the content; it is drawn on every frame (the band always exists). */
-    u8g2_DrawHLine(u8g2, RD_LEFT_X, RD_HEADER_RULE_Y, RD_RIGHT_X - RD_LEFT_X);
+    /* No rule between the meta band and the content: the 12 px gap under the
+     * status line groups the header+status band, and an edge-to-edge line
+     * would chop the panel into strips. */
 
     if (cache->count == 0) {
         /* Waiting words, not a bare blank: the state word + shape in the
          * status band already says WHY, so the body says WHAT is being waited
-         * for.  Centred in the content band (below the header rule). */
+         * for.  Centred in the content band. */
         const char *msg = (state == RD_STATE_OFFLINE)
                               ? "waiting for wifi"
                               : "waiting for calendar";
         set_font(u8g2, RD_FONT_UI);
-        draw_centered(u8g2, RD_HEADER_RULE_Y + (H - RD_HEADER_RULE_Y) / 2 + 7,
+        draw_centered(u8g2, RD_CONTENT_TOP + (H - RD_CONTENT_TOP) / 2 + 7,
                       msg);
         u8g2_SendBuffer(u8g2);
         rd_shot_dump(u8g2);
@@ -583,7 +583,7 @@ void rd_render_screen(rd_state_t state, const rd_config_t *cfg,
     }
     if (nvis == 0) {
         set_font(u8g2, RD_FONT_UI);
-        draw_centered(u8g2, RD_HEADER_RULE_Y + (H - RD_HEADER_RULE_Y) / 2 + 7,
+        draw_centered(u8g2, RD_CONTENT_TOP + (H - RD_CONTENT_TOP) / 2 + 7,
                       "nothing upcoming");
         u8g2_SendBuffer(u8g2);
         rd_shot_dump(u8g2);
@@ -605,12 +605,6 @@ void rd_render_screen(rd_state_t state, const rd_config_t *cfg,
                                         RD_MAX_EVENT_ROWS - 1);
 
     size_t rendered = 1;   /* the headline */
-    if (nrows > 0 && nvis > 1) {
-        /* The compact-section rule appears ONLY when there is a compact
-         * section (a rule for an absent band is noise). */
-        u8g2_DrawHLine(u8g2, RD_LEFT_X, RD_ROW_RULE_Y,
-                       RD_RIGHT_X - RD_LEFT_X);
-    }
     for (size_t v = 1, r = 0; v < nvis && r < nrows; v++, r++) {
         const lma_cal_event_t *ev = vis[v];
         char meta[32];

@@ -515,16 +515,16 @@ calendar events.
 
 **Layout (400×300 landscape canvas).** Geometry lives in ONE block
 (`main/rd_layout.h`) and is drawn at those positions only. One 4 px outer
-margin, one right edge, one rule under the header:
+margin, one right edge, **no rules**: bands are grouped by proximity and by the
+face change (a full-width line would be the heaviest mark on the panel after
+the tile and chops it into strips):
 
 | Band | Content |
 |---|---|
 | header (baseline 22) | calendar identity LEFT (`Family`, or the kid name on a kid panel, first letter capitalised for display; clipped to the space the clock leaves) + live clock `YYYY-MM-DD HH:MM` RIGHT |
-| rule | 1 px border at y=48 under the header band |
 | status (baseline 40) | `now` + **weather icon** (16×16) + `37°F` LEFT; state word + shape RIGHT — filled square `updated`, hollow square `stale`, crossed box `no wifi` |
-| headline | 176×176 served tile at x=4/y=52; right column (204 px): wrapped `helvB18` title block (4 lines), `HH:MM-HH:MM` range meta at baseline 200, the event's forecast as icon + `43°F` right-aligned at 222. **No served tile ⇒ the art slot is dropped and the headline takes the full width** (never a bare placeholder frame) |
-| rule | 1 px border at y=231 above the compact section, drawn only when compact rows exist |
-| compact rows | `9x15B` rows from baseline 246, stride 16, up to 4 rows (headline + 4 = 5 events) |
+| headline (top 52) | 176×176 served tile at x=4/y=52; right column (204 px): wrapped `helvB18` title block (4 lines), `HH:MM-HH:MM` range meta at baseline 200, the event's forecast as icon + `43°F` right-aligned at 222. **No served tile ⇒ the art slot is dropped and the headline takes the full width** (never a bare placeholder frame) |
+| compact rows | `9x15B` rows from baseline 246, stride 16, up to 4 rows (headline + 4 = 5 events); the 6 px gap above them is six times the inter-row gap |
 
 The condition is a **shape, not a word**: seven 16×16 icons drawn from u8g2
 primitives (`wx_sun`, `wx_sun_cloud`, `wx_cloud`, `wx_fog`, `wx_rain`,
