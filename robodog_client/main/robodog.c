@@ -6,10 +6,11 @@
  *   2. framed-TCP calendar sync with the LMAO server (:4247, rd_net)
  *   3. merge the delta into the NVS-persisted cache (rd_store)
  *   4. render the 400x300 landscape panel (rd_render)
- *   5. hold the frame (light sleep between minute ticks: the reflective
- *      ST7305 keeps its image through light sleep because the panel is fed
- *      from the board rail and the SPI pins keep their level), redrawing the
- *      header only when the displayed minute changes, then repeat
+ *   5. hold the frame (explicit light sleep between minute ticks when no USB
+ *      host is attached: the reflective ST7305 keeps its image because the
+ *      panel is fed from the board rail and the SPI pins keep their level),
+ *      redrawing the header only when the displayed minute changes, then
+ *      repeat
  *
  * The pieces this file used to contain now live in their own units:
  *   rd_store.c   NVS config + cache (schema-versioned)
@@ -29,8 +30,12 @@
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_pm.h"
+#include "esp_sleep.h"
 #include "esp_system.h"
 #include "esp_task_wdt.h"
+#include "esp_timer.h"
+
+#include "driver/usb_serial_jtag.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "nvs.h"
@@ -91,36 +96,68 @@ static void nvs_boot(void)
  * redraws only when this changes: the RLCD holds its frame, so re-rendering
  * on every 30 s tick burned CPU + SPI for a clock that moves once a minute. */
 static uint32_t s_shown_minute;
+static bool s_sleep_logged;
 
-/* Automatic light sleep is what makes the hold cheap: between ticks the CPU
- * is parked (tickless idle) and the board draws ~1 mA instead of ~40-80 mA.
- * WiFi is stopped for the hold and no other PM lock is held, so the only
- * thing that can keep the SoC awake is a USB host on the console -- and the
- * IDF SOF monitor (CONFIG_USJ_NO_AUTO_LS_ON_CONNECTION) deliberately does
- * exactly that, because USB-Serial/JTAG cannot survive light sleep.  On
- * battery no host is present, so the lock is released within a few ms. */
+/* DFS only: the CPU drops to RD_PM_MIN_FREQ_MHZ when idle.  Automatic light
+ * sleep is deliberately NOT enabled here (CONFIG_FREERTOS_USE_TICKLESS_IDLE is
+ * off).  USB-Serial/JTAG cannot survive light sleep, and automatic sleep is
+ * entered from the idle task -- during the boot dump, before the host has
+ * enumerated, the IDF SOF monitor's grace period expires and the first idle
+ * window slept mid-frame, which tore down the CDC interface for good (the
+ * bench then saw a truncated frame and a board that no longer enumerates).
+ * The hold loop therefore sleeps EXPLICITLY, and only when no host is
+ * attached; see hold_sleep(). */
 static void power_init(void)
 {
     esp_pm_config_t pm = {
         .max_freq_mhz = RD_PM_MAX_FREQ_MHZ,
         .min_freq_mhz = RD_PM_MIN_FREQ_MHZ,
-        .light_sleep_enable = true,
+        .light_sleep_enable = false,
     };
     esp_err_t err = esp_pm_configure(&pm);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "esp_pm_configure(%u/%u MHz, light sleep) failed: %s "
-                      "(the hold will stay active)", RD_PM_MAX_FREQ_MHZ,
-                 RD_PM_MIN_FREQ_MHZ, esp_err_to_name(err));
+        ESP_LOGE(TAG, "esp_pm_configure(%u/%u MHz) failed: %s (no DFS)",
+                 (unsigned)RD_PM_MAX_FREQ_MHZ, (unsigned)RD_PM_MIN_FREQ_MHZ,
+                 esp_err_to_name(err));
         return;
     }
-    ESP_LOGI(TAG, "pm: %u/%u MHz, light sleep enabled",
+    ESP_LOGI(TAG, "pm: %u/%u MHz DFS; light sleep is explicit (hold loop)",
              (unsigned)RD_PM_MAX_FREQ_MHZ, (unsigned)RD_PM_MIN_FREQ_MHZ);
+}
+
+/* Park the SoC for `ms`.  A USB host on the console keeps it awake: the
+ * USB-Serial/JTAG peripheral cannot work across light sleep, so sleeping while
+ * a host is attached would silently kill the capture/console path (and the
+ * board would stop enumerating until a power cycle).  With no host -- the
+ * battery case -- an explicit light sleep costs ~1 mA instead of the ~40-80 mA
+ * of an active wait.  The RTC timer wakes it; esp_timer is compensated across
+ * light sleep, so the display clock stays correct. */
+static void hold_sleep(uint32_t ms)
+{
+    if (usb_serial_jtag_is_connected()) {
+        vTaskDelay(pdMS_TO_TICKS(ms));
+        return;
+    }
+    if (!s_sleep_logged) {
+        s_sleep_logged = true;
+        ESP_LOGW(TAG, "no USB host: light-sleeping the hold "
+                      "(the USB console is unavailable until reset)");
+    }
+    const int64_t t0 = esp_timer_get_time();
+    esp_sleep_enable_timer_wakeup((uint64_t)ms * 1000u);
+    esp_light_sleep_start();
+    const int64_t slept_ms = (esp_timer_get_time() - t0) / 1000;
+    if (slept_ms < (int64_t)ms / 2) {
+        /* A stray wake source cut the sleep short: finish the chunk awake
+         * instead of spinning on repeated short sleeps. */
+        vTaskDelay(pdMS_TO_TICKS(ms - (uint32_t)slept_ms));
+    }
 }
 
 static void hold_until_next_sync(rd_state_t state)
 {
     rd_net_disconnect();
-    ESP_LOGI(TAG, "holding screen %u s (light sleep, minute ticks)",
+    ESP_LOGI(TAG, "holding screen %u s (minute ticks)",
              (unsigned)RD_SYNC_INTERVAL_SECONDS);
     const uint64_t now = rd_render_now_ms();
     s_shown_minute = (uint32_t)(now / 60000u);   /* 0 before the first sync */
@@ -129,9 +166,9 @@ static void hold_until_next_sync(rd_state_t state)
     while (left_ms > 0) {
         uint32_t chunk = left_ms > RD_CLOCK_TICK_MS ? RD_CLOCK_TICK_MS
                                                     : left_ms;
-        /* Tickless idle turns this delay into a light sleep.  The chunk stays
-         * below RD_WDT_TIMEOUT_S so a wedged task is still caught. */
-        vTaskDelay(pdMS_TO_TICKS(chunk));
+        /* The chunk stays below RD_WDT_TIMEOUT_S so a wedged task is still
+         * caught while the board sleeps between ticks. */
+        hold_sleep(chunk);
         left_ms -= chunk;
         esp_task_wdt_reset();
         const uint64_t tick_now = rd_render_now_ms();

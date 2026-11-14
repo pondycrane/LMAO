@@ -15,18 +15,23 @@ ESP32-S3 ───┘   → decode → merge δ into NVS cache → render ST7305
                 → hold the frame ~60 min (light sleep; redraw on a new minute) → repeat
 ```
 
-**Power.** The hold is not an active spin: `esp_pm_configure()` enables
-automatic light sleep and tickless idle parks the CPU between ticks, so the
-board sits at ~1 mA instead of ~40-80 mA between syncs (WiFi is stopped for the
-hold; the panel is fed from the board rail and keeps its GRAM, so the picture
-stays up). Two build knobs make this safe: `CONFIG_FREERTOS_USE_TICKLESS_IDLE`
-and `CONFIG_USJ_NO_AUTO_LS_ON_CONNECTION` (USB-Serial/JTAG cannot survive light
-sleep, so a `NO_LIGHT_SLEEP` lock is held *only* while a host is attached — the
-bench/capture rig keeps its console, the board still sleeps on battery). The
-RD_SHOT dump is likewise gated on a host being attached: on battery it is
-skipped, which removes ~31 KB of console traffic per render. See
-`main/config.h` (`RD_SYNC_INTERVAL_SECONDS`, `RD_CLOCK_TICK_MS`,
-`RD_PM_MAX_FREQ_MHZ`) and `build.sh`'s stale-`sdkconfig` guard.
+**Power.** The hold is not an active spin. `esp_pm_configure()` runs DFS at
+80/40 MHz, and the hold loop calls `esp_light_sleep_start()` **explicitly** for
+each tick when no USB host is attached, so the board sits at ~1 mA instead of
+~40-80 mA between syncs (WiFi is stopped for the hold; the panel is fed from the
+board rail and keeps its GRAM, so the picture stays up). Automatic light sleep
+(`CONFIG_FREERTOS_USE_TICKLESS_IDLE`) is deliberately **off**: USB-Serial/JTAG
+cannot survive light sleep, and the idle task would sleep during the boot dump
+before the host had enumerated, which tore down the CDC interface permanently
+(the board then stops enumerating until a power cycle — observed on the bench).
+Sleeping explicitly only after `usb_serial_jtag_is_connected()` says "no host"
+keeps the capture/console path safe. The RD_SHOT dump is likewise gated on a
+host being attached: on battery it is skipped, which removes ~31 KB of console
+traffic per render. **Caveat:** on battery the USB console is unavailable while
+the panel sleeps (the USB-JTAG peripheral is off across light sleep); attach USB
+before powering/resetting the board to capture. See `main/config.h`
+(`RD_SYNC_INTERVAL_SECONDS`, `RD_CLOCK_TICK_MS`, `RD_PM_MAX_FREQ_MHZ`) and
+`build.sh`'s stale-`sdkconfig` guard.
 
 **Transport decision.** An earlier build spoke a hand-rolled HTTP/2 + gRPC
 client for `lma.LMAO/GetCalendar` on `:50051`.  That bought nothing for one

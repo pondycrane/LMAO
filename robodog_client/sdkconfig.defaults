@@ -20,17 +20,18 @@ CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 CONFIG_FREERTOS_HZ=1000
 CONFIG_ESP_WIFI_ENABLED=y
 
-# Power management: automatic light sleep is what makes the hold between
-# calendar syncs cheap.  Tickless idle turns vTaskDelay() into a light sleep;
-# WiFi is stopped for the hold, so no PM lock keeps the SoC awake.
+# Power management: DFS (80/40 MHz) only.  Automatic light sleep is
+# deliberately OFF: USB-Serial/JTAG cannot survive light sleep, and the idle
+# task would sleep during the boot dump before the host has enumerated, which
+# killed the CDC interface for good.  The hold loop calls
+# esp_light_sleep_start() explicitly, and only when no USB host is attached.
 CONFIG_PM_ENABLE=y
-CONFIG_FREERTOS_USE_TICKLESS_IDLE=y
 # 80 MHz is ample for a protobuf decode + u8g2 render + 24 MHz SPI push.
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_80=y
 
-# USB-Serial/JTAG cannot run across light sleep.  This holds a NO_LIGHT_SLEEP
-# lock only while a host is attached (SOF packets), so the bench/capture rig
-# keeps its console and the board still sleeps on battery.
+# Belt for the explicit sleep: if a future change re-enables automatic light
+# sleep, hold a NO_LIGHT_SLEEP lock while a USB host is attached (SOF monitor),
+# so the bench/capture console still survives.
 CONFIG_USJ_NO_AUTO_LS_ON_CONNECTION=y
 
 # The main task runs the whole display loop: WiFi connect, the framed-TCP

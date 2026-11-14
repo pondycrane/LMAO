@@ -37,11 +37,15 @@ if [ -f "$SDK" ]; then
     if [ -n "${STACK:-}" ] && [ "$STACK" -lt 8192 ]; then
         stale+=("CONFIG_ESP_MAIN_TASK_STACK_SIZE=$STACK (< 8192)")
     fi
-    grep -qx 'CONFIG_SPIRAM=y' "$SDK" && stale+=("CONFIG_SPIRAM=y (buffer belongs in internal SRAM)")
-    grep -qx 'CONFIG_FREERTOS_USE_TICKLESS_IDLE=y' "$SDK" \
-        || stale+=("CONFIG_FREERTOS_USE_TICKLESS_IDLE is not set (no light sleep)")
-    grep -qx 'CONFIG_USJ_NO_AUTO_LS_ON_CONNECTION=y' "$SDK" \
-        || stale+=("CONFIG_USJ_NO_AUTO_LS_ON_CONNECTION is not set (console dies in light sleep)")
+    if grep -qx 'CONFIG_SPIRAM=y' "$SDK"; then
+        stale+=("CONFIG_SPIRAM=y (buffer belongs in internal SRAM)")
+    fi
+    if grep -qx 'CONFIG_FREERTOS_USE_TICKLESS_IDLE=y' "$SDK"; then
+        stale+=("CONFIG_FREERTOS_USE_TICKLESS_IDLE=y (automatic sleep kills the USB console)")
+    fi
+    if ! grep -qx 'CONFIG_USJ_NO_AUTO_LS_ON_CONNECTION=y' "$SDK"; then
+        stale+=("CONFIG_USJ_NO_AUTO_LS_ON_CONNECTION is not set (console dies in light sleep)")
+    fi
     if [ ${#stale[@]} -gt 0 ]; then
         echo "error: $SDK is stale (it wins over sdkconfig.defaults):" >&2
         for s in "${stale[@]}"; do echo "       - $s" >&2; done
