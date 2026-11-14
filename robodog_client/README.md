@@ -514,14 +514,22 @@ polarity included).  The header shows the live date once synced; rows are real
 calendar events.
 
 **Layout (400×300 landscape canvas).** Geometry lives in ONE block
-(`main/rd_layout.h`) and is drawn at those positions only:
+(`main/rd_layout.h`) and is drawn at those positions only. One 4 px outer
+margin, one right edge, one rule under the header:
 
 | Band | Content |
 |---|---|
-| header (baseline 24) | kid name LEFT + live clock RIGHT (family: centered clock) |
-| status (baseline 46) | `now 44°F clear` LEFT, `stale`/`no wifi` RIGHT |
-| headline | 176×176 served tile at x=6/y=52; right column (200 px): wrapped `helvB18` title block, `HH:MM-HH:MM` range meta, forecast |
+| header (baseline 22) | calendar identity LEFT (`kid name`, or `family` in family mode; clipped to the space the clock leaves) + live clock `YYYY-MM-DD HH:MM` RIGHT |
+| rule | 1 px border at y=48 under the header band |
+| status (baseline 40) | `now 44°F clear` LEFT; state word + shape RIGHT — filled square `updated`, hollow square `stale`, crossed box `no wifi` |
+| headline | 176×176 served tile at x=4/y=52; right column (204 px): wrapped `helvB18` title block (4 lines), `HH:MM-HH:MM` range meta at baseline 200, `forecast 27°F snow` at 222. **No served tile ⇒ the art slot is dropped and the headline takes the full width** (never a bare placeholder frame) |
+| rule | 1 px border at y=231 above the compact section, drawn only when compact rows exist |
 | compact rows | `9x15B` rows from baseline 246, stride 16, up to 4 rows (headline + 4 = 5 events) |
+
+State is carried by word **and** shape on every frame (a synced panel says
+`updated`, it does not stay silent), and empty/offline frames show waiting
+words (`waiting for wifi` / `waiting for calendar` / `nothing upcoming`)
+instead of a bare blank.
 
 The number of title lines and compact rows is COMPUTED from the measured font
 metrics (`rd_layout_title_lines` / `rd_layout_rows`, host-tested by
@@ -592,17 +600,20 @@ python3 capture.py --port /dev/ttyACM0 --reset --n 4 --timeout 100 --describe
 ```
 
 **Reading the device state from the screenshot:**
-- Header (family): centered `YYYY-MM-DD HH:MM` present → WiFi up + TCP sync
-  healthy.  Header (kid panel): kid name LEFT + `YYYY-MM-DD HH:MM` RIGHT on the
-  same row — same health signals.  (No divider under the header.)
-- Header **BLANK** + `no wifi` hint beside the first row → not connected yet:
-  pre-sync boot frame, or WiFi/AP unreachable.
-- `stale` hint → connected but last sync failed (showing NVS cache).
-- Weather line under the header (`now 44°F clear`) → the reply carried
-  `CalendarBundle.current`; the headline event's forecast (`27°F snow`) sits in
-  the info column below its range meta. **Neither line is drawn** when the
-  server sent no `Weather` (weather disabled / no sync yet), so a blank band is
-  "no forecast", not "0°F".
+- Header always draws its LEFT identity label (`family`, or the kid name on a
+  kid panel) and the live `YYYY-MM-DD HH:MM` clock RIGHT once synced — clock
+  present ⇒ WiFi up + TCP sync healthy.  (Before the first sync the label is
+  drawn alone; there is no clock yet.)
+- Status band RIGHT is the state channel, always drawn as word + shape:
+  filled square `updated` (fresh), hollow square `stale` (last sync failed,
+  showing the NVS cache), crossed box `no wifi` (not connected).
+- `waiting for wifi` / `waiting for calendar` body text ⇒ no cached events and
+  no fresh reply; `nothing upcoming` ⇒ the reply was fine but every event has
+  already ended.
+- Weather (`now 44°F clear`) → the reply carried `CalendarBundle.current`; the
+  headline event's forecast (`forecast 27°F snow`) sits in the info column below
+  its range meta. **Neither line is drawn** when the server sent no `Weather`
+  (weather disabled / no sync yet), so a blank band is "no forecast", not "0°F".
 - Row set == Postgres/`CalendarBundle` output → data path live; a stale/different
   set means the cache is being shown (compare timestamps against the header).
 - At most 5 event rows are drawn: the headline (176×176 picture, LEFT;
@@ -610,8 +621,9 @@ python3 capture.py --port /dev/ttyACM0 --reset --n 4 --timeout 100 --describe
   beside it) plus up to 4 compact `9x15B` rows, each title-clipped left with a
   measured, right-aligned `HH:MM-HH:MM` range meta; a 6th+ visible event is
   dropped by design (`RD_MAX_EVENT_ROWS` in `rd_layout.h`) — a shorter row set
-  is not a data-path error unless the header hints (`stale`/`no wifi`) say
-  otherwise.
+  is not a data-path error unless the state word (`stale`/`no wifi`) says
+  otherwise.  Without a served tile the headline takes the full width, so the
+  panel stays one coherent block instead of text beside an empty box.
 - Non-today events prefix their right-hand meta with a day qualifier so the
   family panel reads unambiguously: `tomorrow` for the next civil day,
   `MM/DD` for a later day in the same civil year, `YYYY/MM/DD` for a later

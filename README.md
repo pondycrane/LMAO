@@ -721,29 +721,35 @@ Outputs in `robodog_client/shots/` (gitignored):
 | `frameN_analysis.txt` | vision-model transcription (`--describe`) |
 
 **Reading the state** (validate feature + device state):
-- Header date/time present → calendar sync healthy; **BLANK** → not connected yet
-  or offline (the "no wifi" hint appears beside the first row).
-- `stale` hint → connected but last sync failed (showing cache); no hint →
-  fresh data.
+- Header: the LEFT slot is the calendar identity (`family`, or the kid name on
+  a kid panel) and the RIGHT slot is the live `YYYY-MM-DD HH:MM` clock — clock
+  present → calendar sync healthy; **absent** → not connected yet or offline
+  (the status word `no wifi` appears on the same frame).
+- The status band's RIGHT slot is the state channel, always word **and** shape:
+  filled square `updated`, hollow square `stale` (connected, last sync failed,
+  showing cache), crossed box `no wifi`.
+- Body waiting words: `waiting for wifi` / `waiting for calendar` (no cached
+  events, no reply) and `nothing upcoming` (reply fine, every event ended).
 - Rows show live served events (or the exact cached set) — compare against
   Postgres/`CalendarBundle` to confirm a data-path change. Note the panel caps
   at 5 event rows by design (headline 176×176 picture + up to 4 compact
   `9x15B` rows; 6th+ dropped), so a shorter set is not a data-path error
-  unless a hint says so.
-  On a kid panel the header shows the kid name LEFT + `YYYY-MM-DD HH:MM`
-  RIGHT (no divider); family keeps the centered clock.
+  unless the state word says so.
 - Layout: the render uses the panel's full **400×300 landscape** canvas — a
-  **176×176** headline tile at its native size on the LEFT, a 200 px text
-  column to its right (wrapped `helvB18` title, then `HH:MM-HH:MM` range meta,
-  then the forecast), and the compact rows below.  Geometry lives in one block,
-  `robodog_client/main/rd_layout.h`; the title-line and row counts are computed
-  from measured font metrics, not assumed.
-- **Weather**: with the server's `LMAO_WEATHER_LAT/LON` set, a status line
-  sits under the header (baseline 46) reading `now 44°F clear` on the LEFT and
-  the `stale`/`no wifi` hint on the RIGHT, and the headline event's forecast
-  prints in the text column below its range meta (`27°F snow`). Both come from
-  the reply's `Weather` slots; when the server sends none, neither line is
-  drawn (never a placeholder `0°F`). Forecasts are Fahrenheit, rounded.
+  **176×176** headline tile at its native size on the LEFT, a 204 px text
+  column to its right (wrapped `helvB18` title, `HH:MM-HH:MM` range meta,
+  `forecast`), and the compact rows below. **No served tile ⇒ the art slot is
+  dropped and the headline takes the full width** (never a bare placeholder
+  frame). One 4 px outer margin, a 1 px rule under the header (y=48), and a
+  1 px rule above the compact section (y=231, only when rows exist). Geometry
+  lives in one block, `robodog_client/main/rd_layout.h`; the title-line and row
+  counts are computed from measured font metrics, not assumed.
+- **Weather**: with the server's `LMAO_WEATHER_LAT/LON` set, the status band
+  reads `now 44°F clear` on the LEFT (baseline 40), and the headline event's
+  forecast prints in the text column below its range meta as
+  `forecast 27°F snow` (baseline 222). Both come from the reply's `Weather`
+  slots; when the server sends none, neither line is drawn (never a
+  placeholder `0°F`). Forecasts are Fahrenheit, rounded.
 - Row meta reads `HH:MM-HH:MM` (start–end range) right-aligned on every row;
   the headline title is a word-wrapped `helvB18` block (bottom-anchored, with
   an ellipsis on the final shown line when it overflows). Non-today events
