@@ -354,11 +354,14 @@ The transcription looks like:
 ```
 
 **Reading the device state from the screenshot (README):**
-- Header `YYYY-MM-DD HH:MM` present → WiFi up + calendar (framed-TCP :4247)
-  sync healthy.
-- Header **BLANK** + `no wifi` beside the first row → not connected yet:
-  pre-sync boot frame, or WiFi/AP unreachable.
-- `stale` → connected but the last sync failed (showing the NVS cache).
+- Header LEFT is the calendar identity (`family`, or the kid name on a kid
+  panel); the RIGHT slot shows `YYYY-MM-DD HH:MM` → WiFi up + calendar
+  (framed-TCP :4247) sync healthy.
+- Status band RIGHT is always word + shape: filled square `updated`, hollow
+  square `stale` (connected but the last sync failed, showing the NVS cache),
+  crossed box `no wifi` (not connected: pre-sync boot frame, or WiFi/AP
+  unreachable). Body text `waiting for wifi` / `waiting for calendar` /
+  `nothing upcoming` says what is being waited for.
 
 **Assertions (on the LAST frame captured):**
 
