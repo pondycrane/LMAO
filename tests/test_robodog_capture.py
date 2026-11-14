@@ -80,6 +80,45 @@ class TestShotAssembler:
         assert out is not None
         assert out[0] == bytes.fromhex("abcd")
 
+    def test_lost_end_resyncs_on_the_next_begin(self):
+        """A dump whose END line was lost must not swallow the NEXT frame: the
+        partial frame is unusable (no END), and ignoring its successor's BEGIN
+        would drop that frame's hex too."""
+        asm = capture.ShotAssembler(validate=True)
+        out = None
+        for ln in _frame_lines(b"\xaa" * 8)[:-1] + _frame_lines(b"\xbb" * 8):
+            out = asm.feed(ln) or out
+        assert out is not None
+        assert out[0] == b"\xbb" * 8
+        assert asm.dropped == 1
+
+
+class TestU8g2Decode:
+    def test_r1_inverse_recovers_the_logical_screen(self):
+        """Both u8g2 firmwares (calendar, home) draw 400x300 logical through
+        U8G2_R1 into the native 300x400 memory, so the decode is a fixed
+        rotation.  A wrong rotation silently hands the vision model a sideways
+        frame — pin the exact mapping."""
+        from PIL import Image, ImageChops, ImageDraw
+
+        logical = Image.new("L", (400, 300), 255)
+        d = ImageDraw.Draw(logical)
+        d.rectangle([0, 0, 399, 49], fill=0)     # header band
+        d.line([(50, 260), (350, 60)], fill=0, width=3)
+        d.rectangle([40, 60, 360, 250], outline=0)
+
+        # Forward R1: native (px, py) = logical (py, 299-px) (u8g2_draw_l90_r1).
+        buf = bytearray(capture.BUF_SIZE)
+        for py in range(400):
+            base = (py >> 3) * capture.W_TILE
+            for px in range(300):
+                if logical.getpixel((py, 299 - px)) >= 128:
+                    buf[base + px] |= 1 << (py & 7)
+
+        out = capture.landscape_view(capture.decode_raw(bytes(buf)))
+        assert out.size == (400, 300)
+        assert ImageChops.difference(out, logical).getbbox() is None
+
 
 class TestRigHelpers:
     def test_audio_cmd_without_sg_is_bare(self):

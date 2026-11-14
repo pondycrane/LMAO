@@ -38,11 +38,11 @@
 #   - postgres.default.svc.cluster.local:5432  reachable
 #   - 192.168.50.200:8000 (vision)             reachable
 #   - 192.168.50.138:8000 (gx10 LLM)           refused (box down → reasoned fallback)
-#   - 192.168.50.27:8188  (ComfyUI)            reachable (spark-5307)
+#   - commons.wikimedia.org / duckduckgo.com   reachable (the tile sources)
 #   The pics stage degrades gracefully: an unreachable LLM yields deterministic
-#   search queries and an unreachable ComfyUI yields Wikimedia Commons art.
-#   (PAW Patrol tiles are local-generation only — Commons carries no licensed
-#   PAW art, so those events keep their previous tile and retry next run.)
+#   search queries, an unreachable search index leaves the event artless until
+#   the next run.  There is no image generator any more — tiles are fetched
+#   line drawings (Commons + DuckDuckGo line-art/coloring-page search).
 #   LAN hostnames do NOT resolve under cluster DNS, so the LLM is addressed by
 #   IP here (gx10-f156 == 192.168.50.138).
 
@@ -55,11 +55,13 @@ metadata:
   labels:
     app: lmao-calendar-sync
 data:
-  # Stage-2 picture sources.  Addresses are IPs because cluster DNS does not
-  # resolve the LAN hostnames (gx10-f156 / spark-5307).
+  # Stage-2 picture sources.  Tiles are FETCHED line drawings (no image
+  # generator): Wikimedia Commons plus DuckDuckGo image search biased to
+  # "line drawing"/"coloring page".  The LLM only proposes search queries and
+  # the vision box crops/gates candidates.  Addresses are IPs because cluster
+  # DNS does not resolve the LAN hostnames (gx10-f156 / spark-eefb).
   LMAO_IMAGE_LLM_URL: "http://192.168.50.138:8000/v1"
   LMAO_IMAGE_LLM_MODEL: "deepseek-ai/DeepSeek-V4-Flash-0731"
-  LMAO_IMAGE_GEN_URL: "http://192.168.50.27:8188"
   LMAO_IMAGE_VISION_URL: "http://192.168.50.200:8000/v1"
   LMAO_IMAGE_VISION_MODEL: "Qwen/Qwen2.5-VL-72B-Instruct"
 

@@ -215,11 +215,15 @@ python3 robodog_client/capture.py --port /dev/ttyACM0 --reset --n 8 --timeout 18
 #   shots/frameN_analysis.txt     vision transcription (--describe)
 ```
 
-Frames are auto-detected by their `RD_SHOT` header/buffer size (15000 B =
-voice board 400×300 landscape LUT; 15200 B = calendar app 300×400 portrait),
-and the voice-board vision prompt transcribes the XiaoZhi status/subtitle text
-instead of calendar rows. Capture is throttled to one full frame per ~10 s so
-the serial dump never interleaves or starves the realtime audio.
+Frames are auto-detected by buffer size (15000 B = voice board landscape LUT;
+15200 B = u8g2 tiles — the calendar app and the home env client share that
+size AND the same `U8G2_R1` landscape rotation, so they decode identically).
+The voice-board frame uses its own vision prompt (XiaoZhi status/subtitle text,
+CJK); the u8g2 frames use one prompt that transcribes every drawn line and
+lets the gate's assertions pick what matters (clock + rows for the calendar,
+name + reading + status for the env panel). Capture is throttled to one full
+frame per ~10 s so the serial dump never interleaves or starves the realtime
+audio.
 
 ### Software button (RD_LISTEN)
 
@@ -524,8 +528,10 @@ Every UI/data change is validated from the **panel pixels**, not a
 re-render.  The capture hook is compiled into every build (it must confirm the
 current production firmware's render — no separate opt-in build); it streams
 the exact full-frame buffer after each render — for each frame it reconstructs
-`panel_raw_portrait.png` (300×400 panel memory) and `panel_landscape.png` (as
-seen in landscape) so a change is verifiable pixel-for-pixel.
+`panel_raw_portrait.png` (300×400 panel memory) and `panel_landscape.png` (the
+400×300 logical screen: `U8G2_R1` is fixed, so the landscape view is one
+deterministic rotation, not an OCR guess) so a change is verifiable
+pixel-for-pixel.
 
 ```bash
 # capture is built into every firmware — just build+flash normally:

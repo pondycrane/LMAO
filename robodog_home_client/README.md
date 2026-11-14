@@ -77,21 +77,34 @@ every RH_INTERVAL_SECONDS:
   ◀── LMAOEnvelope{ChartBundle} ──▶ chart (temp + humidity traces)
 ```
 
-Panel layout (400×300 landscape): device name + latest `22.6C 55%` on the top
-row, status/sample-count under it, a framed plot with the temperature trace
-(solid, own min/max on the left in °C) and the humidity trace (dotted, own
+Panel layout (400×300 landscape): the device name on the top-left (10×20,
+clipped to the space the reading leaves) and the **current reading as the
+panel's primary element** on the top-right (helvB18 bold, e.g. `31.5°C 29%`), a
+1 px rule under the header at y=50, and a status row carrying **a shape plus a
+word** — filled square = live/now, hollow square = stale/pre-sync/failed — with
+the sample count in a right-aligned slot.
+Below it, a framed plot with the temperature trace (solid, own min/max on the
+left, unit inside the label: `32.0C`) and the humidity trace (dotted, own
 min/max on the right in %), with an **x-axis clock**: tick marks under the
 left edge, the middle sample and the right edge, each labelled with that
 sample's local `HH:MM` (derived from `ChartBundle.start_ms + i*period_ms`,
 offset by `RH_TZ_OFFSET_MINUTES`; `--:--` when the board has no clock rather
-than a fake `00:00`).  Each line also
+than a fake `00:00`). Ticks that land on the same x are collapsed, so a
+one-sample history shows a single right-aligned "now" time and a two-sample one
+shows two labels (`14:02 14:03`) instead of overprinted ones. Each trace also
 carries **its current value at its own end** (`30.4°C` above the temperature
-endpoint, `43%` below the humidity one) — the two traces cross, so the unit is
-what identifies a line at a glance.  Those labels are drawn on a
-paper-coloured knockout box, so a trace cannot strike through the digits, and
-they are pushed apart when the two endpoints nearly coincide.  The chart is
-drawn from `ChartBundle` values (`temp` tenths of °C, `hum` %); an empty reply
-renders `waiting for data...` rather than a placeholder curve.
+endpoint, `43%` below the humidity one) — only when the trace exists, since the
+header already states the reading — so the two crossing lines are identified by
+unit. Those labels are drawn on a paper-coloured knockout box, so a trace
+cannot strike through the digits, and they are pushed apart when the two
+endpoints nearly coincide. The chart is drawn from `ChartBundle` values (`temp`
+tenths of °C, `hum` %); no reply *or an empty series* renders a centred
+`waiting for data` rather than an empty chart frame.
+
+The design rules this panel follows — one ink, one font raster per role,
+state as text+shape, real 1 px rules, no motion — are in
+`.omp/skills/robodog-ui/SKILL.md`, together with the pixel-driven review loop
+(`capture.py` RD_SHOT → vision readback, or the op4 bench).
 
 **Identity.** The board's Reticulum identity is pinned at build time
 (`RH_NODE_IDENTITY_HEX`, from the per-device store

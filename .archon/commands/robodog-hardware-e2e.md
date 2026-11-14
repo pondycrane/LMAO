@@ -117,14 +117,14 @@ Local-fallback prerequisites (only needed when the bench is down):
 
 ```bash
 python3 -c "import serial; import PIL"        # capture.py needs both
-command -v tesseract                          # orientation OCR (capture.py dihedral)
 python3 -m esptool --help >/dev/null 2>&1     # flash.sh host esptool
 docker version >/dev/null 2>&1                # build.sh ESP-IDF image runner
 ```
 
-If `serial`/`PIL`/`tesseract` are missing, install them (`pip install pyserial
-Pillow`, `apt install tesseract-ocr`) and re-check — capture.py cannot decode the
-frames or pick the orientation without them.
+If `serial`/`PIL` are missing, install them (`pip install pyserial Pillow`) and
+re-check — capture.py cannot decode the frames without them.  No OCR tool is
+needed: every u8g2 firmware draws through `U8G2_R1`, so the landscape view is a
+fixed rotation, not a guess.
 
 ---
 
@@ -325,10 +325,11 @@ python3 robodog_client/capture.py --port "$PORT" --reset --n 4 --timeout 120 \
 - `--reset` reboots the app (fresh frame dumps); `--n 4 --timeout 120` is wide
   enough that the WiFi connect + first calendar sync land (~40 s post-boot) — so
   the later frames show the synced state, while frame 0 is the pre-sync boot.
-- Outputs per frame: `frameN.i1` (raw 15200-byte buffer), `panel_raw_portrait.png`
-  (300×400), `panel_landscape.png` (400×300, orientation auto-detected by OCR so
-  the clock reads upright), `frameN_analysis.txt` (vision transcription when
-  `--describe` worked).
+- Outputs per frame: `frameN.i1` (raw buffer — 15200 B u8g2 tiles or 15000 B
+  hermes landscape), `panel_raw_portrait.png` (300×400 panel memory),
+  `panel_landscape.png` (400×300 logical screen — a fixed `U8G2_R1` rotation for
+  both u8g2 firmwares, the hermes LUT inverse for the voice app),
+  `frameN_analysis.txt` (vision transcription when `--describe` worked).
 - If `no RD_SHOT frames captured` → the flashed firmware lacks the capture hook
   or is wedged. FATAL for this gate (capture is compiled into every build per the
   README) — re-flash, retry once, then FAIL.

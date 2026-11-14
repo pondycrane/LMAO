@@ -17,6 +17,7 @@ import os
 import sys
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 PORT = int(os.environ.get("DSH_SUPERAGENT_PORT", "3082"))
 API = f"http://127.0.0.1:{PORT}/orchestrator/api"
@@ -72,6 +73,42 @@ RULES = [
         ),
     },
 ]
+
+# Team skills: the repo's own `.omp/skills/<name>/SKILL.md` bodies (frontmatter
+# stripped).  dsh carries skill TEXT, not files, so the body is inlined into the
+# prompts config — the same source omp loads, one definition.
+SKILL_FILES = {"robodog-ui": "robodog-ui/SKILL.md"}
+
+
+def repo_root() -> Path:
+    """The workspace root, whether run from a checkout or `bazel run`.
+
+    `bazel run` executes this file from the runfiles tree (no `.omp/`), so the
+    root comes from BUILD_WORKSPACE_DIRECTORY; a plain `python3 tools/...`
+    resolves it from the script's own location.  Never silently fall back to a
+    runfiles path that lacks the skills — a missing skill must be loud.
+    """
+    ws = os.environ.get("BUILD_WORKSPACE_DIRECTORY")
+    if ws:
+        return Path(ws)
+    return Path(__file__).resolve().parent.parent
+
+
+def team_skills() -> dict:
+    root = repo_root() / ".omp" / "skills"
+    out = {}
+    for name, rel in SKILL_FILES.items():
+        path = root / rel
+        if not path.exists():
+            print(f"warning: skill {name!r} not found at {path} — "
+                  f"it will not reach the dsh prompts", file=sys.stderr)
+            continue
+        text = path.read_text(encoding="utf-8")
+        if text.startswith("---"):
+            # strip the YAML frontmatter: name/description are dsh metadata
+            text = text.split("---", 2)[2].lstrip("\n")
+        out[name] = text
+    return out
 
 
 def call(method: str, path: str, body: dict | None = None) -> dict:
@@ -145,7 +182,7 @@ def desired() -> dict:
         "communication": defaults["communication"],
         "scope": defaults["scope"],
         "delivery": defaults["delivery"] + "\n\n" + DEVICE_CONTRACT + "\n",
-        "skills": {},
+        "skills": team_skills(),
     }
 
     return {

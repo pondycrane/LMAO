@@ -146,7 +146,7 @@ gathering. Mandatory reads for robodog work:
 1. **`robodog_client/README.md`** — board, pins, wire contract, capture/validation
    loop, status hints (`no wifi` / `stale` / `offline`).
 2. **`robodog_client/capture.py`** — how to extract frames, `--describe` vision
-   readback, `--i1` offline decode, orientation auto-detection.
+   readback, `--i1` offline decode (fixed `U8G2_R1` landscape rotation).
 3. **`robodog_client/main/robodog.c`** — the render loop: sync → decode →
    merge δ → render → light-sleep. Understand where your change lands in it.
 4. **`robodog_client/main/lma_proto.{c,h}`** — the protobuf codec (no malloc, no
