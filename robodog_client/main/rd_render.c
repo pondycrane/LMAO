@@ -376,14 +376,17 @@ static void draw_headline(u8g2_t *u8g2, const rd_cache_t *cache,
 
     draw_headline_title(u8g2, hl->title, txt_x, txt_w);
 
-    /* Forecast at the headline event's start, labelled so it cannot be read
-     * as the current reading in the status band (absent -> nothing drawn). */
+    /* Forecast at the headline event's start (absent -> nothing drawn).  It is
+     * drawn BARE, directly under the range meta: the column holds 20 chars at
+     * 10x20, and the longest WMO label ("43°F partly cloudy" = 17) leaves no
+     * room for a prefix word -- a prefixed line clipped the label itself
+     * ("forecast 43°F ove...").  Proximity is what marks it as part of the
+     * event block (title, when, weather then); the ONLY labelled current
+     * reading is the status band's "now". */
     set_font(u8g2, RD_FONT_UI);
     char wx[24];
     if (hl->weather.present && rd_format_weather(&hl->weather, wx, sizeof(wx))) {
-        char line[40];
-        snprintf(line, sizeof(line), "forecast %s", wx);
-        draw_clipped(u8g2, txt_x, RD_FORECAST_BASE, line, txt_w);
+        draw_clipped(u8g2, txt_x, RD_FORECAST_BASE, wx, txt_w);
     }
 }
 

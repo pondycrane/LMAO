@@ -522,7 +522,7 @@ margin, one right edge, one rule under the header:
 | header (baseline 22) | calendar identity LEFT (`kid name`, or `family` in family mode; clipped to the space the clock leaves) + live clock `YYYY-MM-DD HH:MM` RIGHT |
 | rule | 1 px border at y=48 under the header band |
 | status (baseline 40) | `now 44°F clear` LEFT; state word + shape RIGHT — filled square `updated`, hollow square `stale`, crossed box `no wifi` |
-| headline | 176×176 served tile at x=4/y=52; right column (204 px): wrapped `helvB18` title block (4 lines), `HH:MM-HH:MM` range meta at baseline 200, `forecast 27°F snow` at 222. **No served tile ⇒ the art slot is dropped and the headline takes the full width** (never a bare placeholder frame) |
+| headline | 176×176 served tile at x=4/y=52; right column (204 px): wrapped `helvB18` title block (4 lines), `HH:MM-HH:MM` range meta at baseline 200, the event's forecast at 222. **No served tile ⇒ the art slot is dropped and the headline takes the full width** (never a bare placeholder frame) |
 | rule | 1 px border at y=231 above the compact section, drawn only when compact rows exist |
 | compact rows | `9x15B` rows from baseline 246, stride 16, up to 4 rows (headline + 4 = 5 events) |
 
@@ -611,9 +611,11 @@ python3 capture.py --port /dev/ttyACM0 --reset --n 4 --timeout 100 --describe
   no fresh reply; `nothing upcoming` ⇒ the reply was fine but every event has
   already ended.
 - Weather (`now 44°F clear`) → the reply carried `CalendarBundle.current`; the
-  headline event's forecast (`forecast 27°F snow`) sits in the info column below
-  its range meta. **Neither line is drawn** when the server sent no `Weather`
-  (weather disabled / no sync yet), so a blank band is "no forecast", not "0°F".
+  headline event's forecast (`27°F snow`) sits bare in the info column directly
+  under its range meta, so it reads as part of the event block (title, when,
+  weather then) rather than a second current reading. **Neither line is drawn**
+  when the server sent no `Weather` (weather disabled / no sync yet), so a
+  blank band is "no forecast", not "0°F".
 - Row set == Postgres/`CalendarBundle` output → data path live; a stale/different
   set means the cache is being shown (compare timestamps against the header).
 - At most 5 event rows are drawn: the headline (176×176 picture, LEFT;

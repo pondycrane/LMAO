@@ -746,10 +746,12 @@ Outputs in `robodog_client/shots/` (gitignored):
   counts are computed from measured font metrics, not assumed.
 - **Weather**: with the server's `LMAO_WEATHER_LAT/LON` set, the status band
   reads `now 44°F clear` on the LEFT (baseline 40), and the headline event's
-  forecast prints in the text column below its range meta as
-  `forecast 27°F snow` (baseline 222). Both come from the reply's `Weather`
-  slots; when the server sends none, neither line is drawn (never a
-  placeholder `0°F`). Forecasts are Fahrenheit, rounded.
+  forecast prints bare in the text column directly under its range meta
+  (`27°F snow`, baseline 222 — no prefix word: the 204 px column holds only
+  20 chars at 10x20, and a label would clip the conditions themselves). Both
+  come from the reply's `Weather` slots; when the server sends none, neither
+  line is drawn (never a placeholder `0°F`). Forecasts are Fahrenheit,
+  rounded.
 - Row meta reads `HH:MM-HH:MM` (start–end range) right-aligned on every row;
   the headline title is a word-wrapped `helvB18` block (bottom-anchored, with
   an ellipsis on the final shown line when it overflows). Non-today events
