@@ -236,7 +236,13 @@ def adopt_device_identity_bytes(data: bytes, name: str):
     return adopt_client_identity_bytes(data, identity_dir)
 
 
+def device_public_key_hex(name: str) -> str:
+    """The named device's public key (published in the contact book)."""
+    identity, _ = ensure_device_identity(name)
+    return identity.get_public_key().hex()
+
+
 def device_delivery_destination_hash(name: str) -> str:
-    """The delivery hash of a named device's identity (for ALLOWED_CLIENTS)."""
+    """The delivery hash of a named device's identity (its contact key)."""
     identity, _ = ensure_device_identity(name)
     return delivery_destination_hash_hex(identity)

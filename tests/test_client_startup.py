@@ -61,7 +61,7 @@ class TestMain:
 
         # Verify LXMF router was created and callbacks registered
         sys.modules["LXMF"].LXMRouter.assert_called_once_with(
-            identity=mock_identity, storagepath="/tmp/lmao_human_client_lxmf"
+            identity=mock_identity, storagepath=client._identity_storage_path()
         )
         mock_router = sys.modules["LXMF"].LXMRouter.return_value
         # Verify delivery identity registered (required for receiving messages)

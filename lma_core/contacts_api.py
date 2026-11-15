@@ -1,17 +1,22 @@
-"""HTTP API for the LMAO contact book (receiver directory).
+"""HTTP API for the LMAO contact book (receiver directory + approval).
 
 Runs beside the DuckDB query API as its own aiohttp app (separate port), so it
 does not inherit the query gate's SQL-scope.  Lets a client answer the question
 "who in the LMAO network do I want to send to" — by friendly name, device type,
-or delivery hash — and register/nudge a device's directory entry.
+or delivery hash — and lets the operator approve/revoke a device without
+editing the server manifest and rolling a pod.
 
 Endpoints
 ---------
-GET  /contacts                    list every known device
+GET  /contacts                    list every known device (?state=pending)
 GET  /contacts/find?name=...      resolve a receiver by name
 GET  /contacts/find?type=...      resolve by device type (cardputer, sprout, ...)
 GET  /contacts/find?hash=...      resolve by delivery hash
-POST /contacts                    register/upsert {name?, type, delivery_hash, pubkey_hex?}
+POST /contacts                    register/upsert {name?, type, delivery_hash,
+                                  pubkey_hex?, state?} — a POST is an operator
+                                  act, so it defaults to state=approved
+POST /contacts/{hash}/approve     approve a pending/revoked device
+POST /contacts/{hash}/revoke      revoke a device
 """
 
 from __future__ import annotations
@@ -38,14 +43,25 @@ def _require_aiohttp() -> None:
         )
 
 
+def _is_unique_violation(exc: Exception) -> bool:
+    """True when *exc* is a duplicate-name constraint failure (either backend)."""
+    import sqlite3
+
+    return (
+        isinstance(exc, sqlite3.IntegrityError)
+        or exc.__class__.__name__ in ("UniqueViolation", "IntegrityError")
+    )
+
+
 def create_app(book: Any) -> Any:  # aiohttp.web.Application
     """Create an aiohttp Application exposing the contact-book API."""
     _require_aiohttp()
     routes = aiohttp.web.RouteTableDef()
 
     @routes.get("/contacts")
-    async def list_contacts(_request: aiohttp.web.Request) -> aiohttp.web.Response:
-        return aiohttp.web.json_response({"contacts": book.all()})
+    async def list_contacts(request: aiohttp.web.Request) -> aiohttp.web.Response:
+        state = request.query.get("state")
+        return aiohttp.web.json_response({"contacts": book.all(state=state)})
 
     @routes.get("/contacts/find")
     async def find_contact(request: aiohttp.web.Request) -> aiohttp.web.Response:
@@ -54,6 +70,7 @@ def create_app(book: Any) -> Any:  # aiohttp.web.Application
             delivery_hash=query.get("hash"),
             device_name=query.get("name"),
             device_type=query.get("type"),
+            state=query.get("state"),
         )
         return aiohttp.web.json_response({"contacts": matches})
 
@@ -71,17 +88,50 @@ def create_app(book: Any) -> Any:  # aiohttp.web.Application
             return aiohttp.web.json_response(
                 {"error": "Both 'delivery_hash' and 'type' are required."}, status=400
             )
-        entry = book.register(
-            delivery_hash=delivery_hash,
-            device_type=device_type,
-            device_name=body.get("name"),
-            pubkey_hex=body.get("pubkey_hex"),
-            identity_hash=body.get("identity_hash"),
-            # A name given here is the operator's: it must survive the device's
-            # own SensorReport.node_id / announce on every later report.
-            name_source="operator" if body.get("name") else "auto",
-        )
+        # A POST is the operator's trust decision (install_all with the device
+        # plugged in, or a manual curl), so it registers approved unless the
+        # caller explicitly asks for another state.
+        state = body.get("state") or "approved"
+        try:
+            entry = book.register(
+                delivery_hash=delivery_hash,
+                device_type=device_type,
+                device_name=body.get("name"),
+                pubkey_hex=body.get("pubkey_hex"),
+                # A name given here is the operator's: it must survive the
+                # device's own SensorReport.node_id / announce on every report.
+                name_source="operator" if body.get("name") else "auto",
+                state=state,
+            )
+        except ValueError as exc:
+            return aiohttp.web.json_response({"error": str(exc)}, status=400)
+        except Exception as exc:
+            if _is_unique_violation(exc):
+                return aiohttp.web.json_response(
+                    {"error": f"device name {body.get('name')!r} is already in use"},
+                    status=409,
+                )
+            raise
         return aiohttp.web.json_response({"contact": entry}, status=201)
+
+    @routes.post("/contacts/{hash}/approve")
+    async def approve_contact(request: aiohttp.web.Request) -> aiohttp.web.Response:
+        return _set_state(request, "approved")
+
+    @routes.post("/contacts/{hash}/revoke")
+    async def revoke_contact(request: aiohttp.web.Request) -> aiohttp.web.Response:
+        return _set_state(request, "revoked")
+
+    def _set_state(request: aiohttp.web.Request,
+                   state: str) -> aiohttp.web.Response:
+        delivery_hash = request.match_info["hash"].lower()
+        if not book.set_state(delivery_hash, state):
+            return aiohttp.web.json_response(
+                {"error": f"unknown contact {delivery_hash}"}, status=404
+            )
+        return aiohttp.web.json_response(
+            {"contact": book.find(delivery_hash=delivery_hash)[0]}
+        )
 
     app = aiohttp.web.Application()
     app.add_routes(routes)

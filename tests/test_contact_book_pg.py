@@ -12,6 +12,8 @@ import os
 import sys
 from unittest import mock
 
+import pytest
+
 from lma_core import contact_book_pg as cbp
 
 
@@ -61,6 +63,174 @@ def test_backfill_noop_without_legacy_file(tmp_path):
     # No legacy SQLite file → nothing to backfill, and no PG connection is
     # attempted regardless of whether psycopg is installed.
     assert cbp.backfill_sqlite_to_pg(str(tmp_path / "nope.db"), "postgres://x") == 0
+
+
+class _FakeCursor:
+    """Records executed SQL and returns canned results for the migration probe."""
+
+    def __init__(self, exists=True, columns=(), pk=("device_name",)):
+        self.statements = []
+        self._exists = exists
+        self._columns = list(columns)
+        self._pk = set(pk)
+
+    def execute(self, sql, params=None):
+        self.statements.append((" ".join(sql.split()), params))
+        flat = " ".join(sql.split())
+        if flat.startswith("SELECT to_regclass('contacts')"):
+            self._result = [(("contacts" if self._exists else None),)]
+        elif flat.startswith("SELECT to_regclass('contacts_legacy')"):
+            self._result = [(None,)]
+        elif flat.startswith("SELECT column_name"):
+            self._result = [(c,) for c in self._columns]
+        elif "indisprimary" in flat:
+            self._result = [(c,) for c in self._pk]
+        else:
+            self._result = []
+
+    def fetchone(self):
+        return self._result[0] if self._result else None
+
+    def fetchall(self):
+        return list(self._result)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def test_pg_migration_rebuilds_a_name_keyed_table():
+    """A pre-lifecycle PG book (device_name PK, identity_hash column, no state)
+    is rebuilt onto delivery_hash with legacy rows approved."""
+    cur = _FakeCursor(
+        exists=True,
+        columns=("device_name", "device_type", "delivery_hash", "pubkey_hex",
+                 "identity_hash", "first_seen", "last_seen", "name_source"),
+    )
+    cbp.PostgresContactBook._migrate(cur)
+    flat = [s for s, _ in cur.statements]
+    assert any(s.startswith("ALTER TABLE contacts RENAME TO contacts_legacy") for s in flat)
+    insert = next(s for s in flat if s.startswith("INSERT INTO contacts("))
+    assert "'approved'" in insert
+    assert "identity_hash" not in insert.split("FROM contacts_legacy")[0]
+    assert any(s.startswith("DROP TABLE contacts_legacy") for s in flat)
+
+
+def test_pg_migration_creates_a_missing_table():
+    cur = _FakeCursor(exists=False)
+    cbp.PostgresContactBook._migrate(cur)
+    assert cur.statements[0][0].startswith("SELECT to_regclass")
+    assert cur.statements[1][0].startswith("CREATE TABLE IF NOT EXISTS contacts")
+    assert "state" in cur.statements[1][0]
+
+
+def test_pg_migration_is_a_noop_on_the_current_schema():
+    cur = _FakeCursor(
+        exists=True,
+        columns=("delivery_hash", "device_name", "device_type", "pubkey_hex",
+                 "first_seen", "last_seen", "name_source", "state", "approved_at"),
+        pk=("delivery_hash",),
+    )
+    cbp.PostgresContactBook._migrate(cur)
+    flat = [s for s, _ in cur.statements]
+    assert not any(s.startswith("ALTER TABLE contacts RENAME") for s in flat)
+
+
+def test_pg_register_types_every_parameter():
+    """Postgres rejects an untyped parameter in `%s IS NULL` (indeterminate
+    datatype); the state placeholders must be cast explicitly.  This bit the
+    live deployment — the fake-cursor test below pins the SQL text."""
+    book = object.__new__(cbp.PostgresContactBook)
+    import threading
+
+    book._lock = threading.Lock()
+    book._conn = mock.MagicMock()
+    statements = []
+
+    def _run(fn):
+        class _Cur:
+            def execute(self, sql, params=None):
+                statements.append(" ".join(sql.split()))
+
+            def fetchone(self):
+                return ("h", "n", "t", None, 0.0, 0.0, "auto", "pending", None)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        return fn(_Cur())
+
+    book._run = _run
+    book.register(delivery_hash="a" * 32, device_type="cardputer",
+                  state="approved")
+
+    insert = next(s for s in statements if s.startswith("INSERT INTO contacts("))
+    assert "COALESCE(%s::text, 'pending')" in insert
+    assert "%s::text IS NULL" in insert
+    assert "%s::text = 'approved'" in insert
+    # psycopg does not strip SQL comments, so a placeholder mentioned in one
+    # counts: the live deploy failed with 13 placeholders / 12 parameters.
+    assert insert.count("%s") == 12
+
+
+class _DeadCursor:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def test_run_reconnects_once_when_the_connection_died():
+    """A Postgres restart closes the pooled connection; the book must rebuild
+    it instead of failing every report until the server pod restarts."""
+    book = object.__new__(cbp.PostgresContactBook)
+    import threading
+
+    book._lock = threading.Lock()
+    book._dsn = "postgresql://x"
+    book._conn = mock.MagicMock()
+    class _ConnLost(Exception):
+        pass
+
+    book._conn.cursor.side_effect = _ConnLost("closed")
+    reconnects = []
+
+    def _reconnect():
+        reconnects.append(True)
+        book._conn = mock.MagicMock()
+
+    book._reconnect = _reconnect
+    calls = []
+
+    def _fn(cur):
+        calls.append(cur)
+        return "ok"
+
+    with mock.patch.object(cbp, "_OPERATIONAL_ERRORS", (_ConnLost,)):
+        assert book._run(_fn) == "ok"
+    assert reconnects == [True]
+    assert len(calls) == 1
+
+    # A failure that survives the reconnect propagates instead of looping.
+    def _reconnect_dead():
+        reconnects.append(True)
+        dead = mock.MagicMock()
+        dead.cursor.side_effect = _ConnLost("still down")
+        book._conn = dead
+
+    book._reconnect = _reconnect_dead
+    book._conn.cursor.side_effect = _ConnLost("still down")
+    with mock.patch.object(cbp, "_OPERATIONAL_ERRORS", (_ConnLost,)), \
+         pytest.raises(_ConnLost):
+        book._run(_fn)
+    assert len(reconnects) == 2
+    assert len(calls) == 1
 
 
 if __name__ == "__main__":

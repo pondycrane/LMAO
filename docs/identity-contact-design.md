@@ -1,7 +1,10 @@
 # LMAO Identity & Contact System — Design (2026-10-28)
 
-Status: proposal. Audience: anyone touching device provisioning,
-`ALLOWED_CLIENTS`, the contact book, or firmware DEST_HASH injection.
+Status: **implemented** (phases 1-3; phase 4 optional and not done). Audience:
+anyone touching device provisioning, `ALLOWED_CLIENTS`, the contact book, or
+firmware DEST_HASH injection.  The "Problem statement" below is the state
+*before* the change, kept as the rationale; "Implemented as" records what
+actually landed.
 
 This design follows the identity/contact inventory taken from the tree on
 2026-10-28 (every claim below cites `file:line` from that inventory, verified
@@ -53,7 +56,16 @@ send paths resolve names through the directory
   └── send_command / gRPC Send: target = name | type | hash
 ```
 
-## Phased change list
+## Implemented as
+
+| Phase | Landed | Where |
+|---|---|---|
+| 1 — one registry | `contacts` keyed on `delivery_hash`; `device_name` unique but mutable; `state` (`pending`/`approved`/`revoked`) + `approved_at`; dead `identity_hash` dropped; pre-lifecycle tables rebuilt in place (rows migrate as `approved`). Server learns **before** the gate, drops non-approved with a loud `contact state=…` log, seeds `LMAO_ALLOWED_CLIENTS` as approved contacts (insert-only), and `_DEFAULT_ALLOWED_CLIENTS` is gone. API: `?state=`, `POST /contacts/<hash>/approve`, `/revoke`, POST defaults to `approved`, duplicate name → 409. | `lma_core/contact_book.py`, `contact_book_pg.py`, `contacts_api.py`, `lmao_server/server.py` |
+| 2 — readable directory | `Server.resolve_target` (hash → name → type, contact `pubkey_hex` fallback) used by `send_command` and gRPC `Send`; the human client's `/send`/`/dest` accept a name/type/hash via `lma_core/contact_client.py`, and its identity moved from `/tmp` to `devs/human-<host>/identity` so it can be approved. | `lmao_server/server.py`, `human_client/client.py`, `lma_core/contact_client.py` |
+| 3 — provisioning | `install_all --device-name` POSTs `{name, hash, type, pubkey_hex, state=approved}`; `tools/sprout_provision.py` (run by Sprout's `build.sh`) bakes `LMAO_DEST_HASH_HEX`, `LMAO_SERVER_PUBKEY_HEX` and `LMAO_NODE_IDENTITY_HEX` into a generated `main/lmao_config.h` — the committed `DEST_HASH_HEX`/`SERVER_PUBKEY_HEX` literals are gone. | `tools/install_all.py`, `tools/sprout_provision.py`, `smart_irrigation/native-client/firmware/build.sh`, `.../main/main.cpp` |
+| 4 — server-hash resilience | **Not implemented** (optional, LoRa-only). Sprout still pins the server hash/pubkey at build time; the announce-learn path remains a fallback, not the recovery path. | — |
+
+## Phased change list (as originally proposed)
 
 ### Phase 1 — unify the registry (server-only, no device changes)
 

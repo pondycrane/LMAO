@@ -11,7 +11,7 @@ delivery hash in the server contact book — the same pipeline as
 exposed as a single runnable bazel target so `bazel run :flash_voice_cardputer`
 always reproduces the exact working flash.  Runtime is native C (PR1); the
 identity is the same no-drift private key the MicroPython client used, so one
-ALLOWED_CLIENTS entry covers both runtimes and a re-flash never changes the
+contact covers both runtimes and a re-flash never changes the
 lxmf/delivery hash.
 
 Usage:
@@ -91,11 +91,17 @@ def main(argv: list[str] | None = None) -> int:
 
     if result.status == "OK" and args.device_name and not args.skip_register:
         try:
-            from lma_core.client_identity import device_delivery_destination_hash
+            from lma_core.client_identity import (
+                device_delivery_destination_hash,
+                device_public_key_hex,
+            )
             from tools.install_all import _register_contact_book
 
             dev_hash = device_delivery_destination_hash(args.device_name)
-            _register_contact_book(args.device_name, dev_hash)
+            _register_contact_book(
+                args.device_name, dev_hash,
+                pubkey_hex=device_public_key_hex(args.device_name),
+            )
         except Exception as exc:
             print(f"  WARNING: contact-book registration skipped: {exc}")
 

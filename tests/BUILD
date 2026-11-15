@@ -651,6 +651,17 @@ py_test(
     ],
 )
 
+# Sprout build-time provisioning (tools/sprout_provision.py): the KEY=value
+# lines build.sh evals, and "a plain build never changes a fielded node".
+py_test(
+    name = "test_sprout_provision",
+    srcs = ["test_sprout_provision.py"],
+    deps = [
+        "//tools:sprout_provision_lib",
+        "@lmao_pip//pytest",
+    ],
+)
+
 py_test(
     name = "test_contact_book",
     srcs = ["test_contact_book.py"],

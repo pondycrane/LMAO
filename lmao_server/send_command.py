@@ -2,9 +2,13 @@
 send_command — CLI tool for sending LMAO CommandRequest messages over LXMF.
 
 Usage:
-    bazel run //lmao_server:send_command -- --target <hex> --action reboot
+    bazel run //lmao_server:send_command -- --target kitchen --action reboot
     bazel run //lmao_server:send_command -- --target <hex> --action reboot --params '{"key":"val"}'
-    bazel run //lmao_server:send_command -- --target <hex> --action reboot --rnode-port /dev/ttyUSB0
+    bazel run //lmao_server:send_command -- --target cardputer --action reboot --rnode-port /dev/ttyUSB0
+
+--target accepts a contact name (POST :8081/contacts), a device type, or a
+delivery hash; the server's contact book resolves it and supplies the peer's
+public key when the announce cache is cold.
 
 This tool initialises Reticulum + LXMF, sends a CommandRequest to the
 target node, and exits.  It is the server-side counterpart to the
@@ -32,8 +36,8 @@ def main():
     parser.add_argument(
         "--target",
         required=True,
-        help="Target node identity hex (required). Use the node's identity hash "
-        "(the value printed at boot as 'ID: a1b2c3...').",
+        help="Target contact name, device type, or delivery hash (required). "
+        "A name resolves through the server contact book; a hash is used as-is.",
     )
     parser.add_argument(
         "--action",

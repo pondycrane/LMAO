@@ -2726,6 +2726,60 @@ class TestDeployLmaoServer:
             assert "not verified" in result.detail
 
 
+class TestContactRegistration:
+    """A flash with --device-name registers the device as an APPROVED contact
+    with its public key — the operator's provisioning step replaces the
+    manifest-edit + rollout flow."""
+
+    def test_posts_an_approved_record_with_the_pubkey(self, monkeypatch):
+        import json
+
+        captured = {}
+
+        class _Resp:
+            status = 201
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        def _urlopen(req, timeout=None):
+            captured["url"] = req.full_url
+            captured["body"] = json.loads(req.data.decode())
+            return _Resp()
+
+        monkeypatch.setenv("LMAO_CONTACTS_API", "http://tp4:8081")
+        monkeypatch.setattr("urllib.request.urlopen", _urlopen)
+
+        install_all._register_contact_book(
+            "kitchen", "81aae19de81066b491f437d0e9820618",
+            pubkey_hex="aa" * 64,
+        )
+
+        assert captured["url"] == "http://tp4:8081/contacts"
+        assert captured["body"] == {
+            "delivery_hash": "81aae19de81066b491f437d0e9820618",
+            "name": "kitchen",
+            "type": "cardputer",
+            "pubkey_hex": "aa" * 64,
+            "state": "approved",
+        }
+
+    def test_an_unreachable_api_never_fails_the_flash(self, monkeypatch, capsys):
+        monkeypatch.setattr(
+            "urllib.request.urlopen",
+            MagicMock(side_effect=OSError("connection refused")),
+        )
+        install_all._register_contact_book(
+            "kitchen", "81aae19de81066b491f437d0e9820618"
+        )
+        out = capsys.readouterr().out
+        assert "LMAO_ALLOWED_CLIENTS: 81aae19de81066b491f437d0e9820618" in out
+        assert "could not POST" in out
+
+
 if __name__ == "__main__":
     import sys
 
