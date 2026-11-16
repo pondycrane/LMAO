@@ -48,18 +48,68 @@ Each family is a firmware tree the bench knows how to build, flash, and judge.
 | `home` | `robodog_home_client/firmware/` (SHTC3 env chart, Reticulum TCP) | NVS is rewritten every flash; bench supplies device name + identity + dest hash |
 | `claw` | `robodog_client/esp-claw/` (ESP-Claw edge agent, text UI + voice) | NVS rewritten (WiFi + LLM endpoint) from bench creds |
 | `hermes` | `robodog_client/voice/` (XiaoZhi voice firmware) | bridge OTA URL comes from NVS |
+| `cardputer` | `cardputer_client/` (MicroPython client, UIFlow2 — its own board, `0x303A:0x816B`) | `flash.py` uploads the client; benchd's `cardputer.py` then pins `/flash/rns/identity` + writes `DEST_HASH` |
+
+A family names the USB **fingerprint** it needs, so a job is routed to a board
+that can run it; naming a board whose fingerprint does not match is a 400
+(`refusing to flash the wrong stack`), and a family with no matching board is
+refused rather than flashed elsewhere.
+
+**Boards are auto-discovered — do not maintain a list.** `bench boards` is
+whatever is on the USB bus: `0x303A:0x1001` → `robodog-<n>`,
+`0x303A:0x816B` → `cardputer-<n>` (the UIFlow2 runtime the bench flashes),
+`0x303A:0x8120` → listed `quarantined` (UiFlow bootloader; boot it into
+MicroPython). Ports are re-resolved from `/dev/serial/by-id` on every listing,
+probe and flash, so a `ttyACM0 → ttyACM1` re-enumeration cannot send a flash to
+the wrong device. `BENCH_BOARDS` is only an optional pin.
+
+Hot-plug: a board plugged in later shows up on the next `bench boards`/job.
+A board quarantined because it was **unplugged** or left in the bootloader
+clears itself when it returns; a quarantine from a **killed flash** or a
+daemon restart is sticky and needs `bench probe <board>` after a power-cycle.
 
 Credentials, identities, and dest hashes live in `/etc/benchd.env` and are
 injected into the job env — **never** put them in a `--payload`.
+
+### `cardputer` — the console-judged family
+
+The Cardputer has **no compile step** (`build` only pins the worktree the
+flash runs from) and **no frame stream** (its UI is drawn from Python), so
+`flash_capture` judges the **serial console**: `benchd/cardputer.py` resets the
+client and drains `payload.seconds` (default 60) into `console.log`. Verdict:
+`BOOT`, `READY`, `ID_SHOWN` (the console's `ID: <16-hex>` against
+`BENCH_CARDPUTER_IDENTITY_HASH` — the drift guard), `TELEMETRY` (a send cycle
+reached), `NO_UNEXPECTED_STATUS`. A pre-send boot frame is `pending` and the
+bench retries once with +60 s.
+
+```bash
+B=$(bench submit build --family cardputer --head "$SHA" --class dev)
+bench wait "$B"
+J=$(bench submit flash_capture --family cardputer --head "$SHA" --build "$B" \
+        --class dev --payload '{"seconds":60}')
+bench wait "$J" --on-artifacts "$ARTIFACTS_DIR/cardputer-console"
+bench evidence "$J"        # inlines console.log
+```
+
+- `e2e` works for this family too (build + flash + console verdict, no voice
+  gate).
+- `capture` (live, no reset) only sees output on the client's send cycle, so
+  give it `payload.seconds` above `INTERVAL_SECONDS` (300 s).
+- `mpy-cross` must exist on the bench host: without it `flash.py` ships `.py`
+  sources, which exhaust UIFlow2's heap and boot-loop the device. The bench
+  refuses the flash before touching the board instead.
+- RF delivery (Cardputer → RNode → server) is **not** covered — the RNode is on
+  tp4. That remains the LMAO `test_cardputer_lora_e2e` gate.
 
 ## Job kinds
 
 | Kind | What it does | Needs |
 |---|---|---|
 | `build` | fetch `head`, build in a worktree, record it | `--head` (+`--ref`) |
+| `test` | run the repo's Bazel suite in that head's worktree (bazelisk honours `.bazelversion`); no board, shares the build-slot budget | `--head` (+`--ref`), `--targets` (default `//tests:all`) |
 | `flash_capture` | flash that build's worktree, reset, capture N frames, vision-read, assert | `--build <id>` |
 | `capture` | capture the **already-flashed** board (no reflash, no reset) | board free |
-| `e2e` | build + flash + gate in ONE job/worktree — **voice families only** (`claw`, `hermes`) | `--head`, `--ref` |
+| `e2e` | build + flash + gate in ONE job/worktree — voice families (`claw`, `hermes`) and `cardputer` (console verdict, no voice gate) | `--head`, `--ref` |
 | `voice_loop` | voice gate on an already-flashed board | `--build <id>` (else stale checkout, logged) |
 | `stress` | multi-session soak (`claw` only) | `--build <id>` |
 | `audio_play` | play a WAV into the board mic via the rig | `payload.wav` |
@@ -101,6 +151,35 @@ e.g. after an NVS-only change, or to prove a redraw cadence across two
 frames. It reads the live RD_SHOT stream, so it only works while the firmware
 emits frames (the calendar firmware gates RD_SHOT on a USB host being
 attached — the bench always is).
+
+## The software gate (`test`)
+
+Hardware verdicts do not cover the Python/server half of a change, and a
+worker host rarely has the pinned toolchain. The `test` kind closes that: it
+runs the repo's **Bazel suite** in the head's own worktree, on the bench box.
+
+```bash
+T=$(bench submit test --head "$HEAD_SHA" ${REF:+--ref "$REF"} \
+        --targets //tests:all --class dev --by "dev:<task>")
+bench wait "$T" --timeout 5400          # first run also fetches Bazel + toolchain
+bench evidence "$T" > "$ARTIFACTS_DIR/bazel-evidence.md"
+```
+
+- **bazelisk, not the host bazel.** The tree pins `.bazelversion`; a host
+  Bazel of another major cannot build this workspace and would judge a
+  different toolchain than CI. `bazelisk` fetches that exact release.
+- **No board, so no lease.** A `test` job is schedulable while a board is
+  flashed; it draws from `BENCH_BUILD_SLOTS` because a suite compiles as hard
+  as a firmware build.
+- `--nocache_test_results` and `--keep_going` are always passed: a cached
+  `PASSED` is not evidence for a head, and one run should report every failing
+  target instead of stopping at the first.
+- Verdict is `N target(s): P passed[, F failed — //label, …]`; the full log is
+  `bazel-test.log`. `payload.targets` and `payload.bazel_args` widen or narrow
+  the run (e.g. `--bazel-arg=--test_timeout=900`).
+- A `test` job is **not** a hardware gate: it says the suite passes, not that
+  the board renders. A hardware change still needs `build` + `flash_capture`.
+
 
 ## Refs — how the bench gets your commit
 
@@ -216,3 +295,62 @@ not about the bench.
 - `robodog_client/capture.py` — the frame assembler + vision readback the
   bench drives.
 - `.omp/skills/robodog-ui/SKILL.md` — what the captured pixels must satisfy.
+
+## Pinning a device identity (home / cardputer builds)
+
+A `home` or `cardputer` build is provisioned with the server dest hash and the
+**pinned per-device identity** from the bench config, keyed by the payload's
+`device_name` (spaces fall back to the `study_room` slug):
+
+```
+BENCH_HOME_NODE_IDENTITIES={"main bedroom":"<128 hex>","kitchen":"<128 hex>"}
+```
+
+The hex is the raw private key of `~/.local/share/lmao_client/devs/<slug>/identity`
+(the same bytes the repo's `lma_core/client_identity.py` stores — never commit
+it). Missing key ⇒ **announce-only image**: the board mints a fresh NVS identity
+on boot, the server auto-learns it as `<type>-<last4>` `pending`, and every
+report is dropped (`Dropping LXMF from … (contact state=pending)`). The flash
+log says `contact book: no baked identity` in exactly that case.
+
+After editing the map: restart benchd, then resubmit the build — the dedupe key
+now hashes the **resolved** build env, so the same head rebuilds instead of
+handing back the stale announce-only binary. Confirm the new build's env line
+lists `RH_NODE_IDENTITY_HEX`, and that the board's `lxmf/delivery` hash has an
+`approved` contact in the book before expecting `READINGS=True`.
+
+### The bench registers the contact
+
+`flash.sh` publishes the device's public record as `approved` when the host
+that runs it can `import RNS` (the delivery hash derives from the identity).
+The bench host now can: `rns` is installed in `/opt/bench/venv`, which is first
+on benchd's `PATH`, so the flash's `python3` is the venv one. Set the API it
+posts to once, in `/etc/benchd.env`:
+
+```
+BENCH_CONTACTS_API="http://192.168.50.68:8081"
+```
+
+benchd injects it as `LMAO_CONTACTS_API` for `calendar`/`home` flashes (a
+payload `env` value still wins), so the flash log reads
+`contact book: registered '<name>' -> <hash>… approved` instead of the old
+`RNS is not installed on this host — cannot derive the hash` approve hint.
+Without the key the flash still succeeds and prints the hint — registration is
+a convenience, never a flash precondition.
+
+## Reviving a board that dropped off the USB bus
+
+`quarantined / not on the bus` with **no** `0x303A` device in `lsusb` is a port
+state problem, not a benchd one — the hub still reports the port connected but
+not enabled (`usb 3-1-port3: disabled by hub (EMI?)`). A software reset of the
+port re-enumerates it without touching the cable:
+
+```python
+# on op4, as root: CLEAR_PORT_FEATURE(PORT_POWER) then SET_PORT_FEATURE(PORT_POWER)
+hub.ctrl_transfer(0x23, 1, 8, port, 0)   # power off
+hub.ctrl_transfer(0x23, 3, 8, port, 0)   # power on
+```
+
+The board then shows up as `303a:1001` and `/dev/bench/robodog-0` reappears;
+finish with `bench probe robodog-1`. If a plain `PORT_RESET` leaves it
+`connected but not enabled`, the power cycle above is the reliable step.
