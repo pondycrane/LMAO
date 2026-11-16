@@ -118,6 +118,13 @@ if [ "$REGISTER" = "0" ] || [ "${RH_SKIP_REGISTER:-0}" = "1" ]; then
 elif [ -z "$IDENTITY_HEX" ]; then
     echo "contact book: no baked identity — this image mints one in NVS on boot;"
     echo "  approve the lxmf/delivery hash it prints (POST /contacts/<hash>/approve)."
+elif ! PYTHONPATH="$REPO_ROOT" python3 -c "import RNS" 2>/dev/null; then
+    # The bench host has no Reticulum, so the delivery hash cannot be derived
+    # here.  A pinned identity normally already has an approved contact; the
+    # board prints its hash at boot if it does not.
+    echo "contact book: RNS is not installed on this host — cannot derive the hash."
+    echo "  approve the lxmf/delivery hash the board prints on boot, or run"
+    echo "  'home_client --register-contact --device-name "$DEVICE_NAME"' from a host with RNS."
 else
     PYTHONPATH="$REPO_ROOT" python3 - "$IDENTITY_HEX" "$DEVICE_NAME" <<'PYREG' || true
 import sys
