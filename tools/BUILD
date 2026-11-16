@@ -34,6 +34,32 @@ py_binary(
     deps = [":install_all_lib"],
 )
 
+# Native-device build-time provisioning: prints <PREFIX>DEST_HASH_HEX /
+# <PREFIX>SERVER_PUBKEY_HEX / <PREFIX>NODE_IDENTITY_HEX for the Sprout and
+# RoboDog-home firmware build.sh scripts, which eval the output.  The server
+# identity is loaded locally or synced from the in-cluster PVC (never minted —
+# a fresh identity breaks every flashed client, #70).
+#   bazel run //tools:device_provision -- --device-name sprout
+#   bazel run //tools:device_provision -- --prefix RH_ --device-name "study room" \
+#       --device-type robodog_home
+py_library(
+    name = "device_provision_lib",
+    srcs = ["device_provision.py"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//lma_core",
+        "@lmao_pip//rns",
+    ],
+)
+
+py_binary(
+    name = "device_provision",
+    srcs = ["device_provision.py"],
+    main = "device_provision.py",
+    visibility = ["//visibility:public"],
+    deps = [":device_provision_lib"],
+)
+
 # The repeatable foundation target for the native voice Cardputer: replicate
 # `install_all --native-cardputer --device-name <name>` (build firmware with
 # identity + DEST_HASH, flash, register in contact book) as one `bazel run`.

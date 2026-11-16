@@ -338,7 +338,7 @@ class TestParseInput:
         result = client._parse_input("/dest short")
         assert result is True
         captured = capsys.readouterr()
-        assert "Invalid hash" in captured.out
+        assert "Invalid destination" in captured.out
 
     def test_dest_missing_arg_shows_usage(self, client_with_mocks, capsys):
         """/dest without an argument should show usage."""
@@ -370,7 +370,7 @@ class TestParseInput:
         result = client._parse_input("/send short message")
         assert result is True
         captured = capsys.readouterr()
-        assert "Invalid hash" in captured.out
+        assert "Invalid destination" in captured.out
 
     def test_unknown_command_falls_to_plain_text(self, client_with_mocks, capsys):
         """Unknown commands are treated as plain text (no dispatch prefix).
@@ -558,6 +558,61 @@ class TestSendMessage:
         result = client._send_message(dest_identity, "Test message")
 
         assert result is False, "Send should return False on OSError"
+
+
+class TestContactResolution:
+    """The REPL sends to a contact NAME through the server directory."""
+
+    def test_resolves_a_name_to_hash_and_pubkey_identity(self, client_with_mocks):
+        client = client_with_mocks
+        contact = {
+            "delivery_hash": "81aae19de81066b491f437d0e9820618",
+            "pubkey_hex": "bb" * 64,
+        }
+
+        class _Resp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def read(self):
+                import json
+                return json.dumps({"contacts": [contact]}).encode()
+
+        sys.modules["RNS"].Identity.recall.return_value = None
+        with patch("urllib.request.urlopen", return_value=_Resp()):
+            dest_hash, identity = client._resolve_target("kitchen")
+
+        assert dest_hash == "81aae19de81066b491f437d0e9820618"
+        assert identity is not None
+        sys.modules["RNS"].Identity.return_value.load_public_key.assert_called_once()
+
+    def test_an_unknown_name_is_reported(self, client_with_mocks, capsys):
+        client = client_with_mocks
+
+        class _Resp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def read(self):
+                return b'{"contacts": []}'
+
+        with patch("urllib.request.urlopen", return_value=_Resp()):
+            assert client._resolve_target("nope") == (None, None)
+        assert "no such contact" in capsys.readouterr().out
+
+    def test_an_unreachable_api_falls_back_to_the_hash_error(
+        self, client_with_mocks, capsys
+    ):
+        client = client_with_mocks
+        with patch("urllib.request.urlopen", side_effect=OSError("refused")):
+            assert client._resolve_target("kitchen") == (None, None)
+        assert "Invalid destination" in capsys.readouterr().out
 
 
 if __name__ == "__main__":

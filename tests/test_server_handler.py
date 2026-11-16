@@ -40,7 +40,7 @@ def server_with_mocks():
     # setup_common_mocks() stubs RNS.hexrep to return "testhash1234", so the
     # allow-list gate (PR #132) computes every mock sender as that hash.
     # Authorize it so the behavior tests exercise the allowed path instead of
-    # being dropped as "unauthorized" — see handle_lxmf_delivery/ALLOWED_CLIENTS.
+    # being dropped as unapproved — see handle_lxmf_delivery's contact gate.
     server.ALLOWED_CLIENTS = server.ALLOWED_CLIENTS | {"testhash1234"}
 
     server_instance = server.Server()
@@ -356,7 +356,7 @@ class TestHandleLXMFDelivery:
         ):
             server.handle_lxmf_delivery(msg)
 
-        assert "Dropping LXMF from unauthorized node deadbeef00" in caplog.text
+        assert "Dropping LXMF from deadbeef00" in caplog.text
         # No reply was generated, and nothing downstream ran.
         server.router.handle_outbound.assert_not_called()
 
@@ -829,6 +829,233 @@ class TestNatsReconnectSupervisor:
 # ── send_command (issue #78) ─────────────────────────────────────
 
 
+class TestContactGate:
+    """The contact book is the ONE registry: unknown devices land as pending
+    (visible to the operator) and are dropped until approved."""
+
+    def test_unknown_sender_is_learned_pending_and_dropped(
+        self, server_with_mocks, tmp_path, caplog
+    ):
+        from lma_core.contact_book import ContactBook
+
+        server = server_with_mocks
+        book = ContactBook(str(tmp_path / "contacts.db"))
+        msg = MagicMock()
+        msg.get_source.return_value = MagicMock()
+        msg.get_source.return_value.hash = b"\x0b" * 16
+        msg.content = b"report"
+        msg.title_as_string.return_value = "p:Envelope"
+
+        with (
+            patch.object(sys.modules["lmao_server.server"], "CONTACTS", book),
+            patch.object(sys.modules["RNS"], "hexrep", return_value="cafe1234"),
+            caplog.at_level(logging.WARNING),
+        ):
+            server.handle_lxmf_delivery(msg)
+
+        entry = book.find(delivery_hash="cafe1234")[0]
+        assert entry["state"] == "pending"
+        assert "contact state=pending" in caplog.text
+        server.router.handle_outbound.assert_not_called()
+
+        # The operator approves it; the same sender is now accepted.
+        assert book.set_state("cafe1234", "approved") is True
+        sys.modules["lma_core"].LMAOEnvelope.return_value.request_ack = True
+        with (
+            patch.object(sys.modules["lmao_server.server"], "CONTACTS", book),
+            patch.object(sys.modules["RNS"], "hexrep", return_value="cafe1234"),
+        ):
+            server.handle_lxmf_delivery(msg)
+
+        server.router.handle_outbound.assert_called_once()
+        assert book.state_of("cafe1234") == "approved"
+        book.close()
+
+    def test_seed_does_not_undo_a_revocation(self, server_with_mocks, tmp_path):
+        from lma_core.contact_book import ContactBook
+
+        server = server_with_mocks
+        book = ContactBook(str(tmp_path / "contacts.db"))
+        book.register(delivery_hash="cafe1234", device_type="cardputer")
+        book.set_state("cafe1234", "revoked")
+
+        with patch.object(sys.modules["lmao_server.server"], "ALLOWED_CLIENTS",
+                          {"cafe1234"}):
+            sys.modules["lmao_server.server"]._seed_approved_contacts(book)
+
+        assert book.state_of("cafe1234") == "revoked"
+        book.close()
+
+    def test_missing_book_falls_back_to_the_env_seed(self, server_with_mocks, caplog):
+        server = server_with_mocks
+        msg = MagicMock()
+        msg.get_source.return_value = MagicMock()
+        msg.get_source.return_value.hash = b"\x0c" * 16
+        msg.content = b"report"
+        msg.title_as_string.return_value = "p:Envelope"
+
+        with (
+            patch.object(sys.modules["lmao_server.server"], "CONTACTS", None),
+            patch.object(sys.modules["lmao_server.server"], "ALLOWED_CLIENTS", set()),
+            patch.object(sys.modules["RNS"], "hexrep", return_value="beef0001"),
+            caplog.at_level(logging.WARNING),
+        ):
+            server.handle_lxmf_delivery(msg)
+
+        assert "contact state=unknown" in caplog.text
+        server.router.handle_outbound.assert_not_called()
+
+
+    def test_a_message_without_a_source_is_dropped_not_learned(
+        self, server_with_mocks, caplog
+    ):
+        """A message with no source destination cannot be keyed on a hash.
+        The old code learned it as a literal "<unknown>" contact — a bogus
+        pending device no operator can ever approve."""
+        server = server_with_mocks
+        msg = MagicMock()
+        msg.get_source.return_value = None
+        msg.content = b"report"
+        msg.title_as_string.return_value = "p:Envelope"
+        book = MagicMock()
+
+        with (
+            patch.object(sys.modules["lmao_server.server"], "CONTACTS", book),
+            caplog.at_level(logging.WARNING),
+        ):
+            server.handle_lxmf_delivery(msg)
+
+        assert "no source destination" in caplog.text
+        book.register.assert_not_called()
+        server.router.handle_outbound.assert_not_called()
+
+
+class TestContactBookReconnect:
+    """A Postgres outage at startup must not need a pod restart to recover."""
+
+    def test_retries_after_a_failed_startup_open(self, server_with_mocks):
+        mod = sys.modules["lmao_server.server"]
+        book = MagicMock()
+        with (
+            patch.object(mod, "CONTACTS", None),
+            patch.object(mod, "_contacts_open_failed", True),
+            patch.object(mod, "_contacts_retry_at", 0.0),
+            patch.object(mod, "_open_contacts_book", return_value=book) as open_,
+            patch.object(mod, "_seed_approved_contacts") as seed,
+        ):
+            assert mod._ensure_contact_book() is book
+            open_.assert_called_once_with()
+            seed.assert_called_once_with(book)
+            assert mod.CONTACTS is book
+            # Cached: no second connect while the book is live.
+            assert mod._ensure_contact_book() is book
+            open_.assert_called_once_with()
+
+    def test_retries_are_rate_limited(self, server_with_mocks):
+        mod = sys.modules["lmao_server.server"]
+        with (
+            patch.object(mod, "CONTACTS", None),
+            patch.object(mod, "_contacts_open_failed", True),
+            patch.object(mod, "_contacts_retry_at", 0.0),
+            patch.object(mod, "_open_contacts_book", side_effect=OSError("down")) as open_,
+        ):
+            assert mod._ensure_contact_book() is None
+            assert mod._ensure_contact_book() is None
+        assert open_.call_count == 1
+
+    def test_no_retry_when_startup_never_attempted_an_open(self, server_with_mocks):
+        """``CONTACTS is None`` without a failed open is not a broken backend:
+        opening a *different* book here would silently replace the registry."""
+        mod = sys.modules["lmao_server.server"]
+        with (
+            patch.object(mod, "CONTACTS", None),
+            patch.object(mod, "_contacts_open_failed", False),
+            patch.object(mod, "_open_contacts_book") as open_,
+        ):
+            assert mod._ensure_contact_book() is None
+            open_.assert_not_called()
+
+
+class TestResolveTarget:
+    """A downlink target may be a contact name, a device type, or a hash."""
+
+    def test_resolves_a_contact_name_and_its_pubkey(self, server_with_mocks):
+        import sys as _sys
+
+        server = server_with_mocks
+        book = MagicMock()
+        book.find.side_effect = lambda **kw: (
+            [{"delivery_hash": "81aae19de81066b491f437d0e9820618",
+              "pubkey_hex": "aa" * 64}]
+            if kw.get("device_name") == "kitchen" else []
+        )
+        _sys.modules["RNS"].Identity.recall.return_value = None
+        _sys.modules["RNS"].Identity.return_value = MagicMock()
+
+        with patch.object(sys.modules["lmao_server.server"], "CONTACTS", book):
+            delivery_hash, identity = server.resolve_target("kitchen")
+
+        assert delivery_hash == "81aae19de81066b491f437d0e9820618"
+        assert identity is not None
+        _sys.modules["RNS"].Identity.return_value.load_public_key.assert_called_once()
+
+    def test_an_ambiguous_type_is_refused(self, server_with_mocks, caplog):
+        server = server_with_mocks
+        book = MagicMock()
+        book.find.side_effect = lambda **kw: (
+            [{"delivery_hash": "a" * 32}, {"delivery_hash": "b" * 32}]
+            if kw.get("device_type") == "cardputer" else []
+        )
+        with patch.object(sys.modules["lmao_server.server"], "CONTACTS", book), \
+             caplog.at_level(logging.ERROR):
+            assert server.resolve_target("cardputer") == (None, None)
+        assert "matches 2 contacts" in caplog.text
+
+    def test_an_unknown_non_hex_name_is_refused(self, server_with_mocks, caplog):
+        server = server_with_mocks
+        with patch.object(sys.modules["lmao_server.server"], "CONTACTS", None), \
+             caplog.at_level(logging.ERROR):
+            assert server.resolve_target("nope") == (None, None)
+        assert "no contact named/typed/hashed" in caplog.text
+
+    def test_a_revoked_contact_is_not_addressable(self, server_with_mocks, caplog):
+        """Revoking a device must stop downlinks to it: its row no longer
+        resolves, so a send cannot reach a device the operator denied."""
+        server = server_with_mocks
+        book = MagicMock()
+        book.find.side_effect = lambda **kw: (
+            [{"delivery_hash": "81aae19de81066b491f437d0e9820618",
+              "state": "revoked"}]
+            if kw.get("device_name") == "kitchen" else []
+        )
+        with patch.object(sys.modules["lmao_server.server"], "CONTACTS", book), \
+             caplog.at_level(logging.ERROR):
+            assert server.resolve_target("kitchen") == (None, None)
+        assert "no contact named/typed/hashed" in caplog.text
+
+    def test_send_command_by_name_dispatches_to_the_resolved_hash(
+        self, server_with_mocks
+    ):
+        import sys as _sys
+
+        server = server_with_mocks
+        server.server_identity.hash = b"\x03" * 16
+        book = MagicMock()
+        book.find.side_effect = lambda **kw: (
+            [{"delivery_hash": "81aae19de81066b491f437d0e9820618"}]
+            if kw.get("device_name") == "kitchen" else []
+        )
+        _sys.modules["RNS"].Identity.recall.return_value = MagicMock()
+
+        with patch.object(sys.modules["lmao_server.server"], "CONTACTS", book):
+            assert server.send_command(target="kitchen", action="reboot") is True
+
+        _sys.modules["RNS"].Identity.recall.assert_called_once_with(
+            bytes.fromhex("81aae19de81066b491f437d0e9820618")
+        )
+        server.router.handle_outbound.assert_called_once()
+
+
 class TestSendCommand:
     """Tests for Server.send_command() method."""
 
@@ -846,7 +1073,7 @@ class TestSendCommand:
         server.server_identity.hash = b"\x03" * 16
 
         result = server.send_command(
-            target_identity_hex="a1b2c3d4e5f6",
+            target="a1b2c3d4e5f6",
             action="reboot",
         )
 
@@ -866,8 +1093,8 @@ class TestSendCommand:
         _sys.modules["RNS"].Identity.recall.return_value = mock_identity
         server.server_identity.hash = b"\x04" * 16
 
-        result1 = server.send_command(target_identity_hex="aabb", action="reboot")
-        result2 = server.send_command(target_identity_hex="ccdd", action="reboot")
+        result1 = server.send_command(target="aabb", action="reboot")
+        result2 = server.send_command(target="ccdd", action="reboot")
 
         assert result1 is True
         assert result2 is True
@@ -882,7 +1109,7 @@ class TestSendCommand:
         server.server_identity.hash = b"\x05" * 16
 
         result = server.send_command(
-            target_identity_hex="not-valid-hex!!",
+            target="not-valid-hex!!",
             action="reboot",
         )
 
@@ -895,7 +1122,7 @@ class TestSendCommand:
         server.router = None
 
         result = server.send_command(
-            target_identity_hex="aabbccdd",
+            target="aabbccdd",
             action="reboot",
         )
 
@@ -911,7 +1138,7 @@ class TestSendCommand:
         server.server_identity.hash = b"\x06" * 16
 
         result = server.send_command(
-            target_identity_hex="aabb",
+            target="aabb",
             action="reboot",
         )
 
@@ -929,7 +1156,7 @@ class TestSendCommand:
         server.server_identity.hash = b"\x07" * 16
 
         result = server.send_command(
-            target_identity_hex="",
+            target="",
             action="reboot",
         )
 

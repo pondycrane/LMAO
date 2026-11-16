@@ -244,9 +244,10 @@ when the rest of the client boots.
   on-device identity is **adopted unchanged**, so the currently allow-listed
   hash keeps working; a wiped re-flash comes back with the *same*
   `lxmf/delivery` hash instead of minting a fresh one that would need a new
-  `ALLOWED_CLIENTS` entry.  That hash is printed on the serial console and
-  must be added to the server's `ALLOWED_CLIENTS` (env `LMAO_ALLOWED_CLIENTS`
-  in `k8s/lmao-server.yaml`, see §5a) so the server accepts its reports.
+  allow-list entry.  That hash is printed on the serial console; the server
+  accepts the device once its contact is `approved` — a flash with
+  `--device-name` registers it automatically (§7b), otherwise approve it with
+  `POST :8081/contacts/<hash>/approve`.
 - Report interval (default 300 s, minimum clamped 10 s), optional DHT20 sensor
   and other MicroPython-client settings live in `cardputer_client/config.py`;
   the native firmware takes them as build-time defines
@@ -297,7 +298,7 @@ Native-firmware boot log (serial `/dev/ttyACM0`, 115200 baud):
 ```
 Cardputer native client starting (PR1 sensor node)
 identity hash: ...
-my lxmf/delivery hash: ... (add to server ALLOWED_CLIENTS)
+my lxmf/delivery hash: ... (approve it on the server: POST :8081/contacts/<hash>/approve)
 SX1262 listening on 868.0 MHz SF7 BW125
 ```
 
@@ -495,33 +496,64 @@ See [`k8s-app/iot_ingest.py`](k8s-app/iot_ingest.py) for a complete example.
 ### 7b. Contact book — receiver directory (HTTP)
 
 The server keeps a central **contact book** of devices on the LMAO network:
-their delivery hash, public key, device type and name. It lives in the
-dedicated in-cluster Postgres service (`k8s/postgres.yaml`,
-`LMAO_CONTACTS_URL` / `LMAO_CONTACTS_PG_*` env; a legacy SQLite
-`contacts.db` is backfilled into it on startup). Outside the cluster the book
-falls back to a SQLite table (`~/.local/share/lmao_server/contacts.db`). A
-device is learned automatically the first time it reports, and can be
-renamed/retyped via the API below. This replaces the per-device on-air LMAF
-`caps` broadcast as the "who can I reach" signal — the server sends a downlink
-to any known contact directly (issue #151), saving the broadcast bandwidth.
+their delivery hash, public key, device type, name and **approval state**. It
+lives in the dedicated in-cluster Postgres service (`k8s/postgres.yaml`,
+`LMAO_CONTACTS_URL` / `LMAO_CONTACTS_PG_*` env; a legacy SQLite `contacts.db`
+is backfilled into it on startup). Outside the cluster the book falls back to a
+SQLite table (`~/.local/share/lmao_server/contacts.db`).
 
-A small HTTP API is exposed on port **8081** (`LMAO_CONTACTS_PORT` to override)
-for clients to resolve a receiver:
+**The book is the one device registry** — the live allow-list
+(docs/identity-contact-design.md). `delivery_hash` is the key;
+`device_name` is a mutable unique attribute (a rename is an ordinary UPDATE;
+a name already owned by another device is rejected with `409`, never
+re-pointed). Each contact carries a `state`:
+
+| State | Meaning |
+|---|---|
+| `pending` | an unknown device that reported — dropped, listed for approval |
+| `approved` | accepted: reports reach NATS/DuckDB, downlinks reach it |
+| `revoked` | explicitly denied until re-approved |
+
+A device is learned automatically the first time it reports, so it is
+reachable and visible before it is named; the server logs
+`Dropping LXMF from <hash> (contact state=pending)`. Approving it needs no
+manifest edit and no rollout:
 
 ```bash
-# List every known device
+curl :8081/contacts?state=pending          # what is waiting for approval
+curl -X POST :8081/contacts/<hash>/approve # accept it
+curl -X POST :8081/contacts/<hash>/revoke  # deny it
+```
+
+`LMAO_ALLOWED_CLIENTS` (in `k8s/lmao-server.yaml`) is now only a **cold-start
+seed**: at startup each listed hash is inserted as `approved` if absent, and an
+existing row — including a revoked or renamed one — is never touched. It cannot
+approve a device the server has already seen (that row is `pending`); use
+`POST :8081/contacts/<hash>/approve` for those. A flash with `--device-name`
+(or `bazel run //tools:device_provision -- --provision`) registers the device
+`approved` with its public key automatically, which is the normal path.
+
+The API on port **8081** (`LMAO_CONTACTS_PORT` to override) also resolves a
+receiver for the send paths (`send_command`, gRPC `Send`, the human client's
+`/send`/`/dest` accept a name, type or hash):
+
+```bash
+# List every known device (optionally by state)
 curl :8081/contacts
+curl ':8081/contacts?state=approved'
 # Find a receiver to send to — by friendly name, device type, or delivery hash
 curl ':8081/contacts/find?name=living-room'
 curl ':8081/contacts/find?type=cardputer'
 curl ':8081/contacts/find?hash=<delivery-hash>'
-# Register / rename / retype a device (upsert by delivery_hash)
+# Register / rename / retype a device (upsert by delivery_hash; a POST is the
+# operator's trust decision, so it registers approved unless state= is given)
 curl -X POST :8081/contacts -d '{"name":"living-room","type":"cardputer","delivery_hash":"<hash>"}'
 ```
 
 The response for each contact carries `delivery_hash` (the destination to
-address downlinks to), `device_type`, `device_name`, `pubkey_hex`, and
-`last_seen`.
+address downlinks to), `device_type`, `device_name`, `pubkey_hex`, `state`,
+`approved_at`, `name_source` and `last_seen`. Registering a second device under
+an existing name is rejected with `409` rather than re-pointing the first row.
 
 ### 7c. Family calendar — read-only sync (Postgres)
 
@@ -878,9 +910,26 @@ LMAO env — node e824ad2d
 
 It discovers the server's `lxmf.delivery` destination from its periodic
 announce (matched by the `lmao-server` LXMF display name, or pinned with
-`--dest-hash`/`LMAO_DEST_HASH`) and needs its own delivery hash in
-`LMAO_ALLOWED_CLIENTS` — it is printed at startup and persisted at
-`~/.local/share/lmao_home_client/lxmf` (stable across runs).
+`--dest-hash`/`LMAO_DEST_HASH`) and needs its own contact approved (§7b) — the
+delivery hash is printed at startup and persisted at
+`~/.local/share/lmao_home_client/lxmf` (stable across runs).  Publish it as an
+approved contact in one step (the operator's provisioning act; the private key
+never leaves the host):
+
+```bash
+bazel run //robodog_home_client:home_client -- --register-contact \
+    --device-name "study room"     # LMAO_CONTACTS_API selects the API base
+```
+
+The board firmware is provisioned the same way as the Sprout: `build.sh` pins
+the server's delivery hash (and a per-device identity when
+`devs/<name>/identity` exists) via `tools/device_provision.py --prefix RH_`.
+The home header has no server-public-key define, so the board still needs the
+server's announce (or a path) before it can encrypt its first report.  After
+writing NVS, `flash.sh` registers the flashed board's public record as
+`approved` (`type=robodog_home`) when the host has Reticulum — without it the
+host cannot derive the delivery hash and prints the `POST
+:8081/contacts/<hash>/approve` URL instead.  `--no-register` opts out.
 
 **Server side:** air-only `HistoryRequest`s are answered from
 `lma_core/env_history.py`, an all-node air buffer that folds **every**
@@ -914,14 +963,16 @@ from `~/.local/share/lmao_client/devs/<name>/identity`, so the delivery hash
 never drifts.
 
 ```bash
-# build: only the server hash + pinned identity + cadence are baked in
-RH_DEST_HASH_HEX=<server delivery hash> RH_NODE_IDENTITY_HEX=<64-byte key hex> \
+# build: server hash + pinned identity are resolved automatically from the
+# server identity store and devs/<name>/identity (override with RH_* vars);
+# only the cadence is normally passed
 RH_DEVICE_NAME="main bedroom" RH_INTERVAL_SECONDS=60 \
 bazel run //robodog_home_client:build_firmware
 
 # flash + provision NVS — WiFi credentials come from the ENVIRONMENT, never
-# from source (flash.sh refuses to run without them)
-LMAO_WIFI_SSID=... LMAO_WIFI_PASS=... \
+# from source (flash.sh refuses to run without them); the board is then
+# registered as an approved contact
+LMAO_WIFI_SSID=... LMAO_WIFI_PASS=... LMAO_CONTACTS_API=http://tp4:8081 \
 bazel run //robodog_home_client:flash_firmware -- \
     --device-name "main bedroom" --server-host tp4 --port /dev/ttyACM0
 ```
@@ -1418,9 +1469,12 @@ the deterministic home-network transport that also
 carries the server's delivery-identity announces.
 If an RNode is connected, LoRa messaging is available.
 
-For the server to accept a wifi client's envelopes, the client's
-`lxmf/delivery` source hash (printed at client start / seen in server logs as
-`Message received — From: <hash>`) must be in `LMAO_ALLOWED_CLIENTS`.
+For the server to accept a wifi client's envelopes, its contact must be
+`approved` (§7b).  The client prints its `lxmf/delivery` hash at startup; the
+first report from an unknown device appears as a `pending` contact (server log
+`Dropping LXMF from <hash> (contact state=pending)`), so approve it with
+`curl -X POST :8081/contacts/<hash>/approve` — no manifest edit, no rollout.
+`LMAO_ALLOWED_CLIENTS` remains as a cold-start seed for a fresh book.
 
 ### 13. Local Docker Registry
 

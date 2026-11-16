@@ -44,6 +44,7 @@
 #include "rtreticulum/reticulum.h"
 #include "uart_at_interface.h"
 #include "device_config.h"
+#include "lmao_config.h"
 #include "path_find.h"
 #include "sht30.h"
 #include "moisture.h"
@@ -58,8 +59,11 @@ using namespace RNS;
 static const char* TAG = "sprout";
 
 #if !SPROUT_LITE
-// Server LXMF delivery destination hash (issue #127 / install_all DEST_HASH).
-static const char* DEST_HASH_HEX = "dad35b80164b25f7b1474be86e443702";
+// Server LXMF delivery destination hash (issue #127): baked at build time by
+// build.sh from the server identity (LMAO_DEST_HASH_HEX, never a committed
+// literal).  Empty = announce-only build: no path requests, no sends until a
+// pin is provided.
+static const char* DEST_HASH_HEX = LMAO_DEST_HASH_HEX;
 #endif
 
 // Sensor bundle cadence.  5 min per the Phase 0 algorithm evaluation: the
@@ -111,7 +115,7 @@ static bool s_have_server = false;
 static void on_announce_cb(const Bytes& dh, const Identity& peer, const Bytes&) {
     ESP_LOGI(TAG, "<< announce dest=%s id=%s", hexstr(dh).c_str(),
              hexstr(peer.get_salt()).c_str());
-    if (hexstr(dh) == std::string(DEST_HASH_HEX)) {
+    if (DEST_HASH_HEX[0] != '\0' && hexstr(dh) == std::string(DEST_HASH_HEX)) {
         if (s_ident_lock) xSemaphoreTake(s_ident_lock, portMAX_DELAY);
         s_server_identity = peer;
         s_have_server = true;
@@ -126,9 +130,9 @@ static void on_announce_cb(const Bytes& dh, const Identity& peer, const Bytes&) 
 // server DEST_HASH — also carries the server's PUBLIC identity. `load_public_key`
 // lets send_sensor_report construct the server's lxmf.delivery Destination and
 // encrypt to it WITHOUT ever hearing an announce (independent of RAK RX too).
-static const char* SERVER_PUBKEY_HEX =
-    "1985ac0ef98f17d26671f2f9ea31c0593a90fec1a30579fa68545a0cc015942"
-    "0789018213f3115239d0ed1036cf3375ee75cd410318eda87fb9420ce7a4ca788";
+// Injected at build time by build.sh (LMAO_SERVER_PUBKEY_HEX) from the server
+// identity — no committed literal, and empty means "wait for an announce".
+static const char* SERVER_PUBKEY_HEX = LMAO_SERVER_PUBKEY_HEX;
 
 static Bytes baked_from_hex(const std::string& h) {
     if (h.size() % 2) return Bytes();
@@ -147,6 +151,11 @@ static Bytes baked_from_hex(const std::string& h) {
 }
 
 static void bake_server_identity() {
+    if (SERVER_PUBKEY_HEX[0] == '\0') {
+        ESP_LOGW(TAG, "no server pubkey baked — waiting for a server announce "
+                      "(set LMAO_SERVER_PUBKEY_HEX to provision the build)");
+        return;
+    }
     Identity srv;
     srv.load_public_key(baked_from_hex(SERVER_PUBKEY_HEX));
     if (s_ident_lock) xSemaphoreTake(s_ident_lock, portMAX_DELAY);
@@ -292,7 +301,10 @@ void app_main() {
     // Persistent identity (NVS): keep the same RNS identity across boots so the
     // node is a stable mesh peer and can be whitelisted on the server (#130).
     // Shared with the Cardputer client (firmware_common/lma_identity).
-    Identity identity = lma_identity::load_or_create("sprout");
+    // The pinned per-device identity (install/build-time, no drift) wins over
+    // NVS; empty keeps the NVS load-or-mint behaviour so an existing device's
+    // allow-listed delivery hash never changes.
+    Identity identity = lma_identity::load_or_create("sprout", LMAO_NODE_IDENTITY_HEX);
     ESP_LOGI(TAG, "identity hash: %s", hexstr(identity.get_salt()).c_str());
     {
         // The server whitelists the sender's lxmf/delivery hash (what it logs
@@ -412,7 +424,7 @@ void app_main() {
             if (s_ident_lock) xSemaphoreTake(s_ident_lock, portMAX_DELAY);
             const bool have_srv = s_have_server;
             if (s_ident_lock) xSemaphoreGive(s_ident_lock);
-            if (!have_srv) path_find::request(DEST_HASH_HEX);
+            if (!have_srv && DEST_HASH_HEX[0] != '\0') path_find::request(DEST_HASH_HEX);
         }
 #endif  // !SPROUT_LITE
 

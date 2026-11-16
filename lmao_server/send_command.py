@@ -2,9 +2,13 @@
 send_command — CLI tool for sending LMAO CommandRequest messages over LXMF.
 
 Usage:
-    bazel run //lmao_server:send_command -- --target <hex> --action reboot
+    bazel run //lmao_server:send_command -- --target kitchen --action reboot
     bazel run //lmao_server:send_command -- --target <hex> --action reboot --params '{"key":"val"}'
-    bazel run //lmao_server:send_command -- --target <hex> --action reboot --rnode-port /dev/ttyUSB0
+    bazel run //lmao_server:send_command -- --target cardputer --action reboot --rnode-port /dev/ttyUSB0
+
+--target accepts a contact name (POST :8081/contacts), a device type, or a
+delivery hash; the server's contact book resolves it and supplies the peer's
+public key when the announce cache is cold.
 
 This tool initialises Reticulum + LXMF, sends a CommandRequest to the
 target node, and exits.  It is the server-side counterpart to the
@@ -32,8 +36,8 @@ def main():
     parser.add_argument(
         "--target",
         required=True,
-        help="Target node identity hex (required). Use the node's identity hash "
-        "(the value printed at boot as 'ID: a1b2c3...').",
+        help="Target contact name, device type, or delivery hash (required). "
+        "A name resolves through the server contact book; a hash is used as-is.",
     )
     parser.add_argument(
         "--action",
@@ -71,6 +75,7 @@ def main():
             sys.exit(1)
 
     # Initialise Reticulum + LXMF
+    from lmao_server import server as server_module
     from lmao_server.server import Server, _init_rns_and_lxmf, _warn_if_rnode_missing
 
     rnode_port = args.rnode_port
@@ -92,6 +97,16 @@ def main():
     server.server_identity = server_identity
     server.router = router
 
+    # Open the contact book (Postgres when configured, else the SQLite file)
+    # so a name/type target resolves and the peer's pubkey comes from the
+    # directory.  A raw hex target still works when the book is unavailable.
+    try:
+        server_module.CONTACTS = server_module._open_contacts_book()
+    except Exception as e:
+        logger.warning(
+            "Contact book unavailable (%s) — only a delivery-hash target can resolve", e
+        )
+
     # Register delivery callback (required for LXMF to process path responses)
     router.register_delivery_callback(server.handle_lxmf_delivery)
 
@@ -104,7 +119,7 @@ def main():
     )
 
     success = server.send_command(
-        target_identity_hex=args.target,
+        target=args.target,
         action=args.action,
         params=params,
         timeout_ms=args.timeout,

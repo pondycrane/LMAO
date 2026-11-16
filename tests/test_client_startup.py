@@ -9,13 +9,23 @@ from conftest import cleanup_common_mocks, setup_common_mocks
 
 
 @pytest.fixture
-def client_with_main_mocks():
+def client_with_main_mocks(tmp_path, monkeypatch):
     """Set up mocks for testing client.main() with simulated Reticulum/LXMF.
 
     Provides a fresh import of the client module with all external
     dependencies mocked. Call client.main() to exercise the startup path.
     The main loop is terminated via KeyboardInterrupt raised from input.
+
+    The identity directory is redirected under *tmp_path*: otherwise every
+    ``client.main()`` here would create (and chmod) the real
+    ``~/.local/share/lmao_client/devs/human-<host>`` on the test machine.
     """
+    monkeypatch.setattr(
+        "lma_core.client_identity.DEVICE_IDENTITY_ROOT", str(tmp_path / "devs")
+    )
+    # Pre-create the parent: some tests patch os.path.exists to always True,
+    # which makes makedirs skip creating it and fail on the leaf.
+    (tmp_path / "devs").mkdir()
     if "client" in sys.modules:
         del sys.modules["client"]
 
@@ -61,7 +71,7 @@ class TestMain:
 
         # Verify LXMF router was created and callbacks registered
         sys.modules["LXMF"].LXMRouter.assert_called_once_with(
-            identity=mock_identity, storagepath="/tmp/lmao_human_client_lxmf"
+            identity=mock_identity, storagepath=client._identity_storage_path()
         )
         mock_router = sys.modules["LXMF"].LXMRouter.return_value
         # Verify delivery identity registered (required for receiving messages)

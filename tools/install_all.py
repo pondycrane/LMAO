@@ -449,46 +449,34 @@ def _device_client_private_key_hex(device_name=None) -> str:
 
 
 def _register_contact_book(device_name: str, delivery_hash: str,
-                           device_type: str = "cardputer") -> None:
+                           device_type: str = "cardputer",
+                           pubkey_hex: str | None = None) -> None:
     """Best-effort: publish a named device's PUBLIC record to the server contact book.
 
-    POST ``{name, delivery_hash, device_type}`` to the server's Contacts API
-    (the HTTP directory over the server-side SQLite contact book). The private
-    key never leaves the per-name host store — only the address is published.
-    The server base is configurable via ``LMAO_CONTACTS_API``; if unreachable
-    the hash is still printed so it can be added to ``ALLOWED_CLIENTS``.
+    POST ``{name, delivery_hash, type, pubkey_hex, state=approved}`` to the
+    server's Contacts API.  A flash with the device plugged in IS the operator's
+    trust decision (docs/identity-contact-design.md), so the record is
+    registered ``approved`` — no manifest edit, no rollout, no manual
+    allow-list step.  The private key never leaves the per-name host store;
+    only the public address/key are published.  The server base is configurable
+    via ``LMAO_CONTACTS_API``; if unreachable the approve URL is printed (the
+    env ``LMAO_ALLOWED_CLIENTS`` seed only covers a device the server has
+    never seen — it cannot approve a ``pending`` row).
     """
-    import json
-    import urllib.request
+    from lma_core.contact_client import contacts_api_base, register_contact
 
-    # Best-effort registration: POST the public record to the server's Contacts
-    # API. Off-node flashes need LMAO_CONTACTS_API set to a reachable address
-    # (e.g. a kubectl port-forward, or a host on the cluster's network); the
-    # delivery hash is always printed regardless so it can be allow-listed.
-    base = os.environ.get(
-        "LMAO_CONTACTS_API", "http://127.0.0.1:8081"
-    ).rstrip("/")
-    url = f"{base}/contacts"
-
-    def _report(exc=None):
-        print(f"  contact book: add {device_name} hash to ALLOWED_CLIENTS: {delivery_hash}")
-        if exc:
-            print(f"    (could not POST to {url}: {exc})")
-
-    payload = json.dumps(
-        {"delivery_hash": delivery_hash, "name": device_name,
-         "type": device_type}
-    ).encode()
-    req = urllib.request.Request(
-        url, data=payload, method="POST",
-        headers={"Content-Type": "application/json"},
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            print(f"  contact book: registered {device_name} -> {delivery_hash[:12]}… "
-                  f"(HTTP {resp.status})")
-    except Exception as exc:  # never fail the flash on an unreachable API
-        _report(exc)
+    if register_contact(device_name, delivery_hash, device_type, pubkey_hex):
+        print(f"  contact book: registered {device_name} -> {delivery_hash[:12]}… approved")
+    else:  # never fail the flash on an unreachable API
+        print(f"  contact book: could not register {device_name} ({delivery_hash})")
+        print(
+            f"    approve it with POST "
+            f"{contacts_api_base()}/contacts/{delivery_hash}/approve"
+        )
+        print(
+            "    (LMAO_ALLOWED_CLIENTS only seeds a device the server has "
+            "never seen; it cannot approve a pending one)"
+        )
 
 
 def _flash_cardputer_client(port: str, client_root: str, result: DeviceResult,
@@ -602,7 +590,7 @@ def _flash_cardputer_client(port: str, client_root: str, result: DeviceResult,
             client_hash = _inject_client_identity(ser, device_name)
             label = f"device {device_name!r}" if device_name else "canonical"
             print(f"    client {label} lxmf/delivery hash = {client_hash} "
-                  "(keep in server ALLOWED_CLIENTS)")
+                  "(registered as an approved contact)")
         except Exception as exc:
             result.fail(f"Client identity pinning failed: {exc}")
             print(f"  FAIL: client identity pinning failed — {exc}")
@@ -952,10 +940,16 @@ def main(argv: list[str] | None = None) -> None:
         # published. Best-effort — the hash is always printed for ALLOWED_CLIENTS.
         if args.device_name is not None and cp_result.status == "OK":
             try:
-                from lma_core.client_identity import device_delivery_destination_hash
+                from lma_core.client_identity import (
+                    device_delivery_destination_hash,
+                    device_public_key_hex,
+                )
 
                 dev_hash = device_delivery_destination_hash(args.device_name)
-                _register_contact_book(args.device_name, dev_hash)
+                _register_contact_book(
+                    args.device_name, dev_hash,
+                    pubkey_hex=device_public_key_hex(args.device_name),
+                )
             except Exception as exc:
                 print(f"  WARNING: contact-book registration skipped: {exc}")
 

@@ -182,15 +182,23 @@ RNS path requests (Sprout native `path_find`, Cardputer native `path_find`),
 which the server answers as a leaf node (issue #135). The
 answer is deferred by `_PATH_REQUEST_ANSWER_DELAY` (1 s) so a half-duplex
 requester does not miss the PATH_RESPONSE in its own TX→RX turnaround window.
-- **Client allow-list (security)** — the server accepts LXMF messages only from
-known client identities (sender's `lxmf/delivery` destination hash, i.e. the
-`Source/From:` the server logs). Defaults are the Cardputer
-(`7b38fa21e75d8866c18de3da01540f2e`, native C firmware, NVS-persisted
-identity, printed at boot as "my lxmf/delivery hash") and Sprout native
-(`f5f05952392627393f067df8c9eaf6c6`, NVS-persisted identity, printed at boot
-as "my lxmf/delivery hash"). Extend without a rebuild via
-`LMAO_ALLOWED_CLIENTS` (comma-separated hex). Add a new client: capture the
-identity/delivery hash from a boot log, then add it here or via env.
+- **Client approval (security)** — the server accepts LXMF messages only from
+devices whose **contact-book** entry is `approved` (sender's `lxmf/delivery`
+destination hash, i.e. the `Source/From:` the server logs). The book
+(`lmao` Postgres, README §7b) is the one registry; an unknown device is
+learned as `pending` and dropped with a loud log, then approved at runtime —
+no manifest edit, no rollout:
+
+```bash
+kubectl exec deploy/lmao-server -- \
+  python3 -c "import urllib.request; urllib.request.urlopen(urllib.request.Request(
+    'http://127.0.0.1:8081/contacts/<hash>/approve', method='POST'))"
+# or, from a host that can reach the node: curl -X POST 192.168.0.44:8081/contacts/<hash>/approve
+```
+
+  `LMAO_ALLOWED_CLIENTS` (comma-separated hex) remains only a cold-start
+  **seed**: at startup each hash is inserted as `approved` if absent, and an
+  existing row (including a revoked one) is never touched.
 
 **Querying stored data:** `kubectl port-forward svc/iot-query 8080:8080` then
 use `POST /query`, `GET /tables`, `GET /schema/<table>` (see README

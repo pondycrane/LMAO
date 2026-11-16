@@ -363,5 +363,75 @@ class TestRequestEnv:
         assert not client._chart_event.is_set()
 
 
+class TestContactRegistration:
+    """The server's gate is the contact book: the host client publishes its
+    public record as approved on demand (the operator's provisioning act)."""
+
+    class _Identity:
+        def get_public_key(self):
+            return b"\xcc" * 64
+
+    def _client(self, monkeypatch, own_hash="95b658d94028bdecec39b7098985d2de"):
+        class _FakeClient:
+            def __init__(self, **kwargs):
+                self.identity = TestContactRegistration._Identity()
+                self.stopped = False
+
+            def start(self):
+                return own_hash
+
+            def request_env(self, **kwargs):
+                return {
+                    "node_id": "e824ad2d",
+                    "period_ms": 60000,
+                    "start_ms": 0,
+                    "temps_c": [22.6],
+                    "humidity_pct": [55],
+                    "latest_temp_c": 22.6,
+                    "latest_humidity_pct": 55,
+                }
+
+            def stop(self):
+                self.stopped = True
+
+        monkeypatch.setattr(home_client, "HomeClient", _FakeClient)
+
+    def test_register_contact_publishes_an_approved_record(
+        self, monkeypatch, capsys
+    ):
+        self._client(monkeypatch)
+        calls = []
+
+        def _register(name, delivery_hash, device_type, pubkey_hex):
+            calls.append((name, delivery_hash, device_type, pubkey_hex))
+            return True
+
+        monkeypatch.setattr(home_client, "register_contact", _register)
+        assert home_client.main(["--register-contact", "--device-name", "study room"]) == 0
+        assert calls == [(
+            "study room", "95b658d94028bdecec39b7098985d2de",
+            "robodog_home", "cc" * 64,
+        )]
+        assert "registered 'study room'" in capsys.readouterr().out
+
+    def test_without_the_flag_it_prints_the_approve_url(self, monkeypatch, capsys):
+        self._client(monkeypatch)
+        monkeypatch.setattr(
+            home_client, "register_contact",
+            lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not register")),
+        )
+        assert home_client.main([]) == 0
+        out = capsys.readouterr().out
+        assert "/contacts/95b658d94028bdecec39b7098985d2de/approve" in out
+
+    def test_unreachable_api_still_prints_the_approve_url(self, monkeypatch, capsys):
+        self._client(monkeypatch)
+        monkeypatch.setattr(home_client, "register_contact", lambda *a, **k: False)
+        assert home_client.main(["--register-contact"]) == 0
+        out = capsys.readouterr().out
+        assert "could not reach" in out
+        assert "/contacts/95b658d94028bdecec39b7098985d2de/approve" in out
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__] + sys.argv[1:]))

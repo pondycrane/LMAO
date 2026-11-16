@@ -12,6 +12,7 @@ py_library(
         "config_utils.py",
         "contact_book.py",
         "contact_book_pg.py",
+        "contact_client.py",
         "contacts_api.py",
         "device_detect.py",
         "env_history.py",

@@ -21,9 +21,13 @@ Usage:
     python3 robodog_home_client/client.py --json --count 5
     python3 robodog_home_client/client.py --interval 300
 
-The client's ``lxmf/delivery`` hash must be in the server's ``ALLOWED_CLIENTS``
-(``LMAO_ALLOWED_CLIENTS`` in ``k8s/lmao-server.yaml``); it is printed at start
-and is stable across runs (identity persisted under ``--identity-dir``).
+The server's device gate is the **contact book** (docs/identity-contact-design.md):
+an unknown sender is learned as ``pending`` and dropped, so this client's
+``lxmf/delivery`` hash must be an APPROVED contact.  Run once with
+``--register-contact`` (the operator's provisioning act — it publishes the
+public record, never the private key), or approve the hash it prints at start
+with ``POST :8081/contacts/<hash>/approve``.  The hash is stable across runs
+(identity persisted under ``--identity-dir``).
 """
 
 from __future__ import annotations
@@ -40,6 +44,7 @@ import time
 import config
 
 from lma_core import LMAOEnvelope, Series
+from lma_core.contact_client import contacts_api_base, register_contact
 from lma_core.rns_di import LXMF, RNS
 from lma_core.rns_init import init_rns_and_lxmf
 
@@ -339,7 +344,7 @@ class HomeClient:
         """Send one air-series request and wait for the ChartBundle.
 
         Returns the chart summary dict, or None when the server does not
-        answer (unknown/unallow-listed client, no samples, or timeout).
+        answer (unapproved contact, no samples, or timeout).
         """
         timeout = self._timeout if timeout is None else float(timeout)
         dest_hash, dest_identity = self.resolve_server(timeout)
@@ -450,6 +455,18 @@ def _parse_args(argv=None):
         default=0,
         help="Poll every N seconds (0 = fetch once and exit)",
     )
+    parser.add_argument(
+        "--device-name",
+        default=os.environ.get("LMAO_DEVICE_NAME"),
+        help="Contact name to register under (default $LMAO_DEVICE_NAME; with "
+        "--register-contact and no name: 'robodog-home')",
+    )
+    parser.add_argument(
+        "--register-contact",
+        action="store_true",
+        help="Publish this client's public record as an APPROVED contact — the "
+        "operator's provisioning act (the server's gate is the contact book)",
+    )
     parser.add_argument("--json", action="store_true", help="Print JSON")
     parser.add_argument(
         "--verbose", action="store_true", help="Enable INFO logging"
@@ -473,7 +490,22 @@ def main(argv=None):
         timeout=args.timeout,
     )
     own_hash = client.start()
-    print(f"Client lxmf/delivery hash: {own_hash} (must be in ALLOWED_CLIENTS)")
+    print(f"Client lxmf/delivery hash: {own_hash}")
+    if args.register_contact:
+        label = args.device_name or "robodog-home"
+        pubkey_hex = client.identity.get_public_key().hex()
+        if register_contact(label, own_hash, "robodog_home", pubkey_hex):
+            print(f"Contact book: registered {label!r} -> {own_hash[:12]}… approved")
+        else:
+            print(
+                f"Contact book: could not reach {contacts_api_base()} — approve "
+                f"{own_hash} at {contacts_api_base()}/contacts/{own_hash}/approve"
+            )
+    else:
+        print(
+            "  approve it on the server (or re-run once with --register-contact): "
+            f"POST {contacts_api_base()}/contacts/{own_hash}/approve"
+        )
 
     exit_code = 1
     try:

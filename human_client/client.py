@@ -14,14 +14,18 @@ Usage:
     python3 human_client/client.py
 """
 
+import contextlib
 import logging
 import os
+import re
+import socket
 import time
 
 # Local imports
 import config
 
 from lma_core import LMAOEnvelope
+from lma_core.contact_client import contacts_api_base, lookup_contact
 from lma_core.message_utils import decode_lmao_message
 from lma_core.rns_di import LXMF, RNS
 from lma_core.rns_init import init_rns_and_lxmf, warn_if_rnode_missing
@@ -44,6 +48,26 @@ def _identity_to_destination(identity):
         "lxmf",
         "delivery",
     )
+
+
+def _identity_storage_path() -> str:
+    """Persistent per-host identity directory (survives a reboot).
+
+    The human client used to keep its identity in /tmp, so every restart
+    minted a new delivery hash that could never be approved on the server.
+    It now lives beside the per-device identities at
+    ``~/.local/share/lmao_client/devs/human-<host>/`` (owner-only).
+    """
+    from lma_core.client_identity import DEVICE_IDENTITY_ROOT
+
+    host = re.sub(r"[^A-Za-z0-9_.-]+", "_", socket.gethostname()).strip("._") or "host"
+    path = os.path.join(DEVICE_IDENTITY_ROOT, f"human-{host}")
+    os.makedirs(path, mode=0o700, exist_ok=True)
+    # makedirs(mode=...) only applies to directories it creates; an identity
+    # directory left group/world-readable by an older run is tightened here.
+    with contextlib.suppress(OSError):
+        os.chmod(path, 0o700)
+    return path
 
 
 class Client:
@@ -187,12 +211,51 @@ class Client:
             logger.error("Identity recall returned None for %s", hex_str)
         return identity
 
+    def _resolve_target(self, target):
+        """Resolve a name, device type, or hash to (delivery_hash, identity).
+
+        A 32-hex target is a delivery hash: recall it directly (unchanged
+        behaviour).  Anything else is looked up in the server's contact book;
+        the directory's ``pubkey_hex`` can reconstruct the identity when the
+        announce cache is cold, so a named receiver works without having
+        heard it announce.  Prints the error and returns ``(None, None)`` on
+        an unresolvable target.
+        """
+        valid, err = self._validate_hash(target)
+        if valid:
+            return target.lower(), self._resolve_identity(target)
+
+        contact = lookup_contact(target)
+        if not contact:
+            print(
+                f"Invalid destination '{target}': not a 32-hex hash and no such "
+                f"contact name/type (contacts API {contacts_api_base()})."
+            )
+            return None, None
+
+        dest_hash = (contact.get("delivery_hash") or "").lower()
+        identity = self._resolve_identity(dest_hash)
+        if identity is None and contact.get("pubkey_hex"):
+            try:
+                identity = RNS.Identity(False)
+                identity.load_public_key(bytes.fromhex(contact["pubkey_hex"]))
+            except Exception as exc:
+                logger.warning("Could not build identity from pubkey: %s", exc)
+                identity = None
+        if identity is None:
+            print(
+                f"Invalid destination '{target}': contact {dest_hash[:12]}… has no "
+                f"reachable identity (no announce and no pubkey on file)."
+            )
+            return None, None
+        return dest_hash, identity
+
     @staticmethod
     def _print_help():
         """Print available commands."""
         print("\nAvailable commands:")
-        print("  /send <dest_hash> <message>  — Send a message to a destination")
-        print("  /dest <hash>                  — Set default destination hash")
+        print("  /send <name|hash> <message>  — Send to a contact name, type or hash")
+        print("  /dest <name|hash>            — Set the default destination")
         print("  /help                         — Show this help")
         print("  /quit, /exit                  — Shut down gracefully")
         print("\nWhen a default destination is set, typing a message directly")
@@ -221,47 +284,44 @@ class Client:
             self._print_help()
             return True
 
-        # /dest <hash>
+        # /dest <name|type|hash>
         if stripped.startswith("/dest"):
             parts = stripped.split(maxsplit=1)
             if len(parts) < 2 or not parts[1].strip():
-                print("Usage: /dest <hex_hash>")
+                print("Usage: /dest <name|type|hex_hash>")
                 return True
-            dest_str = parts[1].strip()
-            valid, err = self._validate_hash(dest_str)
-            if not valid:
-                print(f"Invalid hash: {err}")
+            target = parts[1].strip()
+            dest_hash, dest_identity = self._resolve_target(target)
+            if dest_hash is None:
                 return True
-            self._default_dest_hash = dest_str
-            self._default_dest_identity = self._resolve_identity(dest_str)
-            if self._default_dest_identity is not None:
-                print(f"Default destination set to: {dest_str}")
+            self._default_dest_hash = dest_hash
+            self._default_dest_identity = dest_identity
+            if dest_identity is not None:
+                print(f"Default destination set to: {dest_hash}")
             else:
                 print(
-                    f"Warning: Could not resolve destination identity for {dest_str}. "
+                    f"Warning: Could not resolve destination identity for {dest_hash}. "
                     f"Hash saved, but send may fail until the identity is discoverable."
                 )
             return True
 
-        # /send <dest_hash> <message>
+        # /send <name|type|hash> <message>
         if stripped.startswith("/send"):
             parts = stripped.split(maxsplit=2)
             if len(parts) < 3:
-                print("Usage: /send <dest_hash> <message>")
+                print("Usage: /send <name|type|hex_hash> <message>")
                 return True
-            dest_str = parts[1].strip()
+            target = parts[1].strip()
             content = parts[2].strip()
-            valid, err = self._validate_hash(dest_str)
-            if not valid:
-                print(f"Invalid hash: {err}")
-                return True
             if not content:
                 print("Error: Message content cannot be empty.")
                 return True
-            dest_identity = self._resolve_identity(dest_str)
+            dest_hash, dest_identity = self._resolve_target(target)
+            if dest_hash is None:
+                return True
             if dest_identity is None:
                 print(
-                    f"Error: Could not resolve destination {dest_str}. Have you heard from this node?"
+                    f"Error: Could not resolve destination {dest_hash}. Have you heard from this node?"
                 )
                 return True
             self._send_message(dest_identity, content)
@@ -300,7 +360,7 @@ class Client:
         self.client_identity, self.router = init_rns_and_lxmf(
             rnode_port=rnode_port,
             configdir_factory=config.get_configdir,
-            identity_storage_path="/tmp/lmao_human_client_lxmf",
+            identity_storage_path=_identity_storage_path(),
             display_name="lmao-client",
             register_delivery_callback=lambda r: r.register_delivery_callback(
                 self.handle_lxmf_delivery
@@ -331,6 +391,13 @@ class Client:
         print(f"\n{'=' * 50}")
         print("LMAO Human Client — Ready")
         print(f"Node identity: {identity_hex}")
+        delivery_hash = next(iter(self.router.delivery_destinations), None)
+        if delivery_hash:
+            print(
+                "  Delivery hash: "
+                f"{RNS.hexrep(delivery_hash, delimit=False)}"
+                "  (approve on the server: POST :8081/contacts/<hash>/approve)"
+            )
         print(f"  LoRa: {rnode_status}")
         print("  WiFi: AutoInterface enabled")
         print("  Title discriminator: p:Envelope")

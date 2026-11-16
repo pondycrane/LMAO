@@ -88,37 +88,110 @@ except ImportError:
 # or the host's cluster network.
 _NATS_SERVER = os.environ.get("NATS_SERVER", "nats://localhost:4222")
 
-# ── Client allow-list (security) ────────────────────────────────────
-# Accept LXMF messages ONLY from known client identities. A stranger node that
-# reaches the LoRa mesh must not be able to inject into the LMAO pipeline
-# (SensorReports -> NATS -> DuckDB, or CommandRequests). The matching field is
-# the *sender's lxmf/delivery destination hash*, i.e. exactly what the server
-# logs as ``Source ... From: <hex>`` (the OUT lxmf.delivery destination hash,
-# not the raw identity hash).
+# ── Client approval (security) ──────────────────────────────────────
+# The live registry is the contact book: a sender is accepted only when its
+# contact state is ``approved`` (see docs/identity-contact-design.md).  The
+# matching field is the *sender's lxmf/delivery destination hash*, i.e. exactly
+# what the server logs as ``Source ... From: <hex>`` (the OUT lxmf.delivery
+# destination hash, not the raw identity hash).
 #
-# Whitelist values:
-#   7b38fa21e75d8866c18de3da01540f2e  production Cardputer (native C firmware,
-#                                     NVS-persisted identity; printed at boot
-#                                     as "my lxmf/delivery hash")
-#   f5f05952392627393f067df8c9eaf6c6  Sprout native client (NVS-persisted
-#                                     identity; printed at boot as
-#                                     "my lxmf/delivery hash")
-# Extend at deploy time via env LMAO_ALLOWED_CLIENTS (comma-separated hex).
-_DEFAULT_ALLOWED_CLIENTS = {
-    "7b38fa21e75d8866c18de3da01540f2e",  # Cardputer (native C)
-    "f5f05952392627393f067df8c9eaf6c6",  # Sprout native
-}
-
-
-def _build_allowed_clients() -> set:
-    s = set(_DEFAULT_ALLOWED_CLIENTS)
+# ``LMAO_ALLOWED_CLIENTS`` (comma-separated hex) is a **cold-start seed**, not
+# live config: at startup each listed hash is inserted as an approved contact
+# if absent.  An existing row — including a revoked one — is never touched, so
+# approval/revocation via the Contacts API survives restarts.  Adding a device
+# no longer requires editing the manifest + rolling the pod: let it report
+# (it appears as pending) and approve it with
+# ``POST :8081/contacts/<hash>/approve``.
+def _env_allowed_clients() -> set:
     env = os.environ.get("LMAO_ALLOWED_CLIENTS", "")
-    s.update(x.strip().lower() for x in env.split(",") if x.strip())
-    return s
+    return {x.strip().lower() for x in env.split(",") if x.strip()}
 
 
+ALLOWED_CLIENTS = _env_allowed_clients()
 
-ALLOWED_CLIENTS = _build_allowed_clients()
+# ── Contact-book recovery ───────────────────────────────────────────
+# Postgres can be unreachable when the pod starts (the service is still
+# coming up, or the Secret is not mounted yet).  The server keeps serving
+# with the env seed in that case, and the book is re-opened lazily on the
+# next message or API request — otherwise a transient outage would leave
+# every device pending (and the operator with no approval path) until a
+# restart.  Retries are rate-limited so a down database costs one connect
+# attempt per interval, not one per message.
+_CONTACTS_RETRY_INTERVAL = 30.0
+_contacts_retry_at = 0.0
+# Set when the startup open failed.  Without it, a ``CONTACTS is None`` that
+# was never a failed open (no backend configured, or a test that patches the
+# book out) must NOT be retried — otherwise the gate would silently bring up
+# a different book than the one the deployment chose.
+_contacts_open_failed = False
+
+
+def _default_sqlite_path() -> str:
+    """Legacy SQLite contacts file beside the server identity (dev fallback)."""
+    identity_dir = os.path.dirname(
+        os.environ.get(
+            "LMAO_SERVER_IDENTITY_PATH",
+            os.path.expanduser("~/.local/share/lmao_server/lxmf"),
+        )
+    )
+    return os.path.join(identity_dir, "contacts.db")
+
+
+def _open_contacts_book(backfill: bool = False):
+    """Open the contact book: Postgres when configured, else legacy SQLite.
+
+    With *backfill* the legacy SQLite rows are copied into Postgres first;
+    that copy is insert-only, so live Postgres state (names, types, state,
+    timestamps) always wins.
+    """
+    dsn = compose_postgres_dsn()
+    if dsn is not None:
+        if backfill:
+            migrated = backfill_sqlite_to_pg(
+                os.environ.get("LMAO_CONTACTS_DB") or _default_sqlite_path(), dsn
+            )
+            if migrated:
+                logger.info(
+                    "Backfilled %d contact(s) from SQLite into Postgres", migrated
+                )
+        book = open_contact_book(dsn)
+        logger.info("Contact book ready (Postgres) at %s", dsn)
+        return book
+    path = os.environ.get("LMAO_CONTACTS_DB") or _default_sqlite_path()
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    book = ContactBook(path)
+    logger.info("Contact book ready at %s", path)
+    return book
+
+
+def _ensure_contact_book():
+    """Return the contact book, re-opening it after a failed startup open.
+
+    Returns ``None`` while the backend is still unreachable; the caller then
+    falls back to the env seed (fail closed).
+    """
+    global CONTACTS, _contacts_retry_at, _contacts_open_failed
+    if CONTACTS is not None:
+        return CONTACTS
+    if not _contacts_open_failed:
+        return None
+    now = time.monotonic()
+    if now < _contacts_retry_at:
+        return None
+    _contacts_retry_at = now + _CONTACTS_RETRY_INTERVAL
+    try:
+        book = _open_contacts_book()
+    except Exception as e:
+        logger.debug("Contact book still unavailable: %s", e)
+        return None
+    _seed_approved_contacts(book)
+    CONTACTS = book
+    _contacts_open_failed = False
+    logger.info(
+        "Contact book reconnected — approve devices with "
+        "POST :8081/contacts/<hash>/approve"
+    )
+    return CONTACTS
 
 # Recent Sprout soil-moisture samples, folded in from every SensorReport the
 # server receives and appended to the client reply below as a DATA line so a
@@ -137,6 +210,11 @@ ENV_HISTORY = EnvHistory()
 # (multi-device mesh: each board charts its own history, not whichever node
 # reported last).
 ANNOUNCED_NAMES: dict[str, str] = {}
+# Public keys of announced lxmf.delivery destinations, keyed by delivery hash.
+# They fill the contact book's ``pubkey_hex`` at learn time (instead of the
+# old known-destinations probe) so a downlink can be built from the directory
+# even when a later announce is missed.
+ANNOUNCED_PUBKEYS: dict[str, str] = {}
 # Names a device reports itself under (SensorReport.node_id), keyed by its
 # lxmf/delivery hash.  Authoritative for both the contact book and air-history
 # scoping: it arrives with the first report, independent of announce timing.
@@ -144,13 +222,19 @@ REPORT_NAMES: dict[str, str] = {}
 
 
 class _AnnounceNameHandler:
-    """RNS announce handler: remember each lxmf.delivery announce's name."""
+    """RNS announce handler: remember each lxmf.delivery announce's name/key."""
 
     aspect_filter = "lxmf.delivery"
     receive_path_responses = True
 
     def received_announce(self, destination_hash, announced_identity, app_data,
                           announce_packet_hash=None, is_path_response=False):
+        key = RNS.hexrep(destination_hash, delimit=False).lower()
+        if announced_identity is not None:
+            try:
+                ANNOUNCED_PUBKEYS[key] = announced_identity.get_public_key().hex()
+            except Exception:
+                pass
         if not app_data:
             return
         try:
@@ -161,7 +245,7 @@ class _AnnounceNameHandler:
             if isinstance(name, bytes):
                 name = name.decode("utf-8", "replace")
             if name:
-                ANNOUNCED_NAMES[RNS.hexrep(destination_hash, delimit=False).lower()] = name
+                ANNOUNCED_NAMES[key] = name
         except Exception:
             return
 
@@ -226,26 +310,35 @@ PIC_STORE = None  # noqa: F841 — assigned in async_main()
 WEATHER: "WeatherProvider | None" = None  # noqa: F841 — assigned in async_main()
 
 
-def _learn_contact(source_hash: str) -> None:
+def _learn_contact(source_hash: str) -> str | None:
     """Register/touch the contact book for a reporting device (issue #151).
 
     The server keys the directory on the sender's ``lxmf/delivery`` hash (the
     destination it addresses downlinks to).  A device is learned automatically
     the first time it reports, so it is reachable before an operator names it;
-    :meth:`ContactBook.register` honors a later operator-set name/type.
+    :meth:`ContactBook.register` honors a later operator-set name/type and
+    leaves an existing lifecycle state alone (a new contact is ``pending``).
+
+    Returns the contact's state (``pending``/``approved``/``revoked``), or
+    ``None`` when the book is unavailable.
     """
-    book = CONTACTS
+    book = _ensure_contact_book()
     if book is None:
-        return
+        return None
     delivery_hash = source_hash.lower()
     try:
-        pubkey_hex = None
-        try:
-            known = RNS.Identity.known_destinations.get(delivery_hash)
-            if known and len(known) > 1 and isinstance(known[1], bytes):
-                pubkey_hex = known[1].hex()
-        except Exception:
-            pubkey_hex = None
+        # Public key: from the device's announce when we heard it, else the
+        # RNS known-destinations cache (keyed by the raw 16-byte hash).
+        pubkey_hex = ANNOUNCED_PUBKEYS.get(delivery_hash)
+        if pubkey_hex is None:
+            try:
+                known = RNS.Identity.known_destinations.get(
+                    bytes.fromhex(delivery_hash)
+                )
+                if known and len(known) > 1 and isinstance(known[1], bytes):
+                    pubkey_hex = known[1].hex()
+            except Exception:
+                pubkey_hex = None
         # Always upsert: register() keeps an operator-set name and type, but
         # replaces the auto `<type>-<last4>` placeholder with the name the
         # device reports (SensorReport.node_id) or announces — so a device
@@ -256,17 +349,50 @@ def _learn_contact(source_hash: str) -> None:
         reported_name = (
             REPORT_NAMES.get(delivery_hash) or ANNOUNCED_NAMES.get(delivery_hash)
         )
-        book.register(
+        entry = book.register(
             delivery_hash=delivery_hash,
             device_type="device",
             device_name=reported_name,
             pubkey_hex=pubkey_hex,
             name_source="device" if reported_name else "auto",
+            state=None,
         )
         if not known_before:
-            logger.info("Contact book: learned new device %s", delivery_hash[:12])
+            logger.info(
+                "Contact book: learned new device %s (state=%s)",
+                delivery_hash[:12], entry.get("state"),
+            )
+        return entry.get("state")
     except Exception as e:  # the directory must never break delivery
         logger.warning("Contact book update failed for %s: %s", source_hash[:12], e)
+        try:
+            return book.state_of(delivery_hash)
+        except Exception:
+            return None
+
+
+def _seed_approved_contacts(book) -> None:
+    """Insert the env allow-list as approved contacts (cold-start seed only).
+
+    Never modifies an existing row, so a revocation (or rename) made through
+    the Contacts API is not undone by a restart.
+    """
+    seeded = 0
+    for delivery_hash in ALLOWED_CLIENTS:
+        try:
+            if book.seed_approved(delivery_hash):
+                seeded += 1
+        except Exception as e:
+            # A hash that fails to seed is not approved, so its device would
+            # be dropped — surface it as an error, not a warning.
+            logger.error(
+                "Contact seed failed for %s: %s — approve it manually with "
+                "POST :8081/contacts/%s/approve",
+                delivery_hash[:12], e, delivery_hash,
+            )
+    if seeded:
+        logger.info("Seeded %d allow-list hash(es) as approved contacts", seeded)
+
 
 def _warn_if_rnode_missing(rnode_port):
     """Warn if the RNode port does not exist (delegates to shared helper)."""
@@ -474,17 +600,85 @@ class Server:
         for q in dead:
             self.unregister_grpc_subscriber(q)
 
-    def send_command(self, target_identity_hex, action, params=None, seq=None,
+    def resolve_target(self, target):
+        """Resolve a command target — contact name, device type, or hash.
+
+        Resolution order: contact book by delivery hash, then by friendly
+        name, then by device type; a raw hex string is the last resort so
+        hex-only callers keep working.  The directory's ``pubkey_hex`` lets a
+        downlink be built without a fresh announce.
+
+        Returns ``(delivery_hash, identity_or_None)``; an empty target means
+        broadcast → ``(None, None)``.
+        """
+        target = (target or "").strip()
+        if not target:
+            return None, None
+
+        delivery_hash = None
+        pubkey_hex = None
+        book = _ensure_contact_book()
+        if book is not None:
+            try:
+                # A revoked device is not addressable: it must be re-approved
+                # before a downlink can reach it.
+                matches = [
+                    m for m in (
+                        book.find(delivery_hash=target)
+                        or book.find(device_name=target)
+                        or book.find(device_type=target)
+                    )
+                    if m.get("state") != "revoked"
+                ]
+                if len(matches) > 1:
+                    logger.error(
+                        "resolve_target: %r matches %d contacts — use a name or hash",
+                        target, len(matches),
+                    )
+                    return None, None
+                if matches:
+                    delivery_hash = matches[0]["delivery_hash"]
+                    pubkey_hex = matches[0].get("pubkey_hex")
+            except Exception as e:
+                logger.warning("resolve_target: contact lookup failed: %s", e)
+
+        if delivery_hash is None:
+            try:
+                bytes.fromhex(target)
+            except (ValueError, TypeError):
+                logger.error(
+                    "resolve_target: no contact named/typed/hashed %r", target
+                )
+                return None, None
+            delivery_hash = target.lower()
+
+        # Reticulum can only encrypt to a peer whose public keys are known
+        # (an announce or the directory's pubkey_hex).
+        identity = None
+        try:
+            identity = RNS.Identity.recall(bytes.fromhex(delivery_hash))
+        except (ValueError, TypeError, KeyError):
+            identity = None
+        if identity is None and pubkey_hex:
+            try:
+                identity = RNS.Identity(False)
+                identity.load_public_key(bytes.fromhex(pubkey_hex))
+            except Exception:
+                identity = None
+        return delivery_hash, identity
+
+    def send_command(self, target, action, params=None, seq=None,
                      timeout_ms=60000):
         """Send a CommandRequest to a target node over LXMF (issue #78).
 
         Builds ``LMAOEnvelope{ request.command, seq, request_ack }``, resolves the
-        target RNS.Identity, and dispatches via the LXMF router. The target
-        replies a DeliveryAck echoing ``seq`` (command results land on the same
-        unified ack payload).
+        target via the contact book (name / device type / delivery hash) with
+        ``Identity.recall`` as the fallback, and dispatches via the LXMF
+        router. The target replies a DeliveryAck echoing ``seq`` (command
+        results land on the same unified ack payload).
 
         Args:
-            target_identity_hex: Target node's identity hash as hex string.
+            target: Contact name, device type, or delivery hash as hex.
                 Empty string or ``None`` = broadcast to all nodes.
             action: Command action string (e.g. ``"reboot"``).
             params: Optional dict of string→string parameters.
@@ -506,11 +700,26 @@ class Server:
         if params is None:
             params = {}
 
-        # Build Request{command} + envelope control
+        resolved_hash, dest_identity = self.resolve_target(target)
+        if target and resolved_hash is None:
+            logger.error("send_command: cannot resolve target %r", target)
+            return False
+        if target and dest_identity is None:
+            logger.error(
+                "send_command: no identity for %s — no announce received from "
+                "this node since server start and the contact has no pubkey",
+                resolved_hash[:16],
+            )
+            return False
+        dest = _identity_to_destination(dest_identity) if dest_identity else None
+
+        # Build Request{command} + envelope control.  The wire target is the
+        # resolved delivery hash, so a name/type target is unambiguous on the
+        # device side.
         from lma_core import CommandRequest, LMAOEnvelope  # noqa: F811
 
         cmd = CommandRequest()
-        cmd.target = target_identity_hex or ""
+        cmd.target = resolved_hash or ""
         cmd.action = action
         cmd.issued_ms = now_ms
         for k, v in params.items():
@@ -520,30 +729,6 @@ class Server:
         envelope.seq = seq
         envelope.request_ack = True
         envelope.request.command.CopyFrom(cmd)
-
-        # Resolve target identity.  Reticulum can only encrypt to a peer
-        # whose public keys were previously learned (via an announce), so
-        # look the identity up in the local cache with Identity.recall().
-        if target_identity_hex:
-            try:
-                dest_identity = RNS.Identity.recall(bytes.fromhex(target_identity_hex))
-                if dest_identity is None:
-                    logger.error(
-                        "send_command: unknown target identity %s — "
-                        "no announce received from this node since server start",
-                        target_identity_hex[:16],
-                    )
-                    return False
-                dest = _identity_to_destination(dest_identity)
-            except (ValueError, TypeError, KeyError) as e:
-                logger.error(
-                    "send_command: invalid target identity %s: %s",
-                    target_identity_hex[:16], e,
-                )
-                return False
-        else:
-            # Broadcast: no specific destination
-            dest = None
 
         # Dispatch via LXMF router
         try:
@@ -557,7 +742,7 @@ class Server:
             self.router.handle_outbound(lxmf_msg)
             logger.info(
                 "CommandRequest seq=%s dispatched: action=%s target=%s",
-                seq, action, target_identity_hex or "<broadcast>",
+                seq, action, resolved_hash or "<broadcast>",
             )
             return True
         except (OSError, ValueError, KeyError, AttributeError) as e:
@@ -692,26 +877,21 @@ class Server:
             # in another RNS.Destination raises TypeError ("Invalid material
             # supplied for destination hash calculation").
             source_dest = message.get_source()
-            source_hash = (
-                RNS.hexrep(source_dest.hash, delimit=False) if source_dest else "<unknown>"
-            )
-
-            # Security gate: only allow known client identities (see the
-            # ALLOWED_CLIENTS allow-list at module top). Drop everyone else
-            # silently-ish (a loud log, but no reply, no NATS publish, no gRPC
-            # fan-out), so a stranger node cannot inject into the pipeline.
-            if source_hash.lower() not in ALLOWED_CLIENTS:
+            if source_dest is None:
+                # Without a source destination there is no hash to key a
+                # contact on — a literal "<unknown>" row would be a bogus
+                # device that no operator can ever approve.
                 logger.warning(
-                    "Dropping LXMF from unauthorized node %s (not in allow-list) — "
-                    "add its lxmf/delivery hash to ALLOWED_CLIENTS or LMAO_ALLOWED_CLIENTS.",
-                    source_hash,
+                    "Dropping LXMF message with no source destination — "
+                    "cannot key a contact entry"
                 )
                 return
-            # ── Contact book (issue #151): remember this device so the server
-            # can send it downlinks even before / without a caps broadcast. The
-            # book is the source of truth for "who is on the LMAO network".
-            # Learned AFTER the sensor fold below, so a SensorReport's node_id
-            # names the entry on its very first report.
+            source_hash = RNS.hexrep(source_dest.hash, delimit=False)
+
+            # Security gate: the contact book is the ONE registry (see
+            # docs/identity-contact-design.md).  Learn/touch the sender BEFORE
+            # the gate so an unknown device becomes a ``pending`` contact the
+            # operator can approve — instead of being dropped invisibly.
             content_bytes = message.content if hasattr(message, "content") else b""
             title = message.title_as_string() if hasattr(message, "title_as_string") else ""
 
@@ -722,26 +902,44 @@ class Server:
                 len(content_bytes),
             )
 
-            # Fold Sprout telemetry into the chart buffer.  A message that is
-            # not a SensorReport (or an undecodable payload) must never disturb
-            # the ACK path below.
+            # Parse once, before the gate: a SensorReport names its sender
+            # (node_id), which is the authoritative name for the contact entry
+            # and for air-history scoping (the announce may not have arrived
+            # yet on a fresh boot).
+            envelope = LMAOEnvelope()
             try:
-                envelope = LMAOEnvelope()
                 envelope.ParseFromString(content_bytes)
                 if envelope.WhichOneof("payload") == "sensor":
-                    SPROUT_HISTORY.update(envelope.sensor)
-                    ENV_HISTORY.update(envelope.sensor)
-                    # A reporting device names itself in SensorReport.node_id.
-                    # That is the authoritative name for BOTH the contact book
-                    # entry and the air-history scoping (the announce app_data
-                    # may not have arrived yet on a fresh boot).
                     report_node = (envelope.sensor.node_id or "").strip()
                     if report_node:
                         REPORT_NAMES[source_hash.lower()] = report_node
             except Exception:
-                logger.debug("No SensorReport in this message — chart buffer unchanged")
+                logger.debug("Not a decodable LMAOEnvelope — no sensor name to record")
 
-            _learn_contact(source_hash)
+            state = _learn_contact(source_hash)
+            if CONTACTS is None:
+                # Book unavailable (misconfigured deployment): the env seed is
+                # the gate.  Fail closed — never accept everyone.
+                approved = source_hash.lower() in ALLOWED_CLIENTS
+            else:
+                approved = state == "approved"
+            if not approved:
+                logger.warning(
+                    "Dropping LXMF from %s (contact state=%s) — approve it with "
+                    "POST :8081/contacts/%s/approve.",
+                    source_hash, state or "unknown", source_hash.lower(),
+                )
+                return
+
+            # Fold Sprout telemetry into the chart buffer (approved senders
+            # only).  A message that is not a SensorReport (or an undecodable
+            # payload) must never disturb the ACK path below.
+            try:
+                if envelope.WhichOneof("payload") == "sensor":
+                    SPROUT_HISTORY.update(envelope.sensor)
+                    ENV_HISTORY.update(envelope.sensor)
+            except Exception:
+                logger.debug("No SensorReport in this message — chart buffer unchanged")
 
             # Decode content (protobuf first, UTF-8 fallback, byte-count placeholder)
             decode_lmao_message(content_bytes)
@@ -926,31 +1124,31 @@ if GRPC_AVAILABLE:
 
             # Resolve destination identity from the envelope payload.
             # SendRequest carries only the serialized envelope, so the
-            # destination must come from the payload itself — currently only a
-            # command request's target (envelope.request.command.target) carries
-            # a destination identity. Reticulum can only encrypt to a peer whose
-            # public keys were previously learned (via an announce), so look the
-            # identity up in the local cache with Identity.recall().
+            # destination must come from the payload itself — a command
+            # request's target (envelope.request.command.target), which may be
+            # a contact name, a device type, or a delivery hash.  The contact
+            # book resolves it and supplies the pubkey when the announce cache
+            # is cold.
+            cmd = None
             dest_hash = ""
             if envelope.HasField("request"):
                 cmd = envelope.request.command if envelope.request.HasField(
                     "command") else None
                 if cmd is not None:
                     dest_hash = cmd.target
-            try:
-                dest = RNS.Identity.recall(bytes.fromhex(dest_hash)) if dest_hash else None
-            except (ValueError, TypeError, KeyError):
-                dest = None
-            if not dest:
+            resolved_hash, dest_identity = self._server.resolve_target(dest_hash)
+            if dest_identity is None:
                 return SendResponse(
                     destination_hash=dest_hash,
                     status="error: invalid or unreachable destination",
                 )
+            if cmd is not None and resolved_hash and resolved_hash != dest_hash:
+                cmd.target = resolved_hash
 
             # Build an LXMF message and dispatch via the router
             try:
                 lxmf_msg = LXMF.LXMessage(
-                    destination=_identity_to_destination(dest),
+                    destination=_identity_to_destination(dest_identity),
                     source=_identity_to_destination(self._server.server_identity),
                     content=envelope.SerializeToString(),
                     title="p:Envelope",
@@ -958,7 +1156,7 @@ if GRPC_AVAILABLE:
                 )
                 self._router.handle_outbound(lxmf_msg)
                 return SendResponse(
-                    destination_hash=dest_hash,
+                    destination_hash=resolved_hash or dest_hash,
                     status="queued",
                 )
             except (OSError, ValueError, KeyError) as e:
@@ -1083,40 +1281,26 @@ async def async_main():
     # service (k8s/postgres.yaml) when LMAO_CONTACTS_URL or LMAO_CONTACTS_PG_*
     # is set (the legacy SQLite file is backfilled into it, idempotent);
     # otherwise the original SQLite file is used (dev / non-cluster runs).
-    global CONTACTS
+    global CONTACTS, _contacts_open_failed
 
-    def _default_sqlite_path() -> str:
-        _id_dir = os.path.dirname(
-            os.environ.get(
-                "LMAO_SERVER_IDENTITY_PATH",
-                os.path.expanduser("~/.local/share/lmao_server/lxmf"),
-            )
+    # Open the book (Postgres when configured, else the legacy SQLite file);
+    # on failure the env seed gates traffic until _ensure_contact_book()
+    # reconnects.
+    try:
+        CONTACTS = _open_contacts_book(backfill=True)
+    except Exception as e:
+        CONTACTS = None
+        _contacts_open_failed = True
+        logger.warning(
+            "Contact book unavailable (%s) — the env allow-list is the gate "
+            "until it reconnects; the Contacts API stays up and answers 503",
+            e,
         )
-        return os.path.join(_id_dir, "contacts.db")
-
-    contacts_dsn = compose_postgres_dsn()
-    if contacts_dsn is not None:
-        try:
-            migrated = backfill_sqlite_to_pg(
-                os.environ.get("LMAO_CONTACTS_DB") or _default_sqlite_path(),
-                contacts_dsn,
-            )
-            if migrated:
-                logger.info("Backfilled %d contact(s) from SQLite into Postgres", migrated)
-            CONTACTS = open_contact_book(contacts_dsn)
-            logger.info("Contact book ready (Postgres) at %s", contacts_dsn)
-        except Exception as e:
-            CONTACTS = None
-            logger.warning("Contact book unavailable (%s) — downlink requires caps", e)
     else:
-        contacts_db = os.environ.get("LMAO_CONTACTS_DB") or _default_sqlite_path()
-        try:
-            os.makedirs(os.path.dirname(contacts_db) or ".", exist_ok=True)
-            CONTACTS = ContactBook(contacts_db)
-            logger.info("Contact book ready at %s", contacts_db)
-        except Exception as e:
-            CONTACTS = None
-            logger.warning("Contact book unavailable (%s) — downlink requires caps", e)
+        # Cold-start seed: LMAO_ALLOWED_CLIENTS hashes become approved
+        # contacts (insert-only — an operator's revocation/rename survives
+        # every restart).
+        _seed_approved_contacts(CONTACTS)
 
     # ── Family calendar (read-only on the wire) ──────────────────
     # Events live in the same Postgres as the contact book and are edited
@@ -1238,16 +1422,19 @@ async def async_main():
         print("gRPC server ready on 0.0.0.0:50051")
 
     # ── Contacts API (receiver directory) ────────────────────────
+    # Always started: it takes a provider, so it answers 503 while the book is
+    # down and starts serving as soon as _ensure_contact_book() reconnects —
+    # the operator keeps an approval path through a Postgres outage.
     contacts_runner = None
-    if CONTACTS is not None:
-        try:
-            from lma_core.contacts_api import start_contacts_server
+    try:
+        from lma_core.contacts_api import start_contacts_server
 
-            contacts_runner = await start_contacts_server(
-                CONTACTS, port=int(os.environ.get("LMAO_CONTACTS_PORT", "8081"))
-            )
-        except Exception as e:
-            logger.warning("Contacts API unavailable (%s)", e)
+        contacts_runner = await start_contacts_server(
+            _ensure_contact_book,
+            port=int(os.environ.get("LMAO_CONTACTS_PORT", "8081")),
+        )
+    except Exception as e:
+        logger.warning("Contacts API unavailable (%s)", e)
 
     # ── Calendar TCP read service (RoboDog native client, no RNS) ────
     # Framed-TCP CalendarRequest/CalendarBundle read on LMAO_CAL_TCP_PORT so

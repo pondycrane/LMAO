@@ -651,6 +651,29 @@ py_test(
     ],
 )
 
+# Client side of the contact book (lma_core/contact_client.py): the payload a
+# provisioning run posts, and the unreachable-API / taken-name failure modes.
+py_test(
+    name = "test_contact_client",
+    srcs = ["test_contact_client.py"],
+    deps = [
+        "//lma_core",
+        "@lmao_pip//pytest",
+    ],
+)
+
+# Native-device build-time provisioning (tools/device_provision.py): the
+# KEY=value lines build.sh evals, the RH_ prefix, and "a plain build never
+# changes a fielded node".
+py_test(
+    name = "test_device_provision",
+    srcs = ["test_device_provision.py"],
+    deps = [
+        "//tools:device_provision_lib",
+        "@lmao_pip//pytest",
+    ],
+)
+
 py_test(
     name = "test_contact_book",
     srcs = ["test_contact_book.py"],

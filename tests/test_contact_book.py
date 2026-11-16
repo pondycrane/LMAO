@@ -27,6 +27,9 @@ def test_register_and_known(tmp_path):
     # Un-named auto-contact: type + short-hash suffix so it is addressable.
     assert entry["device_name"] == "cardputer-0618"
     assert entry["device_type"] == "cardputer"
+    # A learned device starts pending — the operator's approval is the gate.
+    assert entry["state"] == "pending"
+    assert b.is_approved("81aae19de81066b491f437d0e9820618") is False
     b.close()
 
 
@@ -224,6 +227,229 @@ def test_legacy_table_migrates_custom_names_to_operator_owned(tmp_path):
                name_source="device")
     assert b.find(device_name="Kitchen"), "operator name must survive the report"
     b.close()
+
+
+# ── Lifecycle: the contact book is the ONE registry ─────────────────────────
+
+def test_approve_and_revoke_gate_the_registry(tmp_path):
+    b = _book(tmp_path)
+    h = "81aae19de81066b491f437d0e9820618"
+    b.register(delivery_hash=h, device_type="cardputer")
+    assert b.state_of(h) == "pending"
+    assert b.set_state(h, "approved") is True
+    assert b.is_approved(h) is True
+    assert b.find(delivery_hash=h)[0]["approved_at"] is not None
+    assert b.set_state(h, "revoked") is True
+    assert b.is_approved(h) is False
+    assert b.set_state("f" * 32, "approved") is False
+    b.close()
+
+
+def test_reports_do_not_change_an_operator_state(tmp_path):
+    """The learn path upserts on every report; it must not flip a revoked
+    device back to pending/approved."""
+    b = _book(tmp_path)
+    h = "81aae19de81066b491f437d0e9820618"
+    b.register(delivery_hash=h, device_type="cardputer", state="approved")
+    b.register(delivery_hash=h, device_type="device",
+               device_name="kitchen", name_source="device")
+    assert b.state_of(h) == "approved"
+    b.close()
+
+
+def test_seed_approved_is_insert_only(tmp_path):
+    """LMAO_ALLOWED_CLIENTS is a cold-start seed: re-seeding must not undo a
+    revocation, and must not rewrite an existing row's name."""
+    b = _book(tmp_path)
+    h = "81aae19de81066b491f437d0e9820618"
+    assert b.seed_approved(h) is True
+    assert b.is_approved(h) is True
+    b.register(delivery_hash=h, device_type="cardputer",
+               device_name="kitchen", name_source="operator")
+    b.set_state(h, "revoked")
+    assert b.seed_approved(h) is False
+    e = b.find(delivery_hash=h)[0]
+    assert e["state"] == "revoked"
+    assert e["device_name"] == "kitchen"
+    b.close()
+
+
+def test_api_approve_and_revoke(tmp_path):
+    from aiohttp.test_utils import TestClient, TestServer
+
+    b = _book(tmp_path)
+    h = "81aae19de81066b491f437d0e9820618"
+
+    async def run():
+        async with TestClient(TestServer(create_app(b))) as cli:
+            r = await cli.post("/contacts", json={"delivery_hash": h, "type": "sprout",
+                                                  "state": "pending"})
+            assert r.status == 201
+            assert (await r.json())["contact"]["state"] == "pending"
+
+            r = await cli.get("/contacts", params={"state": "pending"})
+            assert len((await r.json())["contacts"]) == 1
+
+            r = await cli.post(f"/contacts/{h}/approve")
+            assert r.status == 200
+            assert (await r.json())["contact"]["state"] == "approved"
+
+            r = await cli.post(f"/contacts/{h}/revoke")
+            assert r.status == 200
+            assert (await r.json())["contact"]["state"] == "revoked"
+
+            # Unknown hash is a 404, not a silent success.
+            r = await cli.post(f"/contacts/{'f' * 32}/approve")
+            assert r.status == 404
+
+            # A POST without state is the operator's approval (install_all path).
+            h2 = "a" * 32
+            r = await cli.post("/contacts", json={"delivery_hash": h2, "type": "cardputer",
+                                                  "name": "kitchen"})
+            assert r.status == 201
+            assert (await r.json())["contact"]["state"] == "approved"
+
+    import asyncio
+
+    asyncio.run(run())
+    b.close()
+
+
+def test_a_device_reporting_a_taken_name_falls_back_to_its_placeholder(tmp_path):
+    """Two devices claiming one name must both keep a row: the report path
+    falls back to <type>-<last4> (never fails every report)."""
+    b = _book(tmp_path)
+    b.register(delivery_hash="a" * 32, device_type="cardputer",
+               device_name="kitchen", name_source="operator")
+    e = b.register(delivery_hash="b" * 32, device_type="device",
+                   device_name="kitchen", name_source="device")
+    assert e["device_name"] == "device-" + "b" * 4
+    assert e["state"] == "pending"
+    assert b.find(device_name="kitchen")[0]["delivery_hash"] == "a" * 32
+    b.close()
+
+
+def test_a_placeholder_collision_never_makes_a_device_unlearnable(tmp_path):
+    """The bare <type>-<last4> placeholder lives in a 65 536-name space.  Two
+    devices whose hashes share their last four hex digits must both get a row
+    (the second falls back to a longer placeholder); otherwise the learn path
+    raises and drops every report from the second device forever."""
+    b = _book(tmp_path)
+    first = b.register(delivery_hash="a" * 28 + "abcd", device_type="device")
+    second = b.register(delivery_hash="b" * 28 + "abcd", device_type="device")
+    assert first["device_name"] == "device-abcd"
+    assert second["device_name"] == "device-bbbb-abcd"
+    assert second["delivery_hash"] == "b" * 28 + "abcd"
+    assert b.is_known("a" * 28 + "abcd")
+    assert b.is_known("b" * 28 + "abcd")
+    b.close()
+
+
+def test_api_duplicate_name_is_a_conflict(tmp_path):
+    """device_name is a unique attribute, not the key: registering a second
+    device under an existing name must be rejected, never re-point the row."""
+    from aiohttp.test_utils import TestClient, TestServer
+
+    b = _book(tmp_path)
+
+    async def run():
+        async with TestClient(TestServer(create_app(b))) as cli:
+            r = await cli.post("/contacts", json={"delivery_hash": "a" * 32,
+                                                  "type": "cardputer", "name": "kitchen"})
+            assert r.status == 201
+            r = await cli.post("/contacts", json={"delivery_hash": "b" * 32,
+                                                  "type": "sprout", "name": "kitchen"})
+            assert r.status == 409
+            assert len((await (await cli.get("/contacts")).json())["contacts"]) == 1
+
+    import asyncio
+
+    asyncio.run(run())
+    b.close()
+
+
+def test_legacy_pk_on_name_migrates_to_delivery_hash(tmp_path):
+    """A pre-lifecycle book keyed on device_name must migrate in place:
+    delivery_hash becomes the PK, legacy rows become approved, and the dead
+    identity_hash column is gone."""
+    import sqlite3
+
+    db = os.path.join(tmp_path, "contacts.db")
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "CREATE TABLE contacts (device_name TEXT PRIMARY KEY, device_type TEXT NOT NULL,"
+        " delivery_hash TEXT NOT NULL UNIQUE, pubkey_hex TEXT, identity_hash TEXT,"
+        " first_seen REAL NOT NULL, last_seen REAL NOT NULL,"
+        " name_source TEXT NOT NULL DEFAULT 'auto')"
+    )
+    conn.execute(
+        "INSERT INTO contacts VALUES ('Kitchen','robodog_home',"
+        "'983c04117aea3d4ca8f48962355624fc',NULL,NULL,1.0,2.0,'operator')"
+    )
+    conn.commit()
+    conn.close()
+
+    b = ContactBook(db)
+    e = b.find(device_name="Kitchen")[0]
+    assert e["state"] == "approved"
+    assert e["approved_at"] == 2.0
+    columns = {
+        row["name"] for row in b._conn.execute("PRAGMA table_info(contacts)")
+    }
+    assert "identity_hash" not in columns
+    info = {row["name"]: row["pk"] for row in b._conn.execute("PRAGMA table_info(contacts)")}
+    assert info["delivery_hash"] == 1
+    assert info["device_name"] == 0
+
+    # The migrated row keeps its operator ownership across later reports.
+    b.register(delivery_hash="983c04117aea3d4ca8f48962355624fc",
+               device_type="device", device_name="main bedroom",
+               name_source="device")
+    assert b.find(device_name="Kitchen")[0]["state"] == "approved"
+    b.close()
+
+
+def test_api_answers_503_until_the_book_reconnects(tmp_path):
+    """The API is started even when the book is down (a Postgres outage at
+    boot): it answers 503 and starts serving once the provider reconnects."""
+    from aiohttp.test_utils import TestClient, TestServer
+
+    b = _book(tmp_path)
+    holder = {"book": None}
+
+    async def run():
+        async with TestClient(TestServer(create_app(lambda: holder["book"]))) as cli:
+            r = await cli.get("/contacts")
+            assert r.status == 503
+            assert "unavailable" in (await r.json())["error"]
+            r = await cli.post("/contacts/" + "a" * 32 + "/approve")
+            assert r.status == 503
+            holder["book"] = b
+            assert (await cli.get("/contacts")).status == 200
+            r = await cli.post("/contacts", json={"delivery_hash": "a" * 32,
+                                                  "type": "cardputer"})
+            assert r.status == 201
+
+    import asyncio
+
+    asyncio.run(run())
+    b.close()
+
+
+def test_only_a_duplicate_name_is_a_409():
+    """A UNIQUE violation is a name conflict (409); any other integrity error
+    (NOT NULL, etc.) must surface as a server error, not a 409."""
+    import sqlite3
+
+    from lma_core.contacts_api import _is_unique_violation
+
+    assert _is_unique_violation(
+        sqlite3.IntegrityError("UNIQUE constraint failed: contacts.device_name")
+    )
+    assert not _is_unique_violation(
+        sqlite3.IntegrityError("NOT NULL constraint failed: contacts.device_type")
+    )
+    assert not _is_unique_violation(ValueError("device_name"))
 
 
 if __name__ == "__main__":

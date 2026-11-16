@@ -12,6 +12,15 @@
 # partition; the identity is baked at build time, so the delivery hash is
 # unaffected.
 #
+# After a successful flash the board's PUBLIC record is published to the
+# server contact book as APPROVED (docs/identity-contact-design.md): a flash
+# with the device attached IS the operator's trust decision, so the server
+# accepts its reports without editing the manifest or rolling the pod.  The
+# hash + pubkey come from the identity actually baked into this image.  Pass
+# --no-register (or RH_SKIP_REGISTER=1) to skip; an unreachable Contacts API
+# is non-fatal and prints the approve URL instead.  Point the API at the
+# cluster host with LMAO_CONTACTS_API (default http://127.0.0.1:8081).
+#
 # Uses the SHARED host-esptool plumbing (robodog_client/flash_common.sh) that
 # the calendar/hermes/claw flashes use: Docker's ttyACM RTS passthrough breaks
 # the button-free reset, so esptool runs on the host.
@@ -36,6 +45,7 @@ WIFI_SSID="${LMAO_WIFI_SSID:-}"
 WIFI_PASS="${LMAO_WIFI_PASS:-}"
 SERVER_HOST="${LMAO_SERVER_HOST:-tp4}"
 SERVER_PORT="${LMAO_SERVER_PORT:-4246}"
+REGISTER=1
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -45,6 +55,7 @@ while [ $# -gt 0 ]; do
         --wifi-pass)   rd_need_value --wifi-pass $# "${2:-}"; WIFI_PASS="$2"; shift 2;;
         --server-host) rd_need_value --server-host $# "${2:-}"; SERVER_HOST="$2"; shift 2;;
         --server-port) rd_need_value --server-port $# "${2:-}"; SERVER_PORT="$2"; shift 2;;
+        --no-register) REGISTER=0; shift;;
         *) echo "unknown argument: $1" >&2; exit 2;;
     esac
 done
@@ -90,5 +101,50 @@ rd_nvs_generate "$RD_NVS_WORK/nvs.csv" "$RD_NVS_WORK/nvs.bin"
 
 echo "flashing app + partition table + NVS ..."
 rd_flash_write "$BUILD" 0x9000 "$RD_NVS_WORK/nvs.bin"
+
+# ── Contact book: publish the board's public record as approved ──────
+# Delivery hash + pubkey derive from the identity baked into THIS image
+# (RH_NODE_IDENTITY_HEX, or the staged header when it came from the env).
+IDENTITY_HEX="${RH_NODE_IDENTITY_HEX:-}"
+if [ -z "$IDENTITY_HEX" ]; then
+    HDR="$(dirname "$BUILD")/main/lmao_config.h"
+    if [ -f "$HDR" ]; then
+        IDENTITY_HEX="$(sed -n 's/^#define RH_NODE_IDENTITY_HEX "\(.*\)"/\1/p' "$HDR" | head -1)"
+    fi
+fi
+REPO_ROOT="$(cd "$APP/.." && pwd)"
+if [ "$REGISTER" = "0" ] || [ "${RH_SKIP_REGISTER:-0}" = "1" ]; then
+    echo "contact book: skipped (--no-register)"
+elif [ -z "$IDENTITY_HEX" ]; then
+    echo "contact book: no baked identity — this image mints one in NVS on boot;"
+    echo "  approve the lxmf/delivery hash it prints (POST /contacts/<hash>/approve)."
+elif ! PYTHONPATH="$REPO_ROOT" python3 -c "import RNS" 2>/dev/null; then
+    # The bench host has no Reticulum, so the delivery hash cannot be derived
+    # here.  A pinned identity normally already has an approved contact; the
+    # board prints its hash at boot if it does not.
+    echo "contact book: RNS is not installed on this host — cannot derive the hash."
+    echo "  approve the lxmf/delivery hash the board prints on boot, or run"
+    echo "  'home_client --register-contact --device-name "$DEVICE_NAME"' from a host with RNS."
+else
+    PYTHONPATH="$REPO_ROOT" python3 - "$IDENTITY_HEX" "$DEVICE_NAME" <<'PYREG' || true
+import sys
+
+from lma_core.contact_client import contacts_api_base, register_contact
+from lma_core.rns_di import RNS
+
+key_hex, name = sys.argv[1], sys.argv[2]
+identity = RNS.Identity(False)
+identity.load_private_key(bytes.fromhex(key_hex))
+dest = RNS.Destination(identity, RNS.Destination.OUT,
+                       RNS.Destination.SINGLE, "lxmf", "delivery")
+delivery_hash = RNS.hexrep(dest.hash, delimit=False)
+pubkey_hex = identity.get_public_key().hex()
+if register_contact(name, delivery_hash, "robodog_home", pubkey_hex):
+    print(f"contact book: registered {name!r} -> {delivery_hash[:12]}… approved")
+else:
+    print(f"contact book: approve {name!r} ({delivery_hash}) at "
+          f"{contacts_api_base()}/contacts/{delivery_hash}/approve")
+PYREG
+fi
 
 echo "==== $RD_PORT flashed: device_name='$DEVICE_NAME', server=$SERVER_HOST:$SERVER_PORT ===="

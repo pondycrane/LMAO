@@ -180,9 +180,14 @@ no display/receive path — the chart needs the MicroPython client.
   first install so an already-allow-listed hash keeps working.  A wiped
   re-flash therefore comes back with the same `lxmf/delivery` hash; only a
   brand-new device mints a fresh canonical identity.  That hash is printed on
-  the serial console and must be added to the server's `ALLOWED_CLIENTS` (env
-  `LMAO_ALLOWED_CLIENTS` in `k8s/lmao-server.yaml`) for the server to accept
-  its reports (same flow as Sprout's native hash).
+  the serial console.  The server's gate is the **contact book**, not a static
+  allow-list (docs/identity-contact-design.md): a flash with `--device-name`
+  registers the device `approved` automatically; an unknown device appears as
+  a `pending` contact (server log `Dropping LXMF from <hash> (contact
+  state=pending)`) and is approved at runtime with
+  `POST :8081/contacts/<hash>/approve` — no manifest edit, no rollout.  The
+  env `LMAO_ALLOWED_CLIENTS` in `k8s/lmao-server.yaml` is only a cold-start
+  seed (insert-only: it never undoes a revocation or rename).
 
 **Vendored changes to flash.py (the MicroPython flash tool — default Cardputer path):**
 - `DEVICE_PREFIX = "/flash"` — M5Stack firmware mounts flash at `/flash/`, not root
