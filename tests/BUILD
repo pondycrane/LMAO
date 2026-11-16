@@ -651,13 +651,14 @@ py_test(
     ],
 )
 
-# Sprout build-time provisioning (tools/sprout_provision.py): the KEY=value
-# lines build.sh evals, and "a plain build never changes a fielded node".
+# Native-device build-time provisioning (tools/device_provision.py): the
+# KEY=value lines build.sh evals, the RH_ prefix, and "a plain build never
+# changes a fielded node".
 py_test(
-    name = "test_sprout_provision",
-    srcs = ["test_sprout_provision.py"],
+    name = "test_device_provision",
+    srcs = ["test_device_provision.py"],
     deps = [
-        "//tools:sprout_provision_lib",
+        "//tools:device_provision_lib",
         "@lmao_pip//pytest",
     ],
 )

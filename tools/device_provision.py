@@ -1,22 +1,25 @@
 #!/usr/bin/env python3
-"""Print the Sprout native firmware's build-time provisioning variables.
+"""Print a native device's build-time provisioning variables.
 
-``smart_irrigation/native-client/firmware/build.sh`` evals this output so a
-Sprout build is self-provisioning — no hardcoded server literals in ``main.cpp``
-(see docs/identity-contact-design.md Phase 3):
+Both native firmware builds ``eval`` this output, so provisioning is one
+helper instead of per-tree logic (docs/identity-contact-design.md Phase 3):
 
-  LMAO_DEST_HASH_HEX      the server's lxmf/delivery destination hash
-  LMAO_SERVER_PUBKEY_HEX  the server's public key (build the destination
-                          without ever hearing an announce, #142)
-  LMAO_NODE_IDENTITY_HEX  the named device's 64-byte private key, when a
-                          per-device identity exists on the host
-                          (empty = keep the device's NVS identity)
+  <PREFIX>DEST_HASH_HEX      the server's lxmf/delivery destination hash
+  <PREFIX>SERVER_PUBKEY_HEX  the server's public key (build the destination
+                             without ever hearing an announce, #142)
+  <PREFIX>NODE_IDENTITY_HEX  the named device's 64-byte private key, when a
+                             per-device identity exists on the host
+                             (empty = keep the device's NVS identity)
+
+``--prefix`` selects the firmware's variable names: ``LMAO_`` for the Sprout
+(``LMAO_DEST_HASH_HEX`` …) and ``RH_`` for the RoboDog home client
+(``RH_DEST_HASH_HEX`` …).
 
 The server identity is resolved from the local store, else synced from the
 in-cluster lmao-server PVC (issue #93).  It is NEVER minted here: a fresh
 identity would silently break every flashed client (#70).
 
-``--provision`` is the opt-in "pin this Sprout" step: it mints the named
+``--provision`` is the opt-in "pin this device" step: it mints the named
 identity if absent, publishes its public record as an APPROVED contact (the
 same flow ``install_all --device-name`` runs for a Cardputer), and prints the
 key.  Without it, an existing ``devs/<name>/identity`` is pinned and an absent
@@ -47,7 +50,8 @@ def _resolve_server_identity():
     return RNS.Identity.from_file(identity_file)
 
 
-def _device_identity(name: str | None, provision: bool) -> str:
+def _device_identity(name: str | None, provision: bool,
+                     device_type: str = "sprout") -> str:
     """The named device's private key hex, or "" when it must keep NVS.
 
     With *provision* the identity is minted when absent and registered as an
@@ -61,7 +65,7 @@ def _device_identity(name: str | None, provision: bool) -> str:
             client_identity.device_identity_dir(name)
         )
     except ValueError as exc:
-        raise SystemExit(f"sprout_provision: {exc}") from None
+        raise SystemExit(f"device_provision: {exc}") from None
     if not os.path.isfile(path) and not provision:
         return ""
 
@@ -69,14 +73,14 @@ def _device_identity(name: str | None, provision: bool) -> str:
     if provision:
         delivery_hash = client_identity.device_delivery_destination_hash(name)
         pubkey_hex = client_identity.device_public_key_hex(name)
-        if register_contact(name, delivery_hash, "sprout", pubkey_hex):
+        if register_contact(name, delivery_hash, device_type, pubkey_hex):
             print(
-                f"sprout_provision: registered {name!r} -> {delivery_hash[:12]}… approved",
+                f"device_provision: registered {name!r} -> {delivery_hash[:12]}… approved",
                 file=sys.stderr,
             )
         else:
             print(
-                f"sprout_provision: WARNING could not register {name!r} at "
+                f"device_provision: WARNING could not register {name!r} at "
                 f"{contacts_api_base()} — approve {delivery_hash} manually "
                 f"(POST /contacts/{delivery_hash}/approve) or add it to "
                 "LMAO_ALLOWED_CLIENTS.",
@@ -88,47 +92,62 @@ def _device_identity(name: str | None, provision: bool) -> str:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
+        "--prefix",
+        default="LMAO_",
+        help="Variable prefix for the printed KEY=value lines (default LMAO_; "
+             "the RoboDog home client uses RH_)",
+    )
+    parser.add_argument(
         "--device-name",
         default=os.environ.get("LMAO_DEVICE_NAME", "sprout"),
         help="Per-device identity name to pin (default: $LMAO_DEVICE_NAME or "
              "'sprout'; empty = keep the device's NVS identity)",
     )
     parser.add_argument(
+        "--device-type",
+        default="sprout",
+        help="Contact-book device type for --provision (default: sprout)",
+    )
+    parser.add_argument(
         "--provision",
         action="store_true",
         help="Mint the named identity if absent and register it as an approved "
-             "contact (pins the Sprout to a stable delivery hash).",
+             "contact (pins the device to a stable delivery hash).",
     )
     args = parser.parse_args(argv)
 
+    dest_var = f"{args.prefix}DEST_HASH_HEX"
+    pubkey_var = f"{args.prefix}SERVER_PUBKEY_HEX"
+    identity_var = f"{args.prefix}NODE_IDENTITY_HEX"
+
     try:
         identity = _resolve_server_identity()
-        node_identity_hex = _device_identity(args.device_name, args.provision)
+        node_identity_hex = _device_identity(
+            args.device_name, args.provision, args.device_type
+        )
     except ImportError as exc:
         # A build host without Reticulum must still produce an announce-only
-        # image (the old committed literals are gone, so nothing else can pin).
-        print(f"sprout_provision: {exc} — building announce-only.", file=sys.stderr)
-        print("LMAO_DEST_HASH_HEX=")
-        print("LMAO_SERVER_PUBKEY_HEX=")
-        print("LMAO_NODE_IDENTITY_HEX=")
-        return 0
-    if identity is None:
-        print(
-            "sprout_provision: no server identity found locally or in the cluster — "
-            "building announce-only (LMAO_DEST_HASH_HEX/LMAO_SERVER_PUBKEY_HEX empty).",
-            file=sys.stderr,
-        )
-        print("LMAO_DEST_HASH_HEX=")
-        print("LMAO_SERVER_PUBKEY_HEX=")
-        print(f"LMAO_NODE_IDENTITY_HEX={node_identity_hex}")
+        # image (nothing else can pin).
+        print(f"device_provision: {exc} — building announce-only.", file=sys.stderr)
+        print(f"{dest_var}=")
+        print(f"{pubkey_var}=")
+        print(f"{identity_var}=")
         return 0
 
-    print(
-        "LMAO_DEST_HASH_HEX="
-        f"{server_identity.delivery_destination_hash_hex(identity)}"
-    )
-    print(f"LMAO_SERVER_PUBKEY_HEX={identity.get_public_key().hex()}")
-    print(f"LMAO_NODE_IDENTITY_HEX={node_identity_hex}")
+    if identity is None:
+        print(
+            "device_provision: no server identity found locally or in the cluster — "
+            f"building announce-only ({dest_var}/{pubkey_var} empty).",
+            file=sys.stderr,
+        )
+        print(f"{dest_var}=")
+        print(f"{pubkey_var}=")
+        print(f"{identity_var}={node_identity_hex}")
+        return 0
+
+    print(f"{dest_var}={server_identity.delivery_destination_hash_hex(identity)}")
+    print(f"{pubkey_var}={identity.get_public_key().hex()}")
+    print(f"{identity_var}={node_identity_hex}")
     return 0
 
 

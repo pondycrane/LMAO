@@ -63,6 +63,23 @@ if ! grep -q "create_ratchet" "$RTR/include/rtreticulum/destination.h"; then
     git -C "$RTR" apply "$RTRET_PATCH"
 fi
 
+# Provisioning: pin the server's delivery hash (+pubkey) and, when a
+# per-device identity already exists on this host, its private key — the same
+# helper the Sprout build uses (tools/device_provision.py).  Nothing is baked
+# from committed source and nothing is minted here: a plain build must never
+# change a fielded node's delivery hash, and an unreachable server identity
+# leaves the RH_* values empty = announce-only image.
+REPO_ROOT="$(cd "$APP/../.." && pwd)"
+if [ -z "${RH_DEST_HASH_HEX:-}" ] || [ -z "${RH_NODE_IDENTITY_HEX:-}" ]; then
+    if PROVISION="$(PYTHONPATH="$REPO_ROOT" python3 "$REPO_ROOT/tools/device_provision.py" \
+            --prefix RH_ --device-name "${RH_DEVICE_NAME:-}" \
+            --device-type robodog_home)"; then
+        eval "$PROVISION"
+    else
+        echo "WARNING: home provisioning failed — building announce-only." >&2
+    fi
+fi
+
 DEST="$RTR/firmware/robodog_home"
 mkdir -p "$DEST"
 rm -rf "$DEST/main" "$DEST/components" 2>/dev/null || true

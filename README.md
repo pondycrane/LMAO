@@ -909,7 +909,20 @@ It discovers the server's `lxmf.delivery` destination from its periodic
 announce (matched by the `lmao-server` LXMF display name, or pinned with
 `--dest-hash`/`LMAO_DEST_HASH`) and needs its own contact approved (§7b) — the
 delivery hash is printed at startup and persisted at
-`~/.local/share/lmao_home_client/lxmf` (stable across runs).
+`~/.local/share/lmao_home_client/lxmf` (stable across runs).  Publish it as an
+approved contact in one step (the operator's provisioning act; the private key
+never leaves the host):
+
+```bash
+bazel run //robodog_home_client:home_client -- --register-contact \
+    --device-name "study room"     # LMAO_CONTACTS_API selects the API base
+```
+
+The board firmware is provisioned the same way as the Sprout: `build.sh` pins
+the server hash/pubkey (and a per-device identity when
+`devs/<name>/identity` exists) via `tools/device_provision.py --prefix RH_`,
+and `flash.sh` registers the flashed board's public record as `approved`
+(`type=robodog_home`) after writing NVS — `--no-register` opts out.
 
 **Server side:** air-only `HistoryRequest`s are answered from
 `lma_core/env_history.py`, an all-node air buffer that folds **every**
@@ -943,14 +956,16 @@ from `~/.local/share/lmao_client/devs/<name>/identity`, so the delivery hash
 never drifts.
 
 ```bash
-# build: only the server hash + pinned identity + cadence are baked in
-RH_DEST_HASH_HEX=<server delivery hash> RH_NODE_IDENTITY_HEX=<64-byte key hex> \
+# build: server hash + pinned identity are resolved automatically from the
+# server identity store and devs/<name>/identity (override with RH_* vars);
+# only the cadence is normally passed
 RH_DEVICE_NAME="main bedroom" RH_INTERVAL_SECONDS=60 \
 bazel run //robodog_home_client:build_firmware
 
 # flash + provision NVS — WiFi credentials come from the ENVIRONMENT, never
-# from source (flash.sh refuses to run without them)
-LMAO_WIFI_SSID=... LMAO_WIFI_PASS=... \
+# from source (flash.sh refuses to run without them); the board is then
+# registered as an approved contact
+LMAO_WIFI_SSID=... LMAO_WIFI_PASS=... LMAO_CONTACTS_API=http://tp4:8081 \
 bazel run //robodog_home_client:flash_firmware -- \
     --device-name "main bedroom" --server-host tp4 --port /dev/ttyACM0
 ```

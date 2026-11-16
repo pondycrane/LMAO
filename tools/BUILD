@@ -34,15 +34,17 @@ py_binary(
     deps = [":install_all_lib"],
 )
 
-# Sprout build-time provisioning: prints LMAO_DEST_HASH_HEX /
-# LMAO_SERVER_PUBKEY_HEX / LMAO_NODE_IDENTITY_HEX for
-# smart_irrigation/native-client/firmware/build.sh, which evals the output.
-# The server identity is loaded locally or synced from the in-cluster PVC
-# (never minted — a fresh identity breaks every flashed client, #70).
-#   bazel run //tools:sprout_provision -- --device-name sprout
+# Native-device build-time provisioning: prints <PREFIX>DEST_HASH_HEX /
+# <PREFIX>SERVER_PUBKEY_HEX / <PREFIX>NODE_IDENTITY_HEX for the Sprout and
+# RoboDog-home firmware build.sh scripts, which eval the output.  The server
+# identity is loaded locally or synced from the in-cluster PVC (never minted —
+# a fresh identity breaks every flashed client, #70).
+#   bazel run //tools:device_provision -- --device-name sprout
+#   bazel run //tools:device_provision -- --prefix RH_ --device-name "study room" \
+#       --device-type robodog_home
 py_library(
-    name = "sprout_provision_lib",
-    srcs = ["sprout_provision.py"],
+    name = "device_provision_lib",
+    srcs = ["device_provision.py"],
     visibility = ["//visibility:public"],
     deps = [
         "//lma_core",
@@ -51,11 +53,11 @@ py_library(
 )
 
 py_binary(
-    name = "sprout_provision",
-    srcs = ["sprout_provision.py"],
-    main = "sprout_provision.py",
+    name = "device_provision",
+    srcs = ["device_provision.py"],
+    main = "device_provision.py",
     visibility = ["//visibility:public"],
-    deps = [":sprout_provision_lib"],
+    deps = [":device_provision_lib"],
 )
 
 # The repeatable foundation target for the native voice Cardputer: replicate

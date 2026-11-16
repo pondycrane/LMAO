@@ -95,7 +95,7 @@ if [ -z "${LMAO_DEST_HASH_HEX:-}" ] || [ -z "${LMAO_SERVER_PUBKEY_HEX:-}" ]; the
     # empty values = announce-only image (the script prints the reason).
     # stderr stays on the console (the script explains any warning); only the
     # KEY=value stdout lines are evaled.
-    if PROVISION="$(PYTHONPATH="$REPO_ROOT" python3 "$REPO_ROOT/tools/sprout_provision.py" \
+    if PROVISION="$(PYTHONPATH="$REPO_ROOT" python3 "$REPO_ROOT/tools/device_provision.py" \
             --device-name "${LMAO_DEVICE_NAME:-sprout}")"; then
         eval "$PROVISION"
     else

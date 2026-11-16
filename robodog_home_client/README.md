@@ -133,6 +133,24 @@ bazel run //robodog_home_client:flash_firmware -- \
 `flash.sh` refuses to run without `--wifi-ssid/--wifi-pass` (or
 `LMAO_WIFI_SSID`/`LMAO_WIFI_PASS`), and requires `--device-name`.
 
+**Provisioning is automatic, in both steps** (docs/identity-contact-design.md
+Phase 3):
+
+- `build.sh` pins the server's delivery hash and public key — and, when
+  `~/.local/share/lmao_client/devs/<name>/identity` already exists, that
+  device's private key — via the shared `tools/device_provision.py`
+  (`--prefix RH_`).  Nothing is minted by a plain build, so a re-build never
+  changes a fielded board's `lxmf/delivery` hash; an unreachable server
+  identity leaves the values empty (announce-only image).
+- After a successful flash, `flash.sh` publishes the board's **public** record
+  to the server contact book as **approved** (`type=robodog_home`), deriving
+  the delivery hash + pubkey from the identity baked into that image.  A flash
+  with the board attached *is* the operator's trust decision, so the server
+  accepts its reports without a manifest edit or a pod rollout.  Skip it with
+  `--no-register` (or `RH_SKIP_REGISTER=1`); an unreachable Contacts API is
+  non-fatal and prints the approve URL.  Point the API at the cluster host
+  with `LMAO_CONTACTS_API`.
+
 Build-time variables (`build.sh`; nothing is written to the source tree):
 
 | Var | Default | Meaning |
@@ -151,8 +169,8 @@ SSID/passphrase (verified by scanning the `.bin`).
 The device announces its delivery destination with the LXMF display name set
 to the device name, and the server learns it in the contact book on its first
 report — named from `SensorReport.node_id` (so it is named even if the
-announce was missed).  Set/retype it explicitly with
-`POST :8081/contacts`:
+announce was missed).  The flash registers it approved automatically; to
+set/retype it explicitly (a POST is an operator act, so it registers approved):
 
 ```sh
 curl -X POST http://tp4:8081/contacts \
@@ -188,9 +206,12 @@ bench wait <job-id>; bench evidence <job-id>
 The build needs no secrets from the caller: the bench holds the server
 delivery hash and the pinned per-device identity
 (`BENCH_HOME_DEST_HASH` / `BENCH_HOME_NODE_IDENTITIES` in `/etc/benchd.env`,
-mirroring the local `~/.local/share/lmao_client/devs/<name>/identity` store),
-and the flash step takes the WiFi credentials from `BENCH_HOME_*`. The device
-name still comes from the job (`payload.device_name` → NVS `device_name`).
+keyed by device name or its slug, mirroring the local
+`~/.local/share/lmao_client/devs/<name>/identity` store), and the flash step
+takes the WiFi credentials from `BENCH_HOME_*`. The device name still comes
+from the job (`payload.device_name` → NVS `device_name`).  The flash's contact
+registration then hits `LMAO_CONTACTS_API`; on the bench that must point at a
+reachable server (the job env can set it) or the board is left pending.
 
 ## Configuration
 
@@ -221,16 +242,24 @@ The interface set comes from one definition,
 fallback by design — multicast is unreliable on the home AP, and this client
 has no LoRa hardware.
 
-## Allow-list
+## Contact approval (the server gate)
 
-The server drops LXMF from senders that are not in `ALLOWED_CLIENTS`
-(`LMAO_ALLOWED_CLIENTS` in `k8s/lmao-server.yaml`) — a dropped request gets no
-reply, and the client reports a timeout.  The client prints its
-`lxmf/delivery` hash at startup; add it to the list and redeploy the server:
+The server's device gate is the **contact book** (`docs/identity-contact-design.md`):
+a sender is accepted only when its contact is `approved`, and an unknown one is
+learned as `pending` and dropped (a dropped request gets no reply, and the
+client reports a timeout).  The host client prints its `lxmf/delivery` hash at
+startup and publishes its public record with `--register-contact`:
 
 ```sh
-bazel run //tools:install_all -- --setup-registry --include-services --skip-rnode
+bazel run //robodog_home_client:home_client -- --register-contact \
+    --device-name "study room"
+# or approve the printed hash directly
+curl -X POST http://tp4:8081/contacts/<hash>/approve
 ```
+
+`LMAO_CONTACTS_API` selects the API base (default `http://127.0.0.1:8081`).
+`LMAO_ALLOWED_CLIENTS` in `k8s/lmao-server.yaml` is now only a cold-start seed
+for a fresh book, so no server redeploy is needed to admit a device.
 
 ## Data availability
 
