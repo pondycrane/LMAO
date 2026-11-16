@@ -51,22 +51,57 @@ class TestPersonWord:
         assert cps.person_word(["alex"]) == "kid"
 
 
+class TestCharacterChoice:
+    def test_juliet_gets_pokemon(self):
+        c = cps.build_queries("J tennis 4pm Mon", ["juliet"])
+        assert c["character"] in cps.JULIET_CHARACTERS
+
+    def test_wesley_gets_paw_patrol(self):
+        c = cps.build_queries("W dental", ["wesley"])
+        assert c["character"] in cps.WESLEY_CHARACTERS
+
+    def test_shared_event_draws_from_either_pool(self):
+        c = cps.build_queries("J and W Chinese Class", ["juliet", "wesley"])
+        assert c["character"] in cps.JULIET_CHARACTERS + cps.WESLEY_CHARACTERS
+
+    def test_unknown_participant_gets_a_general_character(self):
+        assert cps.build_queries("Alex swim", ["alex"])["character"] in \
+            cps.GENERIC_CHARACTERS
+
+    def test_character_is_stable_per_event_and_rotates_across_events(self):
+        a = cps.build_queries("J tennis 4pm Mon", ["juliet"])
+        b = cps.build_queries("J tennis 4pm Mon", ["juliet"])
+        assert a["character"] == b["character"]
+        picks = {cps.build_queries(t, ["juliet"])["character"] for t in (
+            "J tennis", "J chess", "J piano", "J swim", "J dance", "J golf")}
+        assert len(picks) > 1
+
+    def test_character_token_is_the_distinctive_word(self):
+        assert cps.character_token("pikachu") == "pikachu"
+        assert cps.character_token("paw patrol marshall") == "marshall"
+        assert cps.character_token("peppa pig") == "peppa"
+
+
 class TestBuildQueries:
-    def test_activity_is_the_primary_query(self):
+    def test_primary_query_is_the_character_doing_the_activity(self):
         c = cps.build_queries("J tennis 4pm Mon", ["juliet"])
         assert c["action"] == "playing tennis"
-        assert c["queries"][0] == "girl playing tennis coloring page"
-        assert c["queries"][0] in c["queries"]
+        assert c["queries"][0] == f"{c['character']} playing tennis coloring page"
 
-    def test_shared_event_asks_for_kids(self):
+    def test_falls_back_to_the_character_then_a_generic_kid(self):
+        c = cps.build_queries("J tennis 4pm Mon", ["juliet"])
+        assert c["queries"][1] == f"{c['character']} coloring page"
+        assert c["queries"][2] == "girl playing tennis coloring page"
+
+    def test_shared_event_keeps_the_kids_fallback(self):
         c = cps.build_queries("J and W Chinese Class", ["juliet", "wesley"])
         assert c["person"] == "kids"
-        assert c["queries"][0].startswith("kids ")
+        assert "kids in class coloring page" in c["queries"]
 
-    def test_activityless_event_falls_back_to_a_kid(self):
+    def test_activityless_event_asks_for_the_character(self):
         c = cps.build_queries("Parent team lunch", ["wesley"])
         assert c["action"] == ""
-        assert c["queries"][0] == "boy cartoon coloring page"
+        assert c["queries"][0] == f"{c['character']} coloring page"
 
     def test_queries_are_deterministic_and_deduped(self):
         a = cps.build_queries("J tennis 4pm", ["juliet"])
@@ -250,6 +285,27 @@ class TestPickSource:
         # a query token must appear in the title
         assert cps.pick_source([_r("Dolphin logo.png")],
                                "girl playing tennis coloring page") is None
+
+    def test_prefers_the_character_over_a_generic_kid_of_the_same_activity(self):
+        results = [_r("Girl playing tennis coloring page.png"),
+                   _r("Pikachu playing tennis coloring page.png")]
+        picked = cps.pick_source(results, "pikachu playing tennis coloring page",
+                                 "pikachu")
+        assert picked[0].startswith("Pikachu")
+
+    def test_character_alone_beats_a_generic_kid(self):
+        # no "Pikachu playing tennis" page exists -> the character still wins
+        results = [_r("Girl playing tennis coloring page.png"),
+                   _r("Pikachu coloring page.png")]
+        picked = cps.pick_source(results, "pikachu playing tennis coloring page",
+                                 "pikachu")
+        assert picked[0].startswith("Pikachu")
+
+    def test_falls_back_to_the_activity_when_no_character_page_exists(self):
+        results = [_r("Girl playing tennis coloring page.png")]
+        picked = cps.pick_source(results, "pikachu playing tennis coloring page",
+                                 "pikachu")
+        assert picked[0].startswith("Girl")
 
 
 class TestWebSource:

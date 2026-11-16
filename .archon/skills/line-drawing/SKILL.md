@@ -84,14 +84,20 @@ The `cal_pics` table is created on first use; rerunning a key overwrites
 `tools/calendar_pics_sync.py` fills missing keys for upcoming kid events
 without an agent. It draws **what the event says**, from the web:
 
-1. **Query from the title** — `extract_action` maps the event to an activity
-   phrase (`J tennis 4pm` → `playing tennis`, `W dental` → `at the dentist`,
-   `Wesley Princeton` → `at school`), and `person_word` picks the subject
-   (`juliet` → `girl`, `wesley` → `boy`, a shared event → `kids`).  Primary
-   query: `<person> <activity> coloring page`.
+1. **Query from the event** — `pick_character` chooses a character from the
+   kids' shows (`juliet` → Pokemon pool, `wesley` → PAW Patrol pups, a shared
+   event → either; seeded by title+participants, so one kid's events rotate
+   while a re-run never reshuffles), `extract_action` maps the event to an
+   activity phrase (`J tennis 4pm` → `playing tennis`, `W dental` → `at the
+   dentist`, `Wesley Princeton` → `at school`).  Primary query:
+   `<character> <activity> coloring page` (`pikachu playing tennis coloring
+   page`); then `<character> coloring page`; then `person_word`'s generic kid
+   (`juliet` → `girl`, `wesley` → `boy`, shared → `kids`) doing the activity.
 2. **Sources** — Wikimedia Commons plus the keyless DuckDuckGo image index.
    The ranker prefers line art / coloring pages, a single drawing over a
-   multi-panel print sheet, and a kid over an object or adult — and it
+   multi-panel print sheet, and **the requested character above any generic
+   kid** (its distinctive word — `character_token` — carries a +120 score, and
+   `pick_source` returns a candidate naming it whenever one exists) — and it
    **rejects AI-generated art** (`ai-generated`, `generated vector`, diffusion
    tool names in the title/URL) and SVGs (the sync image has no cairosvg).
 3. **Framing** — `lma_core.calendar_pics.rasterize_line_art`, the one

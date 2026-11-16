@@ -6,7 +6,8 @@
 # Runs the two calendar stages that used to be a host Hermes cron
 # (~/.hermes/scripts/lmao_kids_sync.sh):
 #   1. tools/calendar_sync.py       Google Calendar -> cal_events (Postgres)
-#   2. tools/calendar_pics_sync.py  event activity -> fetched line drawing ->
+#   2. tools/calendar_pics_sync.py  kid cartoon character doing the
+#                                   event activity -> fetched line drawing ->
 #                                   1-bit RLCD tile in cal_pics (no generator)
 #
 # Deployed by k8s/calendar-sync.yaml (CronJob, hourly) through

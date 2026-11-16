@@ -4,7 +4,8 @@
 # (~/.hermes/scripts/lmao_kids_sync.sh).  Two stages, in order:
 #
 #   1. tools/calendar_sync.py       Google Calendar -> cal_events (Postgres)
-#   2. tools/calendar_pics_sync.py  event activity -> fetched line drawing ->
+#   2. tools/calendar_pics_sync.py  kid cartoon character doing the
+#                                   event activity -> fetched line drawing ->
 #                                   1-bit RLCD tile in cal_pics (no generator)
 #
 # Why this exists on a schedule at all: the RoboDog panel syncs by DELTA
@@ -40,8 +41,9 @@
 #   - commons.wikimedia.org / duckduckgo.com   reachable (the tile sources)
 #   The pics stage degrades gracefully: an unreachable search index leaves the
 #   event artless until the next run.  There is NO image generator and NO model
-#   call in this path — tiles are fetched kid-activity coloring pages/line
-#   drawings (Commons + DuckDuckGo), framed by a pixel measurement.
+#   call in this path — tiles are fetched coloring pages / line drawings of
+#   the kid's cartoon character doing the activity (Commons + DuckDuckGo),
+#   framed by a pixel measurement.
 #   Nothing in the stage addresses a LAN model host, so no ConfigMap entries
 #   are needed (cluster DNS would not resolve the LAN hostnames anyway).
 
@@ -108,7 +110,7 @@ spec:
                   set -euo pipefail
                   echo "=== stage 1: Google Calendar -> cal_events ==="
                   python tools/calendar_sync.py --window-days 14
-                  echo "=== stage 2: event activity -> fetched line art -> cal_pics ==="
+                  echo "=== stage 2: kid cartoon character doing the activity -> fetched line art -> cal_pics ==="
                   python tools/calendar_pics_sync.py
                   echo "=== calendar sync complete ==="
               envFrom:

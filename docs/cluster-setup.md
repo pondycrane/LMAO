@@ -335,11 +335,12 @@ Two stages per run, matching the old script:
    row inside the window whose id Google no longer lists is tombstoned, so a
    moved/re-created occurrence cannot leave a ghost row behind.  `--dry-run`
    prints the retraction plan.
-2. `tools/calendar_pics_sync.py` — the event's activity → a fetched line
-   drawing of a kid cartoon character doing it → 1-bit 176×176 RLCD tile in
-   `cal_pics`.  No image generator and no model call: the query comes from the
-   title (`J tennis 4pm` → `girl playing tennis coloring page`), the sources
-   are Wikimedia Commons + DuckDuckGo, and the framing/gate are pixel
+2. `tools/calendar_pics_sync.py` — the event's activity + the kid's cartoon
+   character → a fetched line drawing of that character doing it → 1-bit
+   176×176 RLCD tile in `cal_pics`.  No image generator and no model call: the
+   query comes from the event (`J tennis 4pm` → `pikachu playing tennis
+   coloring page`, character seeded per event from the kid's show), the
+   sources are Wikimedia Commons + DuckDuckGo, and the framing/gate are pixel
    measurements (see `.archon/skills/line-drawing/SKILL.md`).
 
 **Why hourly matters beyond data freshness:** the RoboDog panel syncs by delta
@@ -415,12 +416,12 @@ The backfill only lands on the panel for events the RoboDog re-syncs: each
 regenerated tile bumps `updated_ms` on the events using that `pic`
 (`PicStore.put`), so the panel picks them up on its next 30-min delta sync.
 
-**No tile is ever generated.** The stage paints what the event says: the kid
-doing the activity, fetched as a coloring page / line drawing.  Generated art
-is rejected by the ranker (`ai-generated`, `generated vector`, diffusion tool
-names in the title/URL) — the earlier theme-character stage and its ComfyUI
-generator are gone, and with them the unrelated Pokémon / PAW Patrol tiles
-that sat beside "J tennis 4pm".
+**No tile is ever generated.** The stage draws a character the kids know,
+fetched as a coloring page / line drawing, and the character is asked to be
+DOING the event's activity.  Generated art is rejected by the ranker
+(`ai-generated`, `generated vector`, diffusion tool names in the title/URL) —
+the ComfyUI generator and its random-per-event theme pick are gone, and with
+them the unrelated Pokémon / PAW Patrol tiles that sat beside "J tennis 4pm".
 
 **The fix must be in the deployed image.** Rebuild/push
 `lmao-calendar-sync` before a backfill or the next hourly run

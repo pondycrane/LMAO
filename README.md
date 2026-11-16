@@ -596,18 +596,21 @@ skill** (see `.archon/skills/line-drawing/SKILL.md`) via `bazel run
 found online and fetched as a URL (`--source https://…`). The client resolves
 the key to the stored tile for display.
 
-**The hourly stage draws the ACTIVITY, from the web — never from a generator.**
-`tools/calendar_pics_sync.py` reads the event title (`J tennis 4pm` → *girl
-playing tennis*, `W dental` → *boy at the dentist*, a shared event → *kids*),
-searches Wikimedia Commons + DuckDuckGo for a kid-cartoon coloring page /
-line drawing of exactly that, and rasterizes it locally.  There is no image
-generation model and no model call in this path: AI-generated art is rejected
-by the ranker, the framing is a pixel measurement (trim to the drawing's
-subject bbox, ignoring page furniture such as a footer logo; fit
-aspect-preserving and centered into the 176×176 tile — a portrait coloring
-page is no longer squashed into an unrecognizable square), and the gate
-rejects anything that is not outline work (ink fraction 0.02–0.45 with ≥0.15
-of the tile as enclosed white interior).  An event with no acceptable hit
+**The hourly stage draws the kids' CARTOON CHARACTER doing the ACTIVITY, from
+the web — never from a generator.** `tools/calendar_pics_sync.py` picks a
+character the kids watch (`juliet` → Pokemon, `wesley` → PAW Patrol pups, a
+shared event → either pool, seeded per event so one kid's events rotate), reads
+the activity out of the title (`J tennis 4pm` → *playing tennis*, `W dental` →
+*at the dentist*), and searches Wikimedia Commons + DuckDuckGo for that
+character doing it (`pikachu playing tennis coloring page`, then the character
+alone, then a generic kid doing the activity), rasterizing the hit locally.
+There is no image generation model and no model call in this path:
+AI-generated art is rejected by the ranker, the framing is a pixel measurement
+(trim to the drawing's subject bbox, ignoring page furniture such as a footer
+logo; fit aspect-preserving and centered into the 176×176 tile — a portrait
+coloring page is no longer squashed into an unrecognizable square), and the
+gate rejects anything that is not outline work (ink fraction 0.02–0.45 with
+≥0.15 of the tile as enclosed white interior).  An event with no acceptable hit
 stays artless and is retried on the next hourly run.
 
 **Weather rides the same reply.** When the deployment sets

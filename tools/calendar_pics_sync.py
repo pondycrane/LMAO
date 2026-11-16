@@ -6,9 +6,10 @@ not yet in ``cal_pics``, this stage:
 
 1. reads the event's ACTIVITY out of its title ("J tennis 4pm" -> playing
    tennis, "W dental" -> at the dentist),
-2. searches the internet for a line drawing / coloring page of a KID CARTOON
-   CHARACTER doing that activity (Wikimedia Commons, plus DuckDuckGo's keyless
-   image index),
+2. searches the internet for a line drawing / coloring page of a CARTOON
+   CHARACTER the kids know (Pikachu for Juliet, a PAW Patrol pup for Wesley)
+   doing that activity (Wikimedia Commons, plus DuckDuckGo's keyless image
+   index),
 3. trims the hit to its ink and fits it, aspect-preserving, into a 1-bit
    black-and-white 176x176 tile,
 4. stores it under the event's ``pic`` key.
@@ -20,11 +21,16 @@ with no acceptable online line drawing stays artless and is retried on the
 next hourly run (or stored by hand with
 ``bazel run //tools:calendar_pics -- --key <key> --source <url>``).
 
-Why activity art: the earlier stage painted a per-kid theme character (Pokemon
-for Juliet, PAW Patrol / sea animals for Wesley) chosen at random per event, so
-the panel showed an unrelated creature beside "J tennis 4pm" — and the square
-stretch of a tall coloring page made even that unrecognizable.  The panel's job
-is "what is happening"; the drawing now shows that.
+Why characters: the panel is for the kids, so the tile shows a character they
+recognize from the cartoons they watch — Juliet gets Pokemon, Wesley gets PAW
+Patrol, and the character is asked to be DOING the event's activity
+("pikachu playing tennis coloring page") rather than standing there.  The old
+stage picked a random theme character per event with no relation to the title,
+so the panel showed an unrelated creature beside "J tennis 4pm"; and its square
+stretch of a tall coloring page made even that unrecognizable.  When no
+character drawing of the activity exists online, the queries fall back to the
+character alone and then to a generic kid doing the activity, so an event is
+never left artless for lack of a licensed character page.
 
 Idempotent: a ``pic`` key already present in ``cal_pics`` is skipped, so re-runs
 only do new events (``--force`` regenerates).
@@ -39,9 +45,11 @@ Needs the same Postgres env (LMAO_CONTACTS_URL / LMAO_CONTACTS_PG_*).
 from __future__ import annotations
 
 import argparse
+import hashlib
 import io
 import json
 import os
+import random
 import sys
 import time
 import urllib.error
@@ -67,7 +75,27 @@ from lma_core.calendar_pics import (  # noqa: E402
 )
 
 # ---------------------------------------------------------------------------
-# Event title -> activity phrase (usable as "<person> <action> coloring page")
+# Cartoon characters the kids actually watch
+# ---------------------------------------------------------------------------
+# The tile shows one of these DOING the event's activity.  Each entry is a
+# search subject, not just a name: "chase" alone matches car chases, so the
+# PAW Patrol pups carry their show prefix.  Juliet -> Pokemon, Wesley -> PAW
+# Patrol (proprietary IP: Wikimedia Commons has no licensed art, so the
+# DuckDuckGo coloring-page index is what reaches it).  An event shared by both
+# kids draws from either pool; an unknown participant gets a general pool.
+JULIET_CHARACTERS = [
+    "pikachu", "eevee", "squirtle", "charmander", "bulbasaur", "jigglypuff",
+    "psyduck", "snorlax", "meowth", "growlithe", "lapras",
+]
+WESLEY_CHARACTERS = [
+    "paw patrol chase", "paw patrol marshall", "paw patrol skye",
+    "paw patrol rubble", "paw patrol rocky", "paw patrol zuma",
+    "paw patrol everest", "paw patrol tracker",
+]
+GENERIC_CHARACTERS = ["bluey", "peppa pig", "spongebob squarepants"]
+
+# ---------------------------------------------------------------------------
+# Event title -> activity phrase (usable as "<character> <action> coloring page")
 # ---------------------------------------------------------------------------
 # Longest key first so "ice skating" is matched before "skat", and "ninja
 # warrior" before "warrior".  The phrase is what the search query and the
@@ -142,11 +170,12 @@ def extract_action(title: str) -> str:
 
 
 def person_word(participants: list[str] | tuple[str, ...]) -> str:
-    """The noun the drawing should show: one kid, or two/several kids.
+    """The fallback noun when no character drawing is available.
 
     A single participant is rendered as that kid's own kind (Juliet -> girl,
-    Wesley -> boy) so the drawing matches the child the panel is for; a shared
-    event shows kids together.  Unknown names stay neutral.
+    Wesley -> boy); a shared event shows kids together.  Unknown names stay
+    neutral.  This is only the LAST query: the primary one asks for a cartoon
+    character the kids know.
     """
     names = {n.strip().lower() for n in participants if n and n.strip()}
     if len(names) > 1:
@@ -159,27 +188,67 @@ def person_word(participants: list[str] | tuple[str, ...]) -> str:
     return "kid"
 
 
-def build_queries(title: str, participants: list[str] | tuple[str, ...]) -> dict:
-    """Pick the event's activity and its web search queries.
+def character_pool(participants: list[str] | tuple[str, ...]) -> list[str]:
+    """The characters this event may draw: the kids' own shows, or generic."""
+    names = {n.strip().lower() for n in participants if n and n.strip()}
+    pool: list[str] = []
+    if "juliet" in names:
+        pool += JULIET_CHARACTERS
+    if "wesley" in names:
+        pool += WESLEY_CHARACTERS
+    return pool or list(GENERIC_CHARACTERS)
 
-    Deterministic: no model decides anything.  ``queries[0]`` is the primary
-    (the kid doing the activity, as a coloring page); the rest widen the net
-    without leaving the "kid cartoon character doing <activity>" intent.
+
+def pick_character(participants: list[str] | tuple[str, ...],
+                   title: str) -> str:
+    """A character from the event's pool, seeded by the event itself.
+
+    Deterministic (same title + participants -> same character), so re-running
+    the stage does not reshuffle the panel, while different events of one kid
+    rotate through the pool instead of all showing Pikachu.
+    """
+    pool = character_pool(participants)
+    names = sorted({n.strip().lower() for n in participants if n and n.strip()})
+    seed = hashlib.sha1((title + "|" + ",".join(names)).encode()).hexdigest()
+    return random.Random(seed).choice(pool)
+
+
+def character_token(character: str) -> str:
+    """The distinctive word the ranker looks for in a candidate's title.
+
+    The longest word of the subject: "pikachu" -> pikachu, "paw patrol
+    marshall" -> marshall, "peppa pig" -> peppa.  That is the part of the title
+    a character drawing always carries.
+    """
+    words = [w for w in (_norm_title(x) for x in character.split()) if len(w) >= 4]
+    return max(words, key=len) if words else ""
+
+
+def build_queries(title: str, participants: list[str] | tuple[str, ...]) -> dict:
+    """Pick the event's character, activity and web search queries.
+
+    Deterministic: no model decides anything.  ``queries[0]`` is the character
+    DOING the activity ("pikachu playing tennis coloring page"); the rest fall
+    back to the character alone and then to a generic kid doing the activity,
+    so a missing licensed character page still leaves the event illustrated.
     """
     action = extract_action(title)
     person = person_word(participants)
+    character = pick_character(participants, title)
     if action:
         queries = [
+            f"{character} {action} coloring page",
+            f"{character} coloring page",
             f"{person} {action} coloring page",
-            f"kid {action} coloring page",
-            f"{person} {action} line drawing",
         ]
     else:
         queries = [
+            f"{character} coloring page",
             f"{person} cartoon coloring page",
             "happy kid cartoon line drawing",
         ]
-    return {"action": action, "person": person, "queries": _dedupe(queries)}
+    return {"action": action, "person": person, "character": character,
+            "subject": character_token(character), "queries": _dedupe(queries)}
 
 
 def _dedupe(items: list[str]) -> list[str]:
@@ -287,14 +356,14 @@ def search_web_images(query: str, limit: int = 20):
         {"l": "us-en", "o": "json", "q": query, "vqd": vqd, "f": ",,,", "p": "1"})
     req = urllib.request.Request(
         url, headers={"User-Agent": _UA, "Referer": _DDG_HOME})
-    for attempt in range(3):
+    for attempt in range(4):
         try:
             with urllib.request.urlopen(req, timeout=25) as resp:
                 data = json.load(resp)
             break
         except urllib.error.HTTPError as e:
-            if e.code == 429 and attempt < 2:
-                time.sleep(5 * (attempt + 1))
+            if e.code == 429 and attempt < 3:
+                time.sleep(8 * (attempt + 1))
                 continue
             raise
     out = []
@@ -310,11 +379,19 @@ def search_sources(query: str):
     """Internet line-drawing sources for one query.
 
     Wikimedia Commons carries public-domain line art; the DuckDuckGo image
-    index reaches the kid-activity coloring pages Commons has no copy of.  One
-    web call per query keeps the hourly run inside DuckDuckGo's rate limit;
-    ranking + the ink gate then pick the usable tile.
+    index reaches the licensed-character coloring pages Commons has no copy
+    of.  One web call per query keeps the hourly run inside DuckDuckGo's rate
+    limit; ranking + the ink gate then pick the usable tile.
+
+    A source that is down or rate-limited yields nothing for THIS query — it
+    must not abort the event, because the next query (and the next hourly run)
+    can still fill the tile.
     """
-    out = list(search_commons(query))
+    out = []
+    try:
+        out += list(search_commons(query))
+    except Exception as exc:  # noqa: BLE001
+        print(f"  (commons unavailable for {query!r}: {exc})")
     try:
         out += search_web_images(query)
     except Exception as exc:  # noqa: BLE001
@@ -329,8 +406,13 @@ def _norm_title(t: str) -> str:
     return "".join(c for c in t if c.isalnum())
 
 
-def _score_result(r, query: str = ""):
-    """Score one candidate (title,url,w,h) for *query*; None = reject."""
+def _score_result(r, query: str = "", subject: str = ""):
+    """Score one candidate (title,url,w,h) for *query*; None = reject.
+
+    ``subject`` is the character's distinctive word (see
+    :func:`character_token`); when given it dominates the score, so a Pikachu
+    drawing outranks a generic kid drawing of the same activity.
+    """
     title, url, w, h = r
     if not url or not w or not h:
         return None
@@ -339,7 +421,8 @@ def _score_result(r, query: str = ""):
     if w > 6000 or h > 6000 or max(w, h) / max(1, min(w, h)) > 3.0:
         return None
     words = (query or "").split()
-    subject = _norm_title(words[0]) if words else ""
+    subj = _norm_title(subject) if subject else (
+        _norm_title(words[0]) if words else "")
     tokens = [_norm_title(t) for t in words if len(t) >= 4]
     tn = _norm_title(title)
     low = title.lower() + " " + url.lower()
@@ -348,10 +431,10 @@ def _score_result(r, query: str = ""):
     if tokens and not any(t in tn for t in tokens):
         return None  # no query token in the title -> unrelated, reject
     s = 0
-    if subject and subject in tn:
-        s += 60  # the kid noun is present
+    if subj and subj in tn:
+        s += 120  # the character itself — the panel is for the kids
     for t in tokens:
-        if t in tn and t != subject:
+        if t in tn and t != subj:
             s += 25  # matches the action / other query words too
     if "map" in tn or "diagram" in tn or "seating" in tn:
         s -= 20
@@ -372,17 +455,27 @@ def _score_result(r, query: str = ""):
     return s
 
 
-def rank_candidates(results, query: str = ""):
+def rank_candidates(results, query: str = "", subject: str = ""):
     """Return results sorted best-first that match the query (rejecting none-fit)."""
-    scored = [(_score_result(r, query), r) for r in results]
+    scored = [(_score_result(r, query, subject), r) for r in results]
     scored = [(s, r) for s, r in scored if s is not None]
     scored.sort(key=lambda x: x[0], reverse=True)
     return [r for _, r in scored]
 
 
-def pick_source(results, query: str = ""):
-    """Best candidate for *query*, or None if none fit."""
-    ranked = rank_candidates(results, query)
+def pick_source(results, query: str = "", subject: str = ""):
+    """Best candidate for *query*, or None if none fit.
+
+    When a ``subject`` character was asked for, a candidate naming it always
+    wins: the kids should see Pikachu, not an anonymous girl, even though both
+    illustrate "playing tennis".
+    """
+    ranked = rank_candidates(results, query, subject)
+    if subject:
+        token = _norm_title(subject)
+        named = [r for r in ranked if token in _norm_title(r[0])]
+        if named:
+            return named[0]
     return ranked[0] if ranked else None
 
 
@@ -556,7 +649,7 @@ def main(argv: list[str] | None = None) -> int:
         for _uid, title, pic, participants in needed:
             combo = build_queries(title, participants or [])
             print(f"  {pic}  {','.join(participants):<14} {title} -> "
-                  f"{combo['person']} {combo['action'] or '(no activity)'} "
+                  f"{combo['character']} {combo['action'] or '(no activity)'} "
                   f"queries={combo['queries']}")
         pic_store.close()
         cal.close()
@@ -567,43 +660,46 @@ def main(argv: list[str] | None = None) -> int:
         combo = build_queries(title, participants or [])
         queries = combo["queries"]
         print(f"== {pic} ({','.join(participants)}): '{title}' -> "
-              f"{combo['person']} {combo['action'] or '(no activity)'} "
+              f"{combo['character']} {combo['action'] or '(no activity)'} "
               f"{queries} [commons + web line-art]")
         try:
             stored = False
-            results, seen_urls = [], set()
+            # Query-by-query, stopping at the first stored tile: the primary
+            # character query almost always suffices, so the fallbacks cost a
+            # search only when they are actually needed (DuckDuckGo rate limit
+            # is the binding constraint on a 30-event run).
             for q in queries:
-                for r in search_sources(q):
-                    if r[1] and r[1] not in seen_urls:
-                        seen_urls.add(r[1])
-                        results.append(r)
-            for cand in rank_candidates(results, queries[0])[:8]:
-                _, url, w, h = cand
-                try:
-                    raw = download(url)
-                    aspect = content_aspect(raw, args.threshold)
-                    if aspect is not None and not (
-                            1 / MAX_CONTENT_ASPECT <= aspect <= MAX_CONTENT_ASPECT):
-                        print(f"   content is a {aspect:.1f}:1 strip — skipping "
-                              f"{cand[0]!r}")
+                results = search_sources(q)
+                for cand in rank_candidates(results, q, combo["subject"])[:8]:
+                    _, url, w, h = cand
+                    try:
+                        raw = download(url)
+                        aspect = content_aspect(raw, args.threshold)
+                        if aspect is not None and not (
+                                1 / MAX_CONTENT_ASPECT <= aspect <= MAX_CONTENT_ASPECT):
+                            print(f"   content is a {aspect:.1f}:1 strip — skipping "
+                                  f"{cand[0]!r}")
+                            continue
+                        png = to_1bit_png(raw, tw, th, args.threshold)
+                        if not is_line_art(png):
+                            print(f"   not line art (ink {ink_fraction(png):.2f},"
+                                  f" enclosed {enclosed_white_fraction(png):.2f})"
+                                  f" — skipping {cand[0]!r}")
+                            continue
+                        rec = pic_store.put(pic, png, tw, th)
+                        print(f"   stored {pic}: {cand[0]} ({w}x{h}) -> "
+                              f"{rec['width']}x{rec['height']} {rec['mime']} {len(rec['bytes'])}B")
+                        done += 1
+                        stored = True
+                        break
+                    except Exception as exc2:  # noqa: BLE001
+                        print(f"   candidate failed ({cand[0]!r}): {exc2}")
                         continue
-                    png = to_1bit_png(raw, tw, th, args.threshold)
-                    if not is_line_art(png):
-                        print(f"   not line art (ink {ink_fraction(png):.2f},"
-                              f" enclosed {enclosed_white_fraction(png):.2f})"
-                              f" — skipping {cand[0]!r}")
-                        continue
-                    rec = pic_store.put(pic, png, tw, th)
-                    print(f"   stored {pic}: {cand[0]} ({w}x{h}) -> "
-                          f"{rec['width']}x{rec['height']} {rec['mime']} {len(rec['bytes'])}B")
-                    done += 1
-                    stored = True
+                if stored:
                     break
-                except Exception as exc2:  # noqa: BLE001
-                    print(f"   candidate failed ({cand[0]!r}): {exc2}")
-                    continue
+                time.sleep(1.0)  # one search per second: DDG 429s a burst
             if not stored:
-                print(f"   no acceptable image for {queries[0]!r}")
+                print(f"   no acceptable image for {queries!r}")
                 failed += 1
         except Exception as exc:  # noqa: BLE001
             print(f"   FAILED for {queries[0]!r}: {exc}")
