@@ -161,11 +161,11 @@ Proven on this host:
 | Runtime on Node ≥ 24.9 | `node -v` → `v24.22.2`; `dsh --version` → `0.2.1-rc.3` |
 | Service up | `systemctl is-active dsh-superagent` → `active` |
 | Panel reachable | `GET /?token=…` → `303` (cookie exchange), then `GET /` → `200` |
-| Setup resolved | `GET state` → `setup.problem: null`, `setup.accounts: {repository: pondycrane/LMAO, agent: pondycrane}` |
+| Setup resolved | `GET state` → `setup.problem: null`, `setup.accounts: {repository: pondycrane/LMAO, agent: ecodinquaqua}` |
 | Health | every part `ready` — `runtime, relay, notice, launch, delivery, assessment, reply, evals, models, github` |
 | GitHub Source polling | `GET sources` → `state: ready`, `0 notifications; next poll ≥ 60s` |
 | Local model through the harness | throwaway headless profile with the same `llm-deepseek` + `agent-default-model` rows → `LOCAL-MODEL-OK` |
-| Settings persisted | `GET settings`: `mode=observe`, rules `copy/robodog-device/lmao-server`, `allowed=[pondycrane]`, 8 blocked commands, prepare command, prompts rev 5 |
+| Settings persisted | `GET settings`: `mode=observe`, rules `copy/robodog-device/lmao-server`, `allowed=[pondycrane]`, 8 blocked commands, prepare command, prompts rev 7 |
 | Prepare command | ran it as `dsh-agent` with the real env: fetched `HEAD → refs/dsh-superagent/smoke-1`, `git worktree add` → branch `agent/smoke-one` at `3c5f5da` (then removed) |
 | Worker command shims | `worker-bin/` holds `gh`, `lark-cli` and 8 fail-shims; `esptool`, `mpremote`, `capture.py`, `flash.sh` all answer `… is blocked in this installation`; `gh` resolves to the agent CLI |
 | Bench reachable as the agent account | `runuser -u dsh-agent -- bench boards` → `robodog-1 ready claw /dev/bench/robodog-0 head=6d5c9cec` |
@@ -180,23 +180,19 @@ with the `notifications` scope fixes it — the token now reports
 `Token scopes: 'gist', 'notifications', 'read:org', 'repo'` and the poll
 returns `200`.
 
-## Still blocked — a *distinct* agent GitHub account
+## Agent account — `ecodinquaqua` (distinct from the operator)
 
-The interim identity is `pondycrane` (the operator's own account, chosen to
-prove the machinery). That cannot satisfy the issue's hard prerequisite, for a
-structural reason, not a configuration one:
+The agent is a **separate GitHub user**, `ecodinquaqua`, invited as a `push`
+collaborator of `pondycrane/LMAO`; the operator stays the only entry on the
+policy's allowed list. A distinct identity is a structural prerequisite, not a
+configuration preference:
 
 - the Source **skips the agent account's own messages** (`sameName(comment.user.login, login) → continue`
   in `intakeComments`, and `human: … && !sameName(user.login, agent)` in the
   trigger builder), so a mention posted by the agent identity never becomes a
   trigger;
 - with `pondycrane` as both the agent and the only allowed account, every
-  mention in this repo is a self-mention. Nothing can reach the gate.
-
-So acceptance criteria **4–8 are unexercised**: no Ticket, no observe-mode
-"would accept" record, no worker reply, no `auto` PR, no crash/quarantine
-replay. They need a second GitHub user account; creating one is interactive
-(email verification, CAPTCHA), so it stays an operator step.
+  mention in this repo was a self-mention and nothing could reach the gate.
 
 A bot actor cannot stand in for that second identity either, which is worth
 recording so nobody retries it:
@@ -212,28 +208,68 @@ recording so nobody retries it:
 - A GitHub App installation would post as `<app>[bot]`, but creating an App is an
   account-level change, and the issue rules an App out as the *agent* anyway.
 
-
 Verified criteria: **1** (boots on Node 24.22, `state` returns `setup` resolved,
-panel reachable over a tunnel), **2** as far as the interim identity allows
-(`gh auth status` succeeds, the account has push/admin on the repo), **3**
-(allowed list + `observe` + three rules).
+panel reachable over a tunnel), **2** (`setup.accounts.agent` →
+`ecodinquaqua`, `repos/pondycrane/LMAO` → `permissions.push: true`), **3**
+(allowed list + `observe` + three rules), and **4–8** exercised end to end: a
+mention from `pondycrane` on PR #311 produced an `explicitRouted` decision and
+Ticket `8e569510…` ("Read-only review of PR #311 …") within one poll.
 
-Operator steps, then the same settings command finishes the deployment:
+### Host patch: Thread keys with a suffix
+
+A review Thread is keyed `github:<n>-review`, so `Number(thread.ref.id)` is
+`NaN` and `pollThread` threw `Subscribed thread has no GitHub issue or PR
+number` **every round** — the whole Source sat in `2125 consecutive failed
+polls` from 2026-11-09 until the fix, so no intake at all. `threadNumber()` now
+reads the leading digits (`Number.parseInt(ref.id, 10)`) in
+`src/sources/github.ts` and in the built `lib/github-watch.js`. A suffixed
+Thread is then covered by the canonical Thread's read of the same number each
+round, so the skip callback also clears a stale `pollError` instead of leaving
+`github:<n>-review` stuck at `error` in the panel. The service runs `lib/`, so
+**the patch must be re-applied after `pnpm build` or a package upgrade** (the
+`src` copy keeps it across rebuilds).
+
+Done on this host (2026-11-16) — recorded so a re-provision follows the same
+order:
 
 ```bash
-# 1. Create the agent account on github.com and invite it to pondycrane/LMAO
-#    with write access (accept the invitation as that account).
-# 2. Sign the wrapper in as that account only (device flow, notifications scope):
+BOT=ecodinquaqua
+
+# 1. Agent account created on github.com (email + CAPTCHA, operator step) and
+#    invited from the operator account with write access:
+gh api -X PUT "repos/pondycrane/LMAO/collaborators/$BOT" -f permission=push
+
+# 2. Interim credentials replaced: the wrapper's config dir holds the agent
+#    account ONLY, never the operator's token. Logout is local only —
+#    revoke the old OAuth grant at github.com/settings/applications.
+sudo runuser -u dsh-agent -- /home/dsh-agent/.local/bin/gh-agent auth logout --hostname github.com
 sudo runuser -u dsh-agent -- /home/dsh-agent/.local/bin/gh-agent auth login \
     --hostname github.com --git-protocol https --skip-ssh-key --web --scopes notifications
-sudo runuser -u dsh-agent -- /home/dsh-agent/.local/bin/gh-agent api user --jq .login
-# 3. Save the GitHub Source (runs the setup check) and confirm setup resolved:
+sudo runuser -u dsh-agent -- /home/dsh-agent/.local/bin/gh-agent api user --jq .login   # → $BOT
+
+# 3. Invitation accepted as the agent; push access confirmed (this is exactly
+#    the check the Source runs on save):
+ID=$(sudo runuser -u dsh-agent -- /home/dsh-agent/.local/bin/gh-agent api \
+    user/repository_invitations --jq '.[0].id')
+sudo runuser -u dsh-agent -- /home/dsh-agent/.local/bin/gh-agent api -X PATCH \
+    "user/repository_invitations/$ID"
+sudo runuser -u dsh-agent -- /home/dsh-agent/.local/bin/gh-agent api \
+    repos/pondycrane/LMAO --jq .permissions.push                            # → true
+
+# 4. GitHub Source saved (setup check passed) and setup confirmed resolved:
 python3 tools/dsh_superagent_settings.py
 curl -s -H 'x-orchestrator-request: 1' http://127.0.0.1:3082/orchestrator/api/state | jq .setup
-# 4. Keep the operator on the allowed list next to the agent account, then
-#    mention the agent from the operator account on an issue:
-#    "@<agent login> <request>"  → a Ticket appears within one poll (~60 s)
+
+# 5. The allowed list stays [pondycrane] — the human, never the agent. Mention
+#    the agent from the operator account on an issue or PR:
+#    "@$BOT <request>"  → a Ticket appears within one poll (~60 s)
 ```
+
+An explicit mention from an allowed sender is admitted in **any** accept mode
+(`policy.gate`: `allowed && trigger.addressed → strength: explicit`), so the
+`observe` setting needs no change for step 5; only rule-gated *inferred*
+candidates wait for `auto`. On a PR the ticket's prepare command fetches
+`refs/pull/<n>/head`, so the worker starts on the PR branch, not `HEAD`.
 
 ## Risks kept open
 
