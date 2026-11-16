@@ -21,182 +21,64 @@ def _r(title, url=None, w=512, h=512):
 class TestActionExtraction:
     def test_recognizes_activity_in_title(self):
         assert cps.extract_action("W ice skating 1:30") == "ice skating"
-        assert cps.extract_action("J tennis 4pm Mon") == "tennis"
+        assert cps.extract_action("J tennis 4pm Mon") == "playing tennis"
         assert cps.extract_action("Swim meet") == "swimming"
-        assert cps.extract_action("Juliet dentist") == "dentist"
+        assert cps.extract_action("Juliet dentist") == "at the dentist"
+        assert cps.extract_action("W Ninja Warrior") == "doing martial arts"
+
+    def test_longest_key_wins(self):
+        # "ice skating" must beat the bare "skat"/"school" style substrings
+        assert cps.extract_action("J ice skating lesson") == "ice skating"
+
+    def test_school_synonyms_map_to_school(self):
+        assert cps.extract_action("Wesley Princeton") == "at school"
+        assert cps.extract_action("J early dismissal 1:10pm") == "at school"
 
     def test_no_activity_gives_empty(self):
         assert cps.extract_action("Parent team lunch") == ""
 
 
-class TestSubjectSelection:
-    def test_juliet_picks_pokemon_pool(self):
-        assert cps.pick_subject("juliet", "tennis", "uid1") in cps.POKE_SUBJECTS
+class TestPersonWord:
+    def test_named_kids_get_their_own_kind(self):
+        assert cps.person_word(["juliet"]) == "girl"
+        assert cps.person_word(["wesley"]) == "boy"
 
-    def test_juliet_varies_across_events_not_always_pikachu(self):
-        picked = {cps.pick_subject("juliet", "tennis", f"uid{i}") for i in range(40)}
-        assert len(picked) > 3
-        assert picked != {"pikachu"}
+    def test_shared_event_shows_kids_together(self):
+        assert cps.person_word(["juliet", "wesley"]) == "kids"
 
-    def test_wesley_ice_skating_is_limbed_not_legless(self):
-        # a legless fish/dolphin must NOT be picked for ice skating; PAW dogs ok
-        for i in range(60):
-            s = cps.pick_subject("wesley", "ice skating", f"uid{i}")
-            assert s in cps.PAW_SUBJECTS or s in cps.SEA_COHERENT["ice skating"]
-            assert s not in ("dolphin", "whale", "shark", "fish")
-
-    def test_wesley_swimming_allows_any_sea_or_paw(self):
-        for i in range(30):
-            s = cps.pick_subject("wesley", "swimming", f"uid{i}")
-            assert s in cps.SEA_SUBJECTS or s in cps.PAW_SUBJECTS
-
-    def test_wesley_theme_alternates_paw_and_sea(self):
-        # the old bug pinned every event to the sea-animal theme
-        themes = {cps.pick_theme("wesley", "tennis", f"uid{i}")[0]
-                  for i in range(40)}
-        assert themes == {"sea animal", "paw patrol"}
-        paw = {cps.pick_subject("wesley", "tennis", f"uid{i}") for i in range(40)
-               if cps.pick_theme("wesley", "tennis", f"uid{i}")[0] == "paw patrol"}
-        assert len(paw) > 1  # a random PAW character, not always one dog
-
-    def test_seeded_choice_is_deterministic_per_uid(self):
-        assert cps._seeded_choice(cps.POKE_SUBJECTS, "abc") == \
-            cps._seeded_choice(cps.POKE_SUBJECTS, "abc")
+    def test_unknown_participant_stays_neutral(self):
+        assert cps.person_word([]) == "kid"
+        assert cps.person_word(["alex"]) == "kid"
 
 
-class TestSubjectPool:
-    def test_pokemon_subject_maps_to_pokemon_pool(self):
-        pool, theme = cps._pool_for("goldeen", "tennis")
-        assert theme == "pokemon"
-        assert "pikachu" in pool
-
-    def test_paw_subject_maps_to_paw_pool(self):
-        pool, theme = cps._pool_for("chase", "ice skating")
-        assert theme == "paw patrol"
-        assert "marshall" in pool
-
-    def test_sea_subject_maps_to_coherent_pool(self):
-        pool, theme = cps._pool_for("seal", "ice skating")
-        assert theme == "sea animal"
-        assert "penguin" in pool
-
-    def test_two_word_sea_subject_still_maps_to_sea(self):
-        _, theme = cps._pool_for("sea lion", "ice skating")
-        assert theme == "sea animal"
-
-
-class TestCombo:
-    @pytest.fixture(autouse=True)
-    def _force_deterministic(self, monkeypatch):
-        # never hit the live LLM hook in tests; exercise the reasoned fallback
-        monkeypatch.delenv("LMAO_IMAGE_LLM_URL", raising=False)
-        monkeypatch.delenv("LMAO_IMAGE_LLM_MODEL", raising=False)
-
-    def test_wesley_ice_skating_query_is_coherent(self):
-        c = cps.build_combo("W ice skating 1:30", "wesley", "uid1")
-        assert c["queries"][0].endswith("ice skating")
-        assert c["subject"] in cps.SEA_COHERENT["ice skating"] or \
-            c["subject"] in cps.PAW_SUBJECTS
-        assert c["theme"] in ("sea animal", "paw patrol")
-
-    def test_juliet_tennis_query_pairs_subject_and_action(self):
-        c = cps.build_combo("J tennis 4pm Mon", "juliet", "uid2")
-        assert c["theme"] == "pokemon"
-        assert c["queries"][0].endswith("tennis")
-        assert c["queries"][0].startswith(c["subject"])
-        assert c["subject"] in cps.POKE_SUBJECTS
-
-    def test_primary_in_queries(self):
-        c = cps.build_combo("Swim meet", "wesley", "uid3")
-        assert c["queries"][0].endswith("swimming")
+class TestBuildQueries:
+    def test_activity_is_the_primary_query(self):
+        c = cps.build_queries("J tennis 4pm Mon", ["juliet"])
+        assert c["action"] == "playing tennis"
+        assert c["queries"][0] == "girl playing tennis coloring page"
         assert c["queries"][0] in c["queries"]
 
-    def test_llm_cannot_override_the_chosen_subject(self, monkeypatch):
-        """The model used to answer 'pikachu' for every pokemon event; the
-        seeded subject must win and queries for other characters be dropped."""
-        subject = cps.pick_subject("juliet", "tennis", "uid2")
-        monkeypatch.setenv("LMAO_IMAGE_LLM_URL", "http://llm.invalid/v1")
-        monkeypatch.setattr(cps, "_llm_combo", lambda *a, **k: {
-            "subject": "pikachu", "action": "tennis",
-            "queries": ["pikachu tennis", f"{subject} playing tennis"],
-        })
-        c = cps.build_combo("J tennis 4pm Mon", "juliet", "uid2")
-        assert c["subject"] == subject
-        assert all(cps._norm_title(subject) in cps._norm_title(q)
-                   for q in c["queries"])
-        assert "pikachu tennis" not in [q.lower() for q in c["queries"]]
+    def test_shared_event_asks_for_kids(self):
+        c = cps.build_queries("J and W Chinese Class", ["juliet", "wesley"])
+        assert c["person"] == "kids"
+        assert c["queries"][0].startswith("kids ")
 
-    def test_llm_action_refines_the_primary_query(self, monkeypatch):
-        monkeypatch.setenv("LMAO_IMAGE_LLM_URL", "http://llm.invalid/v1")
-        subject = cps.pick_subject("wesley", "tennis", "uid9")
-        monkeypatch.setattr(cps, "_llm_combo", lambda *a, **k: {
-            "action": "playing tennis", "queries": [f"{subject} playing tennis"],
-        })
-        c = cps.build_combo("W tennis 4pm", "wesley", "uid9")
-        assert c["subject"] == subject
-        assert c["action"] == "playing tennis"
-        assert c["queries"][0] == f"{subject} playing tennis"
+    def test_activityless_event_falls_back_to_a_kid(self):
+        c = cps.build_queries("Parent team lunch", ["wesley"])
+        assert c["action"] == ""
+        assert c["queries"][0] == "boy cartoon coloring page"
 
+    def test_queries_are_deterministic_and_deduped(self):
+        a = cps.build_queries("J tennis 4pm", ["juliet"])
+        b = cps.build_queries("J tennis 4pm", ["juliet"])
+        assert a == b
+        assert len(a["queries"]) == len(set(a["queries"]))
 
-class TestExtractJsonArray:
-    def test_plain_array(self):
-        assert cps._extract_json_array('["seal ice skating", "penguin on ice"]') == \
-            ["seal ice skating", "penguin on ice"]
-
-    def test_code_fence_wrapped(self):
-        s = '```json\n["pikachu tennis"]\n```'
-        assert cps._extract_json_array(s) == ["pikachu tennis"]
-
-    def test_prose_around_array(self):
-        assert cps._extract_json_array('Here: ["a", "b"].') == ["a", "b"]
-
-    def test_garbage_returns_empty(self):
-        assert cps._extract_json_array("no array here") == []
-
-
-class TestParseBbox:
-    def test_parses_array(self):
-        assert cps._parse_bbox("[100, 200, 300, 400]", 500, 500) == (100, 200, 300, 400)
-
-    def test_clamps_to_image(self):
-        # 2000 clamps to width 1000; still a real (non-full-frame) crop
-        assert cps._parse_bbox("[50, 50, 2000, 300]", 1000, 500) == (50, 50, 1000, 300)
-
-    def test_near_full_frame_is_none(self):
-        assert cps._parse_bbox("[0, 0, 495, 495]", 500, 500) is None
-
-    def test_tiny_box_is_none(self):
-        assert cps._parse_bbox("[10, 10, 20, 20]", 500, 500) is None
-
-    def test_garbage_is_none(self):
-        assert cps._parse_bbox("I don't see a subject clearly", 500, 500) is None
-
-
-class TestExtractJsonObject:
-    def test_object(self):
-        assert cps._extract_json_object('{"subject":"seal","queries":["a","b"]}') == \
-            {"subject": "seal", "queries": ["a", "b"]}
-
-    def test_code_fence(self):
-        s = '```json\n{"subject":"pikachu"}\n```'
-        assert cps._extract_json_object(s) == {"subject": "pikachu"}
-
-    def test_prose_around(self):
-        assert cps._extract_json_object('Here: {"a":1}.') == {"a": 1}
-
-    def test_garbage(self):
-        assert cps._extract_json_object("nothing here") == {}
-
-
-class TestParseMatch:
-    def test_true(self):
-        assert cps._parse_match('{"match": true, "reason": "it is a pokemon"}') is True
-
-    def test_false(self):
-        assert cps._parse_match('{"match": false, "reason": "it is a boat"}') is False
-
-    def test_unparseable_is_none(self):
-        assert cps._parse_match("no verdict") is None
+    def test_no_model_hook_remains(self):
+        # the stage is deterministic: no LLM/vision call may shape a query
+        assert not hasattr(cps, "_llm_combo")
+        assert not hasattr(cps, "verify_subject")
+        assert not hasattr(cps, "crop_to_subject")
 
 
 class TestLineArtGate:
@@ -226,50 +108,80 @@ class TestLineArtGate:
         assert cps.is_line_art(self._png(self._outline_box()))
 
     def test_filled_silhouette_is_rejected(self):
-        # a coloring page with filled shapes: 0.35 ink but ~no interior
         png = self._png(self._solid_box())
         assert cps.ink_fraction(png) > cps.LINE_ART_MIN_INK
         assert cps.enclosed_white_fraction(png) < cps.LINE_ART_MIN_ENCLOSED
         assert not cps.is_line_art(png)
 
     def test_blank_page_is_rejected(self):
-        # a badly cropped coloring page: tiny drawing, no enclosed area
         grid = [[0] * 20 for _ in range(20)]
         grid[9][9] = 1
         assert not cps.is_line_art(self._png(grid))
 
     def test_thresholded_photo_is_rejected(self):
-        # a photo thresholded to 1-bit is nearly solid ink (~0.96)
         grid = [[1 if (x + y) % 17 else 0 for x in range(20)] for y in range(20)]
         assert not cps.is_line_art(self._png(grid))
 
     def test_measurements_match_pixels(self):
         png = self._png(self._outline_box())
-        # 20x20, ring at inset 2 (x/y = 2 and 17) -> 14x14 = 196 enclosed px,
-        # 76 ring px of ink.
         assert abs(cps.enclosed_white_fraction(png) - 196 / 400) < 1e-9
         assert abs(cps.ink_fraction(png) - 76 / 400) < 1e-9
 
 
 class TestRasterizer:
-    def test_thin_line_survives_downscale(self):
-        """A 1-px line in a large source must still show at 176x176.
+    def test_thin_strokes_survive_downscale(self):
+        """A 1-px outline stroke in a large source must still show at 176x176.
 
-        The old path (LANCZOS downscale, then threshold) averaged thin lines
+        The old path (LANCZOS downscale, then threshold) averaged thin strokes
         into gray and dropped them.
         """
         src = Image.new("L", (1760, 1760), 255)
         px = src.load()
-        for y in range(1760):
-            px[880, y] = 0  # 1-px vertical line
+        for y in range(100, 1700):
+            for x in range(300, 1400):
+                if x in (300, 1399) or y in (100, 1699):
+                    px[x, y] = 0
         buf = io.BytesIO()
         src.save(buf, format="PNG")
         tile = cps.to_1bit_png(buf.getvalue(), 176, 176, cps._THRESHOLD)
         with Image.open(io.BytesIO(tile)) as im:
             im = im.convert("L")
-            ink_cols = [x for x in range(176)
-                        if any(im.getpixel((x, y)) < 128 for y in range(176))]
-        assert ink_cols == [88]  # exactly one tile column carries the line
+            ink = [(x, y) for x in range(176) for y in range(176)
+                   if im.getpixel((x, y)) < 128]
+        xs = [x for x, _ in ink]
+        ys = [y for _, y in ink]
+        assert im.getpixel((min(xs), (min(ys) + max(ys)) // 2)) < 128
+        assert im.getpixel(((min(xs) + max(xs)) // 2, min(ys))) < 128
+
+    def test_portrait_drawing_keeps_its_proportions(self):
+        """A tall coloring page must be fitted, not squashed to a square.
+
+        The old square resize turned a 700x900 page into an unrecognizable
+        blob; the aspect-preserving fit leaves the figure centered with white
+        bars left and right.
+        """
+        src = Image.new("L", (700, 900), 255)
+        px = src.load()
+        for y in range(100, 800):        # a tall rectangle, 400 wide x 700 high
+            for x in range(150, 550):
+                if x in (150, 549) or y in (100, 799):
+                    px[x, y] = 0
+        buf = io.BytesIO()
+        src.save(buf, format="PNG")
+        tile = cps.to_1bit_png(buf.getvalue(), 176, 176, cps._THRESHOLD)
+        with Image.open(io.BytesIO(tile)) as im:
+            im = im.convert("L")
+            ink = [(x, y) for x in range(176) for y in range(176)
+                   if im.getpixel((x, y)) < 128]
+        xs = [x for x, _ in ink]
+        ys = [y for _, y in ink]
+        content_w = max(xs) - min(xs) + 1
+        content_h = max(ys) - min(ys) + 1
+        # 400:700 content stays ~0.57 aspect (not 1.0), and it is centered
+        assert 0.45 < content_w / content_h < 0.75
+        assert abs((min(xs) + max(xs)) / 2 - 87.5) < 3
+        assert min(xs) >= cps.TILE_MARGIN - 1
+        assert max(ys) <= 176 - cps.TILE_MARGIN + 1
 
     def test_rasterizer_output_is_1bit(self):
         src = Image.new("L", (352, 352), 255)
@@ -284,64 +196,60 @@ class TestRasterizer:
             assert im.mode == "1"
             assert im.size == (176, 176)
 
+    def test_blank_source_yields_a_blank_tile(self):
+        src = Image.new("L", (400, 400), 255)
+        buf = io.BytesIO()
+        src.save(buf, format="PNG")
+        tile = cps.to_1bit_png(buf.getvalue(), 176, 176, cps._THRESHOLD)
+        assert cps.ink_fraction(tile) == 0
 
-class TestThemeQuery:
-    def test_character_theme_names_the_show(self):
-        assert cps.theme_query("chase", "paw patrol", "tennis") == \
-            "chase paw patrol tennis"
 
-    def test_pokemon_theme_names_the_franchise(self):
-        assert cps.theme_query("pikachu", "pokemon", "") == "pikachu pokemon"
+class TestContentAspect:
+    def test_measures_the_ink_bbox(self):
+        src = Image.new("L", (400, 400), 255)
+        px = src.load()
+        for y in range(50, 150):  # 200 wide x 100 high ink -> aspect 2.0
+            for x in range(50, 250):
+                px[x, y] = 0
+        buf = io.BytesIO()
+        src.save(buf, format="PNG")
+        assert abs(cps.content_aspect(buf.getvalue()) - 2.0) < 1e-6
 
-    def test_sea_animal_stays_bare(self):
-        assert cps.theme_query("dolphin", "sea animal", "swimming") == \
-            "dolphin swimming"
+    def test_blank_source_has_no_aspect(self):
+        src = Image.new("L", (400, 400), 255)
+        buf = io.BytesIO()
+        src.save(buf, format="PNG")
+        assert cps.content_aspect(buf.getvalue()) is None
 
 
 class TestPickSource:
     def test_prefers_line_art_over_a_photo_of_the_same_subject(self):
-        results = [_r("Chase tennis player photo.jpg"),
-                   _r("Chase Paw Patrol Coloring Page.png")]
-        picked = cps.pick_source(results, "chase tennis")
+        results = [_r("Girl playing tennis photo.jpg"),
+                   _r("Girl playing tennis coloring page.png")]
+        picked = cps.pick_source(results, "girl playing tennis coloring page")
         assert "coloring" in picked[0].lower()
 
-    def test_prefers_title_matching_query_token(self):
-        results = [_r("Monster Ball Tour 2009.jpg"),
-                   _r("Poké Ball.svg", w=120, h=120),
-                   _r("Pokebola-pokeball-png-0.png")]
-        picked = cps.pick_source(results, "pokeball")
-        assert "pokebola" in picked[0].lower() or "poké ball" in picked[0]
-
-    def test_accent_normalization_matches(self):
-        results = [_r("Generic photo.jpg"), _r("Poké Ball.png")]
-        picked = cps.pick_source(results, "pokeball")
-        assert "pok" in picked[0].lower().replace("é", "e")
-        assert "photo" not in picked[0].lower()
+    def test_prefers_a_single_kid_drawing_over_a_print_sheet(self):
+        results = [_r("Tennis coloring pages for kids gallery.png"),
+                   _r("Girl playing tennis coloring page.png")]
+        picked = cps.pick_source(results, "girl playing tennis coloring page")
+        assert "gallery" not in picked[0].lower()
 
     def test_rejects_giant_maps(self):
         results = [_r("Diagram of everything.png", w=9000, h=9000),
-                   _r("Sea map.png", w=8000, h=6000),
-                   _r("Dolphin logo.png", w=512, h=282)]
-        assert "dolphin" in cps.pick_source(results, "dolphin")[0].lower()
+                   _r("Tennis court map.png", w=8000, h=6000),
+                   _r("Girl playing tennis coloring page.png", w=512, h=282)]
+        assert "tennis coloring" in cps.pick_source(
+            results, "girl playing tennis coloring page")[0].lower()
 
     def test_rejects_svg_without_a_rasterizer(self):
-        # the sync image has no cairosvg; an SVG candidate would fail to decode
-        assert cps.pick_source([_r("Dolphin line drawing.svg")], "dolphin") is None
+        assert cps.pick_source([_r("Tennis line drawing.svg")],
+                               "girl playing tennis") is None
 
-    def test_prefers_query_with_more_tokens(self):
-        results = [_r("Seal animal.jpg"), _r("Seal ice skating cartoon.png")]
-        picked = cps.pick_source(results, "seal ice skating")
-        assert "skating" in picked[0].lower()
-
-    def test_falls_back_when_no_anchor(self):
-        assert cps.pick_source([_r("A.png", w=100, h=100), _r("B.png", w=800, h=600)], "zzz")
-
-
-class TestGoogleSource:
-    def test_google_removed(self):
-        # Google CSE is discontinued for new signups — search_sources uses
-        # Wikimedia Commons + DuckDuckGo image search
-        assert "search_google" not in dir(cps)
+    def test_rejects_unrelated_titles(self):
+        # a query token must appear in the title
+        assert cps.pick_source([_r("Dolphin logo.png")],
+                               "girl playing tennis coloring page") is None
 
 
 class TestWebSource:
@@ -361,54 +269,38 @@ class TestWebSource:
                 return False
 
             def read(self):
-                return b'{"results":[{"title":"Chase coloring page",' \
-                       b'"image":"https://x/chase.png","width":1024,"height":1536},' \
+                return b'{"results":[{"title":"Girl tennis coloring page",' \
+                       b'"image":"https://x/girl-tennis.png","width":1024,"height":1536},' \
                        b'{"title":"no url","image":"","width":1,"height":1}]}'
 
         monkeypatch.setattr(cps.urllib.request, "urlopen", lambda *a, **k: _Resp())
-        got = cps.search_web_images("chase line drawing")
-        assert got == [("Chase coloring page", "https://x/chase.png", 1024, 1536)]
+        got = cps.search_web_images("girl playing tennis coloring page")
+        assert got == [("Girl tennis coloring page",
+                        "https://x/girl-tennis.png", 1024, 1536)]
 
-    def test_search_sources_uses_one_themed_line_art_hint(self, monkeypatch):
-        queries = []
-        monkeypatch.setattr(cps, "search_commons", lambda q: queries.append(q) or [])
+    def test_search_sources_issues_the_query_verbatim(self, monkeypatch):
+        commons, web = [], []
+        monkeypatch.setattr(cps, "search_commons", lambda q: commons.append(q) or [])
         monkeypatch.setattr(
             cps, "search_web_images",
-            lambda q: queries.append(q) or [("t", "https://x/a.png", 800, 800)])
-        got = cps.search_sources("seal ice skating", "sea animal")
-        # one web call per query keeps the hourly run inside DuckDuckGo's limit
-        assert queries == ["seal ice skating", "seal ice skating line drawing"]
+            lambda q: web.append(q) or [("t", "https://x/a.png", 800, 800)])
+        got = cps.search_sources("girl playing tennis coloring page")
+        q = "girl playing tennis coloring page"
+        # the activity query is used as-is, and only ONE web call is spent on it
+        assert commons == [q]
+        assert web == [q]
         assert len(got) == 1
-
-    def test_character_theme_searches_coloring_pages(self, monkeypatch):
-        queries = []
-        monkeypatch.setattr(cps, "search_commons", lambda q: [])
-        monkeypatch.setattr(cps, "search_web_images",
-                            lambda q: queries.append(q) or [])
-        cps.search_sources("chase paw patrol tennis", "paw patrol")
-        assert queries == ["chase paw patrol tennis coloring page"]
-        cps.search_sources("pikachu pokemon", "pokemon")
-        assert queries[-1] == "pikachu pokemon coloring page"
 
     def test_search_sources_survives_a_web_search_failure(self, monkeypatch):
         monkeypatch.setattr(cps, "search_commons",
-                            lambda q: [("Dolphin.png", "https://x/d.png", 512, 512)])
+                            lambda q: [("Tennis.png", "https://x/d.png", 512, 512)])
 
         def boom(q):
             raise RuntimeError("rate limited")
 
         monkeypatch.setattr(cps, "search_web_images", boom)
-        assert cps.search_sources("dolphin") == [
-            ("Dolphin.png", "https://x/d.png", 512, 512)]
-
-    def test_paw_patrol_is_searched_not_skipped(self, monkeypatch):
-        """PAW tiles used to be generation-only; now every theme is searched."""
-        seen = []
-        monkeypatch.setattr(cps, "search_commons", lambda q: seen.append(q) or [])
-        monkeypatch.setattr(cps, "search_web_images",
-                            lambda q: seen.append(q) or [])
-        cps.search_sources("chase tennis")
-        assert "chase tennis" in seen
+        assert cps.search_sources("girl playing tennis") == [
+            ("Tennis.png", "https://x/d.png", 512, 512)]
 
 
 class TestBackfillWindow:
@@ -418,7 +310,6 @@ class TestBackfillWindow:
         cal = _FakeCal([])
         cps.kid_events_needing_pics(cal, _FakePics([]), force=True, since_days=0)
         cutoff = cal.queries[-1][1][0]
-        # future-only cutoff is "now" (allow the call's own elapsed time)
         assert abs(cutoff - time.time() * 1000) < 5000
 
     def test_since_days_includes_recent_past(self):
@@ -483,60 +374,6 @@ class _FakePics:
 
     def close(self):
         pass
-
-
-class TestVerifyPrompt:
-    """The gate must be theme-level for pokemon, or valid renders get rejected
-    and the retry loop collapses onto whichever character happens to pass."""
-
-    def test_pokemon_accepts_any_pokemon_not_just_the_named_one(self):
-        p = cps.build_verify_prompt("charmander", "pokemon", accept=cps.POKE_SUBJECTS)
-        assert "Pokémon character" in p
-        assert "any Pokémon character is acceptable" in p
-        assert "'charmander'" in p          # names the seeded pick as a hint
-        assert "photograph" in p and "costume" in p   # keeps cosplay photos out
-
-    def test_pokemon_prompt_is_theme_level_even_with_a_pool(self):
-        # the pool must not narrow it back to name-exact matching
-        a = cps.build_verify_prompt("goldeen", "pokemon", accept=["goldeen"])
-        assert "any Pokémon character is acceptable" in a
-
-    def test_paw_prompt_lists_the_dogs(self):
-        p = cps.build_verify_prompt("marshall", "paw patrol", accept=cps.PAW_SUBJECTS)
-        assert "PAW Patrol" in p
-        for dog in ("marshall", "chase", "skye", "rubble", "zuma"):
-            assert dog in p
-        assert "real dog photo" in p
-
-    def test_sea_prompt_uses_the_coherent_pool(self):
-        pool = cps.SEA_COHERENT["ice skating"]
-        p = cps.build_verify_prompt("seal", "sea animal", accept=pool)
-        assert "sea animals" in p
-        for name in pool:
-            assert name in p
-        assert "dolphin" not in p   # legless animals stay out of ice skating
-
-    def test_sea_prompt_defaults_to_the_full_pool(self):
-        p = cps.build_verify_prompt("octopus", "sea animal")
-        assert "octopus" in p and "whale" in p
-
-
-class TestParseVerdict:
-    def test_true_with_character(self):
-        assert cps._parse_verdict('{"match": true, "character": "Psyduck"}') == (True, "Psyduck")
-
-    def test_false_with_character(self):
-        assert cps._parse_verdict('{"match": false, "character": "unknown"}') == (False, "unknown")
-
-    def test_string_truthy(self):
-        assert cps._parse_verdict('{"match": "yes"}') == (True, "")
-
-    def test_garbage_is_unparseable(self):
-        assert cps._parse_verdict("no verdict here") == (None, "")
-
-    def test_parse_match_still_returns_a_bool(self):
-        assert cps._parse_match('{"match": true}') is True
-        assert cps._parse_match("nope") is None
 
 
 if __name__ == "__main__":

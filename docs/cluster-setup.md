@@ -335,8 +335,12 @@ Two stages per run, matching the old script:
    row inside the window whose id Google no longer lists is tombstoned, so a
    moved/re-created occurrence cannot leave a ghost row behind.  `--dry-run`
    prints the retraction plan.
-2. `tools/calendar_pics_sync.py` — themed art → 1-bit 176×176 RLCD tiles in
-   `cal_pics`.
+2. `tools/calendar_pics_sync.py` — the event's activity → a fetched line
+   drawing of a kid cartoon character doing it → 1-bit 176×176 RLCD tile in
+   `cal_pics`.  No image generator and no model call: the query comes from the
+   title (`J tennis 4pm` → `girl playing tennis coloring page`), the sources
+   are Wikimedia Commons + DuckDuckGo, and the framing/gate are pixel
+   measurements (see `.archon/skills/line-drawing/SKILL.md`).
 
 **Why hourly matters beyond data freshness:** the RoboDog panel syncs by delta
 (`since_ms` = its last watermark), so an event row only re-ships when its
@@ -373,9 +377,9 @@ kubectl logs -f job/lmao-cal-sync-manual
 ### Backfilling tiles after a subject-selection change
 
 Stage 2 is idempotent: a `pic` key already in `cal_pics` is skipped, so
-existing tiles keep whatever subject they were generated with. To regenerate
-recent ones (e.g. after changing the subject pools), run it with `--force` and
-a look-back window — this rewrites every kid event that started within the
+existing tiles keep whatever art they were generated with. To regenerate
+recent ones (e.g. after changing the query/framing rule), run it with
+`--force` and a look-back window — this rewrites every kid event that started within the
 last N days (and every upcoming one):
 
 ```bash
@@ -392,9 +396,9 @@ LMAO_CONTACTS_URL=... bazel run //tools:calendar_pics_sync -- \
 
 In-cluster, derive a one-off Job from the CronJob template (so the env,
 Secret mounts and node pin stay identical), add the backfill flags to stage 2
-and lift the 900 s job deadline — a tile costs ~60-90 s (FLUX.1-schnell
-generation + vision crop/gate), so the CronJob's `activeDeadlineSeconds: 900`
-only covers ~10 events:
+and lift the 900 s job deadline — a tile costs ~5-15 s (a couple of searches
+plus one download and a local rasterize), so the CronJob's
+`activeDeadlineSeconds: 900` only covers a few dozen events:
 
 ```bash
 kubectl create job --from=cronjob/lmao-calendar-sync lmao-cal-backfill \
@@ -411,19 +415,12 @@ The backfill only lands on the panel for events the RoboDog re-syncs: each
 regenerated tile bumps `updated_ms` on the events using that `pic`
 (`PicStore.put`), so the panel picks them up on its next 30-min delta sync.
 
-**PAW Patrol tiles are generated, never searched.** Wesley's PAW-theme events
-come from ComfyUI/FLUX (`192.168.50.27:8188` — spark-5307). The ConfigMap used
-to point at spark-5307's *old wired IP* `192.168.10.37`, which is dead: every
-event fell through to Wikimedia Commons, and because Commons carries no
-licensed PAW art, Wesley's PAW-themed events silently kept whatever tile they
-had (usually a sea animal). Verify the address before a backfill:
-
-```bash
-curl -s -m 5 http://192.168.50.27:8188/system_stats | head -c 120
-```
-
-Verified working 2026-11-02: `marshall`/`chase`/`skye` all generate a clean
-1-bit dog-character line drawing and pass the vision gate in 48-75 s.
+**No tile is ever generated.** The stage paints what the event says: the kid
+doing the activity, fetched as a coloring page / line drawing.  Generated art
+is rejected by the ranker (`ai-generated`, `generated vector`, diffusion tool
+names in the title/URL) — the earlier theme-character stage and its ComfyUI
+generator are gone, and with them the unrelated Pokémon / PAW Patrol tiles
+that sat beside "J tennis 4pm".
 
 **The fix must be in the deployed image.** Rebuild/push
 `lmao-calendar-sync` before a backfill or the next hourly run
@@ -436,9 +433,8 @@ Networking notes (measured from an in-cluster pod on tp4):
 | Target | Reachable | Effect when down |
 |---|---|---|
 | `postgres.default.svc.cluster.local:5432` | yes | stage 1 fails |
-| `192.168.50.200:8000` (vision) | yes | tile QC skipped |
-| `192.168.50.138:8000` (gx10 LLM) | refused (box down) | deterministic "reasoned" search queries |
-| `192.168.10.37:8188` (ComfyUI, **stale**) | no route — this was spark-5307's old wired IP; the ConfigMap now uses `192.168.50.27:8188` | PAW Patrol tiles silently never generated (Commons has no PAW art), sea/pokemon fell back to Commons photos |
+| `commons.wikimedia.org` | yes | Commons hits missing; DuckDuckGo still searched |
+| `duckduckgo.com` | yes | web hits missing; the event stays artless until the next run |
 
-LAN hostnames do **not** resolve under cluster DNS, so the ConfigMap addresses
-these by IP (`gx10-f156` == `192.168.50.138`).
+Nothing else is contacted: the picture stage makes no model call, so no LAN
+model host appears here.

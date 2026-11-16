@@ -1,53 +1,47 @@
 #!/usr/bin/env python3
-"""Picture stage for the LMAO kid calendar: themed art -> RLCD tile in cal_pics.
+"""Activity picture stage for the LMAO kid calendar: web line art -> RLCD tile.
 
 For each *upcoming* kid event (``participants`` non-empty) whose ``pic`` key is
 not yet in ``cal_pics``, this stage:
 
-1. reasons about the best SEARCH QUERIES for that event (seeded per event),
-2. searches the internet for LINE DRAWINGS of that subject (Wikimedia
-   Commons, plus DuckDuckGo image search biased to line art / coloring pages),
-3. thresholds the best line drawing to a 1-bit black-and-white 176x176 tile,
+1. reads the event's ACTIVITY out of its title ("J tennis 4pm" -> playing
+   tennis, "W dental" -> at the dentist),
+2. searches the internet for a line drawing / coloring page of a KID CARTOON
+   CHARACTER doing that activity (Wikimedia Commons, plus DuckDuckGo's keyless
+   image index),
+3. trims the hit to its ink and fits it, aspect-preserving, into a 1-bit
+   black-and-white 176x176 tile,
 4. stores it under the event's ``pic`` key.
 
-There is no image GENERATION step: the tiles are fetched line drawings.  A
-subject with no acceptable online line drawing stays artless and is retried on
-the next hourly run (or stored by hand with
+There is NO image generation model anywhere in this path, and no model call of
+any kind: the queries are deterministic, the framing is a Pillow ink-bbox trim
+plus a contain fit, and the quality gate is a pixel measurement.  A subject
+with no acceptable online line drawing stays artless and is retried on the
+next hourly run (or stored by hand with
 ``bazel run //tools:calendar_pics -- --key <key> --source <url>``).
 
-Subjects are paired with the event's ACTION and are kept physically coherent
-(a legless dolphin is not asked to ice-skate; Wesley's sea-animal theme falls
-back to a limbed sea animal like a seal/otter/penguin, Juliet's pokemon theme
-can play any sport).  The subject is chosen pseudo-randomly per event
-(deterministic per ``uid`` so re-runs are idempotent) and is authoritative:
-the model only refines the action and the search queries for that subject, so
-Juliet gets a varied pokemon (not always Pikachu) and Wesley alternates
-PAW Patrol characters with sea animals (not always sea animals).
-
-Model reasoning: if ``LMAO_IMAGE_LLM_URL`` points at an OpenAI-compatible chat
-endpoint, a small prompt asks it for an action + 2-3 image-search queries that
-name the already-chosen subject; otherwise a deterministic reasoned fallback
-builds them.
+Why activity art: the earlier stage painted a per-kid theme character (Pokemon
+for Juliet, PAW Patrol / sea animals for Wesley) chosen at random per event, so
+the panel showed an unrelated creature beside "J tennis 4pm" — and the square
+stretch of a tall coloring page made even that unrecognizable.  The panel's job
+is "what is happening"; the drawing now shows that.
 
 Idempotent: a ``pic`` key already present in ``cal_pics`` is skipped, so re-runs
 only do new events (``--force`` regenerates).
 
 Usage::
     PYTHONPATH=repo python3 tools/calendar_pics_sync.py [--dry-run] [--force]
-    # Backfill recent tiles (e.g. after changing subject selection):
+    # Backfill recent tiles (e.g. after changing the subject rule):
     PYTHONPATH=repo python3 tools/calendar_pics_sync.py --force --since-days 14
 Needs the same Postgres env (LMAO_CONTACTS_URL / LMAO_CONTACTS_PG_*).
-Google Images source requires GOOGLE_CSE_KEY + GOOGLE_CSE_CX (Custom Search API).
 """
 
 from __future__ import annotations
 
 import argparse
-import hashlib
 import io
 import json
 import os
-import random
 import sys
 import time
 import urllib.error
@@ -63,62 +57,70 @@ try:
 except ImportError:  # pragma: no cover
     Image = None  # type: ignore[assignment]
 
-from lma_core.calendar_pics import PicStore, pick_tile_size  # noqa: E402
+from lma_core.calendar_pics import (  # noqa: E402
+    INK_THRESHOLD,
+    MAX_CONTENT_ASPECT,
+    TILE_MARGIN,
+    content_aspect,
+    pick_tile_size,
+    rasterize_line_art,
+)
 
 # ---------------------------------------------------------------------------
-# Theme subject pools
+# Event title -> activity phrase (usable as "<person> <action> coloring page")
 # ---------------------------------------------------------------------------
-# Juliet -> pokemon-ish (cartoon can do any action). Wesley -> sea animals.
-POKE_SUBJECTS = [
-    "pikachu", "squirtle", "bulbasaur", "charmander", "psyduck", "jigglypuff",
-    "snorlax", "poliwag", "goldeen", "slowpoke", "eevee", "meowth",
-    "growlithe", "lapras", "magikarp", "gengar", "onix", "vulpix",
-]
-SEA_SUBJECTS = [
-    "dolphin", "orca", "sea turtle", "octopus", "crab", "jellyfish",
-    "whale", "shark", "lobster", "seal", "sea lion", "otter", "penguin",
-]
-# Wesley's alternate theme (PAW Patrol): proprietary IP, so Wikimedia Commons
-# carries no licensed art — the DuckDuckGo line-art/coloring-page search is
-# what reaches it. Alternates with sea animals, seed-chosen per event.
-PAW_SUBJECTS = [
-    "chase", "marshall", "skye", "rubble", "rocky", "zuma", "everest", "tracker",
-]
-# for Wesley, a "limbed/coherent" pool per action (no legless fish doing tennis)
-SEA_COHERENT: dict[str, list[str]] = {
-    "ice skating":   ["seal", "sea lion", "otter", "penguin"],
-    "tennis":        ["octopus", "seal", "sea turtle", "crab", "sea lion"],
-    "soccer":        ["octopus", "seal", "sea turtle", "crab", "sea lion"],
-    "basketball":    ["octopus", "seal", "crab", "sea lion"],
-    "hockey":        ["seal", "sea lion", "otter", "penguin"],
-    "karate":        ["octopus", "seal", "crab", "sea turtle"],
-    "dance":         ["seal", "octopus", "sea lion", "sea turtle"],
-    "swimming":      SEA_SUBJECTS,   # everyone swims
-    "surfing":       SEA_SUBJECTS,
+# Longest key first so "ice skating" is matched before "skat", and "ninja
+# warrior" before "warrior".  The phrase is what the search query and the
+# picture show; an event with no known activity falls back to a generic kid.
+ACTIVITY_ACTIONS: dict[str, str] = {
+    "ninja": "doing martial arts",
+    "martial arts": "doing martial arts",
+    "ice skating": "ice skating",
+    "field trip": "on a field trip",
+    "grandparents": "visiting grandparents",
+    "grocery": "at the grocery store",
+    "playdate": "playing with a friend",
+    "birthday": "at a birthday party",
+    "basketball": "playing basketball",
+    "swimming": "swimming",
+    "swim": "swimming",
+    "tennis": "playing tennis",
+    "soccer": "playing soccer",
+    "chess": "playing chess",
+    "dentist": "at the dentist",
+    "dental": "at the dentist",
+    "doctor": "at the doctor",
+    "piano": "playing piano",
+    "dance": "dancing",
+    "karate": "doing karate",
+    "hockey": "playing hockey",
+    "surf": "surfing",
+    "golf": "playing golf",
+    "movie": "watching a movie",
+    "park": "at the park",
+    "travel": "traveling",
+    "church": "at church",
+    "easter": "hunting easter eggs",
+    "xmas": "at christmas",
+    "christmas": "at christmas",
+    "test": "taking a test",
+    "school": "at school",
+    "princeton": "at school",
+    "pingry": "at school",
+    "class": "in class",
+    "chinese": "in class",
+    "conference": "at school",
+    "assessment": "at school",
+    "dismissal": "at school",
+    "pick up": "at school",
+    "party": "at a party",
 }
 DEFAULT_ACTION = ""
 
-# event-title keyword -> action phrase used in the search query
-ACTIVITY_ACTIONS: dict[str, str] = {
-    "tennis": "tennis", "skat": "ice skating", "swim": "swimming",
-    "soccer": "soccer", "chess": "chess", "dentist": "dentist",
-    "doctor": "doctor", "birthday": "birthday party", "party": "party",
-    "piano": "piano", "dance": "dance", "karate": "karate",
-    "school": "school", "golf": "golf", "hockey": "hockey",
-    "surf": "surfing", "basketball": "basketball",
-}
-
 _UA = "LMAO-calendar-pics/1.0 (family calendar)"
-# Kept in lockstep with lma_core.calendar_pics.TILE_W/H (the panel's headline
-# slot); the module's pick_tile_size() is the authority at run time.
-_TILE_W, _TILE_H = 176, 176
-_THRESHOLD = 140  # generous white so anti-aliased line art stays clean (no gray ink)
-
-# Local Qwen-VL vision box for subject cropping. Default is the ML endpoint IP
-# (the `spark-eefb` hostname fails to resolve from this Pi even though it is in
-# /etc/hosts — the IP works). Override with LMAO_IMAGE_VISION_URL / _MODEL.
-_VISION_BASE_DEFAULT = "http://192.168.50.200:8000/v1"
-_VISION_MODEL_DEFAULT = "Qwen/Qwen2.5-VL-72B-Instruct"
+# The tile size comes from lma_core.calendar_pics.pick_tile_size() at run time
+# (the panel's headline slot); the ink threshold is the shared one.
+_THRESHOLD = INK_THRESHOLD
 
 
 def _prefer_ipv4() -> None:
@@ -130,107 +132,54 @@ def _prefer_ipv4() -> None:
     )
 
 
-def _seeded_choice(pool: list[str], uid: str) -> str:
-    rng = random.Random(hashlib.sha1(uid.encode()).hexdigest())
-    return rng.choice(pool)
-
-
 def extract_action(title: str) -> str:
+    """The event's activity phrase, or "" when the title names none."""
     low = title.lower()
-    for key, action in ACTIVITY_ACTIONS.items():
+    for key in sorted(ACTIVITY_ACTIONS, key=len, reverse=True):
         if key in low:
-            return action
+            return ACTIVITY_ACTIONS[key]
     return DEFAULT_ACTION
 
 
-def pick_theme(participant: str, action: str, uid: str) -> tuple[str, list[str]]:
-    """Return (theme_label, subject_pool) for this event.
+def person_word(participants: list[str] | tuple[str, ...]) -> str:
+    """The noun the drawing should show: one kid, or two/several kids.
 
-    Juliet is always pokemon.  Wesley alternates sea animals and PAW Patrol,
-    seeded per event so a recurring title varies across occurrences; sea
-    subjects are restricted to a limb-coherent pool for the event's action.
+    A single participant is rendered as that kid's own kind (Juliet -> girl,
+    Wesley -> boy) so the drawing matches the child the panel is for; a shared
+    event shows kids together.  Unknown names stay neutral.
     """
-    if participant == "juliet":
-        return "pokemon", POKE_SUBJECTS
-    rng = random.Random(hashlib.sha1((uid + ":theme").encode()).hexdigest())
-    if rng.random() < 0.5:
-        return "sea animal", SEA_COHERENT.get(action, SEA_SUBJECTS)
-    return "paw patrol", PAW_SUBJECTS
+    names = {n.strip().lower() for n in participants if n and n.strip()}
+    if len(names) > 1:
+        return "kids"
+    only = next(iter(names), "")
+    if only == "juliet":
+        return "girl"
+    if only == "wesley":
+        return "boy"
+    return "kid"
 
 
-def pick_subject(participant: str, action: str, uid: str) -> str:
-    """A coherent, seeded per-event subject for the participant's theme."""
-    _, pool = pick_theme(participant, action, uid)
-    return _seeded_choice(pool, uid)
+def build_queries(title: str, participants: list[str] | tuple[str, ...]) -> dict:
+    """Pick the event's activity and its web search queries.
 
-
-def _pool_for(subject: str, action: str) -> tuple[list[str], str]:
-    """Map a picked subject to its (pool, theme_label) for the regen retry.
-
-    Lets the generator retry with an alternate subject from the SAME theme pool
-    when the vision gate false-rejects an obscure character (e.g. goldeen or
-    alakazam), instead of giving up. ``theme_label`` is the truthful label for
-    the vision gate (pokemon / paw patrol / sea animal).
-    """
-    if subject in POKE_SUBJECTS:
-        return POKE_SUBJECTS, "pokemon"
-    if subject in PAW_SUBJECTS:
-        return PAW_SUBJECTS, "paw patrol"
-    return SEA_COHERENT.get(action, SEA_SUBJECTS), "sea animal"
-
-
-def build_combo(title: str, participant: str, uid: str) -> dict:
-    """Pick the event's subject + action + search queries.
-
-    The SUBJECT is chosen by us — seeded uniformly from the participant's
-    theme pool — and is authoritative: the model never gets to override it
-    (left free, it answers "pikachu" for every pokemon event, and never leaves
-    Wesley's sea-animal theme).  When ``LMAO_IMAGE_LLM_URL`` is set, the model
-    only refines the ACTION and proposes extra queries for that same subject;
-    otherwise a deterministic combo is used.
-
-    Returns ``{subject, theme, pool, action, queries}``; ``queries[0]`` is the
-    subject+action primary search query.
+    Deterministic: no model decides anything.  ``queries[0]`` is the primary
+    (the kid doing the activity, as a coloring page); the rest widen the net
+    without leaving the "kid cartoon character doing <activity>" intent.
     """
     action = extract_action(title)
-    subject = pick_subject(participant, action, uid)
-    pool, theme = _pool_for(subject, action)
-    url = os.environ.get("LMAO_IMAGE_LLM_URL")
-    if url:
-        try:
-            combo = _llm_combo(url, title, subject, theme)
-            if combo:
-                action = str(combo.get("action") or action).strip()
-                extra = [q for q in combo.get("queries") or [] if _mentions(q, subject)]
-                queries = _dedupe([_primary_query(subject, action)] + extra + [subject])
-                return {"subject": subject, "theme": theme, "pool": pool,
-                        "action": action, "queries": queries}
-        except Exception as exc:  # noqa: BLE001
-            print(f"  (LLM keyword reasoning unavailable: {exc})")
-    return {"subject": subject, "theme": theme, "pool": pool, "action": action,
-            "queries": [_primary_query(subject, action), subject]}
-
-
-def _primary_query(subject: str, action: str) -> str:
-    return f"{subject} {action}".strip() if action else subject
-
-
-def theme_query(subject: str, theme: str, action: str) -> str:
-    """Disambiguate a character name from an everyday word for a web search.
-
-    ``chase tennis`` finds a tennis player named Chase; ``chase paw patrol
-    tennis`` finds the PAW Patrol dog's coloring page.  Character themes carry
-    no licensed Commons art, so the web index needs the theme name to land on
-    the character rather than on a namesake.
-    """
-    if theme in ("paw patrol", "pokemon"):
-        return f"{subject} {theme} {action}".strip()
-    return _primary_query(subject, action)
-
-
-def _mentions(query: str, subject: str) -> bool:
-    """True when *query* actually names *subject* (accent/space-insensitive)."""
-    return _norm_title(subject) in _norm_title(query)
+    person = person_word(participants)
+    if action:
+        queries = [
+            f"{person} {action} coloring page",
+            f"kid {action} coloring page",
+            f"{person} {action} line drawing",
+        ]
+    else:
+        queries = [
+            f"{person} cartoon coloring page",
+            "happy kid cartoon line drawing",
+        ]
+    return {"action": action, "person": person, "queries": _dedupe(queries)}
 
 
 def _dedupe(items: list[str]) -> list[str]:
@@ -241,90 +190,6 @@ def _dedupe(items: list[str]) -> list[str]:
             seen.add(key)
             out.append(item)
     return out
-
-
-def _extract_json_array(text: str) -> list[str]:
-    """Robustly pull a JSON array (possibly wrapped in prose/code fences)."""
-    import json as _json
-
-    text = text.strip()
-    # strip markdown code fences
-    if text.startswith("```"):
-        text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-    start = text.find("[")
-    end = text.rfind("]")
-    if start == -1 or end == -1 or end <= start:
-        return []
-    try:
-        arr = _json.loads(text[start:end + 1])
-    except _json.JSONDecodeError:
-        return []
-    if isinstance(arr, list):
-        return [str(x).strip() for x in arr if str(x).strip()]
-    return []
-
-
-def _extract_json_object(text: str) -> dict:
-    """Robustly pull the first JSON object from a model reply."""
-    import json as _json
-
-    text = text.strip()
-    if text.startswith("```"):
-        text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-    start = text.find("{")
-    end = text.rfind("}")
-    if start == -1 or end == -1 or end <= start:
-        return {}
-    try:
-        obj = _json.loads(text[start:end + 1])
-    except _json.JSONDecodeError:
-        return {}
-    return obj if isinstance(obj, dict) else {}
-
-
-def _llm_combo(url: str, title: str, subject: str, theme: str) -> dict:
-    """Ask the local model for an action + extra queries for the FIXED subject.
-
-    The subject is chosen by :func:`pick_subject` and is not up for debate —
-    the model only refines the action and proposes queries that name it.
-    """
-    base = url.rstrip("/")
-    endpoint = base + "/chat/completions" if base.endswith("/v1") else base + "/v1/chat/completions"
-    sys_msg = (
-        "You choose image-search queries for a kid's family-calendar picture tile. "
-        f"The kid's theme is {theme} and the subject for this event is ALREADY "
-        f"chosen: '{subject}'. You MUST keep that exact subject — never substitute "
-        "another character. Given the event, choose a concrete action word or "
-        "short phrase the subject can clearly do, and 2-3 image-search queries "
-        "that contain the subject and would return clean, simple LINE DRAWINGS of "
-        "it doing that action (e.g. \"seal ice skating\", \"cartoon penguin on "
-        "ice\"). If the event has no obvious action (e.g. an \"open house\"), "
-        "invent a simple visual one that reads well as a line drawing. Avoid "
-        "physically impossible pairings (a legless fish cannot ice-skate). Reply "
-        "with ONLY a JSON object: {\"subject\":\"...\", \"action\":\"...\", "
-        "\"queries\":[\"a\",\"b\",\"c\"]}. No prose, no code fences."
-    )
-    body = json.dumps({
-        "model": os.environ.get("LMAO_IMAGE_LLM_MODEL", "deepseek-ai/DeepSeek-V4-Flash-0731"),
-        "messages": [
-            {"role": "system", "content": sys_msg},
-            {"role": "user", "content": f"Event: {title}."},
-        ],
-        "temperature": 0.7,
-        "max_tokens": 768,  # reasoning models spend tokens on CoT before content
-    }).encode()
-    headers = {"Content-Type": "application/json", "User-Agent": _UA}
-    if os.environ.get("LMAO_IMAGE_LLM_KEY"):
-        headers["Authorization"] = f"Bearer {os.environ['LMAO_IMAGE_LLM_KEY']}"
-    req = urllib.request.Request(endpoint, data=body, headers=headers)
-    with urllib.request.urlopen(req, timeout=180) as resp:
-        payload = json.load(resp)
-    message = payload["choices"][0]["message"]
-    text = (message.get("content") or "").strip()
-    if not text:
-        # reasoning model that spun on CoT and never emitted content
-        return {}
-    return _extract_json_object(text)
 
 
 # ---------------------------------------------------------------------------
@@ -364,22 +229,33 @@ def search_commons(query: str, limit: int = 12):
     return out
 
 
-# ComfyUI / any local image generator is NOT used: tiles are fetched line
-# drawings from the internet.  DuckDuckGo's image JSON API is keyless and is
-# queried with a line-art bias so character tiles come back as coloring-page /
-# line-drawing art rather than photographs.
+# No local image generator is used or reachable from this path: tiles are
+# fetched line drawings.  DuckDuckGo's image JSON API is keyless and returns
+# coloring pages / line art for the kid-activity queries.
 _DDG_IMAGES = "https://duckduckgo.com/i.js"
 _DDG_HOME = "https://duckduckgo.com/"
-# Web-search line-art hints: "coloring page" for characters, "line drawing" for
-# everything else (see search_sources).
 _VQD_CACHE: dict[str, str] = {}
 # Title/URL signals that a candidate is line art (coloring book, clipart,
 # sketch) vs. a photograph.  Used by the ranker and the ink gate.
 _LINE_ART_TITLE_HINTS = (
-    "coloring", "lineart", "line art", "line-art", "line drawing",
+    "coloring", "colouring", "lineart", "line art", "line-art", "line drawing",
     "line-drawing", "sketch", "clipart", "clip art", "outline", "vector",
 )
 _PHOTO_TITLE_HINTS = ("photo", "photograph", "real life", "stock photo")
+# Generated art is NOT a source: the tile must be a drawing someone drew.  An
+# AI-generated vector carries these markers in its title/URL, so reject it.
+_GENERATED_TITLE_HINTS = (
+    "ai-generated", "ai generated", "generated vector", "generated image",
+    "generative", "midjourney", "stable diffusion", "dall-e", "dalle",
+)
+# Multi-panel / print-page signals: a sheet of many drawings shrinks every
+# figure to an unreadable speck at 176x176, so it ranks last.
+_MULTI_PANEL_HINTS = (
+    "pages", "gallery", "collection", "bundle", "pack", "printable", "pdf",
+    "book", "set of", "vol.",
+)
+# The drawing must show a kid, not an object or an adult.
+_KID_TITLE_HINTS = ("kid", "kids", "child", "children", "boy", "girl", "cartoon")
 
 
 def _ddg_vqd(query: str) -> str:
@@ -430,20 +306,17 @@ def search_web_images(query: str, limit: int = 20):
     return out
 
 
-def search_sources(query: str, theme: str = ""):
+def search_sources(query: str):
     """Internet line-drawing sources for one query.
 
-    Wikimedia Commons carries public-domain line art (animals, objects); the
-    DuckDuckGo image index reaches character line drawings (coloring pages)
-    that Commons has no licensed copy of.  The web query is biased with ONE
-    line-art hint — "coloring page" for characters, "line drawing" otherwise —
-    to keep the hourly run inside DuckDuckGo's rate limit.  Ranking + the
-    vision gate + the ink gate then pick the usable tile.
+    Wikimedia Commons carries public-domain line art; the DuckDuckGo image
+    index reaches the kid-activity coloring pages Commons has no copy of.  One
+    web call per query keeps the hourly run inside DuckDuckGo's rate limit;
+    ranking + the ink gate then pick the usable tile.
     """
-    hint = "coloring page" if theme in ("paw patrol", "pokemon") else "line drawing"
     out = list(search_commons(query))
     try:
-        out += search_web_images(f"{query} {hint}")
+        out += search_web_images(query)
     except Exception as exc:  # noqa: BLE001
         print(f"  (web image search unavailable for {query!r}: {exc})")
     return out
@@ -469,28 +342,32 @@ def _score_result(r, query: str = ""):
     subject = _norm_title(words[0]) if words else ""
     tokens = [_norm_title(t) for t in words if len(t) >= 4]
     tn = _norm_title(title)
+    low = title.lower() + " " + url.lower()
+    if any(h in low for h in _GENERATED_TITLE_HINTS):
+        return None  # AI-generated art is not an acceptable tile source
     if tokens and not any(t in tn for t in tokens):
         return None  # no query token in the title -> unrelated, reject
     s = 0
     if subject and subject in tn:
-        s += 60  # the character/subject is present
+        s += 60  # the kid noun is present
     for t in tokens:
         if t in tn and t != subject:
             s += 25  # matches the action / other query words too
     if "map" in tn or "diagram" in tn or "seating" in tn:
         s -= 20
-    # Line drawings are the ONLY acceptable tile source now (no image
-    # generator), so a line-art signal must outrank a photo of the same
-    # subject: "Chase Paw Patrol Coloring Page" beats a photo of a person
-    # named Chase.  Photos survive the title filter but fail the ink gate.
-    line_art = any(h in tn or h in url.lower() for h in _LINE_ART_TITLE_HINTS)
-    if line_art:
+    # Line drawings are the ONLY acceptable tile source, so a line-art signal
+    # must outrank a photo of the same subject; photos fail the ink gate.
+    if any(h in tn or h in url.lower() for h in _LINE_ART_TITLE_HINTS):
         s += 80
     if any(h in tn for h in _PHOTO_TITLE_HINTS):
         s -= 40
+    if any(h in tn for h in _MULTI_PANEL_HINTS):
+        s -= 35
+    if any(h in tn for h in _KID_TITLE_HINTS):
+        s += 30
     if 300 <= w <= 4000:
         s += 2
-    if 0.5 <= min(w, h) / max(1, max(w, h)):
+    if min(w, h) / max(1, max(w, h)) >= 0.5:
         s += 1
     return s
 
@@ -524,27 +401,16 @@ def download(url: str) -> bytes:
 
 
 def to_1bit_png(raw: bytes, width: int, height: int, threshold: int,
-                coverage: float = 0.09) -> bytes:
-    """Rasterize a line drawing to a 1-bit tile.
+                margin: int = TILE_MARGIN) -> bytes:
+    """Rasterize a line drawing to a 1-bit tile, ASPECT-PRESERVING.
 
-    Thresholding AFTER a LANCZOS downscale turns a detailed line drawing into
-    gray mush (anti-aliased lines average above the threshold and vanish, while
-    textured areas speckle).  Instead: threshold the source at full resolution
-    to an ink mask, area-average that mask down to the tile (BOX = mean ink
-    coverage per cell), then mark a cell as ink when it holds a real amount of
-    ink (``coverage``).  Thin 1-px lines survive; gray noise does not.
-
-    ``coverage`` is 0.09 so a single-pixel line in a 10x-downscaled source
-    (BOX averages it to 25/255 ≈ 0.098 of the cell) still registers; photo /
-    dither noise cells average far below that and drop out.
+    Thin wrapper over :func:`lma_core.calendar_pics.rasterize_line_art` (the
+    one implementation both this stage and the by-hand tool use): trim to the
+    ink, threshold at full resolution, area-average the mask down, then fit
+    and center the drawing on a white tile.  The old square resize squashed a
+    portrait coloring page into an unrecognizable blob.
     """
-    img = Image.open(io.BytesIO(raw)).convert("L")
-    mask = img.point(lambda v: 255 if v < threshold else 0)
-    small = mask.resize((width, height), Image.Resampling.BOX)
-    tile = small.point(lambda v: 0 if v >= coverage * 255 else 255, mode="1")
-    buf = io.BytesIO()
-    tile.save(buf, format="PNG", bits=1, optimize=True)
-    return buf.getvalue()
+    return rasterize_line_art(raw, width, height, threshold, margin)
 
 
 # A line drawing is SPARSE ink around ENCLOSED white regions.  Measured on the
@@ -623,220 +489,14 @@ def is_line_art(png_bytes: bytes) -> bool:
     )
 
 
-def _parse_bbox(text: str, width: int, height: int):
-    """Parse a vision reply to a valid pixel bbox or None.
-
-    Accepts a ``[x1,y1,x2,y2]`` array (or bare numbers). Clamps to the image,
-    rejects degenerate/at-least-near-full-frame boxes (no point cropping) and
-    overly tiny boxes.
-    """
-    import re
-
-    m = re.search(r"\[\s*([0-9.,\s\-]+)\]", text)
-    if m:
-        import json as _json
-
-        try:
-            arr = _json.loads("[" + m.group(1) + "]")
-        except _json.JSONDecodeError:
-            arr = []
-    else:
-        arr = [int(t) for t in re.findall(r"-?\d+", text)][:4]
-    if len(arr) < 4:
-        return None
-    try:
-        x1, y1, x2, y2 = (int(v) for v in arr[:4])
-    except (TypeError, ValueError):
-        return None
-    x1, y1 = max(0, x1), max(0, y1)
-    x2, y2 = min(width, x2), min(height, y2)
-    if x2 <= x1 or y2 <= y1:
-        return None
-    if (x2 - x1) >= 0.98 * width and (y2 - y1) >= 0.98 * height:
-        return None  # basically the full frame — nothing to crop
-    if (x2 - x1) < 32 or (y2 - y1) < 32:
-        return None  # degenerately small box
-    return (x1, y1, x2, y2)
-
-
-def crop_to_subject(raw: bytes) -> bytes:
-    """Crop the downloaded image to its main subject via the local vision box.
-
-    Returns the cropped re-encoded PNG, or ``raw`` unchanged if the vision box
-    is unavailable or returns no usable box (never fatal).
-    """
-    if Image is None:
-        return raw
-    base = os.environ.get("LMAO_IMAGE_VISION_URL", _VISION_BASE_DEFAULT).rstrip("/")
-    model = os.environ.get("LMAO_IMAGE_VISION_MODEL", _VISION_MODEL_DEFAULT)
-    try:
-        with Image.open(io.BytesIO(raw)) as _im0:
-            W, H = _im0.size
-    except Exception:
-        return raw
-
-    import base64 as _b64
-
-    b64 = _b64.b64encode(raw).decode()
-    endpoint = base + "/chat/completions" if base.endswith("/v1") else base + "/v1/chat/completions"
-    prompt = (
-        "Return ONLY a JSON array [x1,y1,x2,y2] with the PIXEL bounding box of "
-        "the MAIN foreground subject in this image, so it can be cropped to "
-        "fill the frame. If the subject already fills most of the frame, return "
-        f"the full frame [0,0,{W},{H}]. No prose."
-    )
-    body = json.dumps({
-        "model": model,
-        "messages": [{"role": "user", "content": [
-            {"type": "text", "text": prompt},
-            {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + b64}},
-        ]}],
-        "max_tokens": 160,
-    }).encode()
-    req = urllib.request.Request(
-        endpoint, data=body,
-        headers={"Content-Type": "application/json", "User-Agent": _UA},
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            payload = json.load(resp)
-        text = (payload["choices"][0]["message"].get("content") or "").strip()
-    except Exception as exc:  # noqa: BLE001
-        print(f"  (vision crop unavailable: {exc})")
-        return raw
-
-    bbox = _parse_bbox(text, W, H)
-    if bbox is None:
-        print("  (vision crop: no usable box — using full frame)")
-        return raw
-    x1, y1, x2, y2 = bbox
-    with Image.open(io.BytesIO(raw)) as im:
-        im = im.crop((x1, y1, x2, y2))
-        buf = io.BytesIO()
-        im.save(buf, format="PNG")
-        cropped = buf.getvalue()
-    print(f"  (vision cropped to {x2 - x1}x{y2 - y1})")
-    return cropped
-
-
-def _parse_verdict(text: str) -> tuple[bool | None, str]:
-    """Parse a gate reply into (verdict, character).  None = unparseable."""
-    obj = _extract_json_object(text)
-    if not obj or "match" not in obj:
-        return None, ""
-    v = obj["match"]
-    verdict = v if isinstance(v, bool) else str(v).strip().lower() in ("true", "yes", "1")
-    character = str(obj.get("character") or "").strip()
-    return verdict, character
-
-
-def _parse_match(text: str):
-    """Extract a boolean verdict from a vision reply, or None if unparseable."""
-    return _parse_verdict(text)[0]
-
-
-def _accept_names(theme: str, accept: list[str] | None) -> list[str]:
-    if accept:
-        return list(accept)
-    return PAW_SUBJECTS if theme == "paw patrol" else SEA_SUBJECTS
-
-
-def build_verify_prompt(subject: str, theme: str,
-                        accept: list[str] | None = None) -> str:
-    """Gate prompt for *theme* — theme-level, not name-exact, for pokemon.
-
-    The old prompt demanded the image resemble the EXACT chosen character
-    ("a pokemon resembling 'charmander'").  At tile size the vision model cannot
-    reliably name a specific Pokémon, so valid renders (charmander, poliwag,
-    goldeen, magikarp, slowpoke) were rejected and the retry loop walked the
-    pool until something passed — which landed on Gengar over and over.
-    For pokemon, ANY Pokémon character is acceptable; the reply names which
-    one, so the tile stays traceable.  PAW Patrol keeps name-exactness (the
-    kid knows the dogs) and sea animals keep the action-coherent pool.
-    """
-    reply = ('Reply ONLY a JSON object: {"match": true or false, '
-             '"character": "its name if recognizable, else unknown"}.')
-    if theme == "pokemon":
-        return (
-            "Is the MAIN subject of this image a Pokémon character — a drawn/cartoon "
-            "creature from the Pokémon franchise? A photograph, a person in a costume, "
-            "an unrelated object that merely shares the name (a boat named 'Slowpoke'), "
-            "or a map does NOT count. It does NOT need to be exactly "
-            f"'{subject}' — any Pokémon character is acceptable. " + reply
-        )
-    if theme == "paw patrol":
-        names = ", ".join(_accept_names(theme, accept))
-        return (
-            "Is the MAIN subject of this image a PAW Patrol dog character — one of "
-            f"{names}? A real dog photo, a random person, or an unrelated object that "
-            "merely shares the name does NOT count. " + reply
-        )
-    names = ", ".join(_accept_names(theme, accept))
-    return (
-        "Is the MAIN subject of this image one of these sea animals: "
-        f"{names}? A random person, a map, or an unrelated object that merely shares "
-        "the name does NOT count. " + reply
-    )
-
-
-def verify_subject(raw: bytes, subject: str, theme: str,
-                   accept: list[str] | None = None) -> bool:
-    """Confirm the image's MAIN subject fits the theme.
-
-    Theme-level for pokemon (any Pokémon counts, and the identified character is
-    logged), name-exact for PAW Patrol, and restricted to the action-coherent
-    pool for sea animals.  Fail-open: an unavailable vision box or an unclear
-    verdict allows the image (consistent with the crop step).  A clear negative
-    (a cosplay photo, a boat named "Slowpoke", a map) rejects it.
-    """
-    if Image is None:
-        return True
-    base = os.environ.get("LMAO_IMAGE_VISION_URL", _VISION_BASE_DEFAULT).rstrip("/")
-    model = os.environ.get("LMAO_IMAGE_VISION_MODEL", _VISION_MODEL_DEFAULT)
-    import base64 as _b64
-
-    b64 = _b64.b64encode(raw).decode()
-    endpoint = base + "/chat/completions" if base.endswith("/v1") else base + "/v1/chat/completions"
-    prompt = build_verify_prompt(subject, theme, accept)
-    body = json.dumps({
-        "model": model,
-        "messages": [{"role": "user", "content": [
-            {"type": "text", "text": prompt},
-            {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + b64}},
-        ]}],
-        "max_tokens": 200,
-    }).encode()
-    req = urllib.request.Request(
-        endpoint, data=body,
-        headers={"Content-Type": "application/json", "User-Agent": _UA},
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            payload = json.load(resp)
-        text = (payload["choices"][0]["message"].get("content") or "").strip()
-    except Exception as exc:  # noqa: BLE001
-        print(f"  (vision content gate unavailable: {exc})")
-        return True
-    verdict, character = _parse_verdict(text)
-    if verdict is None:
-        print("  (vision content gate: no clear verdict — allowing)")
-        return True
-    if not verdict:
-        print(f"  (vision content gate REJECTED: not a {theme})")
-    elif character and character.lower() != "unknown":
-        print(f"  (gate accepted: {theme} -> {character})")
-    return verdict
-
-
 def kid_events_needing_pics(cal, pic_store, force: bool = False,
                             since_days: int = 0, limit: int = 0) -> list[tuple]:
     """Events missing a pic; ``since_days`` also includes recent (past) events.
 
     Default window is future events only.  ``--force --since-days N`` is the
     backfill path: every kid event that started within the last N days (or is
-    still upcoming) is regenerated, so a tile picked under the old
-    always-Pikachu rule gets replaced.  ``limit`` caps the batch, nearest
-    events first.
+    still upcoming) is regenerated, so a tile picked under an old subject rule
+    gets replaced.  ``limit`` caps the batch, nearest events first.
     """
     have = set(pic_store.keys()) if not force else set()
     now_ms = int(time.time() * 1000)
@@ -893,91 +553,60 @@ def main(argv: list[str] | None = None) -> int:
                                      limit=args.limit)
     if args.dry_run:
         print(f"=== {len(needed)} kid event(s) need a pic ===")
-        for uid, title, pic, participants in needed:
-            participant = participants[0] if participants else "kid"
-            combo = build_combo(title, participant, uid)
+        for _uid, title, pic, participants in needed:
+            combo = build_queries(title, participants or [])
             print(f"  {pic}  {','.join(participants):<14} {title} -> "
-                  f"{combo['subject']} ({combo['theme']}, "
-                  f"{combo['action'] or 'general'}) queries={combo['queries']}")
+                  f"{combo['person']} {combo['action'] or '(no activity)'} "
+                  f"queries={combo['queries']}")
         pic_store.close()
         cal.close()
         return 0
 
     done, failed = 0, 0
-    for uid, title, pic, participants in needed:
-        participant = participants[0] if participants else "kid"
-        combo = build_combo(title, participant, uid)
+    for _uid, title, pic, participants in needed:
+        combo = build_queries(title, participants or [])
         queries = combo["queries"]
-        primary = queries[0]
-        kw = "LLM" if os.environ.get("LMAO_IMAGE_LLM_URL") else "reasoned"
-        action = combo["action"]
-        subject_word = combo["subject"]
-        pool, theme_label = combo["pool"], combo["theme"]
-        print(f"== {pic} ({','.join(participants)}): '{title}' "
-              f"-> [{kw}] {subject_word} ({theme_label}) {queries} "
-              f"[commons + web line-art]")
+        print(f"== {pic} ({','.join(participants)}): '{title}' -> "
+              f"{combo['person']} {combo['action'] or '(no activity)'} "
+              f"{queries} [commons + web line-art]")
         try:
             stored = False
-            # Search the internet for a LINE DRAWING of the chosen subject.
-            # On a vision-gate rejection, retry one alternate subject from the
-            # SAME theme pool: an obscure subject (an unrecognized pokemon) may
-            # have no clean line drawing online while its pool-mates do.
-            base_seed = int(hashlib.sha1(uid.encode()).hexdigest(), 16)
-            order = [subject_word] + [pool[(base_seed + i) % len(pool)]
-                                      for i in range(1, len(pool))]
-            uniq_order, seen_s = [], set()
-            for s_ in order:
-                if s_ not in seen_s:
-                    seen_s.add(s_)
-                    uniq_order.append(s_)
-            for subj in uniq_order[:2]:
-                subj_queries = [theme_query(subj, theme_label, action)]
-                if subj == subject_word:
-                    subj_queries += [q for q in queries if q != primary]
-                subj_queries.append(subj)
-                subj_queries = _dedupe(subj_queries)
-                allres = []
-                for q in subj_queries:
-                    allres += search_sources(q, theme_label)
-                seen, uniq = set(), []
-                for r in allres:
-                    if r[1] and r[1] not in seen:
-                        seen.add(r[1])
-                        uniq.append(r)
-                candidates = rank_candidates(uniq, subj_queries[0])
-                for cand in candidates[:8]:
-                    _, url, w, h = cand
-                    try:
-                        raw = download(url)
-                        raw = crop_to_subject(raw)  # tighten to the subject (vision)
-                        if not verify_subject(raw, subj, theme_label, accept=pool):
-                            print(f"   gate rejected candidate ({w}x{h}): {cand[0]!r}")
-                            continue
-                        png = to_1bit_png(raw, tw, th, args.threshold)
-                        if not is_line_art(png):
-                            print(f"   not line art (ink {ink_fraction(png):.2f},"
-                                  f" enclosed {enclosed_white_fraction(png):.2f})"
-                                  f" — skipping {cand[0]!r}")
-                            continue
-                        rec = pic_store.put(pic, png, tw, th)
-                        print(f"   stored {pic}: {cand[0]} ({w}x{h}) -> "
-                              f"{rec['width']}x{rec['height']} {rec['mime']} {len(rec['bytes'])}B")
-                        done += 1
-                        stored = True
-                        break
-                    except Exception as exc2:  # noqa: BLE001
-                        print(f"   candidate failed ({cand[0]!r}): {exc2}")
+            results, seen_urls = [], set()
+            for q in queries:
+                for r in search_sources(q):
+                    if r[1] and r[1] not in seen_urls:
+                        seen_urls.add(r[1])
+                        results.append(r)
+            for cand in rank_candidates(results, queries[0])[:8]:
+                _, url, w, h = cand
+                try:
+                    raw = download(url)
+                    aspect = content_aspect(raw, args.threshold)
+                    if aspect is not None and not (
+                            1 / MAX_CONTENT_ASPECT <= aspect <= MAX_CONTENT_ASPECT):
+                        print(f"   content is a {aspect:.1f}:1 strip — skipping "
+                              f"{cand[0]!r}")
                         continue
-                if stored:
+                    png = to_1bit_png(raw, tw, th, args.threshold)
+                    if not is_line_art(png):
+                        print(f"   not line art (ink {ink_fraction(png):.2f},"
+                              f" enclosed {enclosed_white_fraction(png):.2f})"
+                              f" — skipping {cand[0]!r}")
+                        continue
+                    rec = pic_store.put(pic, png, tw, th)
+                    print(f"   stored {pic}: {cand[0]} ({w}x{h}) -> "
+                          f"{rec['width']}x{rec['height']} {rec['mime']} {len(rec['bytes'])}B")
+                    done += 1
+                    stored = True
                     break
-                if subj == subject_word:
-                    print(f"   no acceptable {subject_word!r} line drawing —"
-                          " trying another subject from the same theme...")
+                except Exception as exc2:  # noqa: BLE001
+                    print(f"   candidate failed ({cand[0]!r}): {exc2}")
+                    continue
             if not stored:
-                print(f"   no acceptable image for {primary!r}")
+                print(f"   no acceptable image for {queries[0]!r}")
                 failed += 1
         except Exception as exc:  # noqa: BLE001
-            print(f"   FAILED for {primary!r}: {exc}")
+            print(f"   FAILED for {queries[0]!r}: {exc}")
             failed += 1
         time.sleep(1.0)
     print(f"=== done: {done} stored, {failed} failed ===")

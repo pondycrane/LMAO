@@ -75,9 +75,10 @@ py_binary(
 
 # The family-calendar line-drawing skill: an agent (Hermes) rasterizes an SVG
 # or PNG source (a local file, or a small line drawing fetched from an http(s)
-# URL) to a 1-bit B&W tile (RLCD 300x400-friendly, default 144x144) and
+# URL) to a 1-bit B&W tile (RLCD 300x400-friendly, default 176x176) and
 # upserts the PNG bytes into the in-cluster Postgres `cal_pics` table via
-# lma_core.calendar_pics.PicStore.
+# lma_core.calendar_pics.PicStore.  Uses the same aspect-preserving rasterizer
+# as the hourly sync stage (lma_core.calendar_pics.rasterize_line_art).
 #   bazel run //tools:calendar_pics -- --key swim
 #   bazel run //tools:calendar_pics -- --key robodog --source https://…/dog.svg
 #   bazel run //tools:calendar_pics -- --key shopping --source art.svg --out check.png
@@ -122,9 +123,9 @@ py_binary(
 )
 
 # Calendar CronJob stage 2: for each upcoming kid event without a picture,
-# pick a seeded theme subject (Juliet: random pokemon; Wesley: alternating
-# random PAW Patrol character / coherent sea animal), generate or fetch line
-# art, and upsert the 1-bit RLCD tile into `cal_pics`.
+# read its ACTIVITY out of the title, fetch a kid-cartoon coloring page / line
+# drawing of that activity from Wikimedia Commons + DuckDuckGo, and upsert the
+# 1-bit RLCD tile into `cal_pics`.  No image generator, no model call.
 #   bazel run //tools:calendar_pics_sync
 #   bazel run //tools:calendar_pics_sync -- --dry-run
 #   bazel run //tools:calendar_pics_sync -- --force --since-days 14   # backfill

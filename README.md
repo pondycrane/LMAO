@@ -590,12 +590,25 @@ The optional `pic` field on each event is a line-drawing pack key (e.g.
 **1-bit black & white tiles** — formatted for the 4.2" RLCD calendar display
 (400×300 landscape canvas) at a default 176×176 so the headline drawing fills
 the left of the panel while the right column keeps the title, time range and
-forecast — generated and stored in Postgres (`cal_pics` table) by the
-**line-drawing skill** for agent use (see
-`.archon/skills/line-drawing/SKILL.md`) via `bazel run //tools:calendar_pics --
---key <key>` — either from a pack SVG or a small line drawing found online and
-fetched as a URL (`--source https://…`). The client resolves the key to the
-stored tile for display.
+forecast — and stored in Postgres (`cal_pics` table) by the **line-drawing
+skill** (see `.archon/skills/line-drawing/SKILL.md`) via `bazel run
+//tools:calendar_pics -- --key <key>`, from a pack SVG or a small line drawing
+found online and fetched as a URL (`--source https://…`). The client resolves
+the key to the stored tile for display.
+
+**The hourly stage draws the ACTIVITY, from the web — never from a generator.**
+`tools/calendar_pics_sync.py` reads the event title (`J tennis 4pm` → *girl
+playing tennis*, `W dental` → *boy at the dentist*, a shared event → *kids*),
+searches Wikimedia Commons + DuckDuckGo for a kid-cartoon coloring page /
+line drawing of exactly that, and rasterizes it locally.  There is no image
+generation model and no model call in this path: AI-generated art is rejected
+by the ranker, the framing is a pixel measurement (trim to the drawing's
+subject bbox, ignoring page furniture such as a footer logo; fit
+aspect-preserving and centered into the 176×176 tile — a portrait coloring
+page is no longer squashed into an unrecognizable square), and the gate
+rejects anything that is not outline work (ink fraction 0.02–0.45 with ≥0.15
+of the tile as enclosed white interior).  An event with no acceptable hit
+stays artless and is retried on the next hourly run.
 
 **Weather rides the same reply.** When the deployment sets
 `LMAO_WEATHER_LAT`/`LMAO_WEATHER_LON` (the in-cluster manifest pins the

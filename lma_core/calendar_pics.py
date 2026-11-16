@@ -57,6 +57,166 @@ def pick_tile_size(screen_w: int = SCREEN_W, screen_h: int = SCREEN_H) -> tuple[
     return (min(DEFAULT_TILE_W, screen_w - 20), min(DEFAULT_TILE_H, screen_h - 20))
 
 
+# ---------------------------------------------------------------------------
+# Rasterizing a line drawing into the tile
+# ---------------------------------------------------------------------------
+# The tile is square, the sources are not: a coloring page is typically
+# portrait (700x900, 864x1184) and a naive square resize squashes the figure
+# into an unrecognizable blob.  These constants drive the shared rasterizer
+# used by BOTH the hourly sync stage and the by-hand tool:
+#   - INK_THRESHOLD: generous white so anti-aliased line art keeps its ink;
+#   - INK_COVERAGE: a downscaled cell holding at least this much ink stays
+#     black, which is what lets a 1-px line survive a 10x downscale;
+#   - TILE_MARGIN: white breathing room inside the tile, tile pixels;
+#   - MAX_CONTENT_ASPECT: a drawing whose ink bbox is more than this wide or
+#     tall (a banner, a row of panels) is a sliver at tile size;
+#   - SUBJECT_MIN_BBOX_FRAC: components smaller than this share of the page
+#     are furniture, not the drawing (see subject_bbox).
+INK_THRESHOLD = 140
+INK_COVERAGE = 0.09
+TILE_MARGIN = 6
+MAX_CONTENT_ASPECT = 2.6
+# A connected ink component smaller than this fraction of the page area is
+# page furniture (a footer logo, a page number, a speck), not the drawing.
+SUBJECT_MIN_BBOX_FRAC = 0.04
+
+
+def ink_mask(img: Any, threshold: int = INK_THRESHOLD) -> Any:
+    """Threshold a Pillow image to an ink mask (255 = ink, 0 = white)."""
+    return img.convert("L").point(lambda v: 255 if v < threshold else 0)
+
+
+def _require_pillow():
+    try:
+        from PIL import Image  # noqa: PLC0415
+    except ImportError as exc:  # pragma: no cover - host tooling has Pillow
+        raise RuntimeError(
+            "Pillow is required to rasterize a calendar picture — "
+            "pip install Pillow"
+        ) from exc
+    return Image
+
+
+def subject_mask(raw: bytes, threshold: int = INK_THRESHOLD,
+                 min_bbox_frac: float = SUBJECT_MIN_BBOX_FRAC):
+    """Ink mask of the DRAWING only: (mask, bbox), page furniture removed.
+
+    A plain ink bbox keeps whatever else the page carries — a site footer
+    logo, a page number, stray specks — and those land in the tile as black
+    blobs beside the figure.  So the ink is labelled into connected components
+    on a 2x-downscaled mask (BOX keeps a 1-px line above the cut), components
+    whose bbox is a real part of the page (>= ``min_bbox_frac`` of the image
+    area) are kept, and the kept mask is scaled back and intersected with the
+    full-resolution ink so line weight is unchanged.
+
+    Returns ``(mask_image, (x1, y1, x2, y2))`` in source pixels; ``(None,
+    None)`` when the source has no ink.
+    """
+    import io  # noqa: PLC0415
+    from collections import deque  # noqa: PLC0415
+
+    from PIL import ImageChops  # noqa: PLC0415
+
+    pil = _require_pillow()
+    with pil.open(io.BytesIO(raw)) as im:
+        full = ink_mask(im, threshold)
+    w, h = full.size
+    down = 2
+    sm = full.resize((max(1, w // down), max(1, h // down)),
+                     pil.Resampling.BOX).point(lambda v: 255 if v >= 64 else 0)
+    sw, sh = sm.size
+    px = sm.load()
+    seen = bytearray(sw * sh)
+    min_area = min_bbox_frac * sw * sh
+    keep = bytearray(sw * sh)
+    found = False
+    for i in range(sw * sh):
+        if seen[i] or px[i % sw, i // sw] == 0:
+            continue
+        queue = deque([i])
+        seen[i] = 1
+        cells = []
+        x1 = y1 = sw + sh
+        x2 = y2 = -1
+        while queue:
+            j = queue.popleft()
+            cells.append(j)
+            x, y = j % sw, j // sw
+            x1, y1, x2, y2 = min(x1, x), min(y1, y), max(x2, x), max(y2, y)
+            for nx, ny in ((x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1),
+                           (x - 1, y - 1), (x + 1, y + 1), (x - 1, y + 1), (x + 1, y - 1)):
+                if 0 <= nx < sw and 0 <= ny < sh:
+                    k = ny * sw + nx
+                    if not seen[k] and px[nx, ny]:
+                        seen[k] = 1
+                        queue.append(k)
+        if (x2 - x1 + 1) * (y2 - y1 + 1) >= min_area:
+            found = True
+            for j in cells:
+                keep[j] = 1
+    if not found:
+        return None, None
+    kept = pil.frombytes("L", (sw, sh), bytes(255 if k else 0 for k in keep))
+    up = kept.resize((w, h), pil.Resampling.NEAREST)
+    mask = ImageChops.logical_and(up.convert("1"), full.convert("1"))
+    mask = mask.convert("L").point(lambda v: 255 if v else 0)
+    bbox = mask.getbbox()
+    if bbox is None:
+        return None, None
+    return mask, bbox
+
+
+def content_aspect(raw: bytes, threshold: int = INK_THRESHOLD) -> float | None:
+    """Width/height of the source's subject bbox, or None when it has none.
+
+    Used to reject strip-shaped hits (a banner or a multi-panel print sheet)
+    before they are shrunk to a speck.
+    """
+    _, bbox = subject_mask(raw, threshold)
+    if bbox is None:
+        return None
+    return (bbox[2] - bbox[0]) / max(1, bbox[3] - bbox[1])
+
+
+def rasterize_line_art(raw: bytes, width: int = DEFAULT_TILE_W,
+                       height: int = DEFAULT_TILE_H,
+                       threshold: int = INK_THRESHOLD,
+                       margin: int = TILE_MARGIN) -> bytes:
+    """Render a line drawing to a 1-bit PNG tile, aspect-preserving.
+
+    1. trim the source to its SUBJECT bbox (:func:`subject_bbox`): the page's
+       white border, a footer bar or a page number would otherwise ride along
+       and land in the tile as a black blob beside the drawing;
+    2. threshold at full resolution and area-average the ink mask down (BOX =
+       mean ink coverage per cell), marking a cell black only when it holds a
+       real amount of ink — thin 1-px lines survive, photo noise does not;
+    3. scale by the smaller of the two fits and CENTER the result on a white
+       tile, so the drawing keeps its own proportions.
+
+    Returns the 1-bit PNG bytes (a blank tile when the source has no ink).
+    """
+    import io  # noqa: PLC0415
+
+    pil = _require_pillow()
+    mask, bbox = subject_mask(raw, threshold)
+    buf = io.BytesIO()
+    if mask is None or bbox is None:
+        pil.new("1", (width, height), 1).save(buf, format="PNG", bits=1)
+        return buf.getvalue()
+    mask = mask.crop(bbox)
+    cw, ch = mask.size
+    fit = min((width - 2 * margin) / cw, (height - 2 * margin) / ch)
+    nw = max(1, int(cw * fit))
+    nh = max(1, int(ch * fit))
+    small = mask.resize((nw, nh), pil.Resampling.BOX)
+    tile = small.point(
+        lambda v: 0 if v >= INK_COVERAGE * 255 else 255, mode="1")
+    out = pil.new("1", (width, height), 1)
+    out.paste(tile, ((width - nw) // 2, (height - nh) // 2))
+    out.save(buf, format="PNG", bits=1, optimize=True)
+    return buf.getvalue()
+
+
 def quantize_1bit(values: list[list[int]], threshold: int = 128) -> list[list[int]]:
     """Threshold a grayscale grid (0-255) to 1-bit black/white (0/255).
 

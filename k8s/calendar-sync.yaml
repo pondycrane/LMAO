@@ -4,7 +4,8 @@
 # (~/.hermes/scripts/lmao_kids_sync.sh).  Two stages, in order:
 #
 #   1. tools/calendar_sync.py       Google Calendar -> cal_events (Postgres)
-#   2. tools/calendar_pics_sync.py  themed art -> 1-bit RLCD tiles in cal_pics
+#   2. tools/calendar_pics_sync.py  event activity -> fetched line drawing ->
+#                                   1-bit RLCD tile in cal_pics (no generator)
 #
 # Why this exists on a schedule at all: the RoboDog panel syncs by DELTA
 # (`since_ms` = its last watermark), so an event row only re-ships when its
@@ -36,15 +37,13 @@
 #
 # Networking notes (measured from an in-cluster pod):
 #   - postgres.default.svc.cluster.local:5432  reachable
-#   - 192.168.50.200:8000 (vision)             reachable
-#   - 192.168.50.138:8000 (gx10 LLM)           refused (box down → reasoned fallback)
 #   - commons.wikimedia.org / duckduckgo.com   reachable (the tile sources)
-#   The pics stage degrades gracefully: an unreachable LLM yields deterministic
-#   search queries, an unreachable search index leaves the event artless until
-#   the next run.  There is no image generator any more — tiles are fetched
-#   line drawings (Commons + DuckDuckGo line-art/coloring-page search).
-#   LAN hostnames do NOT resolve under cluster DNS, so the LLM is addressed by
-#   IP here (gx10-f156 == 192.168.50.138).
+#   The pics stage degrades gracefully: an unreachable search index leaves the
+#   event artless until the next run.  There is NO image generator and NO model
+#   call in this path — tiles are fetched kid-activity coloring pages/line
+#   drawings (Commons + DuckDuckGo), framed by a pixel measurement.
+#   Nothing in the stage addresses a LAN model host, so no ConfigMap entries
+#   are needed (cluster DNS would not resolve the LAN hostnames anyway).
 
 ---
 apiVersion: v1
@@ -55,15 +54,10 @@ metadata:
   labels:
     app: lmao-calendar-sync
 data:
-  # Stage-2 picture sources.  Tiles are FETCHED line drawings (no image
-  # generator): Wikimedia Commons plus DuckDuckGo image search biased to
-  # "line drawing"/"coloring page".  The LLM only proposes search queries and
-  # the vision box crops/gates candidates.  Addresses are IPs because cluster
-  # DNS does not resolve the LAN hostnames (gx10-f156 / spark-eefb).
-  LMAO_IMAGE_LLM_URL: "http://192.168.50.138:8000/v1"
-  LMAO_IMAGE_LLM_MODEL: "deepseek-ai/DeepSeek-V4-Flash-0731"
-  LMAO_IMAGE_VISION_URL: "http://192.168.50.200:8000/v1"
-  LMAO_IMAGE_VISION_MODEL: "Qwen/Qwen2.5-VL-72B-Instruct"
+  # Stage-2 needs NO configuration: queries come from the event title, the
+  # sources are Wikimedia Commons + DuckDuckGo, and framing/gating are local
+  # pixel measurements (no model host is contacted).
+  {}
 
 ---
 apiVersion: batch/v1
@@ -114,7 +108,7 @@ spec:
                   set -euo pipefail
                   echo "=== stage 1: Google Calendar -> cal_events ==="
                   python tools/calendar_sync.py --window-days 14
-                  echo "=== stage 2: themed art -> cal_pics ==="
+                  echo "=== stage 2: event activity -> fetched line art -> cal_pics ==="
                   python tools/calendar_pics_sync.py
                   echo "=== calendar sync complete ==="
               envFrom:

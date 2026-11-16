@@ -82,17 +82,32 @@ The `cal_pics` table is created on first use; rerunning a key overwrites
 ## Automated stage (hourly CronJob)
 
 `tools/calendar_pics_sync.py` fills missing keys for upcoming kid events
-without an agent: it searches Wikimedia Commons and the DuckDuckGo image
-index (queries biased with `line drawing` / `coloring page`, and with the
-theme name for character tiles — `chase paw patrol tennis`, not `chase
-tennis`), crops the hit to its subject with the local vision model, gates it
-against the theme's subject pool, and finally rejects anything that is not
-outline line art: ink fraction 0.02–0.45 **and** at least 0.15 of the tile as
-enclosed white interior. The interior check is what separates a drawing from
-a filled silhouette (0.35 ink, ~0.02 interior) or a badly cropped blank page
-(0.03 ink, no interior). Rasterizing thresholds at full resolution first and
-area-averages the ink mask, so thin lines survive the downscale. There is **no
-image generator**: a character with no acceptable online line drawing stays
-artless and retries on the next hourly run; place it by hand with `--source`
-above when the web has nothing usable. SVG URLs are skipped (the sync image
-has no cairosvg).
+without an agent. It draws **what the event says**, from the web:
+
+1. **Query from the title** — `extract_action` maps the event to an activity
+   phrase (`J tennis 4pm` → `playing tennis`, `W dental` → `at the dentist`,
+   `Wesley Princeton` → `at school`), and `person_word` picks the subject
+   (`juliet` → `girl`, `wesley` → `boy`, a shared event → `kids`).  Primary
+   query: `<person> <activity> coloring page`.
+2. **Sources** — Wikimedia Commons plus the keyless DuckDuckGo image index.
+   The ranker prefers line art / coloring pages, a single drawing over a
+   multi-panel print sheet, and a kid over an object or adult — and it
+   **rejects AI-generated art** (`ai-generated`, `generated vector`, diffusion
+   tool names in the title/URL) and SVGs (the sync image has no cairosvg).
+3. **Framing** — `lma_core.calendar_pics.rasterize_line_art`, the one
+   rasterizer the by-hand tool shares: trim to the *subject* bbox
+   (`subject_mask` drops page furniture such as a footer logo or a page
+   number, which would otherwise land in the tile as a black blob), threshold
+   at full resolution, area-average the ink mask down (thin 1-px strokes
+   survive a 10× downscale), then fit **aspect-preserving** and center on the
+   white tile with a 6-px margin.  A portrait coloring page is no longer
+   squashed into a square.
+4. **Gate** — the tile must be outline work: ink fraction 0.02–0.45 **and**
+   at least 0.15 of the tile as enclosed white interior.  The interior check
+   separates a drawing from a filled silhouette (0.35 ink, ~0.02 interior) or
+   a badly cropped blank page.  A source whose subject bbox is a >2.6:1 strip
+   is skipped before rasterizing (it would be a sliver at tile size).
+
+There is **no image generator and no model call** anywhere in this path.  An
+event with no acceptable hit stays artless and retries on the next hourly
+run; place it by hand with `--source` above when the web has nothing usable.

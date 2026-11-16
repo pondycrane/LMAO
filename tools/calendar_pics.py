@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Line-drawing picture generator + Postgres store for the family calendar.
+"""Line-drawing picture rasterizer + Postgres store for the family calendar.
 
 The skill tooling a Hermes-class agent uses to produce a calendar picture:
 takes an SVG or PNG source — a local file, or the URL of a small line drawing
@@ -10,7 +10,9 @@ table keyed by ``CalEvent.pic``.  Rerunning with the same key overwrites
 (idempotent) — regenerating artwork for kids' calendars is the primary use.
 Prefer a real line drawing found online over an agent-invented SVG: a found
 drawing reads much better on the reflective panel (see
-``.archon/skills/line-drawing/SKILL.md``).
+``.archon/skills/line-drawing/SKILL.md``).  Rasterizing goes through
+``lma_core.calendar_pics.rasterize_line_art`` — the same trim/fit/center path
+the hourly sync stage uses, so a portrait source is never squashed.
 
 Usage (agent-facing; see .archon/skills/line-drawing/SKILL.md):
     PYTHONPATH=<repo-root> python3 tools/calendar_pics.py --key swim
@@ -30,14 +32,12 @@ from __future__ import annotations
 
 import argparse
 import contextlib
-import io
 import mimetypes
 import os
 import sys
 import tempfile
 import urllib.request
 from collections.abc import Iterator
-from typing import Any
 
 # Repo root on path so `from lma_core...` resolves when run as a plain script.
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -45,7 +45,9 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 from lma_core.calendar_pics import (  # noqa: E402
+    INK_THRESHOLD,
     pick_tile_size,
+    rasterize_line_art,
 )
 
 
@@ -55,10 +57,14 @@ def _load_png_bytes(
     height: int,
     threshold: int,
 ) -> bytes:
-    """Render a local SVG/PNG file to a 1-bit B&W PNG of (width, height).
+    """Render a local SVG/PNG file to a 1-bit B&W tile of (width, height).
 
     ``source_path`` must be a local file (URLs are materialized by
-    :func:`_materialize_source` before this is called).
+    :func:`_materialize_source` before this is called).  An SVG is rasterized
+    at 4x the tile so the trim/contain step in
+    :func:`lma_core.calendar_pics.rasterize_line_art` has real pixels to work
+    with; a raster source is used at its own resolution.  Both keep their
+    aspect ratio — a portrait drawing is fitted and centered, never squashed.
     """
     lower = source_path.lower()
     if lower.endswith(".svg"):
@@ -69,43 +75,14 @@ def _load_png_bytes(
                 "cairosvg is required for SVG sources — "
                 "pip install cairosvg"
             ) from exc
-        png = cairosvg.svg2png(
-            url=source_path, output_width=width, output_height=height,
-            background_color="white",
+        raw = cairosvg.svg2png(
+            url=source_path, output_width=width * 4, background_color="white",
         )
-        pil_source = png
     else:
-        try:
-            from PIL import Image  # noqa: PLC0415
-        except ImportError as exc:  # pragma: no cover - host tool
-            raise RuntimeError(
-                "Pillow is required for PNG sources — pip install Pillow"
-            ) from exc
-        with Image.open(source_path) as src:
-            pil_source = src.convert("L").resize(
-                (width, height), Image.Resampling.LANCZOS
-            )
+        with open(source_path, "rb") as f:
+            raw = f.read()
 
-    return _pil_to_1bit_png(pil_source, width, height, threshold)
-
-
-def _pil_to_1bit_png(
-    rgb: Any, width: int, height: int, threshold: int,
-) -> bytes:
-    """Turn Pillow L/RGBA image (or raw cairosvg PNG bytes) into 1-bit PNG."""
-    from PIL import Image  # noqa: PLC0415
-
-    if isinstance(rgb, (bytes, bytearray)):
-        img = Image.open(io.BytesIO(bytes(rgb))).convert("L")
-    else:
-        img = rgb.convert("L") if rgb.mode != "L" else rgb
-
-    # Threshold to pure 1-bit B&W (no dithering) — crisper on a reflective LCD.
-    img = img.point(lambda v: 255 if v >= threshold else 0, mode="1")
-    img = img.resize((width, height), Image.Resampling.NEAREST)
-    buf = io.BytesIO()
-    img.save(buf, format="PNG", bits=1, optimize=True)
-    return buf.getvalue()
+    return rasterize_line_art(raw, width, height, threshold)
 
 
 def _default_source(pic_key: str) -> str | None:
@@ -193,7 +170,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--size", default="176x176",
                         help="tile WxH (RLCD 400x300 landscape headline slot); "
                              "default 176x176")
-    parser.add_argument("--threshold", type=int, default=128, help="B&W threshold 0-255 (default 128)")
+    parser.add_argument("--threshold", type=int, default=INK_THRESHOLD,
+                        help=f"B&W threshold 0-255 (default {INK_THRESHOLD})")
     parser.add_argument("--out", help="also write the PNG locally (always on missing-DB fallback)")
     parser.add_argument("--list", action="store_true", help="list stored picture keys and exit")
     args = parser.parse_args(argv)
