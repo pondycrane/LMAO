@@ -93,11 +93,15 @@ REPO_ROOT="$(cd "$APP/../../.." && pwd)"
 if [ -z "${LMAO_DEST_HASH_HEX:-}" ] || [ -z "${LMAO_SERVER_PUBKEY_HEX:-}" ]; then
     # Never fail the build on provisioning: an unreachable identity yields
     # empty values = announce-only image (the script prints the reason).
-    # stderr stays on the console (the script explains any warning); only the
-    # KEY=value stdout lines are evaled.
+    # stderr stays on the console (the script explains any warning).
     if PROVISION="$(PYTHONPATH="$REPO_ROOT" python3 "$REPO_ROOT/tools/device_provision.py" \
             --device-name "${LMAO_DEVICE_NAME:-sprout}")"; then
-        eval "$PROVISION"
+        # Merge only the NON-EMPTY values: the caller (benchd, install_all) may
+        # already hold the dest hash / identity, and an unresolved server
+        # identity must not blank what it provided.
+        while IFS='=' read -r key value; do
+            [ -n "$value" ] && export "$key=$value"
+        done <<< "$PROVISION"
     else
         echo "WARNING: Sprout provisioning failed — building announce-only." >&2
     fi

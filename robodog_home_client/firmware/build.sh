@@ -74,7 +74,12 @@ if [ -z "${RH_DEST_HASH_HEX:-}" ] || [ -z "${RH_NODE_IDENTITY_HEX:-}" ]; then
     if PROVISION="$(PYTHONPATH="$REPO_ROOT" python3 "$REPO_ROOT/tools/device_provision.py" \
             --prefix RH_ --device-name "${RH_DEVICE_NAME:-}" \
             --device-type robodog_home)"; then
-        eval "$PROVISION"
+        # Merge only the NON-EMPTY values: the caller (benchd, install_all) may
+        # already hold the dest hash / identity, and an unresolved server
+        # identity must not blank what it provided.
+        while IFS='=' read -r key value; do
+            [ -n "$value" ] && export "$key=$value"
+        done <<< "$PROVISION"
     else
         echo "WARNING: home provisioning failed — building announce-only." >&2
     fi

@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Any
@@ -26,6 +27,18 @@ _logger = logging.getLogger(__name__)
 def contacts_api_base() -> str:
     """Base URL of the server's contact-book HTTP API."""
     return os.environ.get("LMAO_CONTACTS_API", "http://127.0.0.1:8081").rstrip("/")
+
+
+def _post_contact(body: dict[str, Any]) -> int:
+    """POST one contact record; returns the HTTP status (raises on no reply)."""
+    req = urllib.request.Request(
+        f"{contacts_api_base()}/contacts",
+        data=json.dumps(body).encode(),
+        method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        return resp.status
 
 
 def register_contact(
@@ -42,33 +55,47 @@ def register_contact(
     manifest edit and no rollout.  Returns True on success; an unreachable API
     is logged, not raised (the caller always prints the hash so the cold-start
     seed remains an option).
+
+    A **name already owned by another device** is not stolen: the API answers
+    409, and the record is re-posted without a name so the device is still
+    addressable (and approved) under its ``<type>-<last4>`` placeholder — a
+    failed registration would otherwise leave a freshly flashed board pending
+    and silently dropped by the server gate.
     """
-    url = f"{contacts_api_base()}/contacts"
-    payload = json.dumps(
-        {
-            "delivery_hash": delivery_hash,
-            "name": device_name,
-            "type": device_type,
-            "pubkey_hex": pubkey_hex,
-            "state": state,
-        }
-    ).encode()
-    req = urllib.request.Request(
-        url,
-        data=payload,
-        method="POST",
-        headers={"Content-Type": "application/json"},
-    )
+    delivery_hash = delivery_hash.lower()
+    body: dict[str, Any] = {
+        "delivery_hash": delivery_hash,
+        "name": device_name,
+        "type": device_type,
+        "pubkey_hex": pubkey_hex,
+        "state": state,
+    }
     try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            _logger.info(
-                "Registered contact %s -> %s (%s, HTTP %s)",
-                device_name, delivery_hash[:12], state, resp.status,
-            )
-            return True
+        status = _post_contact(body)
+    except urllib.error.HTTPError as exc:
+        if exc.code != 409:
+            _logger.warning("Contact registration failed (HTTP %s): %s", exc.code, exc)
+            return False
+        _logger.warning(
+            "Contact name %r is already taken by another device — registering "
+            "%s under a placeholder instead; rename it with POST /contacts.",
+            device_name, delivery_hash[:12],
+        )
+        body.pop("name")
+        try:
+            status = _post_contact(body)
+        except Exception as exc2:
+            _logger.warning("Contact registration failed (%s): %s", exc2, exc2)
+            return False
     except Exception as exc:
-        _logger.warning("Contact registration failed (%s): %s", url, exc)
+        _logger.warning("Contact registration failed: %s", exc)
         return False
+
+    _logger.info(
+        "Registered contact %s -> %s (%s, HTTP %s)",
+        device_name, delivery_hash[:12], state, status,
+    )
+    return True
 
 
 def lookup_contact(token: str) -> dict[str, Any] | None:
