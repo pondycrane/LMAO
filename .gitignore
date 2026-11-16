@@ -33,3 +33,8 @@ MODULE.bazel.lock
 # Temp files
 /tmp/
 *.mpy
+
+# graphify generated output — local knowledge-graph cache (graph.json,
+# graph.html, GRAPH_REPORT.md, dated snapshots, AST cache). Regenerate with
+# `graphify update .`; never commit (1.4 GB of derived data).
+graphify-out/
