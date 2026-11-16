@@ -14,6 +14,7 @@ Usage:
     python3 human_client/client.py
 """
 
+import contextlib
 import logging
 import os
 import re
@@ -62,6 +63,10 @@ def _identity_storage_path() -> str:
     host = re.sub(r"[^A-Za-z0-9_.-]+", "_", socket.gethostname()).strip("._") or "host"
     path = os.path.join(DEVICE_IDENTITY_ROOT, f"human-{host}")
     os.makedirs(path, mode=0o700, exist_ok=True)
+    # makedirs(mode=...) only applies to directories it creates; an identity
+    # directory left group/world-readable by an older run is tightened here.
+    with contextlib.suppress(OSError):
+        os.chmod(path, 0o700)
     return path
 
 

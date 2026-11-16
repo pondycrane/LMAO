@@ -109,6 +109,90 @@ def _env_allowed_clients() -> set:
 
 ALLOWED_CLIENTS = _env_allowed_clients()
 
+# ── Contact-book recovery ───────────────────────────────────────────
+# Postgres can be unreachable when the pod starts (the service is still
+# coming up, or the Secret is not mounted yet).  The server keeps serving
+# with the env seed in that case, and the book is re-opened lazily on the
+# next message or API request — otherwise a transient outage would leave
+# every device pending (and the operator with no approval path) until a
+# restart.  Retries are rate-limited so a down database costs one connect
+# attempt per interval, not one per message.
+_CONTACTS_RETRY_INTERVAL = 30.0
+_contacts_retry_at = 0.0
+# Set when the startup open failed.  Without it, a ``CONTACTS is None`` that
+# was never a failed open (no backend configured, or a test that patches the
+# book out) must NOT be retried — otherwise the gate would silently bring up
+# a different book than the one the deployment chose.
+_contacts_open_failed = False
+
+
+def _default_sqlite_path() -> str:
+    """Legacy SQLite contacts file beside the server identity (dev fallback)."""
+    identity_dir = os.path.dirname(
+        os.environ.get(
+            "LMAO_SERVER_IDENTITY_PATH",
+            os.path.expanduser("~/.local/share/lmao_server/lxmf"),
+        )
+    )
+    return os.path.join(identity_dir, "contacts.db")
+
+
+def _open_contacts_book(backfill: bool = False):
+    """Open the contact book: Postgres when configured, else legacy SQLite.
+
+    With *backfill* the legacy SQLite rows are copied into Postgres first;
+    that copy is insert-only, so live Postgres state (names, types, state,
+    timestamps) always wins.
+    """
+    dsn = compose_postgres_dsn()
+    if dsn is not None:
+        if backfill:
+            migrated = backfill_sqlite_to_pg(
+                os.environ.get("LMAO_CONTACTS_DB") or _default_sqlite_path(), dsn
+            )
+            if migrated:
+                logger.info(
+                    "Backfilled %d contact(s) from SQLite into Postgres", migrated
+                )
+        book = open_contact_book(dsn)
+        logger.info("Contact book ready (Postgres) at %s", dsn)
+        return book
+    path = os.environ.get("LMAO_CONTACTS_DB") or _default_sqlite_path()
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    book = ContactBook(path)
+    logger.info("Contact book ready at %s", path)
+    return book
+
+
+def _ensure_contact_book():
+    """Return the contact book, re-opening it after a failed startup open.
+
+    Returns ``None`` while the backend is still unreachable; the caller then
+    falls back to the env seed (fail closed).
+    """
+    global CONTACTS, _contacts_retry_at, _contacts_open_failed
+    if CONTACTS is not None:
+        return CONTACTS
+    if not _contacts_open_failed:
+        return None
+    now = time.monotonic()
+    if now < _contacts_retry_at:
+        return None
+    _contacts_retry_at = now + _CONTACTS_RETRY_INTERVAL
+    try:
+        book = _open_contacts_book()
+    except Exception as e:
+        logger.debug("Contact book still unavailable: %s", e)
+        return None
+    _seed_approved_contacts(book)
+    CONTACTS = book
+    _contacts_open_failed = False
+    logger.info(
+        "Contact book reconnected — approve devices with "
+        "POST :8081/contacts/<hash>/approve"
+    )
+    return CONTACTS
+
 # Recent Sprout soil-moisture samples, folded in from every SensorReport the
 # server receives and appended to the client reply below as a DATA line so a
 # client (the Cardputer) can chart it — the server holds the stream in memory,
@@ -238,7 +322,7 @@ def _learn_contact(source_hash: str) -> str | None:
     Returns the contact's state (``pending``/``approved``/``revoked``), or
     ``None`` when the book is unavailable.
     """
-    book = CONTACTS
+    book = _ensure_contact_book()
     if book is None:
         return None
     delivery_hash = source_hash.lower()
@@ -533,14 +617,19 @@ class Server:
 
         delivery_hash = None
         pubkey_hex = None
-        book = CONTACTS
+        book = _ensure_contact_book()
         if book is not None:
             try:
-                matches = (
-                    book.find(delivery_hash=target)
-                    or book.find(device_name=target)
-                    or book.find(device_type=target)
-                )
+                # A revoked device is not addressable: it must be re-approved
+                # before a downlink can reach it.
+                matches = [
+                    m for m in (
+                        book.find(delivery_hash=target)
+                        or book.find(device_name=target)
+                        or book.find(device_type=target)
+                    )
+                    if m.get("state") != "revoked"
+                ]
                 if len(matches) > 1:
                     logger.error(
                         "resolve_target: %r matches %d contacts — use a name or hash",
@@ -788,9 +877,16 @@ class Server:
             # in another RNS.Destination raises TypeError ("Invalid material
             # supplied for destination hash calculation").
             source_dest = message.get_source()
-            source_hash = (
-                RNS.hexrep(source_dest.hash, delimit=False) if source_dest else "<unknown>"
-            )
+            if source_dest is None:
+                # Without a source destination there is no hash to key a
+                # contact on — a literal "<unknown>" row would be a bogus
+                # device that no operator can ever approve.
+                logger.warning(
+                    "Dropping LXMF message with no source destination — "
+                    "cannot key a contact entry"
+                )
+                return
+            source_hash = RNS.hexrep(source_dest.hash, delimit=False)
 
             # Security gate: the contact book is the ONE registry (see
             # docs/identity-contact-design.md).  Learn/touch the sender BEFORE
@@ -1185,44 +1281,25 @@ async def async_main():
     # service (k8s/postgres.yaml) when LMAO_CONTACTS_URL or LMAO_CONTACTS_PG_*
     # is set (the legacy SQLite file is backfilled into it, idempotent);
     # otherwise the original SQLite file is used (dev / non-cluster runs).
-    global CONTACTS
+    global CONTACTS, _contacts_open_failed
 
-    def _default_sqlite_path() -> str:
-        _id_dir = os.path.dirname(
-            os.environ.get(
-                "LMAO_SERVER_IDENTITY_PATH",
-                os.path.expanduser("~/.local/share/lmao_server/lxmf"),
-            )
+    # Open the book (Postgres when configured, else the legacy SQLite file);
+    # on failure the env seed gates traffic until _ensure_contact_book()
+    # reconnects.
+    try:
+        CONTACTS = _open_contacts_book(backfill=True)
+    except Exception as e:
+        CONTACTS = None
+        _contacts_open_failed = True
+        logger.warning(
+            "Contact book unavailable (%s) — the env allow-list is the gate "
+            "until it reconnects; the Contacts API stays up and answers 503",
+            e,
         )
-        return os.path.join(_id_dir, "contacts.db")
-
-    contacts_dsn = compose_postgres_dsn()
-    if contacts_dsn is not None:
-        try:
-            migrated = backfill_sqlite_to_pg(
-                os.environ.get("LMAO_CONTACTS_DB") or _default_sqlite_path(),
-                contacts_dsn,
-            )
-            if migrated:
-                logger.info("Backfilled %d contact(s) from SQLite into Postgres", migrated)
-            CONTACTS = open_contact_book(contacts_dsn)
-            logger.info("Contact book ready (Postgres) at %s", contacts_dsn)
-        except Exception as e:
-            CONTACTS = None
-            logger.warning("Contact book unavailable (%s) — the env allow-list is the gate", e)
     else:
-        contacts_db = os.environ.get("LMAO_CONTACTS_DB") or _default_sqlite_path()
-        try:
-            os.makedirs(os.path.dirname(contacts_db) or ".", exist_ok=True)
-            CONTACTS = ContactBook(contacts_db)
-            logger.info("Contact book ready at %s", contacts_db)
-        except Exception as e:
-            CONTACTS = None
-            logger.warning("Contact book unavailable (%s) — the env allow-list is the gate", e)
-
-    # Cold-start seed: LMAO_ALLOWED_CLIENTS hashes become approved contacts
-    # (insert-only — an operator's revocation/rename survives every restart).
-    if CONTACTS is not None:
+        # Cold-start seed: LMAO_ALLOWED_CLIENTS hashes become approved
+        # contacts (insert-only — an operator's revocation/rename survives
+        # every restart).
         _seed_approved_contacts(CONTACTS)
 
     # ── Family calendar (read-only on the wire) ──────────────────
@@ -1345,16 +1422,19 @@ async def async_main():
         print("gRPC server ready on 0.0.0.0:50051")
 
     # ── Contacts API (receiver directory) ────────────────────────
+    # Always started: it takes a provider, so it answers 503 while the book is
+    # down and starts serving as soon as _ensure_contact_book() reconnects —
+    # the operator keeps an approval path through a Postgres outage.
     contacts_runner = None
-    if CONTACTS is not None:
-        try:
-            from lma_core.contacts_api import start_contacts_server
+    try:
+        from lma_core.contacts_api import start_contacts_server
 
-            contacts_runner = await start_contacts_server(
-                CONTACTS, port=int(os.environ.get("LMAO_CONTACTS_PORT", "8081"))
-            )
-        except Exception as e:
-            logger.warning("Contacts API unavailable (%s)", e)
+        contacts_runner = await start_contacts_server(
+            _ensure_contact_book,
+            port=int(os.environ.get("LMAO_CONTACTS_PORT", "8081")),
+        )
+    except Exception as e:
+        logger.warning("Contacts API unavailable (%s)", e)
 
     # ── Calendar TCP read service (RoboDog native client, no RNS) ────
     # Framed-TCP CalendarRequest/CalendarBundle read on LMAO_CAL_TCP_PORT so

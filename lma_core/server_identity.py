@@ -188,17 +188,6 @@ def ensure_server_identity(identity_dir: str | None = None):
     return identity, identity_file
 
 
-def ensure_server_pubkey_hex(identity_dir: str | None = None) -> str:
-    """The server identity's public key as hex (baked into native clients).
-
-    A native client uses it to construct the server's ``lxmf.delivery``
-    destination and encrypt to it without ever hearing an announce (the
-    server no longer announces over LoRa, #142).
-    """
-    identity, _ = ensure_server_identity(identity_dir)
-    return identity.get_public_key().hex()
-
-
 def delivery_destination_hash_hex(identity) -> str:
     """Compute the server's ``lxmf.delivery`` destination hash as hex.
 

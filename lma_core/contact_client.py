@@ -3,7 +3,7 @@
 One place for the HTTP calls that every client-side tool makes against the
 Contacts API (``:8081``): publishing a device's public record at provisioning
 time, and resolving a receiver name/type/hash before a send.  Keeping them
-here means ``install_all``, ``sprout_provision`` and the human client share
+here means ``install_all``, ``device_provision`` and the human client share
 one URL convention, one payload shape and one error policy.
 
 The API base is ``LMAO_CONTACTS_API`` (default ``http://127.0.0.1:8081``);
@@ -53,8 +53,9 @@ def register_contact(
     A provisioning run with the device physically present is the operator's
     trust decision, so the record is registered ``approved`` by default — no
     manifest edit and no rollout.  Returns True on success; an unreachable API
-    is logged, not raised (the caller always prints the hash so the cold-start
-    seed remains an option).
+    is logged, not raised (the caller prints the hash and the
+    ``POST /contacts/<hash>/approve`` URL instead — the env seed cannot
+    approve a device the server has already seen).
 
     A **name already owned by another device** is not stolen: the API answers
     409, and the record is re-posted without a name so the device is still
@@ -103,7 +104,8 @@ def lookup_contact(token: str) -> dict[str, Any] | None:
 
     Returns the single matching contact dict, or None when the API is
     unreachable or nothing matches.  An ambiguous match (a type shared by
-    several devices) is refused: the caller must name one.
+    several devices) is refused: the caller must name one.  A ``revoked``
+    contact is not addressable and counts as no match.
     """
     base = contacts_api_base()
     for key in ("name", "hash", "type"):
@@ -114,6 +116,7 @@ def lookup_contact(token: str) -> dict[str, Any] | None:
         except Exception as exc:
             _logger.debug("Contact lookup failed (%s): %s", url, exc)
             return None
+        contacts = [c for c in contacts if c.get("state") != "revoked"]
         if contacts:
             if len(contacts) > 1:
                 _logger.warning(

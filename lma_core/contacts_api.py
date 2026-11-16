@@ -44,29 +44,55 @@ def _require_aiohttp() -> None:
 
 
 def _is_unique_violation(exc: Exception) -> bool:
-    """True when *exc* is a duplicate-name constraint failure (either backend)."""
+    """True when *exc* is the ``device_name`` UNIQUE constraint (either backend).
+
+    Narrow on purpose: a NOT NULL (or any other) integrity failure is a 500, not
+    a misleading "name already in use" 409.
+    """
     import sqlite3
 
-    return (
-        isinstance(exc, sqlite3.IntegrityError)
-        or exc.__class__.__name__ in ("UniqueViolation", "IntegrityError")
-    )
+    name = exc.__class__.__name__
+    if not isinstance(exc, sqlite3.IntegrityError) and name not in (
+        "UniqueViolation", "IntegrityError"
+    ):
+        return False
+    return "device_name" in str(exc)
 
 
 def create_app(book: Any) -> Any:  # aiohttp.web.Application
-    """Create an aiohttp Application exposing the contact-book API."""
+    """Create an aiohttp Application exposing the contact-book API.
+
+    *book* is a contact book, or a zero-arg callable returning one.  The
+    callable form lets the server start this API before Postgres is reachable
+    (it answers 503 until the book reconnects) instead of leaving the operator
+    with no approval path at all.
+    """
     _require_aiohttp()
     routes = aiohttp.web.RouteTableDef()
 
+    def _book() -> Any:
+        return book() if callable(book) else book
+
+    def _unavailable() -> Any:
+        return aiohttp.web.json_response(
+            {"error": "contact book unavailable — retry shortly"}, status=503
+        )
+
     @routes.get("/contacts")
     async def list_contacts(request: aiohttp.web.Request) -> aiohttp.web.Response:
+        current = _book()
+        if current is None:
+            return _unavailable()
         state = request.query.get("state")
-        return aiohttp.web.json_response({"contacts": book.all(state=state)})
+        return aiohttp.web.json_response({"contacts": current.all(state=state)})
 
     @routes.get("/contacts/find")
     async def find_contact(request: aiohttp.web.Request) -> aiohttp.web.Response:
+        current = _book()
+        if current is None:
+            return _unavailable()
         query = request.query
-        matches = book.find(
+        matches = current.find(
             delivery_hash=query.get("hash"),
             device_name=query.get("name"),
             device_type=query.get("type"),
@@ -76,6 +102,9 @@ def create_app(book: Any) -> Any:  # aiohttp.web.Application
 
     @routes.post("/contacts")
     async def register_contact(request: aiohttp.web.Request) -> aiohttp.web.Response:
+        current = _book()
+        if current is None:
+            return _unavailable()
         try:
             body = await request.json()
         except Exception:
@@ -93,7 +122,7 @@ def create_app(book: Any) -> Any:  # aiohttp.web.Application
         # caller explicitly asks for another state.
         state = body.get("state") or "approved"
         try:
-            entry = book.register(
+            entry = current.register(
                 delivery_hash=delivery_hash,
                 device_type=device_type,
                 device_name=body.get("name"),
@@ -124,13 +153,16 @@ def create_app(book: Any) -> Any:  # aiohttp.web.Application
 
     def _set_state(request: aiohttp.web.Request,
                    state: str) -> aiohttp.web.Response:
+        current = _book()
+        if current is None:
+            return _unavailable()
         delivery_hash = request.match_info["hash"].lower()
-        if not book.set_state(delivery_hash, state):
+        if not current.set_state(delivery_hash, state):
             return aiohttp.web.json_response(
                 {"error": f"unknown contact {delivery_hash}"}, status=404
             )
         return aiohttp.web.json_response(
-            {"contact": book.find(delivery_hash=delivery_hash)[0]}
+            {"contact": current.find(delivery_hash=delivery_hash)[0]}
         )
 
     app = aiohttp.web.Application()
@@ -141,7 +173,10 @@ def create_app(book: Any) -> Any:  # aiohttp.web.Application
 async def start_contacts_server(
     book: Any, host: str = "0.0.0.0", port: int = 8081
 ) -> Any:  # aiohttp.web.AppRunner
-    """Start the contact-book HTTP API. Returns an AppRunner to clean up."""
+    """Start the contact-book HTTP API. Returns an AppRunner to clean up.
+
+    *book* may be a zero-arg provider; see :func:`create_app`.
+    """
     _require_aiohttp()
     app = create_app(book)
     runner = aiohttp.web.AppRunner(app)

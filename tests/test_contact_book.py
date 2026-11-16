@@ -329,6 +329,22 @@ def test_a_device_reporting_a_taken_name_falls_back_to_its_placeholder(tmp_path)
     b.close()
 
 
+def test_a_placeholder_collision_never_makes_a_device_unlearnable(tmp_path):
+    """The bare <type>-<last4> placeholder lives in a 65 536-name space.  Two
+    devices whose hashes share their last four hex digits must both get a row
+    (the second falls back to a longer placeholder); otherwise the learn path
+    raises and drops every report from the second device forever."""
+    b = _book(tmp_path)
+    first = b.register(delivery_hash="a" * 28 + "abcd", device_type="device")
+    second = b.register(delivery_hash="b" * 28 + "abcd", device_type="device")
+    assert first["device_name"] == "device-abcd"
+    assert second["device_name"] == "device-bbbb-abcd"
+    assert second["delivery_hash"] == "b" * 28 + "abcd"
+    assert b.is_known("a" * 28 + "abcd")
+    assert b.is_known("b" * 28 + "abcd")
+    b.close()
+
+
 def test_api_duplicate_name_is_a_conflict(tmp_path):
     """device_name is a unique attribute, not the key: registering a second
     device under an existing name must be rejected, never re-point the row."""
@@ -391,6 +407,49 @@ def test_legacy_pk_on_name_migrates_to_delivery_hash(tmp_path):
                name_source="device")
     assert b.find(device_name="Kitchen")[0]["state"] == "approved"
     b.close()
+
+
+def test_api_answers_503_until_the_book_reconnects(tmp_path):
+    """The API is started even when the book is down (a Postgres outage at
+    boot): it answers 503 and starts serving once the provider reconnects."""
+    from aiohttp.test_utils import TestClient, TestServer
+
+    b = _book(tmp_path)
+    holder = {"book": None}
+
+    async def run():
+        async with TestClient(TestServer(create_app(lambda: holder["book"]))) as cli:
+            r = await cli.get("/contacts")
+            assert r.status == 503
+            assert "unavailable" in (await r.json())["error"]
+            r = await cli.post("/contacts/" + "a" * 32 + "/approve")
+            assert r.status == 503
+            holder["book"] = b
+            assert (await cli.get("/contacts")).status == 200
+            r = await cli.post("/contacts", json={"delivery_hash": "a" * 32,
+                                                  "type": "cardputer"})
+            assert r.status == 201
+
+    import asyncio
+
+    asyncio.run(run())
+    b.close()
+
+
+def test_only_a_duplicate_name_is_a_409():
+    """A UNIQUE violation is a name conflict (409); any other integrity error
+    (NOT NULL, etc.) must surface as a server error, not a 409."""
+    import sqlite3
+
+    from lma_core.contacts_api import _is_unique_violation
+
+    assert _is_unique_violation(
+        sqlite3.IntegrityError("UNIQUE constraint failed: contacts.device_name")
+    )
+    assert not _is_unique_violation(
+        sqlite3.IntegrityError("NOT NULL constraint failed: contacts.device_type")
+    )
+    assert not _is_unique_violation(ValueError("device_name"))
 
 
 if __name__ == "__main__":

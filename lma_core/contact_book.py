@@ -7,8 +7,9 @@ table with a global write lock is plenty — no pooling, no migrations, no ORM.
 A contact keys on :attr:`delivery_hash` (the device's ``lxmf/delivery``
 destination the server addresses) and carries a human ``device_name`` plus a
 ``device_type`` (``cardputer``, ``sprout``, ...).  ``device_name`` is a
-mutable unique attribute, not the key, so renaming one device can never
-collide with another device's row.
+mutable unique attribute, not the key: renaming a device is an ordinary
+UPDATE, and a name already owned by another device is rejected (the API
+answers 409) rather than re-pointing that row.
 
 Lifecycle (``state``) replaces the static allow-list as the live gate:
 
@@ -55,6 +56,23 @@ CREATE TABLE IF NOT EXISTS contacts (
 
 _COLUMNS = ("delivery_hash", "device_name", "device_type", "pubkey_hex",
             "first_seen", "last_seen", "name_source", "state", "approved_at")
+
+
+def placeholder_names(delivery_hash: str, device_type: str) -> list[str]:
+    """Placeholder names for a device, in preference order.
+
+    ``<type>-<last4>`` is the friendly default; the longer forms are used only
+    when another row already owns the shorter one.  They matter because the
+    bare placeholder lives in a 65 536-name space: without a fallback a
+    collision would make the device permanently unlearnable (``register``
+    raises, and the learn path drops every report from it).
+    """
+    tail = delivery_hash[-4:]
+    return [
+        f"{device_type}-{tail}",
+        f"{device_type}-{delivery_hash[:4]}-{tail}",
+        f"{device_type}-{delivery_hash[:8]}",
+    ]
 
 
 def _row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
@@ -166,37 +184,41 @@ class ContactBook:
         the existing state); a new contact defaults to ``pending``.  A
         ``device_name`` already owned by another row raises ``IntegrityError``
         rather than silently re-pointing that row (the old PK-on-name bug).
-        The report path (``name_source='device'``) falls back to the
-        ``<type>-<last4>`` placeholder on such a collision, so two devices
-        claiming one name still get their own row.
+        The automatic paths (``name_source`` ``'device'``/``'auto'``) fall
+        back to the next :func:`placeholder_names` candidate on such a
+        collision, so two devices claiming one name — or one placeholder —
+        still get their own row.  An operator name is never silently
+        rewritten: the API turns that ``IntegrityError`` into a 409.
         """
         if state is not None and state not in STATES:
             raise ValueError(f"invalid contact state: {state!r}")
         delivery_hash = delivery_hash.lower()
-        placeholder = f"{device_type}-{delivery_hash[-4:]}"
-        name = device_name or placeholder
+        candidates = placeholder_names(delivery_hash, device_type)
+        name = device_name or candidates[0]
         if not device_name:
             name_source = "auto"
         now = time.time()
         approved_at = now if state == "approved" else None
+        # Only the automatic paths may fall back: an operator naming a device
+        # must be told the name is taken (API 409).
+        attempts = [name]
+        if name_source in ("device", "auto"):
+            attempts += [c for c in candidates if c != name]
         with self._lock:
-            try:
-                self._register_locked(
-                    delivery_hash, name, device_type, pubkey_hex, name_source,
-                    state, now, approved_at,
-                )
-            except sqlite3.IntegrityError as exc:
-                # Only a device's own reported name falls back: an operator
-                # naming a device must be told the name is taken (API 409).
-                if (name_source != "device" or "device_name" not in str(exc)
-                        or name == placeholder):
-                    raise
-                # Another row owns that name: keep this device addressable
-                # under its placeholder instead of failing every report.
-                self._register_locked(
-                    delivery_hash, placeholder, device_type, pubkey_hex, "auto",
-                    state, now, approved_at,
-                )
+            for index, attempt in enumerate(attempts):
+                # A fallback placeholder is auto-owned even when the device
+                # reported a name that lost the race.
+                source = name_source if attempt == name else "auto"
+                try:
+                    self._register_locked(
+                        delivery_hash, attempt, device_type, pubkey_hex,
+                        source, state, now, approved_at,
+                    )
+                except sqlite3.IntegrityError as exc:
+                    if "device_name" not in str(exc) or index == len(attempts) - 1:
+                        raise
+                    continue
+                break
             self._conn.commit()
             cur = self._conn.execute(
                 "SELECT * FROM contacts WHERE delivery_hash = ?", (delivery_hash,)
@@ -263,10 +285,7 @@ class ContactBook:
         """
         delivery_hash = delivery_hash.lower()
         now = time.time()
-        for name in (
-            f"{device_type}-{delivery_hash[-4:]}",
-            f"{device_type}-{delivery_hash[:4]}-{delivery_hash[-4:]}",
-        ):
+        for name in placeholder_names(delivery_hash, device_type):
             with self._lock:
                 try:
                     cur = self._conn.execute(

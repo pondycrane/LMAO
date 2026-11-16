@@ -75,6 +75,7 @@ def main():
             sys.exit(1)
 
     # Initialise Reticulum + LXMF
+    from lmao_server import server as server_module
     from lmao_server.server import Server, _init_rns_and_lxmf, _warn_if_rnode_missing
 
     rnode_port = args.rnode_port
@@ -96,6 +97,16 @@ def main():
     server.server_identity = server_identity
     server.router = router
 
+    # Open the contact book (Postgres when configured, else the SQLite file)
+    # so a name/type target resolves and the peer's pubkey comes from the
+    # directory.  A raw hex target still works when the book is unavailable.
+    try:
+        server_module.CONTACTS = server_module._open_contacts_book()
+    except Exception as e:
+        logger.warning(
+            "Contact book unavailable (%s) — only a delivery-hash target can resolve", e
+        )
+
     # Register delivery callback (required for LXMF to process path responses)
     router.register_delivery_callback(server.handle_lxmf_delivery)
 
@@ -108,7 +119,7 @@ def main():
     )
 
     success = server.send_command(
-        target_identity_hex=args.target,
+        target=args.target,
         action=args.action,
         params=params,
         timeout_ms=args.timeout,

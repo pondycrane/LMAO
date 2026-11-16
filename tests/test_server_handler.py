@@ -906,6 +906,76 @@ class TestContactGate:
         server.router.handle_outbound.assert_not_called()
 
 
+    def test_a_message_without_a_source_is_dropped_not_learned(
+        self, server_with_mocks, caplog
+    ):
+        """A message with no source destination cannot be keyed on a hash.
+        The old code learned it as a literal "<unknown>" contact — a bogus
+        pending device no operator can ever approve."""
+        server = server_with_mocks
+        msg = MagicMock()
+        msg.get_source.return_value = None
+        msg.content = b"report"
+        msg.title_as_string.return_value = "p:Envelope"
+        book = MagicMock()
+
+        with (
+            patch.object(sys.modules["lmao_server.server"], "CONTACTS", book),
+            caplog.at_level(logging.WARNING),
+        ):
+            server.handle_lxmf_delivery(msg)
+
+        assert "no source destination" in caplog.text
+        book.register.assert_not_called()
+        server.router.handle_outbound.assert_not_called()
+
+
+class TestContactBookReconnect:
+    """A Postgres outage at startup must not need a pod restart to recover."""
+
+    def test_retries_after_a_failed_startup_open(self, server_with_mocks):
+        mod = sys.modules["lmao_server.server"]
+        book = MagicMock()
+        with (
+            patch.object(mod, "CONTACTS", None),
+            patch.object(mod, "_contacts_open_failed", True),
+            patch.object(mod, "_contacts_retry_at", 0.0),
+            patch.object(mod, "_open_contacts_book", return_value=book) as open_,
+            patch.object(mod, "_seed_approved_contacts") as seed,
+        ):
+            assert mod._ensure_contact_book() is book
+            open_.assert_called_once_with()
+            seed.assert_called_once_with(book)
+            assert mod.CONTACTS is book
+            # Cached: no second connect while the book is live.
+            assert mod._ensure_contact_book() is book
+            open_.assert_called_once_with()
+
+    def test_retries_are_rate_limited(self, server_with_mocks):
+        mod = sys.modules["lmao_server.server"]
+        with (
+            patch.object(mod, "CONTACTS", None),
+            patch.object(mod, "_contacts_open_failed", True),
+            patch.object(mod, "_contacts_retry_at", 0.0),
+            patch.object(mod, "_open_contacts_book", side_effect=OSError("down")) as open_,
+        ):
+            assert mod._ensure_contact_book() is None
+            assert mod._ensure_contact_book() is None
+        assert open_.call_count == 1
+
+    def test_no_retry_when_startup_never_attempted_an_open(self, server_with_mocks):
+        """``CONTACTS is None`` without a failed open is not a broken backend:
+        opening a *different* book here would silently replace the registry."""
+        mod = sys.modules["lmao_server.server"]
+        with (
+            patch.object(mod, "CONTACTS", None),
+            patch.object(mod, "_contacts_open_failed", False),
+            patch.object(mod, "_open_contacts_book") as open_,
+        ):
+            assert mod._ensure_contact_book() is None
+            open_.assert_not_called()
+
+
 class TestResolveTarget:
     """A downlink target may be a contact name, a device type, or a hash."""
 
@@ -946,6 +1016,21 @@ class TestResolveTarget:
         with patch.object(sys.modules["lmao_server.server"], "CONTACTS", None), \
              caplog.at_level(logging.ERROR):
             assert server.resolve_target("nope") == (None, None)
+        assert "no contact named/typed/hashed" in caplog.text
+
+    def test_a_revoked_contact_is_not_addressable(self, server_with_mocks, caplog):
+        """Revoking a device must stop downlinks to it: its row no longer
+        resolves, so a send cannot reach a device the operator denied."""
+        server = server_with_mocks
+        book = MagicMock()
+        book.find.side_effect = lambda **kw: (
+            [{"delivery_hash": "81aae19de81066b491f437d0e9820618",
+              "state": "revoked"}]
+            if kw.get("device_name") == "kitchen" else []
+        )
+        with patch.object(sys.modules["lmao_server.server"], "CONTACTS", book), \
+             caplog.at_level(logging.ERROR):
+            assert server.resolve_target("kitchen") == (None, None)
         assert "no contact named/typed/hashed" in caplog.text
 
     def test_send_command_by_name_dispatches_to_the_resolved_hash(

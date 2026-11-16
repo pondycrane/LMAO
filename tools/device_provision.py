@@ -81,9 +81,10 @@ def _device_identity(name: str | None, provision: bool,
         else:
             print(
                 f"device_provision: WARNING could not register {name!r} at "
-                f"{contacts_api_base()} — approve {delivery_hash} manually "
-                f"(POST /contacts/{delivery_hash}/approve) or add it to "
-                "LMAO_ALLOWED_CLIENTS.",
+                f"{contacts_api_base()} — approve it with POST "
+                f"{contacts_api_base()}/contacts/{delivery_hash}/approve "
+                "(the LMAO_ALLOWED_CLIENTS seed only covers a device the "
+                "server has never seen).",
                 file=sys.stderr,
             )
     return identity.get_private_key().hex()

@@ -504,8 +504,9 @@ SQLite table (`~/.local/share/lmao_server/contacts.db`).
 
 **The book is the one device registry** — the live allow-list
 (docs/identity-contact-design.md). `delivery_hash` is the key;
-`device_name` is a mutable unique attribute (renaming a device cannot collide
-with another's row). Each contact carries a `state`:
+`device_name` is a mutable unique attribute (a rename is an ordinary UPDATE;
+a name already owned by another device is rejected with `409`, never
+re-pointed). Each contact carries a `state`:
 
 | State | Meaning |
 |---|---|
@@ -526,8 +527,10 @@ curl -X POST :8081/contacts/<hash>/revoke  # deny it
 
 `LMAO_ALLOWED_CLIENTS` (in `k8s/lmao-server.yaml`) is now only a **cold-start
 seed**: at startup each listed hash is inserted as `approved` if absent, and an
-existing row — including a revoked one — is never touched. A flash with
-`--device-name` (or `sprout_provision --provision`) registers the device
+existing row — including a revoked or renamed one — is never touched. It cannot
+approve a device the server has already seen (that row is `pending`); use
+`POST :8081/contacts/<hash>/approve` for those. A flash with `--device-name`
+(or `bazel run //tools:device_provision -- --provision`) registers the device
 `approved` with its public key automatically, which is the normal path.
 
 The API on port **8081** (`LMAO_CONTACTS_PORT` to override) also resolves a
@@ -919,10 +922,14 @@ bazel run //robodog_home_client:home_client -- --register-contact \
 ```
 
 The board firmware is provisioned the same way as the Sprout: `build.sh` pins
-the server hash/pubkey (and a per-device identity when
-`devs/<name>/identity` exists) via `tools/device_provision.py --prefix RH_`,
-and `flash.sh` registers the flashed board's public record as `approved`
-(`type=robodog_home`) after writing NVS — `--no-register` opts out.
+the server's delivery hash (and a per-device identity when
+`devs/<name>/identity` exists) via `tools/device_provision.py --prefix RH_`.
+The home header has no server-public-key define, so the board still needs the
+server's announce (or a path) before it can encrypt its first report.  After
+writing NVS, `flash.sh` registers the flashed board's public record as
+`approved` (`type=robodog_home`) when the host has Reticulum — without it the
+host cannot derive the delivery hash and prints the `POST
+:8081/contacts/<hash>/approve` URL instead.  `--no-register` opts out.
 
 **Server side:** air-only `HistoryRequest`s are answered from
 `lma_core/env_history.py`, an all-node air buffer that folds **every**

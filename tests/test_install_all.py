@@ -2776,8 +2776,9 @@ class TestContactRegistration:
             "kitchen", "81aae19de81066b491f437d0e9820618"
         )
         out = capsys.readouterr().out
-        assert "LMAO_ALLOWED_CLIENTS: 81aae19de81066b491f437d0e9820618" in out
-        assert "could not POST" in out
+        assert "could not register kitchen" in out
+        assert "81aae19de81066b491f437d0e9820618/approve" in out
+        assert "LMAO_ALLOWED_CLIENTS" in out
 
 
 if __name__ == "__main__":

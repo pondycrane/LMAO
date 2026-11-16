@@ -130,5 +130,18 @@ def test_lookup_refuses_an_ambiguous_match(monkeypatch):
     assert contact_client.lookup_contact("cardputer") is None
 
 
+def test_a_revoked_contact_is_not_addressable(monkeypatch):
+    """Revoking a device must stop sends to it: the resolver treats the
+    revoked row as no match instead of handing out its hash."""
+    class _LookupResp(_Resp):
+        def read(self):
+            return json.dumps({"contacts": [{"delivery_hash": "e" * 32,
+                                             "state": "revoked"}]}).encode()
+
+    monkeypatch.setattr("urllib.request.urlopen",
+                        lambda req, timeout=None: _LookupResp())
+    assert contact_client.lookup_contact("kitchen") is None
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__] + sys.argv[1:]))

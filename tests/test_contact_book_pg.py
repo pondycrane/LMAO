@@ -233,5 +233,84 @@ def test_run_reconnects_once_when_the_connection_died():
     assert len(calls) == 1
 
 
+def test_backfill_never_overwrites_live_postgres_state(tmp_path):
+    """The legacy SQLite file is a frozen snapshot replayed on every start: it
+    may only fill a missing pubkey, never re-apply a name, state, type or
+    timestamp (that would undo an operator rename/revocation each restart)."""
+    import sqlite3
+
+    db = tmp_path / "contacts.db"
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "CREATE TABLE contacts (delivery_hash TEXT PRIMARY KEY, "
+        "device_name TEXT NOT NULL, device_type TEXT NOT NULL, pubkey_hex TEXT, "
+        "first_seen REAL, last_seen REAL)"
+    )
+    conn.execute(
+        "INSERT INTO contacts VALUES (?, 'legacy-name', 'cardputer', NULL, 1.0, 2.0)",
+        ("a" * 32,),
+    )
+    conn.commit()
+    conn.close()
+
+    statements = []
+
+    class _Rec:
+        def execute(self, sql, params=None):
+            # Drop "--" comments: they name the columns the statement must NOT
+            # touch, and the assertions below match on the SQL text.
+            text = " ".join(line.split("--")[0] for line in sql.splitlines())
+            statements.append(" ".join(text.split()))
+
+    fake_book = mock.MagicMock()
+    fake_book._run.side_effect = lambda fn: fn(_Rec())
+
+    with mock.patch.object(cbp, "psycopg", object()), \
+         mock.patch.object(cbp, "PostgresContactBook", return_value=fake_book):
+        assert cbp.backfill_sqlite_to_pg(str(db), "postgres://x") == 1
+
+    insert, update = statements[0].split("ON CONFLICT(delivery_hash) DO UPDATE SET ")
+    assert "device_name" not in update
+    assert "device_type" not in update
+    assert "state" not in update
+    assert "last_seen" not in update
+    assert "pubkey_hex" in update
+    assert "COALESCE" in update
+
+
+def test_pg_register_falls_back_when_the_placeholder_is_taken():
+    """Two devices can share a last4; the PG path must try the longer
+    placeholder instead of failing every report from the second device."""
+    book = object.__new__(cbp.PostgresContactBook)
+    import threading
+
+    book._lock = threading.Lock()
+    tried = []
+
+    class _Cur:
+        def execute(self, sql, params=None):
+            if not " ".join(sql.split()).startswith("INSERT INTO contacts("):
+                return  # the follow-up SELECT is not a new attempt
+            tried.append(params[1])
+            if len(tried) == 1:
+                raise RuntimeError("duplicate key value: contacts_device_name_key")
+
+        def fetchone(self):
+            return ("b" * 32, tried[-1], "device", None, 0.0, 0.0, "auto",
+                    "pending", None)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    book._run = lambda fn: fn(_Cur())
+    entry = book.register(delivery_hash="b" * 28 + "abcd", device_type="device")
+
+    assert tried == ["device-abcd", "device-bbbb-abcd"]
+    assert entry["device_name"] == "device-bbbb-abcd"
+
+
 if __name__ == "__main__":
     sys.exit(__import__("pytest").main([__file__] + sys.argv[1:]))

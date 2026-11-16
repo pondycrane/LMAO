@@ -26,7 +26,7 @@ import time
 import urllib.parse
 from typing import Any
 
-from lma_core.contact_book import STATES, ContactBook
+from lma_core.contact_book import STATES, ContactBook, placeholder_names
 
 try:  # psycopg 3
     import psycopg
@@ -82,7 +82,10 @@ class PostgresContactBook:
             )
         self._lock = threading.Lock()
         self._dsn = dsn
-        self._conn = psycopg.connect(dsn, autocommit=True)
+        # A short connect timeout matters: the approval gate runs inside the
+        # synchronous LXMF delivery callback, so an unreachable Postgres must
+        # not stall message handling for the OS TCP timeout on every message.
+        self._conn = psycopg.connect(dsn, autocommit=True, connect_timeout=5)
         with self._lock:
             self._migrate_conn()
 
@@ -101,7 +104,9 @@ class PostgresContactBook:
         """Replace a dead connection (and re-run the idempotent migration)."""
         with contextlib.suppress(Exception):
             self._conn.close()
-        self._conn = psycopg.connect(self._dsn, autocommit=True)
+        self._conn = psycopg.connect(
+            self._dsn, autocommit=True, connect_timeout=5
+        )
         self._migrate_conn()
 
     def _run(self, fn):
@@ -250,8 +255,8 @@ class PostgresContactBook:
         if state is not None and state not in STATES:
             raise ValueError(f"invalid contact state: {state!r}")
         delivery_hash = delivery_hash.lower()
-        placeholder = f"{device_type}-{delivery_hash[-4:]}"
-        name = device_name or placeholder
+        candidates = placeholder_names(delivery_hash, device_type)
+        name = device_name or candidates[0]
         if not device_name:
             name_source = "auto"
         now = time.time()
@@ -309,16 +314,22 @@ class PostgresContactBook:
             )
             return cur.fetchone()
 
-        try:
-            row = self._run(lambda cur: _upsert(cur, name, name_source))
-        except Exception as exc:
-            # Only a device's own reported name falls back: an operator naming
-            # a device must be told the name is taken (API 409).
-            if (name_source != "device" or "device_name" not in str(exc)
-                    or name == placeholder):
-                raise
-            row = self._run(lambda cur: _upsert(cur, placeholder, "auto"))
-        return _row_to_dict(row)
+        # Only the automatic paths may fall back to a placeholder: an operator
+        # naming a device must be told the name is taken (API 409).
+        attempts = [name]
+        if name_source in ("device", "auto"):
+            attempts += [c for c in candidates if c != name]
+        for index, attempt in enumerate(attempts):
+            source = name_source if attempt == name else "auto"
+            try:
+                row = self._run(
+                    lambda cur, a=attempt, s=source: _upsert(cur, a, s)
+                )
+            except Exception as exc:
+                if "device_name" not in str(exc) or index == len(attempts) - 1:
+                    raise
+                continue
+            return _row_to_dict(row)
 
     def seed_approved(self, delivery_hash: str,
                       device_type: str = "device") -> bool:
@@ -330,10 +341,7 @@ class PostgresContactBook:
         """
         delivery_hash = delivery_hash.lower()
         now = time.time()
-        for name in (
-            f"{device_type}-{delivery_hash[-4:]}",
-            f"{device_type}-{delivery_hash[:4]}-{delivery_hash[-4:]}",
-        ):
+        for name in placeholder_names(delivery_hash, device_type):
             try:
                 return self._run(
                     lambda cur, candidate=name: self._seed(
@@ -468,11 +476,12 @@ def open_contact_book(source: str) -> Any:
 def backfill_sqlite_to_pg(sqlite_path: str, dsn: str) -> int:
     """Copy every row from the legacy SQLite contacts file into Postgres.
 
-    Idempotent (upsert), safe to run on every server start. Preserves the
-    source timestamps and operator-set names exactly; the lifecycle state is
-    only set on insert (legacy rows were all allow-listed → ``approved``), so
-    a later revocation in Postgres is never undone by a restart. Returns the
-    number of rows backfilled (0 when the SQLite file is absent).
+    Insert-only: a row already in Postgres is never modified, except to fill a
+    missing ``pubkey_hex``.  Safe to run on every server start — an operator
+    rename/retype, a revocation, and both timestamps all survive the replay of
+    the legacy file (the SQLite copy is frozen at the cutover and must never
+    win over live Postgres state).  Returns the number of rows copied (0 when
+    the SQLite file is absent).
     """
     if psycopg is None or not os.path.isfile(sqlite_path):
         return 0
@@ -508,12 +517,13 @@ def backfill_sqlite_to_pg(sqlite_path: str, dsn: str) -> int:
                         first_seen, last_seen, name_source, state, approved_at
                     ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT(delivery_hash) DO UPDATE SET
-                        device_name = excluded.device_name,
-                        device_type = excluded.device_type,
-                        name_source = excluded.name_source,
-                        pubkey_hex = COALESCE(excluded.pubkey_hex, contacts.pubkey_hex),
-                        first_seen = excluded.first_seen,
-                        last_seen = excluded.last_seen
+                        -- Fill-only: Postgres is authoritative once a row
+                        -- exists.  Rewriting device_name/device_type/
+                        -- name_source/first_seen/last_seen here would undo
+                        -- every operator rename and rewind last_seen on each
+                        -- pod start (the legacy file is a frozen snapshot).
+                        pubkey_hex = COALESCE(contacts.pubkey_hex,
+                                              excluded.pubkey_hex)
                     """,
                     (
                         (row["delivery_hash"] or "").lower(),

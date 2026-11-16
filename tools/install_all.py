@@ -459,16 +459,24 @@ def _register_contact_book(device_name: str, delivery_hash: str,
     registered ``approved`` — no manifest edit, no rollout, no manual
     allow-list step.  The private key never leaves the per-name host store;
     only the public address/key are published.  The server base is configurable
-    via ``LMAO_CONTACTS_API``; if unreachable the hash is printed so it can be
-    added to ``LMAO_ALLOWED_CLIENTS`` (the cold-start seed).
+    via ``LMAO_CONTACTS_API``; if unreachable the approve URL is printed (the
+    env ``LMAO_ALLOWED_CLIENTS`` seed only covers a device the server has
+    never seen — it cannot approve a ``pending`` row).
     """
     from lma_core.contact_client import contacts_api_base, register_contact
 
     if register_contact(device_name, delivery_hash, device_type, pubkey_hex):
         print(f"  contact book: registered {device_name} -> {delivery_hash[:12]}… approved")
     else:  # never fail the flash on an unreachable API
-        print(f"  contact book: add {device_name} hash to LMAO_ALLOWED_CLIENTS: {delivery_hash}")
-        print(f"    (could not POST to {contacts_api_base()}/contacts)")
+        print(f"  contact book: could not register {device_name} ({delivery_hash})")
+        print(
+            f"    approve it with POST "
+            f"{contacts_api_base()}/contacts/{delivery_hash}/approve"
+        )
+        print(
+            "    (LMAO_ALLOWED_CLIENTS only seeds a device the server has "
+            "never seen; it cannot approve a pending one)"
+        )
 
 
 def _flash_cardputer_client(port: str, client_root: str, result: DeviceResult,
