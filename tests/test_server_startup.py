@@ -9,6 +9,29 @@ import pytest
 from conftest import cleanup_common_mocks, setup_common_mocks
 
 
+@pytest.fixture(autouse=True)
+def _no_aux_listeners():
+    """Keep async_main's auxiliary listeners out of these tests.
+
+    async_main starts the contacts HTTP API on 8081 whenever a contact book
+    opens (it always does with a writable HOME) and the calendar TCP service
+    when Postgres is configured. Binding a real port makes the suite
+    environment-dependent (free in a sandbox, busy on a dev box that already
+    runs the server), and a real aiohttp ``AppRunner.cleanup()`` awaits
+    ``asyncio.sleep(0)`` — which these tests patch to raise KeyboardInterrupt,
+    so the interrupt escaped from the ``finally`` block. Mock both listeners.
+    """
+    runner = MagicMock()
+    runner.cleanup = AsyncMock()
+    tcp_server = MagicMock()
+    tcp_server.wait_closed = AsyncMock()
+    with patch("lma_core.contacts_api.start_contacts_server",
+               AsyncMock(return_value=runner)), \
+            patch("lma_core.calendar_tcp_api.start_calendar_tcp_server",
+                  AsyncMock(return_value=tcp_server)):
+        yield
+
+
 class TestAsyncMain:
     """Tests for async_main() entry point."""
 
