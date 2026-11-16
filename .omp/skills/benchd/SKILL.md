@@ -177,6 +177,17 @@ bench evidence "$T" > "$ARTIFACTS_DIR/bazel-evidence.md"
 - Verdict is `N target(s): P passed[, F failed — //label, …]`; the full log is
   `bazel-test.log`. `payload.targets` and `payload.bazel_args` widen or narrow
   the run (e.g. `--bazel-arg=--test_timeout=900`).
+- **Disk cache.** Each head gets a fresh worktree, hence a fresh Bazel output
+  base, so without a cache every submission recompiles protobuf + rules_python
+  (~15 min on op4). `BENCH_BAZEL_DISK_CACHE=/srv/benchd/.cache/bazel-disk` in
+  `/etc/benchd.env` makes the `test` kind pass `--disk_cache`; action keys are
+  execroot-relative, so the cache hits across worktrees and a repeat run is
+  minutes. Test *results* are still uncached (`--nocache_test_results`).
+- **HOME prep.** The suite runs under `$HOME` and the server's startup tests
+  `makedirs` under `~/.local/share/lmao_server/lxmf` with `exist_ok=True`; the
+  Bazel sandbox is read-only outside declared outputs, so a missing directory
+  fails with `EROFS`. benchd pre-creates those dirs under the bench HOME
+  before running (idempotent, no-op once they exist).
 - A `test` job is **not** a hardware gate: it says the suite passes, not that
   the board renders. A hardware change still needs `build` + `flash_capture`.
 
