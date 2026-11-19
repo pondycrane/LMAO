@@ -158,7 +158,8 @@ namespace lma_chart {
 
 std::string encode_history_request(uint32_t seq, uint32_t count,
                                    uint64_t since_ms, bool air_temp,
-                                   bool air_humidity, bool soil, bool pump) {
+                                   bool air_humidity, bool soil, bool pump,
+                                   const std::string& node_id) {
     std::string history;
     // proto3 defaults are omitted on the wire (Python's serializer does the
     // same), so a 0 count / 0 since_ms simply does not appear.
@@ -170,6 +171,7 @@ std::string encode_history_request(uint32_t seq, uint32_t count,
     if (air_humidity) varint(series, 3); // Series.AIR_HUMIDITY
     if (pump) varint(series, 4);         // Series.PUMP
     if (!series.empty()) field_len(history, 3, series);  // packed enum
+    if (!node_id.empty()) field_len(history, 4, node_id);  // node_id
 
     std::string request;
     field_len(request, 1, history);  // Request.history

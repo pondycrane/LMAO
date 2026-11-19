@@ -38,3 +38,6 @@ MODULE.bazel.lock
 # graph.html, GRAPH_REPORT.md, dated snapshots, AST cache). Regenerate with
 # `graphify update .`; never commit (1.4 GB of derived data).
 graphify-out/
+
+# LMAO socket humidifier firmware staging (ESP-IDF build tree)
+lmao_socket_humidifier/firmware/.idf/

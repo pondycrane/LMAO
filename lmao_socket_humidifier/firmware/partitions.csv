@@ -1,0 +1,6 @@
+# Name,   Type, SubType, Offset,  Size,  Flags
+# Atom Lite is a 4 MB ESP32 (ESP32-PICO-D4).  NVS at 0x9000 (the standard
+# layout the Sprout Atom Lite uses), a 1 MB factory app, and the rest free.
+nvs,      data, nvs,     0x9000, 0x6000,
+phy_init, data, phy,     0xf000, 0x1000,
+factory,  app,  factory, 0x10000, 0x100000,

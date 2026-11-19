@@ -1,0 +1,7 @@
+## IDF component manager manifest — fetched at build time into the gitignored
+## staging tree (never vendored into the repo; AGENTS.md "no vendored
+## third-party code").  mDNS moved out of ESP-IDF 5.x core into this component.
+dependencies:
+  idf:
+    version: ">=5.3"
+  espressif/mdns: "^1.2.0"

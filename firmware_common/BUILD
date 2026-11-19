@@ -4,7 +4,8 @@
 #   lma_common/lma_encoder.*   wire-compatible SensorReport/LMAOEnvelope encoder
 #   lma_common/lxmf_send.*     send-only LXM body builder (RTReticulum)
 #   lma_common/lma_identity.*  NVS identity persistence + hex/delivery helpers
-#   lma_common/path_find.*     on-demand RNS path request (ESP-IDF only)
+#   lma_common/path_find.*    — on-demand RNS path request (ESP-IDF only)
+#   lma_wifi/wifi_helper.*    — WiFi STA connect + SNTP for every LAN client
 #   rtreticulum/CMakeLists.txt shared RNS lib wrapper for the ESP-IDF builds
 #
 # The pure-C++ units are host-testable here under Bazel (same code the device
@@ -61,6 +62,9 @@ filegroup(
         "lma_common/**/*.h",
         "rtreticulum/CMakeLists.txt",
         "lma_common/CMakeLists.txt",
+        "lma_wifi/**/*.cpp",
+        "lma_wifi/**/*.h",
+        "lma_wifi/CMakeLists.txt",
         "tcp_interface/**/*.cpp",
         "tcp_interface/**/*.h",
         "tcp_interface/CMakeLists.txt",

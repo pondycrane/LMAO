@@ -44,13 +44,17 @@ namespace lma_chart {
     };
 
     // LMAOEnvelope{ seq, request.history } with the selected series.  The
-    // default selection is air-only (AIR_TEMP + AIR_HUMIDITY).
+    // default selection is air-only (AIR_TEMP + AIR_HUMIDITY).  ``node_id``
+    // names a specific reporting node to read (empty = the server's requester
+    // scoping) — used by a passive controller that must read one room's series
+    // regardless of which node reported last.
     std::string encode_history_request(uint32_t seq, uint32_t count,
                                        uint64_t since_ms,
                                        bool air_temp = true,
                                        bool air_humidity = true,
                                        bool soil = false,
-                                       bool pump = false);
+                                       bool pump = false,
+                                       const std::string& node_id = "");
 
     // Decode LMAOEnvelope{ chart } (field 23).  Returns false on malformed
     // input or when no chart field is present.

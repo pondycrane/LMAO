@@ -1,8 +1,9 @@
-// WiFi STA connect + SNTP time sync for the RoboDog home client.
+// Shared ESP-IDF WiFi STA connect + SNTP time sync for the LMAO LAN clients.
 //
-// The device reports SensorReading.timestamp_ms, so it needs real epoch
-// milliseconds; SNTP is attempted after DHCP and is non-fatal (an unsynced
-// board reports timestamp_ms=0, which the server stamps with receive time).
+// Moved here from robodog_home_client (DRY): the humidifier Atom Socket needs
+// the same station connect / reconnect / SNTP behaviour, and a second copy in
+// its main/ would drift.  No credentials are ever compiled in — callers pass
+// the NVS-provisioned values.
 #include "wifi_helper.h"
 
 #include <cstring>
@@ -21,13 +22,14 @@ static const char* TAG = "wifi";
 static EventGroupHandle_t s_wifi_eg = nullptr;
 static constexpr int BIT_GOT_IP = BIT0;
 static constexpr int BIT_FAILED = BIT1;
+static constexpr time_t PLAUSIBLE_EPOCH = 1700000000;  // 2023-11-14
 
 static void wifi_event_handler(void*, esp_event_base_t base, int32_t id, void*) {
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
         esp_wifi_connect();
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
         // Keep reconnecting for the life of the process: a dropped AP must
-        // never strand the panel.
+        // never strand a controller (the relay's lease is the fail-safe).
         ESP_LOGW(TAG, "disconnected — reconnecting");
         esp_wifi_connect();
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
@@ -35,15 +37,20 @@ static void wifi_event_handler(void*, esp_event_base_t base, int32_t id, void*) 
     }
 }
 
-bool wifi_connect(const char* ssid, const char* pass, int timeout_s) {
+namespace lma_wifi {
+
+bool time_synced() { return time(nullptr) > PLAUSIBLE_EPOCH; }
+
+bool connect(const char* ssid, const char* pass, int timeout_s) {
     if (ssid == nullptr || ssid[0] == '\0') {
-        ESP_LOGE(TAG, "no WiFi SSID configured (bake RH_WIFI_SSID_DEFAULT)");
+        ESP_LOGE(TAG, "no WiFi SSID configured (provision NVS at flash time)");
         return false;
     }
 
-    s_wifi_eg = xEventGroupCreate();
-    ESP_ERROR_CHECK(esp_netif_init());
-    esp_err_t err = esp_event_loop_create_default();
+    if (s_wifi_eg == nullptr) s_wifi_eg = xEventGroupCreate();
+    esp_err_t err = esp_netif_init();
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) ESP_ERROR_CHECK(err);
+    err = esp_event_loop_create_default();
     if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) ESP_ERROR_CHECK(err);
     esp_netif_create_default_wifi_sta();
 
@@ -75,11 +82,12 @@ bool wifi_connect(const char* ssid, const char* pass, int timeout_s) {
     esp_sntp_config_t sntp_cfg = ESP_NETIF_SNTP_DEFAULT_CONFIG("pool.ntp.org");
     esp_netif_sntp_init(&sntp_cfg);
     const int64_t deadline = esp_timer_get_time() + 8 * 1000 * 1000LL;
-    while (time(nullptr) <= 1700000000 && esp_timer_get_time() < deadline) {
+    while (time(nullptr) <= PLAUSIBLE_EPOCH && esp_timer_get_time() < deadline) {
         vTaskDelay(pdMS_TO_TICKS(250));
     }
     ESP_LOGI(TAG, "SNTP %s (now=%lld)",
-             time(nullptr) > 1700000000 ? "synced" : "timed out",
-             (long long)time(nullptr));
+             time_synced() ? "synced" : "timed out", (long long)time(nullptr));
     return true;
 }
+
+}  // namespace lma_wifi

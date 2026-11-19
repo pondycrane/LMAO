@@ -780,14 +780,16 @@ class Server:
 
             if air_only:
                 # Home-client query: the Sprout chart buffer only holds
-                # soil-bearing reports, so answer from the all-node air buffer,
-                # scoped to the REQUESTER's own node when its name is known —
-                # a multi-device mesh must chart each board's own history.
+                # soil-bearing reports, so answer from the all-node air buffer.
+                # A request may name the reporting node explicitly (a passive
+                # controller reading a room's series); otherwise scope to the
+                # REQUESTER's own node when its name is known — a multi-device
+                # mesh must chart each board's own history.
                 chart = ENV_HISTORY.chart_bundle(
                     count=hist.count,
                     since_ms=hist.since_ms,
                     series=requested_series,
-                    node_id=_requester_node_name(source_dest),
+                    node_id=hist.node_id or _requester_node_name(source_dest),
                 )
             else:
                 chart = SPROUT_HISTORY.chart_bundle(
@@ -803,6 +805,7 @@ class Server:
                         count=hist.count,
                         since_ms=hist.since_ms,
                         series=requested_series,
+                        node_id=hist.node_id or None,
                     )
 
             if chart is not None:

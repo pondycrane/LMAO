@@ -168,7 +168,9 @@ fit; the **Sprout / Atom Lite** native client
 share a **single canonical protocol component**
 in `firmware_common/` (DRY — no per-tree copies): `lma_common` holds the
 `lma_encoder`/`lxmf_send`/`lma_chart`/`path_find`/`lma_identity` sources,
-`rtreticulum/` holds the RNS wrapper and `tcp_interface/` the Reticulum
+`lma_wifi/` the WiFi STA connect + SNTP helper every LAN client stages (the
+RoboDog home board and the humidifier Atom Socket), `rtreticulum/` holds the
+RNS wrapper and `tcp_interface/` the Reticulum
 `TCPClientInterface` (one source that compiles on POSIX hosts and under
 ESP-IDF, so the host interop harness and the board firmwares share it); each
 `build.sh` stages it into the targeted
@@ -960,7 +962,9 @@ The reply is scoped to the **requester's own** node by the `node_id` it
 reports — the buffer's own key — falling back to its announce display name and
 then the contact-book name; an unknown requester gets the newest reporting
 node.  Scoping deliberately does **not** use the contact-book display name, so
-an operator rename cannot make a board chart another node's series.
+an operator rename cannot make a board chart another node's series.  A request
+may also name the reporting node explicitly (`HistoryRequest.node_id`, e.g. a
+passive controller reading one room: §7f), which wins over requester scoping.
 `SproutHistory` is unchanged, so `SOIL` requests still get the soil chart.
 Contact names carry an owner (`operator` > `device` > `auto`): a device's own
 reported name replaces the `<type>-<last4>` placeholder, but never an
@@ -1008,6 +1012,177 @@ python3 robodog_client/capture.py --port /dev/ttyACM0 --reset --n 2 --describe
 ```
 
 See [`robodog_home_client/README.md`](robodog_home_client/README.md).
+
+### 7f. LMAO socket humidifier — Atom Socket actuator driven by room humidity
+
+A closed loop over the two contracts above: the **RoboDog home node** reports
+the room's humidity to the server, and an **M5Stack Atom Socket** (Atom Lite
+inside) switches the humidifier's mains plug.  Nothing runs on the socket but
+the actuator; the decision law lives on the host.
+
+**The humidity input is the RoboDog home node, never the socket.**  The board
+reads its SHTC3 and sends `LMAOEnvelope{SensorReport}` (readings 3 = °C,
+2 = %) to the server's `lxmf/delivery` destination over the Reticulum TCP
+interface, with `node_id` = its NVS `device_name` (`"main bedroom"`).  The
+server folds every report into `lma_core/env_history.py` **keyed by that
+`node_id`** (server-receive timestamps).  The controller then asks for that
+one node's series and gets `ChartBundle{hum}` back.  The Atom Socket has no
+humidity sensor and reports no air data; its HLW8032 is optional power
+telemetry only, and no part of the control decision reads it.
+
+```
+RoboDog home (SHTC3) ──SensorReport{node_id="main bedroom"}──▶ lmao-server
+                                                               ENV_HISTORY[node]
+humidifier controller ──HistoryRequest{node_id="main bedroom"}──▶  │
+   hysteresis + safety   ◀──────────ChartBundle{hum}───────────────┘
+        │
+        └──HTTP POST /on?lease=N | /off──▶ Atom Socket (relay G23)
+```
+
+A request that names an unknown node makes the server fall back to the
+**newest** reporter, so the controller refuses any reply whose
+`ChartBundle.node_id` is not the requested node's first 8 characters and
+treats it as missing data (fail-safe OFF) — a typo can never humidify another
+room.
+
+**Firmware** (`lmao_socket_humidifier/firmware/`, ESP-IDF, ESP32-PICO-D4, 4 MB):
+
+| Endpoint | Effect |
+|---|---|
+| `GET /status` | relay/lease/uptime + optional `voltage_v`, `current_a`, `power_w`, `energy_pulses`, `meter_fresh` |
+| `POST /on?lease=SECS` | close the relay for `SECS` (default 300, clamped to 3600) |
+| `POST /off` | open the relay now |
+| `GET /healthz` | `ok` |
+
+Commands need the NVS-provisioned token (`X-Auth-Token` or `?token=`); a
+socket with no token **refuses commands** (fails closed) and boots with the
+relay **open**.  The lease is a deadman: a controller that dies, loses WiFi,
+or is restarted without renewing leaves the humidifier running only until the
+lease expires.  Relay is GPIO23 (active HIGH), HLW8032 RX GPIO22 @ 4800 8E1
+(the M5Stack/ESPHome pin map), decoded with the M5Stack driver's scaling.
+Metering is **diagnostic only** and is never an input to the control decision.
+It decodes **only while the relay is closed** — with a load attached the chip
+streams ~10 checksum-valid frames/s and `/status` reports live values (bench
+run: 121.0 V, 0.155 A, 16.1 W, `meter_fresh:true`, `frames_ok` climbing
+323 -> 403 -> 483 in 16 s).  With the relay open the byte stream keeps flowing
+at ~270 B/s but **no** frame validates, so `meter_fresh` reads false and
+`voltage_v`/`power_w` show the last decoded sample (`0.63 W`, i.e. the socket's
+own standby draw) — never 0-with-live-load.  There is also a one-off burst of
+158 valid frames right after boot, before the stream stops decoding; the
+mechanism is unresolved, and `first_raw` begins `f2 5a` rather than the
+datasheet's `55 5a` although bytes 2..22 do sum to byte 23 at that alignment.
+So: a **closed** relay gives a trustworthy load reading, an **open** relay
+gives a stale snapshot.  `/status` exposes the evidence (`uart_bytes`,
+`frames_ok`, `meter_rx_pin`, `first_raw`) so the state is visible.
+
+```bash
+# build (ESP-IDF Docker; stages into the gitignored firmware/.idf/)
+bazel run //lmao_socket_humidifier:build_firmware
+
+# flash + provision NVS.  --port is REQUIRED: /dev/ttyUSB* is shared with the
+# RNode, which must NEVER be flashed (AGENTS.md).  Nothing is compiled in.
+HF_API_TOKEN=$(openssl rand -hex 16) \
+LMAO_WIFI_SSID=... LMAO_WIFI_PASS=... \
+bazel run //lmao_socket_humidifier:flash_firmware -- --port /dev/ttyUSB0 \
+    --mdns-host humidifier --api-token "$HF_API_TOKEN"
+
+curl -s http://humidifier.local/status
+curl -s -X POST -H "X-Auth-Token: $HF_API_TOKEN" \
+     "http://humidifier.local/on?lease=60"      # bench: 60 s, then it opens
+```
+
+**Controller** (`lmao_socket_humidifier/controller.py`, host Python): reads the **home
+node's** humidity with `HistoryRequest.node_id` pinned (a second env reporter
+cannot hijack the reading — without the pin the server would scope to the
+requester, and the socket reports no air), applies the law, then renews or
+drops the socket lease.
+
+```bash
+bazel run //lmao_socket_humidifier:controller -- \
+    --env-node "main bedroom" --socket humidifier.local --token "$HF_API_TOKEN"
+bazel run //lmao_socket_humidifier:controller -- --once --json  # one cycle, bench check
+```
+
+**The appliance is a Levoit Classic 160** (`LUH-A251-WCA`, 2.5 L top-fill,
+ultrasonic cool mist, rated **17 W**, 100-190 mL/h across its dial).  It has
+**no humidistat, no auto mode and no app** — a mechanical mist dial and a
+low-water auto shut-off — so the socket's relay is the only way to hold a
+target at all; left to itself the unit runs until the tank empties and
+over-humidifies the room.  The dial is a mechanical potentiometer, so closing
+the relay resumes misting at whatever the dial is set to, with no button press
+[INFERENCE from the manual: no latching digital state].  Leave the dial at the
+setting you want the controller to run at.
+
+The meter confirms the load: with the relay closed the socket reads **16.1-16.4
+W at 121 V**, against the unit's 17 W rating — so a closed relay is genuinely
+running the humidifier, not just energising a standby circuit.  A reading near
+the socket's own 0.63 W standby means the appliance is off or unplugged.
+
+**The band is derived from the room's own data, not a comfort table.**  Over
+14 days of RoboDog home reports (2026-11-04..11-19, n=8873, no humidifier):
+
+| Statistic | RH | Dew point at 26 °C |
+|---|---|---|
+| p10 | 35.1 % | 9.4 °C |
+| median | 37.4 % | 10.3 °C |
+| p75 | 39.4 % | 11.1 °C |
+| p95 | 42.6 % | 12.3 °C |
+| max | 46.3 % | 13.6 °C |
+
+So `--low 35` is the room's **dry decile** (act only on its own dry tail: it
+sits below 35 % for 7.9 % of the time, in 27 spells over 14 days, the longest
+7.4 h) and `--high 40` is its **upper quartile** rounded up — the level the
+room reaches on a good day.  The ceiling is also physical: 40 % at the room's
+usual 26 °C is dew point 11.4 °C, under the 12.8 °C mould line, while 45 % is
+13.1 °C and 55 % is 16.3 °C.  The old 45/55 band was a comfort default
+(EPA 30-50 %): unreachable here (the room never exceeded 46.3 %, so OFF at
+55 % never fired and the humidifier just duty-cycled against the run cap until
+the daily budget was spent) and unsafe at the top.
+
+`max_on_s` follows from a **measured** run of this appliance in this room, not
+a spec sheet: relay closed at 04:52Z with the Classic 160 plugged in, RH went
+**38.5 → 40.6 % in 18 min** (one sample per minute, n=18, monotonic), a slope
+of **+6.5 %/h**.  Crossing the 5-point band therefore takes ~46 min, so the 2 h
+cap is 2.6x the crossing time — a cap, not a limit that bites in normal
+operation.  `max_daily_on_s` (5 h) would be 32 points of rise, which is far more
+than the band needs; it exists as a runaway guard.
+
+The rate is **dial-dependent** (the unit is rated 100-190 mL/h, a 1.9x spread),
+so it is a property of the dial position, not the appliance: an earlier run at
+a lower setting gave ~3 %/h.  If the dial moves, re-measure rather than trusting
+this figure.  The 60 s poll bounds overshoot to ~0.1 point per tick, so the
+`--high` edge is honoured regardless of the rate.
+
+Re-derive it when the season turns (the query API is on `iot-query:8080`,
+reachable with `kubectl port-forward`):
+
+```sql
+SELECT round(quantile_cont(value, 0.10), 1) AS p10,
+       round(quantile_cont(value, 0.50), 1) AS p50,
+       round(quantile_cont(value, 0.75), 1) AS p75
+FROM sensor_readings WHERE node_id = 'main bedroom' AND sensor_id = 2;
+```
+
+Control law (`lmao_socket_humidifier/control.py`, pure and unit-tested): ON at
+`<= --low` (35 %), OFF at `>= --high` (40 %), minimum ON/OFF runs (60/120 s),
+a continuous-run cap (2 h) with a cooldown (10 min), a daily budget
+(5 h), and **fail-safe OFF** when the reading is missing, implausible, or
+older than `--stale-s` (900 s).  A failed server read is not fatal — it is
+missing data, so the humidifier turns off rather than running on a frozen
+reading.  The controller's own `lxmf/delivery` identity lives at
+`~/.local/share/lmao_home_client/lxmf` (the home client's store); approve it
+once as a contact (§7b).
+
+Keep it running as a user service (the unit ships in the repo; the token and
+socket live in `~/.config/lmao/humidifier.env`, mode 0600):
+
+```bash
+cp lmao_socket_humidifier/lmao-socket-humidifier.service \
+    ~/.config/systemd/user/
+systemctl --user daemon-reload && \
+    systemctl --user enable --now lmao-socket-humidifier
+journalctl --user -u lmao-socket-humidifier -f
+```
 
 ### 8. Docker Image
 
@@ -1717,8 +1892,15 @@ The registry is configured via environment variables:
 │   ├── client.py                      # announce discovery + HistoryRequest → ChartBundle
 │   ├── config.py                      # RnsConfig(role="tcp-client"): one TCPClientInterface
 │   └── firmware/                      # ESP-IDF: SHTC3 report + own-history chart (ST7305)
-│       ├── main/                      # main.cpp, env_net, shtc3, ui, rd_chart (host-tested)
-│       └── build.sh / flash.sh        # Docker ESP-IDF build; host esptool + NVS provisioning
+│
+├── lmao_socket_humidifier/            # Atom Socket humidifier control (§7f)
+│   ├── control.py                     # hysteresis + safety law (pure, unit-tested)
+│   ├── socket_client.py               # Atom Socket leased HTTP API client
+│   ├── controller.py                  # poll server humidity → decide → renew/clear lease
+│   ├── lmao-socket-humidifier.service # systemd --user unit (controller host service)
+│   └── firmware/                      # ESP-IDF: relay G23 + HLW8032 G22 + leased HTTP API
+│       ├── main/                      # main.cpp, hlw8032, relay_lease (host-tested)
+│       └── build.sh / flash.sh        # Docker ESP-IDF build + flash; NVS provisioning
 │
 └── rnode_firmware/                    # Documentation only
     └── README.md                      # Step-by-step ESP32 RNode flashing guide
