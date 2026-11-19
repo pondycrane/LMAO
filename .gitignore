@@ -41,3 +41,12 @@ graphify-out/
 
 # LMAO socket humidifier firmware staging (ESP-IDF build tree)
 lmao_socket_humidifier/firmware/.idf/
+
+# Local credentials — NEVER commit.  `local_secrets.h` holds the WiFi
+# SSID/passphrase and server host used by the flash scripts as a fallback
+# value source; it lives only on the flashing host.
+local_secrets.h
+**/local_secrets.h
+.env
+.env.*
+!.env.example
