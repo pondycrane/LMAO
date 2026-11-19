@@ -63,6 +63,16 @@ data:
   # Pinned LAN address first, mDNS name as the fallback (see socket_client).
   HF_SOCKET: "192.168.50.22,humidifier.local"
   HF_INTERVAL: "60"
+  # Dew-point band for 40-50 % RH across the room's 22.6-26.1 C swing:
+  # ON at <= 7.5 C (34.6 % RH at 24.2 C), OFF at >= 11.5 C (45.0 % at 24.2 C,
+  # 40.2 % at 26.1 C), under the 12 C window-condensation line.  Tune here,
+  # not in code: the law reads HF_LOW_DEW / HF_HIGH_DEW.
+  HF_LOW_DEW: "7.5"
+  HF_HIGH_DEW: "11.5"
+  HF_RH_CEILING: "60"
+  # Ramp (~2.4 h) + hold (L/(L+G) ~5.5-7 h/day) fits in 10 h; the 2.5 L tank
+  # covers it at the unit's 190 mL/h maximum.
+  HF_MAX_DAILY_ON_H: "10"
   HF_STATE_FILE: "/state/state.json"
   LMAO_HOME_CLIENT_STATE_PATH: "/state/rns"
   HF_IDENTITY_DIR: "/state/identity"

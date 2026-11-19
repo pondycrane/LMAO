@@ -4,26 +4,33 @@
 moisture it moves ~2-3 points for every degree the room's temperature swings.
 The room's own history shows it (14 days, 2026-11-05..11-19, n=8615 paired
 minutes): T 21.5-33.6 C (mean 24.3), RH p10 35.0 / p50 37.1 / p75 38.6, dew
-point p10 6.8 / p25 7.5 / p50 8.6 / p75 9.6 / p90 10.8 C, corr(T, RH) -0.53.  A 5-point RH band therefore
-duty-cycles the humidifier on the *heater's* schedule rather than on dryness:
-the relay closes whenever the room warms, and the appliance is asked to fight
-a transient it cannot win.  Dew point is the absolute moisture the room holds;
-it is what condensation and mould depend on, and it does not move when the
-thermostat does.
+point p10 6.8 / p25 7.5 / p50 8.6 / p75 9.6 / p90 10.8 C, corr(T, RH) -0.53.
+A 5-point RH band therefore duty-cycles the humidifier on the *heater's*
+schedule rather than on dryness: the relay closes whenever the room warms,
+and the appliance is asked to fight a transient it cannot win.  Dew point is
+the absolute moisture the room holds; it is what condensation and mould
+depend on, and it does not move when the thermostat does.
 
-**The band.**  ``low``/``high`` are the room's own dew-point deciles, so the
-law acts only on its dry tail exactly as the RH law did: ``low`` = p10 (6.8 C,
-9.9 % of the time, 26 spells, 1.9/day, longest 5.7 h) and ``high`` = p75
-(9.6 C), which at the room's median 24.3 C is ~40 % RH — the same ceiling as
-before.  Do **not** derive ``low`` by converting the old 35 % RH at median
-temperature (that gives 7.8 C, 30 % of the time): RH and dew point are
-anti-correlated here (r = -0.53), because a warm room reads a low RH while
-holding *more* moisture.  Converting the RH threshold that way would triple
-the trigger rate and spend the daily budget.
+**The band.**  ``low``/``high`` come from the indoor comfort target, not from
+the room's own history.  Hold 40-50 % RH across the room's whole temperature
+swing (21.5-33.6 C observed; 22.6-26.1 C in the last day), so the dew point
+must be high enough for 40 % RH even at the *warmest* temperature: 26.1 C at
+40 % RH is 11.4 C dew.  ``high`` = 11.5 C therefore holds 40.2 % at 26.1 C,
+45.0 % at 24.2 C and 49.5 % at 22.6 C, and stays under the 12 C winter
+window-condensation line.  ``low`` = 7.5 C (4 C hysteresis) is the floor that
+starts the appliance: 34.6 % RH at 24.2 C.
+
+Do **not** take the band from the room's own dew-point deciles (p10 6.8 /
+p75 9.6 C).  That history is the room *without* humidification, so adopting
+it enshrines the chronic dryness as the target — a self-fulfilling setpoint
+that never turns the appliance on.  Nor convert an RH threshold at one
+temperature: RH and dew point are anti-correlated here (r = -0.53) — a warm
+room reads a low RH while holding *more* moisture — so a single-point
+conversion lands on a different regime than intended.
 
 ``rh_ceiling_pct`` is the physical backstop: a room cold enough that the
-ceiling dew point is 60 % RH (below ~18 C) must not be humidified further —
-that is condensation on windows and walls.
+ceiling dew point is 60 % RH (below ~19.5 C at 11.5 C dew) must not be
+humidified further — that is condensation on windows and walls.
 
 Every rule is a *safety* rule first:
 
@@ -34,17 +41,18 @@ Every rule is a *safety* rule first:
 * **Continuous-run cap + cooldown** -> OFF after ``max_on_s``, and refuse to
   restart for ``cooldown_s``.  A stuck sensor that keeps reading dry must not
   run the appliance all day.  The cap is a runaway guard, not the normal stop:
-  the dew ceiling normally ends a run.  Crossing the 2.8 C band takes ~1.7 h
-  at the measured dial (+1.7 C dew/h) and ~5.3 h at the low dial (+0.55 C/h),
-  so 3 h covers the measured dial and splits the low-dial crossing into two
-  runs with a 10 min cooldown.
+  the dew ceiling normally ends a run.  Crossing the 4 C band takes ~2.4 h
+  at the measured dial (+1.7 C dew/h) and ~7.3 h at the low dial (+0.55 C/h),
+  so 3 h covers the measured dial and splits the low-dial crossing into runs
+  with a 10 min cooldown.
 * **Daily budget** -> OFF once the day's accumulated ON time is spent.  It is
   a runaway guard sized from the physics, not a comfort cap: holding the band
   needs a duty cycle of ``L/(L+G)`` where ``G`` is the measured net rise
   (+1.7 C dew/h) and ``L`` the room's own moisture loss (0.5 C/h typical,
-  0.7 C/h at the p10 of its hourly drift), i.e. ~5.5-7 h/day.  ``8 h`` covers
-  that and still bounds a pathological day at one-third of it; the 2.5 L tank
-  covers 8 h at the unit's 190 mL/h maximum.
+  0.7 C/h at the p10 of its hourly drift), i.e. ~5.5-7 h/day, plus a ~2.4 h
+  ramp from the dry floor to the ceiling on the first run of a dry day:
+  ~8-9.5 h.  ``10 h`` covers that and still bounds a pathological day; the
+  2.5 L tank covers 10 h at the unit's 190 mL/h maximum (1.9 L).
 * **Minimum on/off times** -> the relay is not cycled faster than it can
   tolerate.
 
@@ -72,15 +80,15 @@ def dew_point_c(temp_c: float, humidity_pct: float) -> float:
 class Setpoints:
     """Control band + safety limits (temperatures in C, times in seconds)."""
 
-    low_dew_c: float = 6.8  # turn ON at/below this dew point (room p10)
-    high_dew_c: float = 9.6  # turn OFF at/above this dew point (room p75)
+    low_dew_c: float = 7.5  # turn ON at/below this dew point (34.6 % RH at 24.2 C)
+    high_dew_c: float = 11.5  # turn OFF at/above this dew point (40-50 % RH across the swing)
     rh_ceiling_pct: int = 60  # hard OFF: condensation risk in a cold room
     stale_s: int = 900  # no fresh sample for this long -> OFF
     min_on_s: int = 60  # shortest ON run (relay protection)
     min_off_s: int = 120  # shortest OFF run (relay protection)
     max_on_s: int = 3 * 3600  # longest continuous ON run (runaway guard)
     cooldown_s: int = 600  # forced OFF after a max_on trip
-    max_daily_on_s: int = 8 * 3600
+    max_daily_on_s: int = 10 * 3600
     lease_s: int = 300  # lease granted to the socket on each ON cycle
 
     def validate(self) -> None:

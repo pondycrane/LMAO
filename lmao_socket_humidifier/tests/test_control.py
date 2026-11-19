@@ -10,22 +10,23 @@ from lmao_socket_humidifier.control import (
     reconcile,
 )
 
-# The shipped band: the room's own dew-point p10 / p75 over 14 days, so the
+# The shipped band: 40-50 % RH across the room's 22.6-26.1 C swing, so the
 # tests exercise production configuration.
 SP = Setpoints(
-    low_dew_c=6.8,
-    high_dew_c=9.6,
+    low_dew_c=7.5,
+    high_dew_c=11.5,
     rh_ceiling_pct=60,
     stale_s=900,
     min_on_s=60,
     min_off_s=120,
     max_on_s=3 * 3600,
     cooldown_s=600,
-    max_daily_on_s=8 * 3600,
+    max_daily_on_s=10 * 3600,
     lease_s=300,
 )
 
-# A room at 24.2 C: RH 33 % -> 6.9 C dew (the ON edge), RH 40 % -> 9.7 C.
+# A room at 24.2 C: RH 34 % -> 7.3 C dew (below the 7.5 C ON edge), RH 46 %
+# -> 11.9 C (above the 11.5 C OFF edge).
 T_MED = 24.2
 
 
@@ -36,9 +37,9 @@ def cycle(st, temp, hum, age, now, day=0, sp=SP):
 def test_dew_point_matches_the_magnus_reference():
     # 25 C / 50 % is the textbook 13.9 C dew point.
     assert dew_point_c(25.0, 50.0) == pytest.approx(13.86, abs=0.02)
-    # 24.2 C / 33 % is the band's ON edge; 40 % is the OFF edge.
-    assert dew_point_c(T_MED, 33) == pytest.approx(6.9, abs=0.05)
-    assert dew_point_c(T_MED, 40) == pytest.approx(9.7, abs=0.05)
+    # 24.2 C / 34 % is below the ON edge (7.5 C); 46 % is above the OFF edge.
+    assert dew_point_c(T_MED, 34) == pytest.approx(7.34, abs=0.05)
+    assert dew_point_c(T_MED, 46) == pytest.approx(11.9, abs=0.05)
     # Saturated air: dew point == air temperature.
     assert dew_point_c(20.0, 100.0) == pytest.approx(20.0, abs=0.01)
 
@@ -55,15 +56,15 @@ def test_dry_room_turns_on_after_min_off_time():
     assert cycle(st, T_MED, 30, 5, 0).relay_on is False  # min_off not yet elapsed
     d = cycle(st, T_MED, 30, 5, 120)
     assert d.relay_on is True
-    assert "<= 6.8C" in d.reason
+    assert "<= 7.5C" in d.reason
 
 
 def test_hysteresis_holds_between_setpoints():
     st = ControlState(relay_on=True, on_since_s=0.0)
     # 37 % at 24.2 C is 8.6 C dew: inside the band, stay ON.
     assert cycle(st, T_MED, 37, 5, 300).relay_on is True
-    # 40 % is 9.7 C dew: OFF (the ceiling is 9.6).
-    assert cycle(st, T_MED, 40, 5, 400).relay_on is False
+    # 46 % is 11.9 C dew: OFF (the ceiling is 11.5).
+    assert cycle(st, T_MED, 46, 5, 400).relay_on is False
     assert st.on_accum_s == pytest.approx(400.0)
 
 
@@ -74,12 +75,12 @@ def test_a_warm_room_does_not_trip_the_off_edge_by_temperature_alone():
     d = cycle(st, 30.0, 36, 5, 600)
     assert d.relay_on is False
     assert "in band" not in d.reason
-    assert ">= 9.6C" in d.reason
+    assert ">= 11.5C" in d.reason
 
 
 def test_a_cool_room_is_humidified_at_the_same_absolute_moisture():
-    """RH 45 % at 21 C is 8.6 C dew: inside the band, so OFF (not 'dry' --
-    the old RH law would have called 45 % humid and also stayed off)."""
+    """RH 45 % at 21 C is 8.6 C dew: inside the band, so OFF -- even though
+    45 % RH at 24.2 C would be 11.5 C dew, right at the ceiling."""
     st = ControlState(relay_on=False, off_since_s=0.0)
     assert cycle(st, 21.0, 45, 5, 600).relay_on is False
 
@@ -94,15 +95,15 @@ def test_off_at_the_top_edge_is_not_reported_as_in_band():
     d = cycle(st, T_MED, 40, 5, 600)
     assert d.relay_on is False
     assert "in band" not in d.reason
-    assert ">= 9.6C" in d.reason
+    assert ">= 11.5C" in d.reason
 
 
 def test_min_on_time_delays_the_off_edge():
     st = ControlState(relay_on=True, on_since_s=1000.0)
-    d = cycle(st, T_MED, 40, 5, 1030)
+    d = cycle(st, T_MED, 46, 5, 1030)
     assert d.relay_on is True
     assert "min on" in d.reason
-    assert cycle(st, T_MED, 40, 5, 1060).relay_on is False
+    assert cycle(st, T_MED, 46, 5, 1060).relay_on is False
 
 
 def test_stale_sample_forces_off():
@@ -166,14 +167,14 @@ def test_max_continuous_run_trips_a_cooldown():
 
 
 def test_daily_budget_stops_the_day():
-    st = ControlState(relay_on=True, on_since_s=0.0, on_accum_s=8 * 3600 - 60, day_index=0)
+    st = ControlState(relay_on=True, on_since_s=0.0, on_accum_s=10 * 3600 - 60, day_index=0)
     d = cycle(st, T_MED, 20, 5, 60)
     assert d.relay_on is False
     assert "daily budget" in d.reason
 
 
 def test_day_rollover_resets_the_budget():
-    st = ControlState(relay_on=False, off_since_s=0.0, on_accum_s=8 * 3600, day_index=1)
+    st = ControlState(relay_on=False, off_since_s=0.0, on_accum_s=10 * 3600, day_index=1)
     d = cycle(st, T_MED, 20, 5, 200, day=2)
     assert st.on_accum_s == 0.0
     assert d.relay_on is True

@@ -201,8 +201,7 @@ def _day_index(now_s: float) -> int:
 
 def _parse_args(argv=None):
     p = argparse.ArgumentParser(
-        description="Dew-point humidifier control via the LMAO server "
-        "and an M5Stack Atom Socket"
+        description="Dew-point humidifier control via the LMAO server and an M5Stack Atom Socket"
     )
     p.add_argument(
         "--env-node",
@@ -243,10 +242,23 @@ def _parse_args(argv=None):
         default=int(os.environ.get("HF_INTERVAL", DEFAULT_INTERVAL_S)),
         help=f"poll cadence in seconds (default {DEFAULT_INTERVAL_S})",
     )
-    p.add_argument("--low-dew", type=float, default=6.8, help="ON at/below this dew point (C)")
-    p.add_argument("--high-dew", type=float, default=9.6, help="OFF at/above this dew point (C)")
     p.add_argument(
-        "--rh-ceiling", type=int, default=60, help="hard OFF at/above this relative humidity %%"
+        "--low-dew",
+        type=float,
+        default=float(os.environ.get("HF_LOW_DEW", 7.5)),
+        help="ON at/below this dew point (C)",
+    )
+    p.add_argument(
+        "--high-dew",
+        type=float,
+        default=float(os.environ.get("HF_HIGH_DEW", 11.5)),
+        help="OFF at/above this dew point (C)",
+    )
+    p.add_argument(
+        "--rh-ceiling",
+        type=int,
+        default=int(os.environ.get("HF_RH_CEILING", 60)),
+        help="hard OFF at/above this relative humidity %%",
     )
     p.add_argument(
         "--stale-s", type=int, default=900, help="treat the reading as stale after this long"
@@ -257,7 +269,12 @@ def _parse_args(argv=None):
         "--max-on-s", type=int, default=3 * 3600, help="continuous-run cap before a forced cooldown"
     )
     p.add_argument("--cooldown-s", type=int, default=600)
-    p.add_argument("--max-daily-on-s", type=int, default=8 * 3600)
+    p.add_argument(
+        "--max-daily-on-s",
+        type=int,
+        default=int(os.environ.get("HF_MAX_DAILY_ON_H", 10)) * 3600,
+        help="daily ON budget in seconds (HF_MAX_DAILY_ON_H sets it in hours)",
+    )
     p.add_argument(
         "--lease-s", type=int, default=300, help="lease granted to the socket each ON cycle"
     )

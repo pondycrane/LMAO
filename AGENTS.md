@@ -150,12 +150,17 @@ main bedroom at the current dial setting (dial-dependent: 100-190 mL/h).
 
 The control law is **dew point**, not relative humidity: RH moves 2-3 points
 per degree of thermostat swing, so an RH band duty-cycles the appliance on the
-heater's schedule (corr(T, RH) = -0.53 here).  Band = the room's own dew-point
-p10/p75 over 14 days: ON at `<= 6.8 °C`, OFF at `>= 9.6 °C`, hard OFF at
-`--rh-ceiling 60 %`, 3 h run cap, 8 h daily budget (the duty cycle needed to
-hold the band is `L/(L+G)` ≈ 5.5-7 h/day).  Re-derive the band from the
-`iot-query` SQL in README §7f when the season turns; do not convert an RH
-threshold at one temperature — that is the mistake the law exists to avoid.
+heater's schedule (corr(T, RH) = -0.53 here).  Band from the **comfort
+target, not the room's history**: 40-50 % RH across the 22.6-26.1 °C swing,
+i.e. ON at `<= 7.5 °C` dew (34.6 % RH at 24.2 °C), OFF at `>= 11.5 °C`
+(40.2 % at 26.1 °C, 45.0 % at 24.2 °C), hard OFF at `--rh-ceiling 60 %`, 3 h
+run cap, 10 h daily budget (ramp ~2.4 h + hold `L/(L+G)` ≈ 5.5-7 h/day).  The
+band is tuned in `k8s/humidifier.yaml` (`HF_LOW_DEW`/`HF_HIGH_DEW`).  Never
+derive it from the room's own dew-point deciles — that history is the room
+*without* humidification, so it encodes the dryness as the target.  Nor
+convert an RH threshold at one temperature (RH and dew are anti-correlated
+here).  The `iot-query` SQL in README §7f re-derives the *drift* numbers
+(loss `L`, duty cycle), not the setpoints.
 
 The humidity input is the **RoboDog home node's** `SensorReport` folded into
 the server's air history — never the socket, which has no humidity sensor.
