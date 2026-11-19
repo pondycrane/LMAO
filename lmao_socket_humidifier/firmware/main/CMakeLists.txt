@@ -9,9 +9,11 @@ idf_component_register(
     INCLUDE_DIRS "."
     REQUIRES
         lma_wifi
+        lma_led
         driver
         esp_driver_uart
         esp_driver_gpio
+        esp_driver_rmt
         esp_http_server
         mdns
         esp_timer

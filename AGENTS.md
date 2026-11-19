@@ -167,6 +167,11 @@ relay open bytes still flow but no frame validates, so `meter_fresh` is false
 and the readings are a stale snapshot. Do not read an open-relay meter value
 as load.
 
+The Atom Lite's RGB LED (GPIO27) is the relay indicator: red while the relay is
+closed, dark while open, driven from `relay_write()` so it cannot disagree with
+the GPIO.  The writer is the shared `firmware_common/lma_led/` component (the
+Sprout's status LED uses the same one — never add a second SK6812 writer).
+
 The controller runs as the `lmao-socket-humidifier.service` user unit and must
 stay running: the socket opens the relay when the lease expires, so a stopped
 controller fails the humidifier OFF (the intended deadman).

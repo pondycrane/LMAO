@@ -1049,10 +1049,19 @@ room.
 
 | Endpoint | Effect |
 |---|---|
-| `GET /status` | relay/lease/uptime + optional `voltage_v`, `current_a`, `power_w`, `energy_pulses`, `meter_fresh` |
+| `GET /status` | relay/lease/uptime + optional `voltage_v`, `current_a`, `power_w`, `energy_pulses`, `meter_fresh`, `led` |
 | `POST /on?lease=SECS` | close the relay for `SECS` (default 300, clamped to 3600) |
 | `POST /off` | open the relay now |
 | `GET /healthz` | `ok` |
+
+**The RGB LED is the relay indicator.**  The Atom Lite's single SK6812 on
+GPIO27 is driven from `relay_write()` — the one place the GPIO changes — so the
+light cannot disagree with the relay: **red while closed** (mains live), **dark
+while open**.  It is dark at boot (the relay boots open) and follows every
+lease grant and expiry; a socket whose RMT channel fails to initialise still
+controls the relay, it just shows no light.  `/status` reports the commanded
+colour as `led`.  The writer is the shared `firmware_common/lma_led/` component
+(also used by the Sprout's status LED), not a second copy.
 
 Commands need the NVS-provisioned token (`X-Auth-Token` or `?token=`); a
 socket with no token **refuses commands** (fails closed) and boots with the

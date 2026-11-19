@@ -16,6 +16,11 @@
 //
 // Commands require the NVS-provisioned token in X-Auth-Token (or ?token=).
 // An unprovisioned socket fails CLOSED: status works, commands are refused.
+//
+// The Atom Lite's RGB LED (GPIO27) is the relay indicator: lit red while the
+// relay is closed, dark while it is open.  It is driven from relay_write(),
+// the single place the GPIO changes, so the light cannot disagree with the
+// relay.
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -38,6 +43,7 @@
 
 #include "config.h"
 #include "hlw8032.h"
+#include "led_rgb.h"
 #include "relay_lease.h"
 #include "wifi_helper.h"
 
@@ -71,6 +77,7 @@ static uint32_t s_energy_pulses = 0;
 static bool s_last_pulse_bit = false;
 static uint32_t s_relay_writes = 0;
 static bool s_relay_state = false;
+static bool s_led_ready = false;
 static uint32_t s_refusals = 0;
 
 // Metering diagnostics.  A dead HLW8032 looks identical to "no load" in the
@@ -92,6 +99,10 @@ static void relay_write(bool on) {
     gpio_set_level(HF_RELAY_PIN, on ? 1 : 0);
     s_relay_state = on;
     s_relay_writes++;
+    // Indicator follows the GPIO in the same call, so there is no window in
+    // which the light and the relay disagree.  A missing LED never blocks
+    // control: s_led_ready is false and set_all() is a no-op.
+    if (s_led_ready) lma_led::set_all(on ? lma_led::kRed : lma_led::kOff);
 }
 
 static void nvs_load() {
@@ -228,6 +239,7 @@ static esp_err_t status_get(httpd_req_t* req) {
         "\"current_a\":%.3f,\"power_w\":%.2f,\"pf_raw\":%u,"
         "\"energy_pulses\":%u,\"uart_bytes\":%u,\"frames_ok\":%u,"
         "\"meter_rx_pin\":%d,"
+        "\"led\":\"%s\","
         "\"first_raw\":\"%s\",\"uptime_s\":%u,\"mdns_host\":\"%s\"}",
         lease.on ? "true" : "false",
         (unsigned)humidifier::lease_remaining_s(lease, t),
@@ -236,7 +248,8 @@ static esp_err_t status_get(httpd_req_t* req) {
         meter.voltage, meter.current_a, meter.power_w,
         (unsigned)meter.pf_raw, (unsigned)meter.energy_pulses,
         (unsigned)s_uart_bytes, (unsigned)s_frames_ok,
-        (int)HF_METER_RX_PIN, first_raw,
+        (int)HF_METER_RX_PIN,
+        s_relay_state ? "red" : "off", first_raw,
         (unsigned)(t / 1000), s_cfg.host);
     (void)n;
     httpd_resp_set_type(req, "application/json");
@@ -344,6 +357,10 @@ void app_main(void) {
     gpio_set_level(HF_RELAY_PIN, 0);
     s_relay_state = false;
     ESP_LOGI(TAG, "relay GPIO%d OPEN at boot", (int)HF_RELAY_PIN);
+
+    // Indicator: dark at boot (relay open), red while closed.
+    s_led_ready = lma_led::init((int)HF_LED_PIN, HF_LED_PIXELS, HF_LED_RMT_CHANNEL);
+    if (s_led_ready) lma_led::set_all(lma_led::kOff);
 
     meter_init();
 
