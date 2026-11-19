@@ -1152,44 +1152,49 @@ schedule instead of on dryness.  Over 14 days of RoboDog home reports
 | p75 | 38.6 % | 9.6 °C |
 | p90 | 40.1 % | 10.8 °C |
 
-(T 21.5-33.6 °C, mean 24.3 °C; corr(T, RH) = -0.53.)  `--low-dew` is the
-room's **dry decile** (6.8 °C: below it 9.9 % of the time, 26 spells over the
-14 days, 1.9/day, longest 5.7 h) and `--high-dew` is its **upper quartile**
-(9.6 °C, which at the median 24.3 °C is ~40 % RH — the old ceiling).  The
-humidifier therefore acts on the room's own dry tail (1.9 spells/day) and the
-ceiling is physical: 9.6 °C is 3.2 °C under the 12.8 °C mould line.
+(T 21.5-33.6 °C, mean 24.3 °C; corr(T, RH) = -0.53.)  The **band comes from
+the comfort target, not from that history**: 40-50 % RH across the room's
+swing.  The dew point must clear 40 % RH even at the warmest temperature the
+room reaches (26.1 °C in the last day), so `--high-dew 11.5` — which holds
+40.2 % at 26.1 °C, 45.0 % at 24.2 °C and 49.5 % at 22.6 °C, and stays under
+the 12 °C winter window-condensation line.  `--low-dew 7.5` is the restart
+floor (34.6 % RH at 24.2 °C; 4 °C hysteresis).
 
-Do **not** derive `--low-dew` by converting the old 35 % RH at the median
-temperature: that gives 7.8 °C, which the room sits below 30 % of the time
-(7.2 h/day) and would spend the daily budget.  RH and dew point are
-anti-correlated here: a warm room reads a low RH while holding *more*
-moisture, so the two "dry tails" are different regimes.  `--rh-ceiling 60`
-remains a physical backstop: a room cold enough that the dew ceiling is 60 %
-RH (below ~18 °C) is a condensation risk and is not humidified further.
+The table above is *evidence that dew point is the right variable*, not a
+setpoint source: the room's own p10/p75 (6.8/9.6 °C) is the room **without**
+humidification, so adopting it would enshrine the chronic dryness as the
+target — the failure mode where 34 % RH reads "in band" and the appliance
+never runs.  Do not convert an RH threshold at one temperature either: RH and
+dew point are anti-correlated here (r = -0.53), because a warm room reads a
+low RH while holding *more* moisture.  `--rh-ceiling 60` remains a physical
+backstop: at 11.5 °C dew a room cooled below ~19.5 °C reaches 60 % RH, which
+is condensation on windows and walls, so it is not humidified further.
 
 `max_on_s` follows from a **measured** run of this appliance in this room, not
 a spec sheet: relay closed with the Classic 160 plugged in, RH went 38.2 ->
 40.6 % in 32 min at ~23.6 °C, i.e. dew point 8.6 -> 9.5 °C, a slope of
-**+1.7 °C dew/h**.  Crossing the 2.8 °C band therefore takes ~1.7 h, so the
-3 h cap is 1.8x the crossing time — a cap, not a limit that bites.  At the
-lower dial (~3 %/h RH, ~+0.55 °C dew/h) a crossing needs ~5.1 h, so the cap
-splits it into two runs with the 10 min cooldown.
+**+1.7 °C dew/h**.  Crossing the 4 °C band therefore takes ~2.4 h, so the
+3 h cap is 1.25x the crossing time — a cap, not a limit that bites.  At the
+lower dial (~3 %/h RH, ~+0.55 °C dew/h) a crossing needs ~7.3 h, so the cap
+splits it into three runs with the 10 min cooldown.
 
 `max_daily_on_s` is **not** the dry-spell duration (0.57 h/day below the low
 edge) — it is the duty cycle needed to hold the band.  The room loses moisture
 to ventilation at **0.5 °C dew/h** (median falling drift over the 14 days;
 0.7 °C/h at its p10) and the appliance adds a net +1.7 °C/h, so the ON
 fraction is `L/(L+G)` = 23-29 %, i.e. **5.5-7 h/day** (one cycle takes
-2.8/0.5 + 2.8/1.7 = 7.2 h, so ~3 cycles a day).  The 8 h budget covers that
-and still bounds a pathological day at one-third of it; the 2.5 L tank covers
-8 h at the unit's 190 mL/h maximum.  The 60 s poll bounds overshoot to
-~0.05 °C dew per tick.
+4/0.5 + 4/1.7 = 10.4 h, so ~2.3 cycles a day), plus the ~2.4 h ramp from the
+dry floor to the ceiling on the first run of a dry day — **8-9.5 h**.  The
+10 h budget covers that and still bounds a pathological day; the 2.5 L tank
+covers 10 h at the unit's 190 mL/h maximum (1.9 L).  The 60 s poll bounds
+overshoot to ~0.05 °C dew per tick.
 
-**Comfort knob.**  The ceiling is the *condensation* limit, not a comfort
-target: 9.6 °C dew is 3.2 °C under the 12.8 °C mould line.  For a moister
-room raise `--high-dew` (45-50 % RH at 24 °C is 11.0-11.7 °C dew); stay under
-`--rh-ceiling` 60 % and well under the mould line.  Raising it increases the
-duty cycle, so check `max_daily_on_s` still covers `L/(L+G)`.
+**Tuning.**  The band is set in `k8s/humidifier.yaml` (`HF_LOW_DEW` /
+`HF_HIGH_DEW`), not in code: the controller reads them as defaults.  The
+ceiling is bounded by physics, not comfort — 11.5 °C dew is under the 12 °C
+winter window-condensation line and far under the 12.8 °C mould line.  A
+moister room means a higher `HF_HIGH_DEW`, which raises the duty cycle, so
+raise `HF_MAX_DAILY_ON_H` with it (the tank holds 13 h at 190 mL/h).
 
 Re-derive the band when the season turns (the query API is on
 `iot-query:8080`, reachable with `kubectl port-forward`):
@@ -1212,9 +1217,9 @@ FROM g;
 ```
 
 Control law (`lmao_socket_humidifier/control.py`, pure and unit-tested): ON at
-`<= --low-dew` (6.8 °C), OFF at `>= --high-dew` (9.6 °C), hard OFF at
+`<= --low-dew` (7.5 °C), OFF at `>= --high-dew` (11.5 °C), hard OFF at
 `--rh-ceiling` (60 %), minimum ON/OFF runs (60/120 s), a continuous-run cap
-(3 h) with a cooldown (10 min), a daily budget (8 h), and **fail-safe OFF**
+(3 h) with a cooldown (10 min), a daily budget (10 h), and **fail-safe OFF**
 when the reading is missing, implausible, or older than `--stale-s` (900 s).
 A failed server read is not fatal — it is missing data, so the humidifier
 turns off rather than running on a frozen reading.
