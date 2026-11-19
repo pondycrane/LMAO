@@ -280,7 +280,8 @@ LMAO-owned tooling in this folder (all in `robodog_client/esp-claw/`):
   `idf.py bmgr -c ./boards -b waveshare/waveshare_ESP32_S3_RLCD_4_2 && idf.py build`.
 - `flash_esp_claw.sh` — host esptool via the sanctioned `flash.sh` pattern:
   writes bootloader/app/partition/system/storage **and provisions NVS** at
-  `0xA000` (WiFi `Hankerker`, LLM openai_compatible, `cfg_ver=1`).
+  `0xA000` (WiFi SSID/passphrase from the flash host, LLM
+  openai_compatible, `cfg_ver=1`).
 - Bazel: `//robodog_client:build_robodog_claw` + `:flash_robodog_claw`.
 
 Hardware-verified results:
@@ -320,7 +321,8 @@ Upstream/build fixes that were required (documented for Phase 1 reuse):
 
 Model configuration (NVS, namespace `app`):
 
-- `wifi_ssid` / `wifi_password` → Hankerker on the 192.168.50.0/24 LAN.
+- `wifi_ssid` / `wifi_password` → the household AP on the 192.168.50.0/24
+  LAN, written at flash time; never in the repo.
 - `llm_backend=openai_compatible`, `llm_endpoint=static`,
   `llm_base_url=http://192.168.50.3:8000/v1`, `llm_model=qwen3.8-flash-next`,
   `llm_auth_type=none`, `llm_sup_tools=true` (false → the agent refuses with
