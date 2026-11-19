@@ -1077,6 +1077,19 @@ that alignment.  Treat the meter as an open defect, not a load signal; use the
 relay state and the room's humidity chart instead.  `/status` exposes the
 evidence (`uart_bytes`, `frames_ok`, `meter_rx_pin`, `first_raw`) so the
 failure is visible rather than silent.
+It decodes **only while the relay is closed** — with a load attached the chip
+streams ~10 checksum-valid frames/s and `/status` reports live values (bench
+run: 121.0 V, 0.155 A, 16.1 W, `meter_fresh:true`, `frames_ok` climbing
+323 -> 403 -> 483 in 16 s).  With the relay open the byte stream keeps flowing
+at ~270 B/s but **no** frame validates, so `meter_fresh` reads false and
+`voltage_v`/`power_w` show the last decoded sample (`0.63 W`, i.e. the socket's
+own standby draw) — never 0-with-live-load.  There is also a one-off burst of
+158 valid frames right after boot, before the stream stops decoding; the
+mechanism is unresolved, and `first_raw` begins `f2 5a` rather than the
+datasheet's `55 5a` although bytes 2..22 do sum to byte 23 at that alignment.
+So: a **closed** relay gives a trustworthy load reading, an **open** relay
+gives a stale snapshot.  `/status` exposes the evidence (`uart_bytes`,
+`frames_ok`, `meter_rx_pin`, `first_raw`) so the state is visible.
 
 ```bash
 # build (ESP-IDF Docker; stages into the gitignored firmware/.idf/)
@@ -1104,6 +1117,42 @@ drops the socket lease.
 bazel run //lmao_socket_humidifier:controller -- \
     --env-node "main bedroom" --socket humidifier.local --token "$HF_API_TOKEN"
 bazel run //lmao_socket_humidifier:controller -- --once --json  # one cycle, bench check
+```
+
+**The band is derived from the room's own data, not a comfort table.**  Over
+14 days of RoboDog home reports (2026-11-04..11-19, n=8873, no humidifier):
+
+| Statistic | RH | Dew point at 26 °C |
+|---|---|---|
+| p10 | 35.1 % | 9.4 °C |
+| median | 37.4 % | 10.3 °C |
+| p75 | 39.4 % | 11.1 °C |
+| p95 | 42.6 % | 12.3 °C |
+| max | 46.3 % | 13.6 °C |
+
+So `--low 35` is the room's **dry decile** (act only on its own dry tail: it
+sits below 35 % for 7.9 % of the time, in 27 spells over 14 days, the longest
+7.4 h) and `--high 40` is its **upper quartile** rounded up — the level the
+room reaches on a good day.  The ceiling is also physical: 40 % at the room's
+usual 26 °C is dew point 11.4 °C, under the 12.8 °C mould line, while 45 % is
+13.1 °C and 55 % is 16.3 °C.  The old 45/55 band was a comfort default
+(EPA 30-50 %): unreachable here (the room never exceeded 46.3 %, so OFF at
+55 % never fired and the humidifier just duty-cycled against the run cap until
+the daily budget was spent) and unsafe at the top.
+
+`max_on_s` follows from the same measurement: the humidifier adds **~3 %/h**
+(37.4 → 39.0 over a 34 min ON run), so crossing the 5-point band needs ~1.7 h
+— a 30 min cap could never reach `--high`.  `max_daily_on_s` (5 h) covers the
+deepest observed excursion (26.2 % → 40 % = 4.6 h at that rate).
+
+Re-derive it when the season turns (the query API is on `iot-query:8080`,
+reachable with `kubectl port-forward`):
+
+```sql
+SELECT round(quantile_cont(value, 0.10), 1) AS p10,
+       round(quantile_cont(value, 0.50), 1) AS p50,
+       round(quantile_cont(value, 0.75), 1) AS p75
+FROM sensor_readings WHERE node_id = 'main bedroom' AND sensor_id = 2;
 ```
 
 **The band is derived from the room's own data, not a comfort table.**  Over
