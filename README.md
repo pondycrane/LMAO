@@ -1112,6 +1112,16 @@ bazel run //lmao_socket_humidifier:controller -- \
 bazel run //lmao_socket_humidifier:controller -- --once --json  # one cycle, bench check
 ```
 
+`--socket` takes a **comma-separated fallback list** (`humidifier.local,
+192.168.50.22`).  mDNS resolution through nss-mdns fails transiently on the
+controller host — observed as `POST /off failed: Name or service not known`
+while the socket was up — so a pinned address keeps the relay controllable.
+Only transport failures fall through; an HTTP answer (including a 403) is
+authoritative and is never retried against the next host.  The answering host
+becomes the sticky first choice.  The systemd unit passes `${HF_SOCKET}` from
+`~/.config/lmao/humidifier.env`, so the host's pinned address stays out of the
+repo.
+
 **The appliance is a Levoit Classic 160** (`LUH-A251-WCA`, 2.5 L top-fill,
 ultrasonic cool mist, rated **17 W**, 100-190 mL/h across its dial).  It has
 **no humidistat, no auto mode and no app** — a mechanical mist dial and a
@@ -1171,16 +1181,6 @@ SELECT round(quantile_cont(value, 0.10), 1) AS p10,
        round(quantile_cont(value, 0.75), 1) AS p75
 FROM sensor_readings WHERE node_id = 'main bedroom' AND sensor_id = 2;
 ```
-
-`--socket` takes a **comma-separated fallback list** (`humidifier.local,
-192.168.50.22`).  mDNS resolution through nss-mdns fails transiently on the
-controller host — observed as `POST /off failed: Name or service not known`
-while the socket was up — so a pinned address keeps the relay controllable.
-Only transport failures fall through; an HTTP answer (including a 403) is
-authoritative and is never retried against the next host.  The answering host
-becomes the sticky first choice.  The systemd unit passes `${HF_SOCKET}` from
-`~/.config/lmao/humidifier.env`, so the host's pinned address stays out of the
-repo.
 
 Control law (`lmao_socket_humidifier/control.py`, pure and unit-tested): ON at
 `<= --low` (35 %), OFF at `>= --high` (40 %), minimum ON/OFF runs (60/120 s),
