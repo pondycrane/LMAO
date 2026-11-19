@@ -158,6 +158,17 @@ are NVS-only, written at flash time; nothing is compiled in.  The socket's
 HLW8032 metering is diagnostic only (this unit's chip does not decode at
 8E1) and is never an input to the control law.
 
+Its firmware lives in `lmao_socket_humidifier/firmware/` and flashes ONLY
+through `bazel run //lmao_socket_humidifier:flash_firmware` (ESP-IDF Docker,
+115200 baud — the sanctioned Atom Lite path, same as the Sprout).  `--port` is
+required and there is no default: `/dev/ttyUSB*` is shared with the RNode,
+which must NEVER be flashed (see RNode).  WiFi credentials and the API token
+are NVS-only, written at flash time; nothing is compiled in.  The socket's
+HLW8032 metering is diagnostic only and never an input to the control law.
+On this unit it decodes only in a burst right after boot (158 valid frames,
+120.8 V) and then stops while bytes keep flowing, so `meter_fresh` is false and
+the readings are stale — an open defect, not a load signal.
+
 The controller runs as the `lmao-socket-humidifier.service` user unit and must
 stay running: the socket opens the relay when the lease expires, so a stopped
 controller fails the humidifier OFF (the intended deadman).
