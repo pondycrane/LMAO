@@ -9,6 +9,8 @@ WorkingDirectory=%h/LMAO
 # Host Python (RNS + protobuf from the repo's requirements); the client modules
 # are imported straight from the checkout, so no build step is needed here.
 Environment=PYTHONPATH=%h/LMAO:%h/LMAO/robodog_home_client
+# Default before the env file so an unset HF_SOCKET still names a host.
+Environment=HF_SOCKET=humidifier.local
 EnvironmentFile=%h/.config/lmao/humidifier.env
 # HF_SOCKET comes from the EnvironmentFile so the host can pin a fallback
 # address (mDNS names fail transiently) without editing this unit.
