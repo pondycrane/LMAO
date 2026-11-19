@@ -180,6 +180,30 @@ It decodes only while the relay is closed (live V/A/W, ~10 frames/s); with the
 relay open bytes still flow but no frame validates, so `meter_fresh` is false
 and the readings are a stale snapshot. Do not read an open-relay meter value
 as load.
+HTTP API (README §7f).  The appliance is a Levoit Classic 160 (`LUH-A251-WCA`,
+2.5 L, ultrasonic cool mist, rated 17 W): **no humidistat, no auto mode, no
+app** — a mechanical mist dial — so the relay is the only way to hold a
+target.  Measured: 16.1-16.4 W at 121 V when closed, and +6.5 %/h RH in the
+main bedroom at the current dial setting (dial-dependent: 100-190 mL/h).
+
+The humidity input is the **RoboDog home node's** `SensorReport` folded into
+the server's air history — never the socket, which has no humidity sensor.
+The controller speaks the LMAO protocol (`HistoryRequest` over Reticulum TCP)
+and pins `--env-node` to the board's `SensorReport.node_id`
+(`"main bedroom"`); a reply naming another node is refused as missing data
+(fail-safe OFF).
+
+Its firmware lives in `lmao_socket_humidifier/firmware/` and flashes ONLY
+through `bazel run //lmao_socket_humidifier:flash_firmware` (ESP-IDF Docker,
+115200 baud — the sanctioned Atom Lite path, same as the Sprout).  `--port` is
+required and there is no default: `/dev/ttyUSB*` is shared with the RNode,
+which must NEVER be flashed (see RNode).  WiFi credentials and the API token
+are NVS-only, written at flash time; nothing is compiled in.  The socket's
+HLW8032 metering is diagnostic only and never an input to the control law.
+It decodes only while the relay is closed (live V/A/W, ~10 frames/s); with the
+relay open bytes still flow but no frame validates, so `meter_fresh` is false
+and the readings are a stale snapshot. Do not read an open-relay meter value
+as load.
 
 The controller runs as the `lmao-socket-humidifier.service` user unit and must
 stay running: the socket opens the relay when the lease expires, so a stopped

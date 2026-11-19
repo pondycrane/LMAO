@@ -1227,6 +1227,66 @@ SELECT round(quantile_cont(value, 0.10), 1) AS p10,
 FROM sensor_readings WHERE node_id = 'main bedroom' AND sensor_id = 2;
 ```
 
+**The appliance is a Levoit Classic 160** (`LUH-A251-WCA`, 2.5 L top-fill,
+ultrasonic cool mist, rated **17 W**, 100-190 mL/h across its dial).  It has
+**no humidistat, no auto mode and no app** — a mechanical mist dial and a
+low-water auto shut-off — so the socket's relay is the only way to hold a
+target at all; left to itself the unit runs until the tank empties and
+over-humidifies the room.  The dial is a mechanical potentiometer, so closing
+the relay resumes misting at whatever the dial is set to, with no button press
+[INFERENCE from the manual: no latching digital state].  Leave the dial at the
+setting you want the controller to run at.
+
+The meter confirms the load: with the relay closed the socket reads **16.1-16.4
+W at 121 V**, against the unit's 17 W rating — so a closed relay is genuinely
+running the humidifier, not just energising a standby circuit.  A reading near
+the socket's own 0.63 W standby means the appliance is off or unplugged.
+
+**The band is derived from the room's own data, not a comfort table.**  Over
+14 days of RoboDog home reports (2026-11-04..11-19, n=8873, no humidifier):
+
+| Statistic | RH | Dew point at 26 °C |
+|---|---|---|
+| p10 | 35.1 % | 9.4 °C |
+| median | 37.4 % | 10.3 °C |
+| p75 | 39.4 % | 11.1 °C |
+| p95 | 42.6 % | 12.3 °C |
+| max | 46.3 % | 13.6 °C |
+
+So `--low 35` is the room's **dry decile** (act only on its own dry tail: it
+sits below 35 % for 7.9 % of the time, in 27 spells over 14 days, the longest
+7.4 h) and `--high 40` is its **upper quartile** rounded up — the level the
+room reaches on a good day.  The ceiling is also physical: 40 % at the room's
+usual 26 °C is dew point 11.4 °C, under the 12.8 °C mould line, while 45 % is
+13.1 °C and 55 % is 16.3 °C.  The old 45/55 band was a comfort default
+(EPA 30-50 %): unreachable here (the room never exceeded 46.3 %, so OFF at
+55 % never fired and the humidifier just duty-cycled against the run cap until
+the daily budget was spent) and unsafe at the top.
+
+`max_on_s` follows from a **measured** run of this appliance in this room, not
+a spec sheet: relay closed at 04:52Z with the Classic 160 plugged in, RH went
+**38.5 → 40.6 % in 18 min** (one sample per minute, n=18, monotonic), a slope
+of **+6.5 %/h**.  Crossing the 5-point band therefore takes ~46 min, so the 2 h
+cap is 2.6x the crossing time — a cap, not a limit that bites in normal
+operation.  `max_daily_on_s` (5 h) would be 32 points of rise, which is far more
+than the band needs; it exists as a runaway guard.
+
+The rate is **dial-dependent** (the unit is rated 100-190 mL/h, a 1.9x spread),
+so it is a property of the dial position, not the appliance: an earlier run at
+a lower setting gave ~3 %/h.  If the dial moves, re-measure rather than trusting
+this figure.  The 60 s poll bounds overshoot to ~0.1 point per tick, so the
+`--high` edge is honoured regardless of the rate.
+
+Re-derive it when the season turns (the query API is on `iot-query:8080`,
+reachable with `kubectl port-forward`):
+
+```sql
+SELECT round(quantile_cont(value, 0.10), 1) AS p10,
+       round(quantile_cont(value, 0.50), 1) AS p50,
+       round(quantile_cont(value, 0.75), 1) AS p75
+FROM sensor_readings WHERE node_id = 'main bedroom' AND sensor_id = 2;
+```
+
 Control law (`lmao_socket_humidifier/control.py`, pure and unit-tested): ON at
 `<= --low` (35 %), OFF at `>= --high` (40 %), minimum ON/OFF runs (60/120 s),
 a continuous-run cap (2 h) with a cooldown (10 min), a daily budget
