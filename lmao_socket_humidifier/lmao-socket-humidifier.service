@@ -9,9 +9,20 @@ WorkingDirectory=%h/LMAO
 # Host Python (RNS + protobuf from the repo's requirements); the client modules
 # are imported straight from the checkout, so no build step is needed here.
 Environment=PYTHONPATH=%h/LMAO:%h/LMAO/robodog_home_client
+# Default before the env file so an unset HF_SOCKET still names a host.
+Environment=HF_SOCKET=humidifier.local
 EnvironmentFile=%h/.config/lmao/humidifier.env
+# HF_SOCKET/HF_STATE_FILE come from the EnvironmentFile so the host can pin a
+# fallback address (mDNS names fail transiently) without editing this unit.
+# State persistence keeps the daily budget and a cooldown across restarts: a
+# crash loop must not reset the runaway guards.
+Environment=HF_STATE_FILE=%h/.local/state/lmao-humidifier/state.json
 ExecStart=/usr/bin/python3 %h/LMAO/lmao_socket_humidifier/controller.py \
-    --env-node "main bedroom" --socket humidifier.local
+    --env-node "main bedroom" --socket ${HF_SOCKET} \
+    --state-file ${HF_STATE_FILE}
+# SIGTERM opens the relay before exit (the controller handles it), so a
+# restart does not leave the humidifier running for the rest of the lease.
+KillSignal=SIGTERM
 Restart=always
 RestartSec=10
 

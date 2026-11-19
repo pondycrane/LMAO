@@ -140,6 +140,7 @@ fi
 # + the RTReticulum wrapper. Single canonical copy — no per-tree duplication.
 cp -r "$APP/../../../firmware_common/lma_common" "$DEST/components/lma_common"
 cp -r "$APP/../../../firmware_common/rtreticulum" "$DEST/components/rtreticulum"
+cp -r "$APP/../../../firmware_common/lma_led" "$DEST/components/lma_led"
 cp "$APP/CMakeLists.txt" "$APP/sdkconfig.defaults" "$APP/partitions.csv" "$DEST/"
 echo "app staged in $DEST (mode=$MODE plant=$PLANT target=$TARGET)"
 

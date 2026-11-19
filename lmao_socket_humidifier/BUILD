@@ -6,6 +6,7 @@ load("//robodog_client:firmware_tools.bzl", "firmware_tool")
 #
 #   bazel run //lmao_socket_humidifier:controller -- \
 #       --env-node "main bedroom" --socket humidifier.local
+#   bazel run //lmao_socket_humidifier:deploy        # K8s controller
 #   bazel run //lmao_socket_humidifier:build_firmware
 #   bazel run //lmao_socket_humidifier:flash_firmware -- --port /dev/ttyUSB0 ...
 #
@@ -108,6 +109,18 @@ py_test(
         "@lmao_pip//pytest",
     ],
     tags = ["unit"],
+)
+
+# ── Cluster deploy (build image + push + kubectl apply + rollout) ─────
+# Same function install_all --include-services calls; this is the standalone
+# entry point.  Manual: it needs docker, kubectl and the host secrets.
+py_binary(
+    name = "deploy",
+    srcs = ["deploy.py"],
+    main = "deploy.py",
+    tags = ["manual"],
+    visibility = ["//visibility:public"],
+    deps = ["//tools:install_services_lib"],
 )
 
 # ── Firmware build / flash (manual — Docker ESP-IDF, device-attached) ──

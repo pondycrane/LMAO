@@ -1018,7 +1018,8 @@ See [`robodog_home_client/README.md`](robodog_home_client/README.md).
 A closed loop over the two contracts above: the **RoboDog home node** reports
 the room's humidity to the server, and an **M5Stack Atom Socket** (Atom Lite
 inside) switches the humidifier's mains plug.  Nothing runs on the socket but
-the actuator; the decision law lives on the host.
+the actuator; the decision law runs in the cluster (or on a host, §"Two ways
+to run it").
 
 **The humidity input is the RoboDog home node, never the socket.**  The board
 reads its SHTC3 and sends `LMAOEnvelope{SensorReport}` (readings 3 = °C,
@@ -1034,7 +1035,7 @@ telemetry only, and no part of the control decision reads it.
 RoboDog home (SHTC3) ──SensorReport{node_id="main bedroom"}──▶ lmao-server
                                                                ENV_HISTORY[node]
 humidifier controller ──HistoryRequest{node_id="main bedroom"}──▶  │
-   hysteresis + safety   ◀──────────ChartBundle{hum}───────────────┘
+ dew hysteresis + safety ◀──────────ChartBundle{hum}───────────────┘
         │
         └──HTTP POST /on?lease=N | /off──▶ Atom Socket (relay G23)
 ```
@@ -1049,10 +1050,19 @@ room.
 
 | Endpoint | Effect |
 |---|---|
-| `GET /status` | relay/lease/uptime + optional `voltage_v`, `current_a`, `power_w`, `energy_pulses`, `meter_fresh` |
+| `GET /status` | relay/lease/uptime + optional `voltage_v`, `current_a`, `power_w`, `energy_pulses`, `meter_fresh`, `led` |
 | `POST /on?lease=SECS` | close the relay for `SECS` (default 300, clamped to 3600) |
 | `POST /off` | open the relay now |
 | `GET /healthz` | `ok` |
+
+**The RGB LED is the relay indicator.**  The Atom Lite's single SK6812 on
+GPIO27 is driven from `relay_write()` — the one place the GPIO changes — so the
+light cannot disagree with the relay: **red while closed** (mains live), **dark
+while open**.  It is dark at boot (the relay boots open) and follows every
+lease grant and expiry; a socket whose RMT channel fails to initialise still
+controls the relay, it just shows no light.  `/status` reports the commanded
+colour as `led`.  The writer is the shared `firmware_common/lma_led/` component
+(also used by the Sprout's status LED), not a second copy.
 
 Commands need the NVS-provisioned token (`X-Auth-Token` or `?token=`); a
 socket with no token **refuses commands** (fails closed) and boots with the
@@ -1103,6 +1113,16 @@ bazel run //lmao_socket_humidifier:controller -- \
 bazel run //lmao_socket_humidifier:controller -- --once --json  # one cycle, bench check
 ```
 
+`--socket` takes a **comma-separated fallback list** (`humidifier.local,
+192.168.50.22`).  mDNS resolution through nss-mdns fails transiently on the
+controller host — observed as `POST /off failed: Name or service not known`
+while the socket was up — so a pinned address keeps the relay controllable.
+Only transport failures fall through; an HTTP answer (including a 403) is
+authoritative and is never retried against the next host.  The answering host
+becomes the sticky first choice.  The systemd unit passes `${HF_SOCKET}` from
+`~/.config/lmao/humidifier.env`, so the host's pinned address stays out of the
+repo.
+
 **The appliance is a Levoit Classic 160** (`LUH-A251-WCA`, 2.5 L top-fill,
 ultrasonic cool mist, rated **17 W**, 100-190 mL/h across its dial).  It has
 **no humidistat, no auto mode and no app** — a mechanical mist dial and a
@@ -1118,63 +1138,113 @@ W at 121 V**, against the unit's 17 W rating — so a closed relay is genuinely
 running the humidifier, not just energising a standby circuit.  A reading near
 the socket's own 0.63 W standby means the appliance is off or unplugged.
 
-**The band is derived from the room's own data, not a comfort table.**  Over
-14 days of RoboDog home reports (2026-11-04..11-19, n=8873, no humidifier):
+**The law controls dew point, not relative humidity.**  RH is a ratio: at
+fixed absolute moisture it moves 2-3 points for every degree the thermostat
+swings, so a 5-point RH band duty-cycles the appliance on the *heater's*
+schedule instead of on dryness.  Over 14 days of RoboDog home reports
+(2026-11-05..11-19, n=8615 paired minutes, no humidifier):
 
-| Statistic | RH | Dew point at 26 °C |
+| Statistic | RH | Dew point |
 |---|---|---|
-| p10 | 35.1 % | 9.4 °C |
-| median | 37.4 % | 10.3 °C |
-| p75 | 39.4 % | 11.1 °C |
-| p95 | 42.6 % | 12.3 °C |
-| max | 46.3 % | 13.6 °C |
+| p10 | 35.0 % | 6.8 °C |
+| p25 | 35.9 % | 7.5 °C |
+| median | 37.1 % | 8.6 °C |
+| p75 | 38.6 % | 9.6 °C |
+| p90 | 40.1 % | 10.8 °C |
 
-So `--low 35` is the room's **dry decile** (act only on its own dry tail: it
-sits below 35 % for 7.9 % of the time, in 27 spells over 14 days, the longest
-7.4 h) and `--high 40` is its **upper quartile** rounded up — the level the
-room reaches on a good day.  The ceiling is also physical: 40 % at the room's
-usual 26 °C is dew point 11.4 °C, under the 12.8 °C mould line, while 45 % is
-13.1 °C and 55 % is 16.3 °C.  The old 45/55 band was a comfort default
-(EPA 30-50 %): unreachable here (the room never exceeded 46.3 %, so OFF at
-55 % never fired and the humidifier just duty-cycled against the run cap until
-the daily budget was spent) and unsafe at the top.
+(T 21.5-33.6 °C, mean 24.3 °C; corr(T, RH) = -0.53.)  The **band comes from
+the comfort target, not from that history**: 40-50 % RH across the room's
+swing.  The dew point must clear 40 % RH even at the warmest temperature the
+room reaches (26.1 °C in the last day), so `--high-dew 11.5` — which holds
+40.2 % at 26.1 °C, 45.0 % at 24.2 °C and 49.5 % at 22.6 °C, and stays under
+the 12 °C winter window-condensation line.  `--low-dew 7.5` is the restart
+floor (34.6 % RH at 24.2 °C; 4 °C hysteresis).
+
+The table above is *evidence that dew point is the right variable*, not a
+setpoint source: the room's own p10/p75 (6.8/9.6 °C) is the room **without**
+humidification, so adopting it would enshrine the chronic dryness as the
+target — the failure mode where 34 % RH reads "in band" and the appliance
+never runs.  Do not convert an RH threshold at one temperature either: RH and
+dew point are anti-correlated here (r = -0.53), because a warm room reads a
+low RH while holding *more* moisture.  `--rh-ceiling 60` remains a physical
+backstop: at 11.5 °C dew a room cooled below ~19.5 °C reaches 60 % RH, which
+is condensation on windows and walls, so it is not humidified further.
 
 `max_on_s` follows from a **measured** run of this appliance in this room, not
-a spec sheet: relay closed at 04:52Z with the Classic 160 plugged in, RH went
-**38.5 → 40.6 % in 18 min** (one sample per minute, n=18, monotonic), a slope
-of **+6.5 %/h**.  Crossing the 5-point band therefore takes ~46 min, so the 2 h
-cap is 2.6x the crossing time — a cap, not a limit that bites in normal
-operation.  `max_daily_on_s` (5 h) would be 32 points of rise, which is far more
-than the band needs; it exists as a runaway guard.
+a spec sheet: relay closed with the Classic 160 plugged in, RH went 38.2 ->
+40.6 % in 32 min at ~23.6 °C, i.e. dew point 8.6 -> 9.5 °C, a slope of
+**+1.7 °C dew/h**.  Crossing the 4 °C band therefore takes ~2.4 h, so the
+3 h cap is 1.25x the crossing time — a cap, not a limit that bites.  At the
+lower dial (~3 %/h RH, ~+0.55 °C dew/h) a crossing needs ~7.3 h, so the cap
+splits it into three runs with the 10 min cooldown.
 
-The rate is **dial-dependent** (the unit is rated 100-190 mL/h, a 1.9x spread),
-so it is a property of the dial position, not the appliance: an earlier run at
-a lower setting gave ~3 %/h.  If the dial moves, re-measure rather than trusting
-this figure.  The 60 s poll bounds overshoot to ~0.1 point per tick, so the
-`--high` edge is honoured regardless of the rate.
+`max_daily_on_s` is **not** the dry-spell duration (0.57 h/day below the low
+edge) — it is the duty cycle needed to hold the band.  The room loses moisture
+to ventilation at **0.5 °C dew/h** (median falling drift over the 14 days;
+0.7 °C/h at its p10) and the appliance adds a net +1.7 °C/h, so the ON
+fraction is `L/(L+G)` = 23-29 %, i.e. **5.5-7 h/day** (one cycle takes
+4/0.5 + 4/1.7 = 10.4 h, so ~2.3 cycles a day), plus the ~2.4 h ramp from the
+dry floor to the ceiling on the first run of a dry day — **8-9.5 h**.  The
+10 h budget covers that and still bounds a pathological day; the 2.5 L tank
+covers 10 h at the unit's 190 mL/h maximum (1.9 L).  The 60 s poll bounds
+overshoot to ~0.05 °C dew per tick.
 
-Re-derive it when the season turns (the query API is on `iot-query:8080`,
-reachable with `kubectl port-forward`):
+**Tuning.**  The band is set in `k8s/humidifier.yaml` (`HF_LOW_DEW` /
+`HF_HIGH_DEW`), not in code: the controller reads them as defaults.  The
+ceiling is bounded by physics, not comfort — 11.5 °C dew is under the 12 °C
+winter window-condensation line and far under the 12.8 °C mould line.  A
+moister room means a higher `HF_HIGH_DEW`, which raises the duty cycle, so
+raise `HF_MAX_DAILY_ON_H` with it (the tank holds 13 h at 190 mL/h).
+
+Re-derive the band when the season turns (the query API is on
+`iot-query:8080`, reachable with `kubectl port-forward`):
 
 ```sql
-SELECT round(quantile_cont(value, 0.10), 1) AS p10,
-       round(quantile_cont(value, 0.50), 1) AS p50,
-       round(quantile_cont(value, 0.75), 1) AS p75
-FROM sensor_readings WHERE node_id = 'main bedroom' AND sensor_id = 2;
+WITH p AS (
+  SELECT timestamp_ms,
+         max(CASE WHEN sensor_id = 3 THEN value END) AS t,
+         max(CASE WHEN sensor_id = 2 THEN value END) AS rh
+  FROM sensor_readings WHERE node_id = 'main bedroom' GROUP BY timestamp_ms
+), g AS (
+  SELECT 243.12 * (ln(rh / 100.0) + 17.62 * t / (243.12 + t))
+         / (17.62 - (ln(rh / 100.0) + 17.62 * t / (243.12 + t))) AS dew
+  FROM p WHERE t IS NOT NULL AND rh IS NOT NULL
+)
+SELECT round(quantile_cont(dew, 0.10), 2) AS p10,
+       round(quantile_cont(dew, 0.50), 2) AS p50,
+       round(quantile_cont(dew, 0.75), 2) AS p75
+FROM g;
 ```
 
 Control law (`lmao_socket_humidifier/control.py`, pure and unit-tested): ON at
-`<= --low` (35 %), OFF at `>= --high` (40 %), minimum ON/OFF runs (60/120 s),
-a continuous-run cap (2 h) with a cooldown (10 min), a daily budget
-(5 h), and **fail-safe OFF** when the reading is missing, implausible, or
-older than `--stale-s` (900 s).  A failed server read is not fatal — it is
-missing data, so the humidifier turns off rather than running on a frozen
-reading.  The controller's own `lxmf/delivery` identity lives at
-`~/.local/share/lmao_home_client/lxmf` (the home client's store); approve it
-once as a contact (§7b).
+`<= --low-dew` (7.5 °C), OFF at `>= --high-dew` (11.5 °C), hard OFF at
+`--rh-ceiling` (60 %), minimum ON/OFF runs (60/120 s), a continuous-run cap
+(3 h) with a cooldown (10 min), a daily budget (10 h), and **fail-safe OFF**
+when the reading is missing, implausible, or older than `--stale-s` (900 s).
+A failed server read is not fatal — it is missing data, so the humidifier
+turns off rather than running on a frozen reading.
 
-Keep it running as a user service (the unit ships in the repo; the token and
-socket live in `~/.config/lmao/humidifier.env`, mode 0600):
+**Two ways to run it, never both** (two writers would both renew leases and
+write state).  In the cluster, on tp4 with `hostNetwork` so Reticulum TCP is
+`localhost:4246` and the socket is on the LAN:
+
+```bash
+bazel run //lmao_socket_humidifier:deploy   # image -> registry -> K8s -> rollout
+kubectl logs deployment/humidifier-controller -f
+```
+
+The deploy builds `Dockerfile.humidifier` (pure-Python, 253 MB, no compiler),
+pushes it, creates the token + identity Secrets, applies `k8s/humidifier.yaml`
+(`Recreate`, one replica), waits for the first logged decision, and **stops
+and disables the host systemd unit**.  The identity Secret is the same `lxmf/delivery` key
+the host controller used, so the server's contact book already has it
+approved; an initContainer copies it onto the state volume because a Secret
+mount is read-only while the LXMF router writes its storage.  `HF_STATE_FILE`
+on the `humidifier-state` PVC persists the daily budget, cooldown and run
+timers across restarts (a crash loop must not reset the guards).
+
+Without a cluster, the host unit is the alternative (the token and socket live
+in `~/.config/lmao/humidifier.env`, mode 0600):
 
 ```bash
 cp lmao_socket_humidifier/lmao-socket-humidifier.service \
@@ -1183,6 +1253,10 @@ systemctl --user daemon-reload && \
     systemctl --user enable --now lmao-socket-humidifier
 journalctl --user -u lmao-socket-humidifier -f
 ```
+
+The unit also sets `HF_STATE_FILE`, so the guards survive a restart; on
+SIGTERM the controller opens the relay before exiting, so a rollout does not
+leave the humidifier running for the rest of the lease.
 
 ### 8. Docker Image
 

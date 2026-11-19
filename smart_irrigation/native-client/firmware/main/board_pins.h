@@ -28,10 +28,12 @@
 #define BOARD_PUMP_GPIO          2
 #define BOARD_BTN_GPIO           41
 #define BOARD_LED_GPIO           35
+#define BOARD_LED_COUNT          4
 #else
 #define BOARD_MOISTURE_ADC1_CH   ADC1_CHANNEL_4   // GPIO32
 #define BOARD_MOISTURE_GPIO      32
 #define BOARD_PUMP_GPIO          26
 #define BOARD_BTN_GPIO           39
 #define BOARD_LED_GPIO           27
+#define BOARD_LED_COUNT          1
 #endif

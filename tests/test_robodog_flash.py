@@ -106,7 +106,7 @@ def _fake_workspace(tmp_path, *, secrets=False):
     if secrets:
         (app / "main").mkdir()
         (app / "main" / "local_secrets.h").write_text(
-            '#define RD_WIFI_SSID_DEFAULT   "Hankerker"\n'
+            '#define RD_WIFI_SSID_DEFAULT   "FixtureSSID"\n'
             '#define RD_WIFI_PASS_DEFAULT   "secret"\n'
             '#define RD_SERVER_HOST_DEFAULT "tp4"\n'
         )

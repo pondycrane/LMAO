@@ -4,6 +4,7 @@
  * Hardware (M5Stack Atom Socket K055, Atom Lite / ESP32-PICO-D4 inside):
  *   relay      -> GPIO23, active HIGH (relay closed = mains on)
  *   HLW8032 RX -> GPIO22, UART2 @ 4800 8E1 (metering chip transmits only)
+ *   RGB LED    -> GPIO27, single SK6812 (relay ON/OFF indicator)
  *
  * The factory firmware's pin facts come from the M5Stack driver
  * (M5Atom/examples/ATOM_BASE/ATOM_Socket/AtomSocket.cpp) and the product
@@ -24,6 +25,15 @@
 #define HF_METER_UART UART_NUM_2
 #define HF_METER_RX_PIN GPIO_NUM_22
 #define HF_METER_BAUD 4800
+
+/* ---- relay indicator ----
+ * One SK6812 pixel on the Atom Lite's GPIO27.  Driven from relay_write(), so
+ * the LED is a hardware-visible copy of the GPIO state rather than a guess:
+ * lit red = relay closed (mains live), dark = relay open.  The factory sketch
+ * uses the same pin and the same red/amber semantics. */
+#define HF_LED_PIN GPIO_NUM_27
+#define HF_LED_PIXELS 1
+#define HF_LED_RMT_CHANNEL 0
 
 /* ---- HTTP control API ---- */
 #ifndef HF_HTTP_PORT

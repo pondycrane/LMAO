@@ -145,8 +145,22 @@ mains actuator, driven by `lmao_socket_humidifier/controller.py` over a leased
 HTTP API (README §7f).  The appliance is a Levoit Classic 160 (`LUH-A251-WCA`,
 2.5 L, ultrasonic cool mist, rated 17 W): **no humidistat, no auto mode, no
 app** — a mechanical mist dial — so the relay is the only way to hold a
-target.  Measured: 16.1-16.4 W at 121 V when closed, and +6.5 %/h RH in the
+target.  Measured: 16.1-16.4 W at 121 V when closed, and +1.7 °C dew/h in the
 main bedroom at the current dial setting (dial-dependent: 100-190 mL/h).
+
+The control law is **dew point**, not relative humidity: RH moves 2-3 points
+per degree of thermostat swing, so an RH band duty-cycles the appliance on the
+heater's schedule (corr(T, RH) = -0.53 here).  Band from the **comfort
+target, not the room's history**: 40-50 % RH across the 22.6-26.1 °C swing,
+i.e. ON at `<= 7.5 °C` dew (34.6 % RH at 24.2 °C), OFF at `>= 11.5 °C`
+(40.2 % at 26.1 °C, 45.0 % at 24.2 °C), hard OFF at `--rh-ceiling 60 %`, 3 h
+run cap, 10 h daily budget (ramp ~2.4 h + hold `L/(L+G)` ≈ 5.5-7 h/day).  The
+band is tuned in `k8s/humidifier.yaml` (`HF_LOW_DEW`/`HF_HIGH_DEW`).  Never
+derive it from the room's own dew-point deciles — that history is the room
+*without* humidification, so it encodes the dryness as the target.  Nor
+convert an RH threshold at one temperature (RH and dew are anti-correlated
+here).  The `iot-query` SQL in README §7f re-derives the *drift* numbers
+(loss `L`, duty cycle), not the setpoints.
 
 The humidity input is the **RoboDog home node's** `SensorReport` folded into
 the server's air history — never the socket, which has no humidity sensor.
@@ -167,9 +181,21 @@ relay open bytes still flow but no frame validates, so `meter_fresh` is false
 and the readings are a stale snapshot. Do not read an open-relay meter value
 as load.
 
-The controller runs as the `lmao-socket-humidifier.service` user unit and must
-stay running: the socket opens the relay when the lease expires, so a stopped
-controller fails the humidifier OFF (the intended deadman).
+The Atom Lite's RGB LED (GPIO27) is the relay indicator: red while the relay is
+closed, dark while open, driven from `relay_write()` so it cannot disagree with
+the GPIO.  The writer is the shared `firmware_common/lma_led/` component (the
+Sprout's status LED uses the same one — never add a second SK6812 writer).
+
+The controller runs **in the cluster** by default: `bazel run
+//lmao_socket_humidifier:deploy` builds `Dockerfile.humidifier`, pushes it,
+applies `k8s/humidifier.yaml` (one replica on tp4, hostNetwork so Reticulum
+TCP is `localhost:4246`) and stops+disables the host unit — two writers would
+both renew leases and write state.  The host
+`lmao-socket-humidifier.service` unit is the no-cluster alternative; never run
+both.  Either way the socket opens the relay when the lease expires, so a
+stopped controller fails the humidifier OFF (the intended deadman), and
+`HF_STATE_FILE` persists the daily budget/cooldown so a crash loop cannot
+reset the guards.
 
 ## Cardputer
 

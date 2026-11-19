@@ -36,6 +36,7 @@ Prerequisites:
 
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
 import subprocess
@@ -370,7 +371,9 @@ def _tag_and_push(result: DeviceResult, local_tag: str, registry_image: str) -> 
         return False
 
 
-def _force_restart_and_wait(result: "DeviceResult", deployment: str) -> bool:
+def _force_restart_and_wait(
+    result: "DeviceResult", deployment: str, timeout_s: int = 240
+) -> bool:
     """Force-roll a mutable-``:latest`` Deployment so the freshly built image
     is actually pulled and the rollout fully completes.
 
@@ -393,10 +396,10 @@ def _force_restart_and_wait(result: "DeviceResult", deployment: str) -> bool:
     print(f"  Forced rollout of {deployment} (fresh :latest image) ...")
     try:
         rp = subprocess.run(
-            ["kubectl", "rollout", "status", f"deployment/{deployment}", "--timeout=240s"],
+            ["kubectl", "rollout", "status", f"deployment/{deployment}", f"--timeout={timeout_s}s"],
             capture_output=True,
             text=True,
-            timeout=260,
+            timeout=timeout_s + 20,
         )
     except subprocess.SubprocessError as exc:
         result.fail(f"rollout status error: {exc}")
@@ -771,6 +774,324 @@ def install_iot_ingest_consumer(result: DeviceResult, repo_root: str | None = No
 
     result.ok(f"IoT Ingest Consumer deployed and Running ({registry_image})")
     print(f"  OK: IoT Ingest Consumer Running ({registry_image})")
+
+
+HUMIDIFIER_ENV_FILE = "~/.config/lmao/humidifier.env"
+HUMIDIFIER_IDENTITY_FILE = "~/.local/share/lmao_home_client/lxmf/identity"
+HUMIDIFIER_UNIT = "lmao-socket-humidifier.service"
+
+
+def _read_env_file(path: str) -> dict[str, str]:
+    """Parse a KEY=VALUE env file (systemd EnvironmentFile syntax, no quotes)."""
+    values: dict[str, str] = {}
+    try:
+        with open(os.path.expanduser(path), encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                values[key.strip()] = value.strip()
+    except OSError:
+        pass
+    return values
+
+
+def _apply_secret_from_yaml(result: DeviceResult, step: str, yaml_text: str) -> bool:
+    """Create/update a Secret from `kubectl create ... --dry-run=client -o yaml`."""
+    try:
+        proc = subprocess.run(
+            ["kubectl", "apply", "-f", "-"],
+            input=yaml_text,
+            capture_output=True,
+            text=True,
+        )
+    except (subprocess.SubprocessError, OSError) as exc:
+        result.fail(f"{step} failed: {exc}")
+        print(f"  FAIL: {step} — {exc}")
+        return False
+    if proc.returncode != 0:
+        err = "; ".join((proc.stderr or proc.stdout).strip().split("\n")[-3:])
+        result.fail(f"{step} failed: {err}")
+        print(f"  FAIL: {step} — {err}")
+        return False
+    print(f"  OK: {step} ({proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else 'applied'})")
+    return True
+
+
+def _ensure_humidifier_secrets(result: DeviceResult) -> bool:
+    """Provision the socket token and the approved LXMF identity as Secrets.
+
+    The identity is the SAME one the host controller used: the server's
+    contact book already has its `lxmf/delivery` hash approved, so moving the
+    controller into the cluster does not turn it into a pending contact that
+    the server drops.
+    """
+    env = _read_env_file(HUMIDIFIER_ENV_FILE)
+    token = env.get("HF_API_TOKEN", "")
+    if not token:
+        result.fail(
+            f"no HF_API_TOKEN in {HUMIDIFIER_ENV_FILE} — it is the socket's "
+            "NVS-provisioned token, not something to guess"
+        )
+        print(f"  FAIL: no HF_API_TOKEN in {HUMIDIFIER_ENV_FILE}")
+        return False
+
+    identity = os.path.expanduser(HUMIDIFIER_IDENTITY_FILE)
+    if not os.path.isfile(identity):
+        result.fail(
+            f"identity not found at {HUMIDIFIER_IDENTITY_FILE} — run the host "
+            "controller once (or --register-contact) so it exists and is approved"
+        )
+        print(f"  FAIL: identity not found at {HUMIDIFIER_IDENTITY_FILE}")
+        return False
+
+    try:
+        proc = subprocess.run(
+            [
+                "kubectl",
+                "create",
+                "secret",
+                "generic",
+                "humidifier-socket-token",
+                f"--from-literal=token={token}",
+                "--dry-run=client",
+                "-o",
+                "yaml",
+            ],
+            capture_output=True,
+            text=True,
+        )
+    except (subprocess.SubprocessError, OSError) as exc:
+        result.fail(f"secret render failed: {exc}")
+        print(f"  FAIL: {exc}")
+        return False
+    if proc.returncode != 0:
+        err = "; ".join(proc.stderr.strip().split("\n")[-3:])
+        result.fail(f"secret render failed: {err}")
+        print(f"  FAIL: {err}")
+        return False
+    if not _apply_secret_from_yaml(result, "socket-token Secret", proc.stdout):
+        return False
+
+    try:
+        proc = subprocess.run(
+            [
+                "kubectl",
+                "create",
+                "secret",
+                "generic",
+                "humidifier-identity",
+                f"--from-file=identity={identity}",
+                "--dry-run=client",
+                "-o",
+                "yaml",
+            ],
+            capture_output=True,
+            text=True,
+        )
+    except (subprocess.SubprocessError, OSError) as exc:
+        result.fail(f"identity secret render failed: {exc}")
+        print(f"  FAIL: {exc}")
+        return False
+    if proc.returncode != 0:
+        err = "; ".join(proc.stderr.strip().split("\n")[-3:])
+        result.fail(f"identity secret render failed: {err}")
+        print(f"  FAIL: {err}")
+        return False
+    return _apply_secret_from_yaml(result, "identity Secret", proc.stdout)
+
+
+def _stop_host_humidifier_unit() -> None:
+    """Stop the host systemd controller so the relay has exactly one writer."""
+    if shutil.which("systemctl") is None:
+        return
+    def _query(verb: str) -> str:
+        try:
+            proc = subprocess.run(
+                ["systemctl", "--user", verb, HUMIDIFIER_UNIT],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+        except (subprocess.SubprocessError, OSError):
+            return ""
+        return proc.stdout.strip()
+
+    # An inactive-but-ENABLED unit is the dangerous case: it is not a writer
+    # now, but the next login or reboot starts it and the relay gets two
+    # writers.  So disable unconditionally, not only when it is running.
+    was_active = _query("is-active") == "active"
+    was_enabled = _query("is-enabled") == "enabled"
+    if not was_active and not was_enabled:
+        return
+    print(f"  Stopping the host unit {HUMIDIFIER_UNIT} (one relay writer only) ...")
+    for verb in ("stop", "disable"):
+        with contextlib.suppress(subprocess.SubprocessError, OSError):
+            subprocess.run(
+                ["systemctl", "--user", verb, HUMIDIFIER_UNIT],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+    print(f"  OK: host unit stopped + disabled; re-enable with `systemctl --user enable --now {HUMIDIFIER_UNIT}`")
+
+
+def deploy_humidifier(result: DeviceResult, repo_root: str | None = None) -> None:
+    """Build, release, and deploy the humidifier controller into the cluster.
+
+    1. Create/update the ``humidifier-socket-token`` and
+       ``humidifier-identity`` Secrets (token from the host env file, identity
+       from the host client's approved ``lxmf/delivery`` key).
+    2. Build ``lmao-humidifier:latest`` from ``Dockerfile.humidifier`` and push
+       it to the local registry (the cluster cannot see the Pi's daemon).
+    3. Apply ``k8s/humidifier.yaml``, force a rollout so the mutable
+       ``:latest`` tag is actually pulled, and wait for it.
+    4. Verify a pod is Running and that it logged a control decision.
+    5. Stop the host systemd unit so exactly one process drives the relay.
+
+    Args:
+        result: A ``DeviceResult`` instance (from ``tools.install_all``).
+        repo_root: Repo root containing ``Dockerfile.humidifier`` and ``k8s/``.
+    """
+
+    print("\n--- Humidifier Controller: build + push + K8s deploy ---")
+
+    if repo_root is None:
+        repo_root = _find_repo_root()
+    if not repo_root:
+        result.fail("Cannot locate repo root (no Dockerfile found)")
+        print("  FAIL: Cannot locate repo root (no Dockerfile found)")
+        return
+
+    cluster_ok, cluster_msg = _check_k8s_cluster()
+    print(f"  K8s cluster: {cluster_msg}")
+    registry_ok, registry_msg = _check_registry()
+    print(f"  Local registry: {registry_msg}")
+
+    dockerfile = os.path.join(repo_root, "Dockerfile.humidifier")
+    if shutil.which("docker") is None:
+        result.skip("Docker not found on PATH — install with: apt-get install docker.io")
+        print("  SKIP: Docker not found on PATH")
+        return
+    if not os.path.isfile(dockerfile):
+        result.fail(f"Dockerfile not found: {dockerfile}")
+        print(f"  FAIL: Dockerfile not found: {dockerfile}")
+        return
+
+    try:
+        proc = subprocess.run(
+            ["docker", "build", "-f", dockerfile, "-t", "lmao-humidifier", "."],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+        )
+        if proc.returncode != 0:
+            err = "; ".join(proc.stderr.strip().split("\n")[-3:])
+            result.fail(f"Docker build failed: {err}")
+            print(f"  FAIL: Docker build failed — {err}")
+            return
+        print("  OK: Docker image built (lmao-humidifier:latest)")
+    except (subprocess.SubprocessError, OSError) as exc:
+        result.fail(f"Docker build error: {exc}")
+        print(f"  FAIL: {exc}")
+        return
+
+    registry_image = f"{DEFAULT_REGISTRY_HOST}:{DEFAULT_REGISTRY_PORT}/lmao-humidifier:latest"
+    if not registry_ok:
+        result.fail(f"Cannot release image: {registry_msg}")
+        print(f"  FAIL: {registry_msg}")
+        return
+    if not _tag_and_push(result, "lmao-humidifier:latest", registry_image):
+        return
+
+    if not cluster_ok:
+        print()
+        print("  ╔══ K8s cluster unreachable ═══════════════════════════════╗")
+        print(f"  ║  {cluster_msg:<56s}║")
+        print("  ║  Image is built and pushed. Deploy later with:         ║")
+        print("  ║    kubectl apply -f k8s/humidifier.yaml                ║")
+        print("  ╚═══════════════════════════════════════════════════════╝")
+        result.ok(
+            f"Docker image built and pushed to {registry_image}. "
+            "K8s cluster unreachable — run 'kubectl apply -f k8s/humidifier.yaml' "
+            "when it is back online."
+        )
+        return
+
+    if shutil.which("kubectl") is None:
+        result.skip("kubectl not found on PATH — install with: apt-get install kubectl")
+        print("  SKIP: kubectl not found on PATH")
+        return
+
+    if not _ensure_humidifier_secrets(result):
+        return
+
+    manifest_path = os.path.join(repo_root, "k8s", "humidifier.yaml")
+    if not os.path.isfile(manifest_path):
+        result.fail(f"Manifest not found: {manifest_path}")
+        print(f"  FAIL: Manifest not found: {manifest_path}")
+        return
+
+    proc = _run_kubectl_step(result, "apply", ["kubectl", "apply", "-f", manifest_path])
+    if proc is None:
+        return
+    # A Pi pulling a fresh image layer is slow (the registry->tp4 link ran at
+    # ~50 kB/s on one blob, so a full 400 MB image pull took >5 min); the
+    # default 240 s rollout wait timed out on the first deploy while the pod
+    # was still ContainerCreating.
+    if not _force_restart_and_wait(result, "humidifier-controller", timeout_s=900):
+        print("  Rollout did not complete — check: kubectl describe deployment/humidifier-controller")
+        return
+
+    proc = _run_kubectl_step(
+        result,
+        "get pods",
+        [
+            "kubectl",
+            "get",
+            "pods",
+            "-l",
+            "app=humidifier-controller",
+            "-o",
+            "jsonpath={.items[*].status.phase}",
+        ],
+    )
+    if proc is None:
+        return
+    phases = proc.stdout.split()
+    if "Running" not in phases:
+        result.fail(f"No humidifier-controller pod Running (phases: {phases})")
+        print(f"  FAIL: no humidifier-controller pod Running (phases: {phases})")
+        return
+
+    # A Running pod is not proof the loop works: wait for the first decision
+    # line, which only appears after a successful read of the room.
+    decision = None
+    deadline = time.time() + 150
+    while time.time() < deadline:
+        logs = subprocess.run(
+            ["kubectl", "logs", "deployment/humidifier-controller", "--tail=40"],
+            capture_output=True,
+            text=True,
+        )
+        for line in logs.stdout.splitlines():
+            if "-> relay" in line:
+                decision = line.strip()
+        if decision:
+            break
+        time.sleep(10)
+
+    _stop_host_humidifier_unit()
+
+    if not decision:
+        result.fail("pod is Running but logged no control decision within 150 s")
+        print("  FAIL: no control decision in the pod log")
+        print("  Inspect with: kubectl logs deployment/humidifier-controller")
+        return
+
+    print(f"  Decision: {decision}")
+    result.ok(f"Humidifier controller deployed and Running ({registry_image})")
 
 
 GCAL_TOKEN_DEFAULT = "~/.hermes/google_token.json"

@@ -27,6 +27,7 @@ rm -rf "$DEST/main" "$DEST/components" 2>/dev/null || true
 mkdir -p "$DEST/components"
 cp -r "$APP/main" "$DEST/main"
 cp -r "$APP/../../firmware_common/lma_wifi" "$DEST/components/lma_wifi"
+cp -r "$APP/../../firmware_common/lma_led" "$DEST/components/lma_led"
 cp "$APP/CMakeLists.txt" "$APP/sdkconfig.defaults" "$APP/partitions.csv" "$DEST/"
 echo "app staged in $DEST"
 

@@ -97,3 +97,28 @@ def test_unreachable_socket_raises_socket_error():
     client = SocketClient("127.0.0.1:1", TOKEN, timeout=1.0)
     with pytest.raises(SocketError):
         client.status()
+
+
+def test_transport_failure_falls_through_to_the_next_host(server):
+    # First entry cannot resolve (mDNS failure); the pinned address answers.
+    client = SocketClient(f"no-such-host.invalid,{server}", TOKEN, timeout=1.0)
+    assert client.set_on(60)["relay"] is True
+    assert STATE["commands"] == [("on", 60)]
+    # The answering host is now the sticky first choice.
+    assert client.base_urls[0] == f"http://{server}"
+    assert client.status()["relay"] is True
+
+
+def test_http_refusal_does_not_fall_through(server):
+    # A 403 is an authoritative answer from the socket, not a dead host: the
+    # fallback must not be tried (it would be the same socket).
+    client = SocketClient(f"{server},no-such-host.invalid", timeout=1.0)
+    with pytest.raises(SocketError, match="403"):
+        client.set_on(60)
+    assert STATE["commands"] == []
+
+
+def test_all_hosts_down_reports_every_host(server):
+    client = SocketClient("127.0.0.1:1,127.0.0.1:2", TOKEN, timeout=1.0)
+    with pytest.raises(SocketError, match="tried 2 hosts"):
+        client.status()

@@ -13,6 +13,7 @@ idf_component_register(
     INCLUDE_DIRS "."
     REQUIRES
         lma_common
+        lma_led
         rtreticulum
         driver
         esp_driver_uart

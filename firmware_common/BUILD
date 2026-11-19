@@ -6,6 +6,7 @@
 #   lma_common/lma_identity.*  NVS identity persistence + hex/delivery helpers
 #   lma_common/path_find.*    — on-demand RNS path request (ESP-IDF only)
 #   lma_wifi/wifi_helper.*    — WiFi STA connect + SNTP for every LAN client
+#   lma_led/led_rgb.*         — SK6812/WS2812 RGB LED writer (Atom Lite G27/G35)
 #   rtreticulum/CMakeLists.txt shared RNS lib wrapper for the ESP-IDF builds
 #
 # The pure-C++ units are host-testable here under Bazel (same code the device
@@ -65,6 +66,9 @@ filegroup(
         "lma_wifi/**/*.cpp",
         "lma_wifi/**/*.h",
         "lma_wifi/CMakeLists.txt",
+        "lma_led/**/*.cpp",
+        "lma_led/**/*.h",
+        "lma_led/CMakeLists.txt",
         "tcp_interface/**/*.cpp",
         "tcp_interface/**/*.h",
         "tcp_interface/CMakeLists.txt",

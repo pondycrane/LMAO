@@ -74,6 +74,7 @@ from lma_core.server_identity import ensure_delivery_destination_hash
 from tools.install_services import (
     _docker_psql,
     deploy_calendar_sync,
+    deploy_humidifier,
     deploy_lmao_server,
     detect_serial_devices,
     install_iot_ingest_consumer,
@@ -855,6 +856,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "-> cal_pics, hourly; only meaningful with --include-services).",
     )
     parser.add_argument(
+        "--skip-humidifier",
+        action="store_true",
+        help="Skip the humidifier controller deploy (Atom Socket relay driven by "
+        "the room's dew point; only meaningful with --include-services).",
+    )
+    parser.add_argument(
         "--skip-dest-hash",
         action="store_true",
         help="Skip injecting the server DEST_HASH into the Cardputer config "
@@ -1008,6 +1015,8 @@ def main(argv: list[str] | None = None) -> None:
     results.append(iot_result)
     cal_result = DeviceResult("Calendar Sync CronJob")
     results.append(cal_result)
+    hf_result = DeviceResult("Humidifier Controller")
+    results.append(hf_result)
 
     if args.include_services:
         try:
@@ -1040,6 +1049,13 @@ def main(argv: list[str] | None = None) -> None:
                 cal_result.skip("--skip-k8s (K8s services skipped)")
             else:
                 deploy_calendar_sync(cal_result)
+
+            if args.skip_humidifier:
+                hf_result.skip("--skip-humidifier")
+            elif args.skip_k8s:
+                hf_result.skip("--skip-k8s (K8s services skipped)")
+            else:
+                deploy_humidifier(hf_result)
         except Exception as exc:
             import traceback
 
@@ -1048,11 +1064,13 @@ def main(argv: list[str] | None = None) -> None:
             k8s_result.fail(f"K8s Services install error: {exc}")
             iot_result.fail(f"IoT Ingest Consumer install error: {exc}")
             cal_result.fail(f"Calendar Sync install error: {exc}")
+            hf_result.fail(f"Humidifier Controller install error: {exc}")
     else:
         pi_result.skip("--include-services not set")
         k8s_result.skip("--include-services not set")
         iot_result.skip("--include-services not set")
         cal_result.skip("--include-services not set")
+        hf_result.skip("--include-services not set")
 
     # ── Summary ──
     _print_summary(results)
