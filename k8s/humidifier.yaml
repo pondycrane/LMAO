@@ -1,0 +1,141 @@
+# Humidifier controller — dew-point law driving the Atom Socket relay
+#
+# One replica, `Recreate`: two controllers would both renew leases and write
+# state, and the relay must have exactly one writer.  The socket's lease is a
+# deadman (300 s), so a dead or evicted pod opens the relay on its own.
+#
+# Networking: the pod runs on tp4 with `hostNetwork`, which lets it reach the
+# LMAO server's Reticulum TCP interface at `localhost:4246` (that pod is
+# hostNetwork on the same node) without pinning any node address — the Turing
+# Pi nodes are DHCP (tools/check_node_addresses.py).  The Atom Socket is a LAN
+# appliance, addressed by its own IP with the mDNS name as a fallback; mDNS
+# does not resolve inside a container, so the IP comes first there.
+#
+# Identity: `humidifier-identity` holds the SAME `lxmf/delivery` identity the
+# host controller used, so the server's contact book already has it approved
+# and the reading is not dropped as a pending contact.  The deploy tool
+# creates it from ~/.local/share/lmao_home_client/lxmf/identity.  A Secret
+# mount is always read-only, but the LXMF router writes its storage (known
+# destinations, announces) into the identity dir, so an initContainer copies
+# the key onto the writable state volume and HF_IDENTITY_DIR points there.
+#
+# State: `humidifier-state` carries the persisted control state (daily budget,
+# cooldown, run timers) and Reticulum's known destinations across restarts.
+#
+# Usage:
+#   bazel run //lmao_socket_humidifier:deploy
+#   kubectl apply -f k8s/humidifier.yaml        # after the secrets exist
+#
+# The host systemd unit (lmao_socket_humidifier/lmao-socket-humidifier.service)
+# is the alternative for a machine with no cluster; running both would give the
+# relay two writers, so the deploy tool stops the unit.
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: humidifier-state
+  namespace: default
+  labels:
+    app: humidifier-controller
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 100Mi
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: humidifier-config
+  namespace: default
+  labels:
+    app: humidifier-controller
+data:
+  # SensorReport.node_id of the RoboDog home board in the room being controlled.
+  LMAO_ENV_NODE: "main bedroom"
+  # Same node as the lmao-server pod (hostNetwork), so the Reticulum TCP
+  # interface is local.
+  LMAO_SERVER_HOST: "localhost"
+  LMAO_SERVER_PORT: "4246"
+  # Pinned LAN address first, mDNS name as the fallback (see socket_client).
+  HF_SOCKET: "192.168.50.22,humidifier.local"
+  HF_INTERVAL: "60"
+  HF_STATE_FILE: "/state/state.json"
+  LMAO_HOME_CLIENT_STATE_PATH: "/state/rns"
+  HF_IDENTITY_DIR: "/state/identity"
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: humidifier-controller
+  namespace: default
+  labels:
+    app: humidifier-controller
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: humidifier-controller
+  template:
+    metadata:
+      labels:
+        app: humidifier-controller
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: tp4
+      hostNetwork: true
+      dnsPolicy: Default
+      terminationGracePeriodSeconds: 15
+      initContainers:
+        - name: seed-identity
+          image: 192.168.50.153:5000/lmao-humidifier:latest
+          imagePullPolicy: Always
+          command:
+            - sh
+            - -c
+            - mkdir -p /state/identity && cp /identity-ro/identity /state/identity/identity && chmod 600 /state/identity/identity
+          volumeMounts:
+            - name: state
+              mountPath: /state
+            - name: identity
+              mountPath: /identity-ro
+              readOnly: true
+      containers:
+        - name: controller
+          image: 192.168.50.153:5000/lmao-humidifier:latest
+          imagePullPolicy: Always
+          envFrom:
+            - configMapRef:
+                name: humidifier-config
+          env:
+            - name: HF_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: humidifier-socket-token
+                  key: token
+          volumeMounts:
+            - name: state
+              mountPath: /state
+            - name: identity
+              mountPath: /identity-ro
+              readOnly: true
+          resources:
+            requests:
+              cpu: 20m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+      volumes:
+        - name: state
+          persistentVolumeClaim:
+            claimName: humidifier-state
+        - name: identity
+          secret:
+            secretName: humidifier-identity
+            defaultMode: 0400

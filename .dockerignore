@@ -20,3 +20,6 @@ rnode_firmware/
 robodog_client/
 # Generated graphify output — not server code.
 graphify-out/
+# ESP-IDF build tree (firmware/.idf, ~124 MB) — the controller image runs the
+# host Python controller, not the socket firmware.
+lmao_socket_humidifier/firmware/

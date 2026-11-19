@@ -1007,16 +1007,17 @@ class TestMainWithoutServices:
         """Every device/service gets its own summary row, even when nothing
         is connected or no services were requested.
 
-        Seven rows: Cardputer, RNode (Heltec), Local Registry, Pi Server,
-        K8s Services, IoT Ingest Consumer, Calendar Sync CronJob.
+        Eight rows: Cardputer, RNode (Heltec), Local Registry, Pi Server,
+        K8s Services, IoT Ingest Consumer, Calendar Sync CronJob, and the
+        Humidifier Controller (deployed with --include-services).
         """
         with pytest.raises(SystemExit):
             install_all.main([])
         captured = capsys.readouterr().out
-        assert captured.count("[SKIP]") == 7
+        assert captured.count("[SKIP]") == 8
         for row in ("Cardputer", "RNode", "Local Registry", "Pi Server",
                     "K8s Services", "IoT Ingest Consumer",
-                    "Calendar Sync CronJob"):
+                    "Calendar Sync CronJob", "Humidifier Controller"):
             assert row in captured, f"summary is missing the {row} row"
 
 

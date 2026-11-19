@@ -1,16 +1,50 @@
-"""Hysteresis control law for a mains humidifier — pure, no I/O.
+"""Dew-point control law for a mains humidifier — pure, no I/O.
 
-The relay is the actuator of an appliance that can over-humidify a room, so
-every rule here is a *safety* rule first:
+**Why dew point, not relative humidity.**  RH is a ratio: at fixed absolute
+moisture it moves ~2-3 points for every degree the room's temperature swings.
+The room's own history shows it (14 days, 2026-11-05..11-19, n=8615 paired
+minutes): T 21.5-33.6 C (mean 24.3), RH p10 35.0 / p50 37.1 / p75 38.6, dew
+point p10 6.8 / p25 7.5 / p50 8.6 / p75 9.6 / p90 10.8 C, corr(T, RH) -0.53.  A 5-point RH band therefore
+duty-cycles the humidifier on the *heater's* schedule rather than on dryness:
+the relay closes whenever the room warms, and the appliance is asked to fight
+a transient it cannot win.  Dew point is the absolute moisture the room holds;
+it is what condensation and mould depend on, and it does not move when the
+thermostat does.
 
-* **Stale or missing humidity** -> OFF.  The controller reads the room through
+**The band.**  ``low``/``high`` are the room's own dew-point deciles, so the
+law acts only on its dry tail exactly as the RH law did: ``low`` = p10 (6.8 C,
+9.9 % of the time, 26 spells, 1.9/day, longest 5.7 h) and ``high`` = p75
+(9.6 C), which at the room's median 24.3 C is ~40 % RH — the same ceiling as
+before.  Do **not** derive ``low`` by converting the old 35 % RH at median
+temperature (that gives 7.8 C, 30 % of the time): RH and dew point are
+anti-correlated here (r = -0.53), because a warm room reads a low RH while
+holding *more* moisture.  Converting the RH threshold that way would triple
+the trigger rate and spend the daily budget.
+
+``rh_ceiling_pct`` is the physical backstop: a room cold enough that the
+ceiling dew point is 60 % RH (below ~18 C) must not be humidified further —
+that is condensation on windows and walls.
+
+Every rule is a *safety* rule first:
+
+* **Stale or missing room data** -> OFF.  The controller reads the room through
   the LMAO server; if the reporting node stops, the last value must not be
-  trusted forever (a humidifier that runs on a frozen 40 % reading never
-  stops).
+  trusted forever (a humidifier that runs on a frozen reading never stops).
+  A missing temperature is also missing data: without it there is no dew point.
 * **Continuous-run cap + cooldown** -> OFF after ``max_on_s``, and refuse to
   restart for ``cooldown_s``.  A stuck sensor that keeps reading dry must not
-  run the appliance all day.
-* **Daily budget** -> OFF once the day's accumulated ON time is spent.
+  run the appliance all day.  The cap is a runaway guard, not the normal stop:
+  the dew ceiling normally ends a run.  Crossing the 2.8 C band takes ~1.7 h
+  at the measured dial (+1.7 C dew/h) and ~5.3 h at the low dial (+0.55 C/h),
+  so 3 h covers the measured dial and splits the low-dial crossing into two
+  runs with a 10 min cooldown.
+* **Daily budget** -> OFF once the day's accumulated ON time is spent.  It is
+  a runaway guard sized from the physics, not a comfort cap: holding the band
+  needs a duty cycle of ``L/(L+G)`` where ``G`` is the measured net rise
+  (+1.7 C dew/h) and ``L`` the room's own moisture loss (0.5 C/h typical,
+  0.7 C/h at the p10 of its hourly drift), i.e. ~5.5-7 h/day.  ``8 h`` covers
+  that and still bounds a pathological day at one-third of it; the 2.5 L tank
+  covers 8 h at the unit's 190 mL/h maximum.
 * **Minimum on/off times** -> the relay is not cycled faster than it can
   tolerate.
 
@@ -20,45 +54,43 @@ socket itself is the deadman if this process dies.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
+
+# Magnus coefficients (WMO formulation) for water over the domestic range.
+_MAGNUS_A = 17.62
+_MAGNUS_B = 243.12
+
+
+def dew_point_c(temp_c: float, humidity_pct: float) -> float:
+    """Dew point in degrees Celsius from air temperature and RH."""
+    gamma = math.log(humidity_pct / 100.0) + _MAGNUS_A * temp_c / (_MAGNUS_B + temp_c)
+    return _MAGNUS_B * gamma / (_MAGNUS_A - gamma)
 
 
 @dataclass(frozen=True)
 class Setpoints:
-    """Control band + safety limits (all times in seconds).
+    """Control band + safety limits (temperatures in C, times in seconds)."""
 
-    The band is derived from the room's own history, not from a comfort table.
-    Over 14 days of RoboDog home reports (2026-11-04..11-19, n=8873) the room
-    ran: p10 35.1 %, median 37.4 %, p75 39.4 %, p95 42.6 %, max 46.3 %.  So
-    ``low`` is the dry decile (act only on the room's own dry tail) and
-    ``high`` is the upper quartile rounded up -- the level the room already
-    reaches on a good day.  40 % also keeps the dew point at ~11.4 C at the
-    room's usual 26 C, under the 12.8 C mould line; 45 % at 26 C is 13.1 C
-    (already over it), which is why the old 55 % ceiling was both unreachable
-    (the room never exceeded 46.3 %) and physically wrong.
-
-    ``max_on_s`` must be long enough to cross the band: the humidifier adds
-    ~3 %/h (measured over a 34 min ON run: 37.4 -> 39.0), so 5 points needs
-    ~1.7 h.  ``max_daily_on_s`` covers the deepest observed excursion
-    (26.2 % -> 40 % = 4.6 h at that rate).
-    """
-
-    low_pct: int = 35  # turn ON at/below this humidity
-    high_pct: int = 40  # turn OFF at/above this humidity
+    low_dew_c: float = 6.8  # turn ON at/below this dew point (room p10)
+    high_dew_c: float = 9.6  # turn OFF at/above this dew point (room p75)
+    rh_ceiling_pct: int = 60  # hard OFF: condensation risk in a cold room
     stale_s: int = 900  # no fresh sample for this long -> OFF
     min_on_s: int = 60  # shortest ON run (relay protection)
     min_off_s: int = 120  # shortest OFF run (relay protection)
-    max_on_s: int = 2 * 3600  # longest continuous ON run (band crossing)
+    max_on_s: int = 3 * 3600  # longest continuous ON run (runaway guard)
     cooldown_s: int = 600  # forced OFF after a max_on trip
-    max_daily_on_s: int = 5 * 3600
+    max_daily_on_s: int = 8 * 3600
     lease_s: int = 300  # lease granted to the socket on each ON cycle
 
     def validate(self) -> None:
-        if not (0 <= self.low_pct < self.high_pct <= 100):
+        if not (self.low_dew_c < self.high_dew_c):
             raise ValueError(
-                f"setpoints must satisfy 0 <= low < high <= 100 "
-                f"(low={self.low_pct}, high={self.high_pct})"
+                f"setpoints must satisfy low_dew_c < high_dew_c "
+                f"(low={self.low_dew_c}, high={self.high_dew_c})"
             )
+        if not (0 < self.rh_ceiling_pct <= 100):
+            raise ValueError(f"rh_ceiling_pct must be in (0, 100] (got {self.rh_ceiling_pct})")
         for name in (
             "stale_s",
             "min_on_s",
@@ -93,6 +125,36 @@ class ControlState:
         live = (now_s - self.on_since_s) if self.relay_on else 0.0
         return self.on_accum_s + live
 
+    # ---- persistence ----------------------------------------------------
+    #
+    # A controller restart must not reset the daily budget or a cooldown: a
+    # crash loop would otherwise run the appliance indefinitely on a dry
+    # reading.  The caller writes this dict after every decision.
+
+    def to_dict(self) -> dict:
+        return {
+            "relay_on": self.relay_on,
+            "on_since_s": self.on_since_s,
+            "off_since_s": self.off_since_s,
+            "on_accum_s": self.on_accum_s,
+            "day_index": self.day_index,
+            "cooldown_until_s": self.cooldown_until_s,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> ControlState:
+        """Rebuild state from ``to_dict`` output; unknown keys are ignored."""
+        if not isinstance(data, dict):
+            raise ValueError("state must be a JSON object")
+        return cls(
+            relay_on=bool(data.get("relay_on", False)),
+            on_since_s=float(data.get("on_since_s", 0.0)),
+            off_since_s=float(data.get("off_since_s", 0.0)),
+            on_accum_s=float(data.get("on_accum_s", 0.0)),
+            day_index=int(data.get("day_index", -1)),
+            cooldown_until_s=float(data.get("cooldown_until_s", 0.0)),
+        )
+
 
 @dataclass(frozen=True)
 class Decision:
@@ -101,9 +163,26 @@ class Decision:
     fail_safe: bool = False
 
 
+def reconcile(st: ControlState, socket_relay: bool, now_s: float) -> bool:
+    """Adopt the socket's actual relay into ``st`` at startup; True if changed.
+
+    The socket is authoritative, not the persisted state: its lease expired
+    while this process was down, so a persisted ``relay_on=True`` is history.
+    Counting the downtime as ON time would spend the daily budget on minutes
+    the appliance never ran, and leaving ``relay_on`` stale would make the
+    next cycle believe it is already humidifying.
+    """
+    changed = st.relay_on != socket_relay
+    st.relay_on = socket_relay
+    if socket_relay:
+        st.on_since_s = now_s
+    return changed
+
+
 def decide(
     sp: Setpoints,
     st: ControlState,
+    temp_c: float | None,
     humidity_pct: int | None,
     sample_age_s: float | None,
     now_s: float,
@@ -125,17 +204,22 @@ def decide(
             st.on_since_s = now_s
         st.relay_on = on
 
-    # ---- fail-safe: no trustworthy humidity -> OFF ----
-    if humidity_pct is None:
+    # ---- fail-safe: no trustworthy room data -> OFF ----
+    if humidity_pct is None or temp_c is None:
         switch(False)
-        return Decision(False, "no humidity data", fail_safe=True)
+        return Decision(False, "no room data", fail_safe=True)
     if not (0 <= humidity_pct <= 100):
         switch(False)
         return Decision(False, f"implausible humidity {humidity_pct}%", fail_safe=True)
+    if not (-40.0 <= temp_c <= 80.0):
+        switch(False)
+        return Decision(False, f"implausible temperature {temp_c:.1f}C", fail_safe=True)
     if sample_age_s is None or sample_age_s > sp.stale_s:
         switch(False)
         age = "unknown" if sample_age_s is None else f"{sample_age_s:.0f}s"
-        return Decision(False, f"stale humidity ({age})", fail_safe=True)
+        return Decision(False, f"stale room data ({age})", fail_safe=True)
+
+    dew = dew_point_c(temp_c, humidity_pct)
 
     # ---- safety limits ----
     if st.relay_on and (now_s - st.on_since_s) >= sp.max_on_s:
@@ -149,22 +233,27 @@ def decide(
         switch(False)
         return Decision(False, f"daily budget spent ({sp.max_daily_on_s}s)")
 
-    # ---- hysteresis ----
+    # ---- physical ceiling: never humidify a room near saturation ----
+    if humidity_pct >= sp.rh_ceiling_pct:
+        switch(False)
+        return Decision(False, f"room humid ({humidity_pct}% >= {sp.rh_ceiling_pct}%)")
+
+    # ---- hysteresis on absolute moisture ----
     if st.relay_on:
-        if humidity_pct >= sp.high_pct:
+        if dew >= sp.high_dew_c:
             if (now_s - st.on_since_s) >= sp.min_on_s:
                 switch(False)
-                return Decision(False, f"humidity {humidity_pct}% >= {sp.high_pct}%")
-            return Decision(True, f"min on time (humidity {humidity_pct}%)")
-        return Decision(True, f"humidifying ({humidity_pct}% < {sp.high_pct}%)")
+                return Decision(False, f"dew {dew:.1f}C >= {sp.high_dew_c:.1f}C")
+            return Decision(True, f"min on time (dew {dew:.1f}C)")
+        return Decision(True, f"humidifying (dew {dew:.1f}C < {sp.high_dew_c:.1f}C)")
 
-    if humidity_pct <= sp.low_pct:
+    if dew <= sp.low_dew_c:
         if (now_s - st.off_since_s) >= sp.min_off_s:
             switch(True)
-            return Decision(True, f"humidity {humidity_pct}% <= {sp.low_pct}%")
-        return Decision(False, f"min off time (humidity {humidity_pct}%)")
-    if humidity_pct >= sp.high_pct:
+            return Decision(True, f"dew {dew:.1f}C <= {sp.low_dew_c:.1f}C")
+        return Decision(False, f"min off time (dew {dew:.1f}C)")
+    if dew >= sp.high_dew_c:
         # Already OFF and at/above the ceiling: nothing to do, but do not
         # report this as "inside the band" (it is the band's top edge).
-        return Decision(False, f"humidity {humidity_pct}% >= {sp.high_pct}%")
-    return Decision(False, f"in band ({sp.low_pct}% < {humidity_pct}% < {sp.high_pct}%)")
+        return Decision(False, f"dew {dew:.1f}C >= {sp.high_dew_c:.1f}C")
+    return Decision(False, f"in band ({sp.low_dew_c:.1f}C < {dew:.1f}C < {sp.high_dew_c:.1f}C)")

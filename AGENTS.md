@@ -145,8 +145,17 @@ mains actuator, driven by `lmao_socket_humidifier/controller.py` over a leased
 HTTP API (README §7f).  The appliance is a Levoit Classic 160 (`LUH-A251-WCA`,
 2.5 L, ultrasonic cool mist, rated 17 W): **no humidistat, no auto mode, no
 app** — a mechanical mist dial — so the relay is the only way to hold a
-target.  Measured: 16.1-16.4 W at 121 V when closed, and +6.5 %/h RH in the
+target.  Measured: 16.1-16.4 W at 121 V when closed, and +1.7 °C dew/h in the
 main bedroom at the current dial setting (dial-dependent: 100-190 mL/h).
+
+The control law is **dew point**, not relative humidity: RH moves 2-3 points
+per degree of thermostat swing, so an RH band duty-cycles the appliance on the
+heater's schedule (corr(T, RH) = -0.53 here).  Band = the room's own dew-point
+p10/p75 over 14 days: ON at `<= 6.8 °C`, OFF at `>= 9.6 °C`, hard OFF at
+`--rh-ceiling 60 %`, 3 h run cap, 8 h daily budget (the duty cycle needed to
+hold the band is `L/(L+G)` ≈ 5.5-7 h/day).  Re-derive the band from the
+`iot-query` SQL in README §7f when the season turns; do not convert an RH
+threshold at one temperature — that is the mistake the law exists to avoid.
 
 The humidity input is the **RoboDog home node's** `SensorReport` folded into
 the server's air history — never the socket, which has no humidity sensor.
@@ -172,9 +181,16 @@ closed, dark while open, driven from `relay_write()` so it cannot disagree with
 the GPIO.  The writer is the shared `firmware_common/lma_led/` component (the
 Sprout's status LED uses the same one — never add a second SK6812 writer).
 
-The controller runs as the `lmao-socket-humidifier.service` user unit and must
-stay running: the socket opens the relay when the lease expires, so a stopped
-controller fails the humidifier OFF (the intended deadman).
+The controller runs **in the cluster** by default: `bazel run
+//lmao_socket_humidifier:deploy` builds `Dockerfile.humidifier`, pushes it,
+applies `k8s/humidifier.yaml` (one replica on tp4, hostNetwork so Reticulum
+TCP is `localhost:4246`) and stops+disables the host unit — two writers would
+both renew leases and write state.  The host
+`lmao-socket-humidifier.service` unit is the no-cluster alternative; never run
+both.  Either way the socket opens the relay when the lease expires, so a
+stopped controller fails the humidifier OFF (the intended deadman), and
+`HF_STATE_FILE` persists the daily budget/cooldown so a crash loop cannot
+reset the guards.
 
 ## Cardputer
 
