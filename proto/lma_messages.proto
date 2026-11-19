@@ -114,6 +114,12 @@ message HistoryRequest {
   uint32          count    = 1;   // last N samples (0 = full available window)
   uint64          since_ms = 2;   // only samples at/after this epoch ms
   repeated Series series   = 3;   // which series to include (empty = all)
+  // Optional: read THIS reporting node's air series instead of the requester's
+  // own (the server's default scoping).  A mesh with several env reporters
+  // (e.g. two RoboDog home panels) otherwise hands a passive reader whichever
+  // node reported last — the wrong room.  Matches the SensorReport.node_id the
+  // server keys EnvHistory on.  Empty = requester scoping (legacy behavior).
+  string          node_id  = 4;
 }
 
 // The series a HistoryRequest can select from (maps onto ChartBundle fields).

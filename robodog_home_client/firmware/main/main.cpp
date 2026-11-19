@@ -151,8 +151,8 @@ void app_main(void) {
         ESP_LOGE(TAG, "SHTC3 init failed — no readings will be reported");
     }
 
-    const bool wifi_ok = wifi_connect(s_cfg.ssid, s_cfg.pass,
-                                      RH_WIFI_CONNECT_TIMEOUT_S);
+    const bool wifi_ok = lma_wifi::connect(s_cfg.ssid, s_cfg.pass,
+                                           RH_WIFI_CONNECT_TIMEOUT_S);
     ESP_LOGI(TAG, "wifi %s", wifi_ok ? "up" : "FAILED (tcp layer retries)");
     ui::render(s_cfg.name, nullptr, false, false, wifi_ok ? "wifi up" : "no wifi");
 

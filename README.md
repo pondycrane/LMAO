@@ -168,7 +168,9 @@ fit; the **Sprout / Atom Lite** native client
 share a **single canonical protocol component**
 in `firmware_common/` (DRY — no per-tree copies): `lma_common` holds the
 `lma_encoder`/`lxmf_send`/`lma_chart`/`path_find`/`lma_identity` sources,
-`rtreticulum/` holds the RNS wrapper and `tcp_interface/` the Reticulum
+`lma_wifi/` the WiFi STA connect + SNTP helper every LAN client stages (the
+RoboDog home board and the humidifier Atom Socket), `rtreticulum/` holds the
+RNS wrapper and `tcp_interface/` the Reticulum
 `TCPClientInterface` (one source that compiles on POSIX hosts and under
 ESP-IDF, so the host interop harness and the board firmwares share it); each
 `build.sh` stages it into the targeted
@@ -960,7 +962,9 @@ The reply is scoped to the **requester's own** node by the `node_id` it
 reports — the buffer's own key — falling back to its announce display name and
 then the contact-book name; an unknown requester gets the newest reporting
 node.  Scoping deliberately does **not** use the contact-book display name, so
-an operator rename cannot make a board chart another node's series.
+an operator rename cannot make a board chart another node's series.  A request
+may also name the reporting node explicitly (`HistoryRequest.node_id`, e.g. a
+passive controller reading one room: §7f), which wins over requester scoping.
 `SproutHistory` is unchanged, so `SOIL` requests still get the soil chart.
 Contact names carry an owner (`operator` > `device` > `auto`): a device's own
 reported name replaces the `<type>-<last4>` placeholder, but never an
@@ -1008,6 +1012,109 @@ python3 robodog_client/capture.py --port /dev/ttyACM0 --reset --n 2 --describe
 ```
 
 See [`robodog_home_client/README.md`](robodog_home_client/README.md).
+
+### 7f. LMAO socket humidifier — Atom Socket actuator driven by room humidity
+
+A closed loop over the two contracts above: the **RoboDog home node** reports
+the room's humidity to the server, and an **M5Stack Atom Socket** (Atom Lite
+inside) switches the humidifier's mains plug.  Nothing runs on the socket but
+the actuator; the decision law lives on the host.
+
+**The humidity input is the RoboDog home node, never the socket.**  The board
+reads its SHTC3 and sends `LMAOEnvelope{SensorReport}` (readings 3 = °C,
+2 = %) to the server's `lxmf/delivery` destination over the Reticulum TCP
+interface, with `node_id` = its NVS `device_name` (`"main bedroom"`).  The
+server folds every report into `lma_core/env_history.py` **keyed by that
+`node_id`** (server-receive timestamps).  The controller then asks for that
+one node's series and gets `ChartBundle{hum}` back.  The Atom Socket has no
+humidity sensor and reports no air data; its HLW8032 is optional power
+telemetry only, and no part of the control decision reads it.
+
+```
+RoboDog home (SHTC3) ──SensorReport{node_id="main bedroom"}──▶ lmao-server
+                                                               ENV_HISTORY[node]
+humidifier controller ──HistoryRequest{node_id="main bedroom"}──▶  │
+   hysteresis + safety   ◀──────────ChartBundle{hum}───────────────┘
+        │
+        └──HTTP POST /on?lease=N | /off──▶ Atom Socket (relay G23)
+```
+
+A request that names an unknown node makes the server fall back to the
+**newest** reporter, so the controller refuses any reply whose
+`ChartBundle.node_id` is not the requested node's first 8 characters and
+treats it as missing data (fail-safe OFF) — a typo can never humidify another
+room.
+
+**Firmware** (`lmao_socket_humidifier/firmware/`, ESP-IDF, ESP32-PICO-D4, 4 MB):
+
+| Endpoint | Effect |
+|---|---|
+| `GET /status` | relay/lease/uptime + optional `voltage_v`, `current_a`, `power_w`, `energy_pulses`, `meter_fresh` |
+| `POST /on?lease=SECS` | close the relay for `SECS` (default 300, clamped to 3600) |
+| `POST /off` | open the relay now |
+| `GET /healthz` | `ok` |
+
+Commands need the NVS-provisioned token (`X-Auth-Token` or `?token=`); a
+socket with no token **refuses commands** (fails closed) and boots with the
+relay **open**.  The lease is a deadman: a controller that dies, loses WiFi,
+or is restarted without renewing leaves the humidifier running only until the
+lease expires.  Relay is GPIO23 (active HIGH), HLW8032 RX GPIO22 @ 4800 8E1
+(the M5Stack/ESPHome pin map), decoded with the M5Stack driver's scaling.
+Metering is **diagnostic only** and is never an input to the control decision:
+on this unit the chip's stream does not decode at 8E1 (bytes flow, no
+checksum-valid frame), so `meter_fresh` stays false and `voltage_v` reads 0
+while relay control works normally.  `/status` exposes the raw evidence
+(`uart_bytes`, `frames_ok`, `meter_rx_pin`, `first_raw`) so a dead meter link
+is distinguishable from an empty outlet.
+
+```bash
+# build (ESP-IDF Docker; stages into the gitignored firmware/.idf/)
+bazel run //lmao_socket_humidifier:build_firmware
+
+# flash + provision NVS.  --port is REQUIRED: /dev/ttyUSB* is shared with the
+# RNode, which must NEVER be flashed (AGENTS.md).  Nothing is compiled in.
+HF_API_TOKEN=$(openssl rand -hex 16) \
+LMAO_WIFI_SSID=... LMAO_WIFI_PASS=... \
+bazel run //lmao_socket_humidifier:flash_firmware -- --port /dev/ttyUSB0 \
+    --mdns-host humidifier --api-token "$HF_API_TOKEN"
+
+curl -s http://humidifier.local/status
+curl -s -X POST -H "X-Auth-Token: $HF_API_TOKEN" \
+     "http://humidifier.local/on?lease=60"      # bench: 60 s, then it opens
+```
+
+**Controller** (`lmao_socket_humidifier/controller.py`, host Python): reads the **home
+node's** humidity with `HistoryRequest.node_id` pinned (a second env reporter
+cannot hijack the reading — without the pin the server would scope to the
+requester, and the socket reports no air), applies the law, then renews or
+drops the socket lease.
+
+```bash
+bazel run //lmao_socket_humidifier:controller -- \
+    --env-node "main bedroom" --socket humidifier.local --token "$HF_API_TOKEN"
+bazel run //lmao_socket_humidifier:controller -- --once --json  # one cycle, bench check
+```
+
+Control law (`lmao_socket_humidifier/control.py`, pure and unit-tested): ON at
+`<= --low` (45 %), OFF at `>= --high` (55 %), minimum ON/OFF runs (60/120 s),
+a continuous-run cap (1800 s) with a cooldown (300 s), a daily budget
+(4 h), and **fail-safe OFF** when the reading is missing, implausible, or
+older than `--stale-s` (900 s).  A failed server read is not fatal — it is
+missing data, so the humidifier turns off rather than running on a frozen
+reading.  The controller's own `lxmf/delivery` identity lives at
+`~/.local/share/lmao_home_client/lxmf` (the home client's store); approve it
+once as a contact (§7b).
+
+Keep it running as a user service (the unit ships in the repo; the token and
+socket live in `~/.config/lmao/humidifier.env`, mode 0600):
+
+```bash
+cp lmao_socket_humidifier/lmao-socket-humidifier.service \
+    ~/.config/systemd/user/
+systemctl --user daemon-reload && \
+    systemctl --user enable --now lmao-socket-humidifier
+journalctl --user -u lmao-socket-humidifier -f
+```
 
 ### 8. Docker Image
 
@@ -1717,8 +1824,15 @@ The registry is configured via environment variables:
 │   ├── client.py                      # announce discovery + HistoryRequest → ChartBundle
 │   ├── config.py                      # RnsConfig(role="tcp-client"): one TCPClientInterface
 │   └── firmware/                      # ESP-IDF: SHTC3 report + own-history chart (ST7305)
-│       ├── main/                      # main.cpp, env_net, shtc3, ui, rd_chart (host-tested)
-│       └── build.sh / flash.sh        # Docker ESP-IDF build; host esptool + NVS provisioning
+│
+├── lmao_socket_humidifier/            # Atom Socket humidifier control (§7f)
+│   ├── control.py                     # hysteresis + safety law (pure, unit-tested)
+│   ├── socket_client.py               # Atom Socket leased HTTP API client
+│   ├── controller.py                  # poll server humidity → decide → renew/clear lease
+│   ├── lmao-socket-humidifier.service # systemd --user unit (controller host service)
+│   └── firmware/                      # ESP-IDF: relay G23 + HLW8032 G22 + leased HTTP API
+│       ├── main/                      # main.cpp, hlw8032, relay_lease (host-tested)
+│       └── build.sh / flash.sh        # Docker ESP-IDF build + flash; NVS provisioning
 │
 └── rnode_firmware/                    # Documentation only
     └── README.md                      # Step-by-step ESP32 RNode flashing guide

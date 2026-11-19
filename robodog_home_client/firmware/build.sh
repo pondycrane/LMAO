@@ -93,6 +93,7 @@ cp -r "$APP/main" "$DEST/main"
 # Shared protocol core (firmware_common/) + the RTReticulum wrapper, and the
 # LMAO-owned u8g2 components (same panel driver as the calendar firmware).
 cp -r "$APP/../../firmware_common/lma_common" "$DEST/components/lma_common"
+cp -r "$APP/../../firmware_common/lma_wifi" "$DEST/components/lma_wifi"
 cp -r "$APP/../../firmware_common/rtreticulum" "$DEST/components/rtreticulum"
 cp -r "$APP/../../firmware_common/tcp_interface" "$DEST/components/tcp_interface"
 cp -r "$ROBODOG/components/u8g2" "$DEST/components/u8g2"

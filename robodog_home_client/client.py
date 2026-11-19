@@ -58,11 +58,13 @@ SERVER_DISPLAY_NAME = "lmao-server"
 # ───────────────────────────── wire helpers ─────────────────────────────
 
 
-def build_history_request(seq=1, count=0, since_ms=0):
+def build_history_request(seq=1, count=0, since_ms=0, node_id=""):
     """Serialize an air-only ``LMAOEnvelope{ request.history }``.
 
     ``count`` keeps the last N samples per series (0 = full ring);
-    ``since_ms`` is a delta watermark (0 = everything).
+    ``since_ms`` is a delta watermark (0 = everything);
+    ``node_id`` reads that reporting node's series instead of the server's
+    requester scoping (empty = legacy behavior).
     """
     envelope = LMAOEnvelope()
     envelope.seq = seq
@@ -70,6 +72,8 @@ def build_history_request(seq=1, count=0, since_ms=0):
     history.count = int(count)
     history.since_ms = int(since_ms)
     history.series.extend([Series.AIR_TEMP, Series.AIR_HUMIDITY])
+    if node_id:
+        history.node_id = node_id
     return envelope.SerializeToString()
 
 
@@ -340,9 +344,11 @@ class HomeClient:
 
     # ---- request -------------------------------------------------------
 
-    def request_env(self, count=0, since_ms=0, timeout=None):
+    def request_env(self, count=0, since_ms=0, timeout=None, node_id=None):
         """Send one air-series request and wait for the ChartBundle.
 
+        ``node_id`` pins the reporting node whose series is returned; None
+        keeps the server's default (the requester's own node, else newest).
         Returns the chart summary dict, or None when the server does not
         answer (unapproved contact, no samples, or timeout).
         """
@@ -385,18 +391,20 @@ class HomeClient:
                 "delivery",
             ),
             content=build_history_request(
-                seq=self._seq, count=count, since_ms=since_ms
+                seq=self._seq, count=count, since_ms=since_ms,
+                node_id=node_id or "",
             ),
             title="p:Envelope",
             desired_method=LXMF.LXMessage.OPPORTUNISTIC,
         )
         self.router.handle_outbound(outbound)
         logger.info(
-            "Air-series request sent to %s (seq=%d, count=%d, since_ms=%d)",
+            "Air-series request sent to %s (seq=%d, count=%d, since_ms=%d, node=%s)",
             RNS.hexrep(dest_hash, delimit=False),
             self._seq,
             count,
             since_ms,
+            node_id or "<requester>",
         )
 
         if not self._chart_event.wait(timeout):
@@ -436,6 +444,13 @@ def _parse_args(argv=None):
         "--identity-dir",
         default=DEFAULT_IDENTITY_DIR,
         help=f"Client identity directory (default: {DEFAULT_IDENTITY_DIR})",
+    )
+    parser.add_argument(
+        "--node",
+        default=os.environ.get("LMAO_ENV_NODE"),
+        help="Read THIS reporting node's air series (SensorReport.node_id, "
+        "e.g. 'main bed') instead of the server's requester scoping — required "
+        "on a mesh with several env reporters",
     )
     parser.add_argument(
         "--count", type=int, default=0, help="Samples per series (0 = full ring)"
@@ -510,7 +525,9 @@ def main(argv=None):
     exit_code = 1
     try:
         while True:
-            summary = client.request_env(count=args.count, since_ms=args.since_ms)
+            summary = client.request_env(
+                count=args.count, since_ms=args.since_ms, node_id=args.node
+            )
             if summary is None:
                 exit_code = 1
             else:

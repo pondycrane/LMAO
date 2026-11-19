@@ -173,19 +173,60 @@ class TestAirOnlyHistoryRequest:
         assert list(chart.temp) == []
         assert list(chart.hum) == []
 
+    def test_explicit_node_id_wins_over_requester_scoping(self, server_instance):
+        """A passive reader (humidifier controller) names the room it wants.
+
+        The socket never reports air readings, so it has no EnvHistory ring of
+        its own; the request's node_id must select the RoboDog home node's
+        series instead of falling back to the newest reporter.
+        """
+        instance, fake_lxmf = server_instance
+        server.ENV_HISTORY.update(
+            _sensor_report(node_id="main bedroom", temp=20.0, humidity=40.0)
+        )
+        server.ENV_HISTORY.update(
+            _sensor_report(node_id="kitchen", temp=25.0, humidity=60.0)
+        )
+        server.REPORT_NAMES[REQUESTER_HASH] = "kitchen"
+        try:
+            envelope = _air_request(count=1)
+            envelope.request.history.node_id = "main bedroom"
+            instance._send_lxmf_reply(_source(REQUESTER_HASH), envelope)
+        finally:
+            server.REPORT_NAMES.clear()
+
+        chart = _replies(fake_lxmf, instance.router)[0].chart
+        assert chart.node_id == "main bed"
+        assert list(chart.temp) == [200]
+        assert list(chart.hum) == [40]
+
+    def test_unknown_explicit_node_id_falls_back_to_newest(self, server_instance):
+        """A typo'd room must not silence the reply — the buffer falls back."""
+        instance, fake_lxmf = server_instance
+        server.ENV_HISTORY.update(
+            _sensor_report(node_id="kitchen", temp=25.0, humidity=60.0)
+        )
+        envelope = _air_request(count=1)
+        envelope.request.history.node_id = "no such room"
+        instance._send_lxmf_reply(MagicMock(), envelope)
+
+        chart = _replies(fake_lxmf, instance.router)[0].chart
+        assert chart.node_id == "kitchen"[:8]
+        assert list(chart.hum) == [60]
+
     def test_mixed_request_falls_back_to_the_env_buffer(self, server_instance):
         """SOIL+AIR with no soil history answers with the air series."""
         instance, fake_lxmf = server_instance
         server.ENV_HISTORY.update(_sensor_report())
 
-        instance._send_lxmf_reply(
-            MagicMock(),
-            _air_request(series=(pb.Series.SOIL, pb.Series.AIR_TEMP)),
-        )
+        envelope = _air_request(series=(pb.Series.SOIL, pb.Series.AIR_TEMP))
+        envelope.request.history.node_id = AIR_NODE
+        instance._send_lxmf_reply(MagicMock(), envelope)
 
         replies = _replies(fake_lxmf, instance.router)
         assert len(replies) == 1
         chart = replies[0].chart
+        assert chart.node_id == AIR_NODE[:8]
         assert list(chart.temp) == [215]
         assert len(chart.soil) == 0
 

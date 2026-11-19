@@ -1,0 +1,19 @@
+[Unit]
+Description=LMAO socket humidifier (RoboDog home humidity -> Atom Socket relay)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/LMAO
+# Host Python (RNS + protobuf from the repo's requirements); the client modules
+# are imported straight from the checkout, so no build step is needed here.
+Environment=PYTHONPATH=%h/LMAO:%h/LMAO/robodog_home_client
+EnvironmentFile=%h/.config/lmao/humidifier.env
+ExecStart=/usr/bin/python3 %h/LMAO/lmao_socket_humidifier/controller.py \
+    --env-node "main bedroom" --socket humidifier.local
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target
