@@ -4,15 +4,17 @@ import pytest
 
 from lmao_socket_humidifier.control import ControlState, Setpoints, decide
 
+# The shipped band (data-derived: room p10..p75), so the tests exercise the
+# production configuration rather than an arbitrary one.
 SP = Setpoints(
-    low_pct=45,
-    high_pct=55,
+    low_pct=35,
+    high_pct=40,
     stale_s=900,
     min_on_s=60,
     min_off_s=120,
-    max_on_s=1800,
-    cooldown_s=300,
-    max_daily_on_s=4 * 3600,
+    max_on_s=2 * 3600,
+    cooldown_s=600,
+    max_daily_on_s=5 * 3600,
     lease_s=300,
 )
 
@@ -23,32 +25,42 @@ def cycle(st, hum, age, now, day=0, sp=SP):
 
 def test_dry_room_turns_on_after_min_off_time():
     st = ControlState()
-    assert cycle(st, 40, 5, 0).relay_on is False  # min_off not yet elapsed
-    d = cycle(st, 40, 5, 120)
+    assert cycle(st, 30, 5, 0).relay_on is False  # min_off not yet elapsed
+    d = cycle(st, 30, 5, 120)
     assert d.relay_on is True
-    assert "<= 45%" in d.reason
+    assert "<= 35%" in d.reason
 
 
 def test_hysteresis_holds_between_setpoints():
     st = ControlState(relay_on=True, on_since_s=0.0)
-    # 50 % is inside the band: stay ON.
-    assert cycle(st, 50, 5, 300).relay_on is True
-    # 55 %: OFF.
-    assert cycle(st, 55, 5, 400).relay_on is False
+    # 37 % is inside the band: stay ON.
+    assert cycle(st, 37, 5, 300).relay_on is True
+    # 40 %: OFF.
+    assert cycle(st, 40, 5, 400).relay_on is False
     assert st.on_accum_s == pytest.approx(400.0)
 
 
 def test_off_stays_off_inside_the_band():
     st = ControlState(relay_on=False, off_since_s=0.0)
-    assert cycle(st, 50, 5, 600).relay_on is False
+    assert cycle(st, 37, 5, 600).relay_on is False
+
+
+def test_off_at_the_top_edge_is_not_reported_as_in_band():
+    """An already-OFF relay at >= high must not log the misleading
+    "35% < 40% < 40%" comparison (40 is not inside the band)."""
+    st = ControlState(relay_on=False, off_since_s=0.0)
+    d = cycle(st, 40, 5, 600)
+    assert d.relay_on is False
+    assert "in band" not in d.reason
+    assert ">= 40%" in d.reason
 
 
 def test_min_on_time_delays_the_off_edge():
     st = ControlState(relay_on=True, on_since_s=1000.0)
-    d = cycle(st, 60, 5, 1030)
+    d = cycle(st, 40, 5, 1030)
     assert d.relay_on is True
     assert "min on" in d.reason
-    assert cycle(st, 60, 5, 1060).relay_on is False
+    assert cycle(st, 40, 5, 1060).relay_on is False
 
 
 def test_stale_sample_forces_off():
@@ -81,26 +93,26 @@ def test_implausible_reading_is_refused():
 
 def test_max_continuous_run_trips_a_cooldown():
     st = ControlState(relay_on=True, on_since_s=0.0)
-    assert cycle(st, 30, 5, 1799).relay_on is True
-    d = cycle(st, 30, 5, 1800)
+    assert cycle(st, 30, 5, 7199).relay_on is True
+    d = cycle(st, 30, 5, 7200)
     assert d.relay_on is False
     assert "max continuous" in d.reason
     # Even a bone-dry reading cannot restart it during the cooldown.
-    assert cycle(st, 10, 5, 1900).relay_on is False
-    assert "cooldown" in cycle(st, 10, 5, 1900).reason
+    assert cycle(st, 10, 5, 7300).relay_on is False
+    assert "cooldown" in cycle(st, 10, 5, 7300).reason
     # After the cooldown the normal min_off gate applies (already elapsed).
-    assert cycle(st, 10, 5, 2100).relay_on is True
+    assert cycle(st, 10, 5, 7800).relay_on is True
 
 
 def test_daily_budget_stops_the_day():
-    st = ControlState(relay_on=True, on_since_s=0.0, on_accum_s=4 * 3600 - 60, day_index=0)
+    st = ControlState(relay_on=True, on_since_s=0.0, on_accum_s=5 * 3600 - 60, day_index=0)
     d = cycle(st, 20, 5, 60)
     assert d.relay_on is False
     assert "daily budget" in d.reason
 
 
 def test_day_rollover_resets_the_budget():
-    st = ControlState(relay_on=False, off_since_s=0.0, on_accum_s=4 * 3600, day_index=1)
+    st = ControlState(relay_on=False, off_since_s=0.0, on_accum_s=5 * 3600, day_index=1)
     # A new day clears the accumulator, so a dry room may run again.
     d = cycle(st, 20, 5, 200, day=2)
     assert st.on_accum_s == 0.0

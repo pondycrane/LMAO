@@ -25,16 +25,32 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class Setpoints:
-    """Control band + safety limits (all times in seconds)."""
+    """Control band + safety limits (all times in seconds).
 
-    low_pct: int = 45  # turn ON at/below this humidity
-    high_pct: int = 55  # turn OFF at/above this humidity
+    The band is derived from the room's own history, not from a comfort table.
+    Over 14 days of RoboDog home reports (2026-11-04..11-19, n=8873) the room
+    ran: p10 35.1 %, median 37.4 %, p75 39.4 %, p95 42.6 %, max 46.3 %.  So
+    ``low`` is the dry decile (act only on the room's own dry tail) and
+    ``high`` is the upper quartile rounded up -- the level the room already
+    reaches on a good day.  40 % also keeps the dew point at ~11.4 C at the
+    room's usual 26 C, under the 12.8 C mould line; 45 % at 26 C is 13.1 C
+    (already over it), which is why the old 55 % ceiling was both unreachable
+    (the room never exceeded 46.3 %) and physically wrong.
+
+    ``max_on_s`` must be long enough to cross the band: the humidifier adds
+    ~3 %/h (measured over a 34 min ON run: 37.4 -> 39.0), so 5 points needs
+    ~1.7 h.  ``max_daily_on_s`` covers the deepest observed excursion
+    (26.2 % -> 40 % = 4.6 h at that rate).
+    """
+
+    low_pct: int = 35  # turn ON at/below this humidity
+    high_pct: int = 40  # turn OFF at/above this humidity
     stale_s: int = 900  # no fresh sample for this long -> OFF
     min_on_s: int = 60  # shortest ON run (relay protection)
     min_off_s: int = 120  # shortest OFF run (relay protection)
-    max_on_s: int = 1800  # longest continuous ON run
-    cooldown_s: int = 300  # forced OFF after a max_on trip
-    max_daily_on_s: int = 4 * 3600
+    max_on_s: int = 2 * 3600  # longest continuous ON run (band crossing)
+    cooldown_s: int = 600  # forced OFF after a max_on trip
+    max_daily_on_s: int = 5 * 3600
     lease_s: int = 300  # lease granted to the socket on each ON cycle
 
     def validate(self) -> None:
@@ -147,4 +163,8 @@ def decide(
             switch(True)
             return Decision(True, f"humidity {humidity_pct}% <= {sp.low_pct}%")
         return Decision(False, f"min off time (humidity {humidity_pct}%)")
+    if humidity_pct >= sp.high_pct:
+        # Already OFF and at/above the ceiling: nothing to do, but do not
+        # report this as "inside the band" (it is the band's top edge).
+        return Decision(False, f"humidity {humidity_pct}% >= {sp.high_pct}%")
     return Decision(False, f"in band ({sp.low_pct}% < {humidity_pct}% < {sp.high_pct}%)")

@@ -123,18 +123,18 @@ def _parse_args(argv=None):
         default=int(os.environ.get("HF_INTERVAL", DEFAULT_INTERVAL_S)),
         help=f"poll cadence in seconds (default {DEFAULT_INTERVAL_S})",
     )
-    p.add_argument("--low", type=int, default=45, help="ON at/below this %%")
-    p.add_argument("--high", type=int, default=55, help="OFF at/above this %%")
+    p.add_argument("--low", type=int, default=35, help="ON at/below this %%")
+    p.add_argument("--high", type=int, default=40, help="OFF at/above this %%")
     p.add_argument(
         "--stale-s", type=int, default=900, help="treat the reading as stale after this long"
     )
     p.add_argument("--min-on-s", type=int, default=60)
     p.add_argument("--min-off-s", type=int, default=120)
     p.add_argument(
-        "--max-on-s", type=int, default=1800, help="continuous-run cap before a forced cooldown"
+        "--max-on-s", type=int, default=2 * 3600, help="continuous-run cap before a forced cooldown"
     )
-    p.add_argument("--cooldown-s", type=int, default=300)
-    p.add_argument("--max-daily-on-s", type=int, default=4 * 3600)
+    p.add_argument("--cooldown-s", type=int, default=600)
+    p.add_argument("--max-daily-on-s", type=int, default=5 * 3600)
     p.add_argument(
         "--lease-s", type=int, default=300, help="lease granted to the socket each ON cycle"
     )
