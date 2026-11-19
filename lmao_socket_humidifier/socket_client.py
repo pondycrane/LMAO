@@ -8,6 +8,11 @@ The socket exposes a leased control API on the LAN:
 
 Commands carry the NVS-provisioned token in ``X-Auth-Token``.  A socket with
 no token refuses commands (fails closed), which surfaces here as HTTP 403.
+
+A host may be given as a comma-separated fallback list (``humidifier.local,
+192.168.50.22``): mDNS resolution fails transiently, and a transport failure
+falls through to the next host.  An HTTP answer is authoritative and never
+falls through.  The host that answers becomes the sticky first choice.
 """
 
 from __future__ import annotations
@@ -21,34 +26,67 @@ import urllib.request
 class SocketError(RuntimeError):
     """The socket refused or did not answer."""
 
+    def __init__(self, msg: str, *, transport: bool = False):
+        super().__init__(msg)
+        self.transport = transport
+
 
 class SocketClient:
     def __init__(self, base_url: str, token: str = "", timeout: float = 5.0):
-        url = base_url.strip()
-        if "://" not in url:
-            url = "http://" + url
-        self.base_url = url.rstrip("/")
+        # ``base_url`` may be a comma-separated fallback list.  mDNS
+        # (``humidifier.local``) resolves through nss-mdns and does fail
+        # transiently; a pinned address keeps the relay controllable then.
+        urls = []
+        for part in base_url.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            if "://" not in part:
+                part = "http://" + part
+            urls.append(part.rstrip("/"))
+        if not urls:
+            raise ValueError("no socket host given")
+        self.base_urls = urls
         self.token = token
         self.timeout = float(timeout)
 
     # ---- plumbing -------------------------------------------------------
 
     def _request(self, path: str, method: str = "GET") -> dict:
-        req = urllib.request.Request(self.base_url + path, method=method)
+        last: SocketError | None = None
+        for idx, base in enumerate(self.base_urls):
+            try:
+                body = self._send(base, path, method)
+            except SocketError as exc:
+                if not exc.transport:
+                    raise
+                last = exc
+                continue
+            if idx:
+                # Sticky failover: the working host moves to the front so a
+                # dead mDNS name is not re-tried on every command.
+                self.base_urls.insert(0, self.base_urls.pop(idx))
+            try:
+                return json.loads(body)
+            except json.JSONDecodeError as exc:
+                raise SocketError(f"{method} {path} returned non-JSON: {body!r}") from exc
+        assert last is not None
+        if len(self.base_urls) > 1:
+            raise SocketError(f"{last} (tried {len(self.base_urls)} hosts)") from last
+        raise last
+
+    def _send(self, base: str, path: str, method: str) -> bytes:
+        req = urllib.request.Request(base + path, method=method)
         if self.token:
             req.add_header("X-Auth-Token", self.token)
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                body = resp.read()
+                return resp.read()
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", "replace").strip()
             raise SocketError(f"{method} {path} -> HTTP {exc.code}: {detail}") from exc
         except (urllib.error.URLError, OSError) as exc:
-            raise SocketError(f"{method} {path} failed: {exc}") from exc
-        try:
-            return json.loads(body)
-        except json.JSONDecodeError as exc:
-            raise SocketError(f"{method} {path} returned non-JSON: {body!r}") from exc
+            raise SocketError(f"{method} {path} failed: {exc}", transport=True) from exc
 
     # ---- API ------------------------------------------------------------
 

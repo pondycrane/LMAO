@@ -110,7 +110,8 @@ def _parse_args(argv=None):
     p.add_argument(
         "--socket",
         default=os.environ.get("HF_SOCKET", "humidifier.local"),
-        help="Atom Socket base URL or host (default humidifier.local)",
+        help="Atom Socket base URL or host, or a comma-separated fallback "
+        "list (default humidifier.local)",
     )
     p.add_argument(
         "--token",

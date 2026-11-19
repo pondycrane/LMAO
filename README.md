@@ -1172,6 +1172,16 @@ SELECT round(quantile_cont(value, 0.10), 1) AS p10,
 FROM sensor_readings WHERE node_id = 'main bedroom' AND sensor_id = 2;
 ```
 
+`--socket` takes a **comma-separated fallback list** (`humidifier.local,
+192.168.50.22`).  mDNS resolution through nss-mdns fails transiently on the
+controller host — observed as `POST /off failed: Name or service not known`
+while the socket was up — so a pinned address keeps the relay controllable.
+Only transport failures fall through; an HTTP answer (including a 403) is
+authoritative and is never retried against the next host.  The answering host
+becomes the sticky first choice.  The systemd unit passes `${HF_SOCKET}` from
+`~/.config/lmao/humidifier.env`, so the host's pinned address stays out of the
+repo.
+
 Control law (`lmao_socket_humidifier/control.py`, pure and unit-tested): ON at
 `<= --low` (35 %), OFF at `>= --high` (40 %), minimum ON/OFF runs (60/120 s),
 a continuous-run cap (2 h) with a cooldown (10 min), a daily budget

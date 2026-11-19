@@ -10,8 +10,10 @@ WorkingDirectory=%h/LMAO
 # are imported straight from the checkout, so no build step is needed here.
 Environment=PYTHONPATH=%h/LMAO:%h/LMAO/robodog_home_client
 EnvironmentFile=%h/.config/lmao/humidifier.env
+# HF_SOCKET comes from the EnvironmentFile so the host can pin a fallback
+# address (mDNS names fail transiently) without editing this unit.
 ExecStart=/usr/bin/python3 %h/LMAO/lmao_socket_humidifier/controller.py \
-    --env-node "main bedroom" --socket humidifier.local
+    --env-node "main bedroom" --socket ${HF_SOCKET}
 Restart=always
 RestartSec=10
 
