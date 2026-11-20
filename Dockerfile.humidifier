@@ -1,8 +1,9 @@
 # LMAO socket humidifier controller — Docker image
 #
-# The in-cluster controller (k8s/humidifier.yaml): reads the RoboDog home
-# node's air series from the LMAO server over Reticulum TCP, applies the
-# dew-point law, and drives the Atom Socket's leased HTTP API.
+# The in-cluster controller (k8s/humidifier.yaml): reads the room's humidity
+# from the Atom Socket's own ENV III (GET /status) — or, when that sample is
+# missing/stale, from the LMAO server's air series over Reticulum TCP — applies
+# the dew-point law, and drives the socket's leased HTTP API.
 #
 # Build + release + deploy in one step (the sanctioned path):
 #   bazel run //lmao_socket_humidifier:deploy
@@ -47,7 +48,7 @@ COPY lmao_socket_humidifier/ lmao_socket_humidifier/
 ENV PYTHONPATH="/app:/app/robodog_home_client"
 ENV PYTHONUNBUFFERED=1
 
-# Config comes from the environment (k8s ConfigMap/Secret): LMAO_ENV_NODE,
-# LMAO_SERVER_HOST/PORT, HF_SOCKET, HF_API_TOKEN, HF_STATE_FILE,
+# Config comes from the environment (k8s ConfigMap/Secret): HF_SENSOR_SOURCE,
+# LMAO_ENV_NODE, LMAO_SERVER_HOST/PORT, HF_SOCKET, HF_API_TOKEN, HF_STATE_FILE,
 # HF_IDENTITY_DIR.  Nothing is baked in.
 CMD ["python", "lmao_socket_humidifier/controller.py"]

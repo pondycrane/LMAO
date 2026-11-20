@@ -253,7 +253,10 @@ def decide(
                 switch(False)
                 return Decision(False, f"dew {dew:.1f}C >= {sp.high_dew_c:.1f}C")
             return Decision(True, f"min on time (dew {dew:.1f}C)")
-        return Decision(True, f"humidifying (dew {dew:.1f}C < {sp.high_dew_c:.1f}C)")
+        # No inequality in this text: dew can be a hair under the ceiling
+        # (11.4995 C) while both format to the same tenth, and "11.5 < 11.5"
+        # reads as a bug.  The OFF path states the comparison instead.
+        return Decision(True, f"humidifying (dew {dew:.2f}C)")
 
     if dew <= sp.low_dew_c:
         if (now_s - st.off_since_s) >= sp.min_off_s:

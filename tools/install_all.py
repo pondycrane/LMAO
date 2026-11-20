@@ -859,7 +859,8 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--skip-humidifier",
         action="store_true",
         help="Skip the humidifier controller deploy (Atom Socket relay driven by "
-        "the room's dew point; only meaningful with --include-services).",
+        "the socket's own ENV III dew point; only meaningful with "
+        "--include-services).",
     )
     parser.add_argument(
         "--skip-dest-hash",

@@ -1,15 +1,19 @@
 // Humidifier Atom Socket controller (M5Stack Atom Socket / Atom Lite, ESP32).
 //
-// A LAN actuator for a mains humidifier: it owns the relay and the socket's
-// HLW8032 power meter, and exposes a small HTTP API.  The decision logic lives
-// in the host controller (lmao_socket_humidifier/controller.py), which reads the room's
-// humidity from the LMAO server; this firmware only executes + reports.
+// A LAN sensor + actuator for a mains humidifier: it owns the relay, the
+// socket's HLW8032 power meter and an ENV III (SHT30) on I2C, exposes a small
+// HTTP API, and reports its air temperature + humidity to the LMAO server as a
+// SensorReport (node_id = NVS device_name).  The decision logic lives in the
+// host controller (lmao_socket_humidifier/controller.py), which reads the
+// socket's own /status (direct) or the server's history for that node
+// (fallback); this firmware only measures, executes + reports.
 //
 // Safety: every ON request carries a LEASE.  If the controller dies, loses
 // WiFi, or is restarted without renewing, the relay opens by itself when the
 // lease expires.  There is no unleased ON path.
 //
-//   GET  /status          -> JSON snapshot (relay, lease, V/A/W, RSSI)
+//   GET  /status          -> JSON snapshot (relay, lease, V/A/W, RSSI,
+//                            temp_c, hum_pct, sensor_ok, sensor_age_s)
 //   POST /on?lease=SECS   -> close the relay for SECS (default HF_DEFAULT_LEASE_S)
 //   POST /off             -> open the relay now
 //   GET  /healthz         -> "ok"
@@ -44,7 +48,9 @@
 #include "config.h"
 #include "hlw8032.h"
 #include "led_rgb.h"
+#include "net_report.h"
 #include "relay_lease.h"
+#include "sht30.h"
 #include "wifi_helper.h"
 
 static const char* TAG = "humidifier";
@@ -57,6 +63,9 @@ static const char* K_PASS = "wifi_pass";
 static const char* K_HOST = "mdns_host";
 static const char* K_TOKEN = "api_token";
 static const char* K_LEASE = "lease_default";
+static const char* K_SERVER_HOST = "server_host";
+static const char* K_SERVER_PORT = "server_port";
+static const char* K_NAME = "device_name";
 
 struct Config {
     char ssid[33];
@@ -64,6 +73,9 @@ struct Config {
     char host[40];
     char token[65];
     uint32_t lease_default_s;
+    char server_host[64];
+    uint16_t server_port;
+    char name[40];
 };
 
 static Config s_cfg;
@@ -88,6 +100,19 @@ static uint32_t s_frames_ok = 0;
 static uint8_t s_first_raw[hlw8032::kFrameLen] = {};
 static size_t s_first_raw_len = 0;
 
+// ── ENV III (SHT30) sample cache ────────────────────────────────────
+// The controller reads /status directly, so the last good sample + its age
+// are part of the API contract.  A failed read never overwrites the last good
+// value: stale-but-real beats a fabricated one, and the age lets the caller
+// reject it.
+static float s_temp_c = 0.0f;
+static float s_hum_pct = 0.0f;
+static bool s_sensor_ok = false;
+static uint32_t s_sensor_ms = 0;
+static uint32_t s_sensor_reads = 0;
+static uint32_t s_sensor_fails = 0;
+static uint32_t s_sensor_last_reprobe_ms = 0;
+
 static uint32_t now_ms() {
     return (uint32_t)(esp_timer_get_time() / 1000);
 }
@@ -107,6 +132,10 @@ static void relay_write(bool on) {
 
 static void nvs_load() {
     snprintf(s_cfg.host, sizeof(s_cfg.host), "%s", HF_MDNS_HOST_DEFAULT);
+    snprintf(s_cfg.server_host, sizeof(s_cfg.server_host), "%s",
+             HF_SERVER_HOST_DEFAULT);
+    s_cfg.server_port = (uint16_t)HF_SERVER_PORT_DEFAULT;
+    snprintf(s_cfg.name, sizeof(s_cfg.name), "%s", HF_DEVICE_NAME_DEFAULT);
     s_cfg.lease_default_s = HF_DEFAULT_LEASE_S;
 
     nvs_handle_t h;
@@ -123,15 +152,25 @@ static void nvs_load() {
     (void)nvs_get_str(h, K_HOST, s_cfg.host, &sz);
     sz = sizeof(s_cfg.token);
     (void)nvs_get_str(h, K_TOKEN, s_cfg.token, &sz);
+    sz = sizeof(s_cfg.server_host);
+    (void)nvs_get_str(h, K_SERVER_HOST, s_cfg.server_host, &sz);
+    uint16_t port = 0;
+    if (nvs_get_u16(h, K_SERVER_PORT, &port) == ESP_OK && port != 0) {
+        s_cfg.server_port = port;
+    }
+    sz = sizeof(s_cfg.name);
+    (void)nvs_get_str(h, K_NAME, s_cfg.name, &sz);
     uint32_t lease = 0;
     if (nvs_get_u32(h, K_LEASE, &lease) == ESP_OK && lease != 0) {
         s_cfg.lease_default_s = lease;
     }
     nvs_close(h);
-    ESP_LOGI(TAG, "config: ssid='%s' mdns='%s' token=%s lease_default=%us",
+    ESP_LOGI(TAG, "config: ssid='%s' mdns='%s' token=%s lease_default=%us "
+                  "server=%s:%u device='%s'",
              s_cfg.ssid, s_cfg.host,
              s_cfg.token[0] ? "set" : "MISSING",
-             (unsigned)s_cfg.lease_default_s);
+             (unsigned)s_cfg.lease_default_s, s_cfg.server_host,
+             (unsigned)s_cfg.server_port, s_cfg.name);
 }
 
 // ── HLW8032 metering ─────────────────────────────────────────────────
@@ -187,6 +226,59 @@ static void meter_poll(hlw8032::FrameAssembler* asm_) {
     }
 }
 
+// ── ENV III (SHT30) ──────────────────────────────────────────────────
+// Probe order: the Atom Lite's Grove port first (G26 SDA / G32 SCL, and the
+// swapped polarity), then the 9-pin header's dedicated I2C (G25 SDA / G21
+// SCL).  The socket's own 4-pin port has no I2C, so a unit plugged there will
+// simply not answer; the log names every pair tried.
+static void sensor_init() {
+    static const int pairs[HF_ENV_PAIR_COUNT][2] = {
+        {HF_ENV_SDA_G26, HF_ENV_SCL_G32},
+        {HF_ENV_SCL_G32, HF_ENV_SDA_G26},
+        {HF_ENV_SDA_G25, HF_ENV_SCL_G21},
+        {HF_ENV_SCL_G21, HF_ENV_SDA_G25},
+    };
+    const int idx = lma_sensor::sht30_init(pairs, HF_ENV_PAIR_COUNT);
+    if (idx < 0) {
+        ESP_LOGE(TAG, "no ENV III detected — the room has no humidity input "
+                      "from this socket (check the Grove/header wiring)");
+        return;
+    }
+    lma_sensor::Reading r{};
+    if (lma_sensor::sht30_read(&r)) {
+        s_temp_c = r.temp_c;
+        s_hum_pct = r.hum_pct;
+        s_sensor_ok = true;
+        s_sensor_ms = now_ms();
+        s_sensor_reads++;
+    }
+}
+
+static void sensor_poll(uint32_t t) {
+    if (!lma_sensor::sht30_ok()) {
+        // Rate-limit the re-probe: a Grove plug that lost contact can come
+        // back, but deinstalling/reinstalling the driver every tick is noise.
+        if (t - s_sensor_last_reprobe_ms < 300000u) return;
+        s_sensor_last_reprobe_ms = t;
+        ESP_LOGW(TAG, "ENV III unavailable — re-probing I2C pairs");
+        if (!lma_sensor::sht30_reprobe()) return;
+    }
+    lma_sensor::Reading r{};
+    if (lma_sensor::sht30_read(&r)) {
+        s_temp_c = r.temp_c;
+        s_hum_pct = r.hum_pct;
+        s_sensor_ok = true;
+        s_sensor_ms = t;
+        s_sensor_reads++;
+        ESP_LOGI(TAG, "ENV III: %.1f C / %.0f %%RH", r.temp_c, r.hum_pct);
+    } else {
+        s_sensor_fails++;
+        ESP_LOGW(TAG, "ENV III read failed (reads=%u fails=%u) — keeping the "
+                      "last good sample", (unsigned)s_sensor_reads,
+                 (unsigned)s_sensor_fails);
+    }
+}
+
 // ── HTTP API ─────────────────────────────────────────────────────────
 static bool token_ok(httpd_req_t* req) {
     if (s_cfg.token[0] == '\0') return false;  // fail closed
@@ -219,10 +311,19 @@ static esp_err_t status_get(httpd_req_t* req) {
     hlw8032::Sample meter = s_meter;
     const uint32_t meter_last = s_meter_last_ms;
     const bool meter_seen = s_meter_seen;
+    const float temp_c = s_temp_c;
+    const float hum_pct = s_hum_pct;
+    const bool sensor_ok = s_sensor_ok;
+    const uint32_t sensor_ms = s_sensor_ms;
+    const uint32_t sensor_reads = s_sensor_reads;
+    const uint32_t sensor_fails = s_sensor_fails;
     xSemaphoreGive(s_lock);
 
     const uint32_t t = now_ms();
     meter.meter_fresh = meter_seen && (t - meter_last) < HF_METER_STALE_MS;
+    // -1 = no sample ever; otherwise the age the caller's stale_s check uses.
+    const long sensor_age_s =
+        sensor_ms == 0 ? -1L : (long)((t - sensor_ms) / 1000u);
 
     // Raw UART evidence is part of the contract: "0 V" must be explainable as
     // either an empty outlet (frames flowing) or a dead meter link (no bytes).
@@ -231,7 +332,7 @@ static esp_err_t status_get(httpd_req_t* req) {
         snprintf(first_raw + 3 * i, 4, "%02x ", s_first_raw[i]);
     }
 
-    char body[896];
+    char body[1280];
     int n = snprintf(
         body, sizeof(body),
         "{\"relay\":%s,\"lease_s\":%u,\"on_ms_total\":%u,\"relay_writes\":%u,"
@@ -239,6 +340,11 @@ static esp_err_t status_get(httpd_req_t* req) {
         "\"current_a\":%.3f,\"power_w\":%.2f,\"pf_raw\":%u,"
         "\"energy_pulses\":%u,\"uart_bytes\":%u,\"frames_ok\":%u,"
         "\"meter_rx_pin\":%d,"
+        "\"temp_c\":%.2f,\"hum_pct\":%.1f,\"sensor_ok\":%s,"
+        "\"sensor_age_s\":%ld,\"sensor_reads\":%u,\"sensor_fails\":%u,"
+        "\"sensor_sda\":%d,\"sensor_scl\":%d,"
+        "\"server_known\":%s,\"reports_sent\":%u,\"reports_failed\":%u,"
+        "\"device_name\":\"%s\",\"server_host\":\"%s\",\"server_port\":%u,"
         "\"led\":\"%s\","
         "\"first_raw\":\"%s\",\"uptime_s\":%u,\"mdns_host\":\"%s\"}",
         lease.on ? "true" : "false",
@@ -249,6 +355,13 @@ static esp_err_t status_get(httpd_req_t* req) {
         (unsigned)meter.pf_raw, (unsigned)meter.energy_pulses,
         (unsigned)s_uart_bytes, (unsigned)s_frames_ok,
         (int)HF_METER_RX_PIN,
+        temp_c, hum_pct, sensor_ok ? "true" : "false",
+        sensor_age_s, (unsigned)sensor_reads, (unsigned)sensor_fails,
+        lma_sensor::sht30_sda(), lma_sensor::sht30_scl(),
+        net_report::server_known() ? "true" : "false",
+        (unsigned)net_report::reports_sent(),
+        (unsigned)net_report::reports_failed(),
+        s_cfg.name, s_cfg.server_host, (unsigned)s_cfg.server_port,
         s_relay_state ? "red" : "off", first_raw,
         (unsigned)(t / 1000), s_cfg.host);
     (void)n;
@@ -363,6 +476,7 @@ void app_main(void) {
     if (s_led_ready) lma_led::set_all(lma_led::kOff);
 
     meter_init();
+    sensor_init();
 
     const bool wifi_ok = lma_wifi::connect(s_cfg.ssid, s_cfg.pass,
                                            HF_WIFI_CONNECT_TIMEOUT_S);
@@ -371,8 +485,17 @@ void app_main(void) {
     http_start();
     mdns_start();
 
+    // The room's sensor AND actuator: report the ENV III sample to the server
+    // so ENV_HISTORY[device_name] keeps a series (the controller falls back to
+    // it).  A failed RNS start leaves HTTP relay control intact.
+    net_report::init({s_cfg.server_host, s_cfg.server_port, s_cfg.name});
+    if (wifi_ok && !net_report::start()) {
+        ESP_LOGW(TAG, "reporting disabled — /status still carries the sample");
+    }
+
     hlw8032::FrameAssembler assembler;
     uint32_t last_tick = now_ms();
+    uint32_t last_sensor_ms = now_ms();
     for (;;) {
         meter_poll(&assembler);
 
@@ -382,6 +505,12 @@ void app_main(void) {
             continue;
         }
         last_tick = t;
+
+        if (t - last_sensor_ms >= HF_SENSOR_INTERVAL_S * 1000u) {
+            last_sensor_ms = t;
+            sensor_poll(t);
+        }
+        net_report::tick(t, s_sensor_ok, s_temp_c, s_hum_pct);
 
         // Deadman: an expired lease opens the relay, whatever the controller
         // is doing.

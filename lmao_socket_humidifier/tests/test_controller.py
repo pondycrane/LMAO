@@ -156,3 +156,33 @@ def test_state_file_is_valid_json(tmp_path):
     path = tmp_path / "state.json"
     controller.save_state(str(path), ControlState(relay_on=True, on_accum_s=42.0))
     assert json.loads(path.read_text())["on_accum_s"] == 42.0
+
+
+def test_socket_reading_is_the_direct_room_input():
+    """The socket's ENV III is the room's sensor: no server round trip."""
+    status = {"sensor_ok": True, "temp_c": 21.4, "hum_pct": 44, "sensor_age_s": 12}
+    assert controller.read_socket_room(status) == (21.4, 44, 12.0)
+
+
+def test_socket_without_a_sensor_is_missing_data_not_zero():
+    """A socket with no ENV III must not read as 0 C / 0 %RH (the law would
+    humidify against a fabricated bone-dry room)."""
+    assert controller.read_socket_room({"sensor_ok": False}) == (None, None, None)
+    assert controller.read_socket_room({"sensor_ok": True, "sensor_age_s": -1}) == (
+        None,
+        None,
+        None,
+    )
+    assert controller.read_socket_room(None) == (None, None, None)
+
+
+def test_socket_reading_falls_back_to_the_server_when_stale():
+    """auto: a stale socket sample must not shadow a fresh server reading."""
+    args = controller._parse_args(["--once", "--sensor-source", "auto"])
+    assert args.sensor_source == "auto"
+    assert args.stale_s == 900
+    # The selection rule the loop implements: socket is used only while fresh.
+    sp = Setpoints(stale_s=900)
+    status = {"sensor_ok": True, "temp_c": 21.4, "hum_pct": 44, "sensor_age_s": 1200}
+    _t, _h, age = controller.read_socket_room(status)
+    assert age > sp.stale_s

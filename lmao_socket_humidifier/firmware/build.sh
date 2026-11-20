@@ -2,14 +2,33 @@
 # Build the Humidifier Atom Socket firmware (M5Stack Atom Socket / Atom Lite,
 # ESP32-PICO-D4) with ESP-IDF via Docker.
 #
-#   bazel run //humidifier:build_firmware
+#   bazel run //lmao_socket_humidifier:build_firmware
 #
-# The app is staged into a gitignored .idf/ tree next to this script, so no
-# third-party source enters the repo and no RTReticulum checkout is needed
-# (the socket speaks plain HTTP on the LAN; it is not a Reticulum client).
+# The app is staged into the pinned RTReticulum checkout (the same one the
+# Sprout and RoboDog home client use — never a second vendored copy), because
+# the socket is a Reticulum client: it reports its ENV III sample to the LMAO
+# server as a SensorReport, and that path needs the RNS lib + ESP-IDF HAL.
 #
-# NOTHING is baked in: WiFi credentials and the API token are written to the
-# NVS partition by flash.sh at flash time (see README).
+# Build-time injection (written into the STAGED copy's lmao_config.h — the
+# source tree is never modified, and NO credentials are baked in):
+#   HF_DEST_HASH_HEX      server lxmf/delivery hash (32 hex)
+#   HF_SERVER_PUBKEY_HEX  server public key (no announce needed at boot)
+#   HF_NODE_IDENTITY_HEX  64-byte private-key hex: the device's pinned
+#                         identity (lma_core/client_identity.py per-device
+#                         store), so the delivery hash never drifts
+#   HF_DEVICE_NAME_DEFAULT SensorReport.node_id + announce display name (the
+#                         ROOM, e.g. "baby room")
+#
+# Two names, deliberately distinct:
+#   HF_DEVICE_NAME    the room — SensorReport.node_id the controller pins with
+#                     --env-node, and the announce display name
+#   HF_IDENTITY_NAME  the contact-book entry / per-device key store
+#                     (~/.local/share/lmao_client/devs/<name>), e.g.
+#                     "humidifier-baby".  Keeping it separate stops the
+#                     socket from sharing the room's RoboDog-home identity.
+#
+# WiFi credentials and the API token are NEVER compiled in: flash.sh writes
+# them to the NVS partition at flash time (see README).
 set -euo pipefail
 
 if [ -n "${BUILD_WORKSPACE_DIRECTORY:-}" ]; then
@@ -17,20 +36,75 @@ if [ -n "${BUILD_WORKSPACE_DIRECTORY:-}" ]; then
 else
     APP="$(cd "$(dirname "$0")" && pwd)"
 fi
+REPO_ROOT="$(cd "$APP/../.." && pwd)"
 IDF_IMG="${IDF_IMG:-espressif/idf:v5.3.1}"
 
-# Staging lives beside the source and is gitignored: Docker (root) owns the
-# build dir, so only our own source dirs are ever wiped.
-DEST="$APP/.idf/lmao_socket_humidifier"
+# Same pinned RTReticulum rev the Bazel host path uses (WORKSPACE @rtreticulum,
+# dab4362) WITH rtreticulum_fixes.patch applied: unpatched RTR rejects
+# ratcheted announces ("invalid announce sig"), so the server never learns the
+# node.  Reuse the Sprout/home-client checkout; never clone a second copy.
+RTR="${RTRETICULUM_ROOT:-$REPO_ROOT/smart_irrigation/native-client/.rtreticulum}"
+RTRET_PATCH="$REPO_ROOT/smart_irrigation/native-client/rtreticulum_fixes.patch"
+RTR_REV=dab4362cf3577e464e98e85b71abc5cb26185224
+if [ ! -d "$RTR/.git" ]; then
+    echo "cloning RTReticulum (pinned ${RTR_REV:0:7}) -> $RTR"
+    rm -rf "$RTR"
+    git init -q "$RTR"
+    git -C "$RTR" remote add origin https://github.com/0xSeren/RTReticulum
+    git -C "$RTR" fetch -q --depth 1 origin "$RTR_REV"
+    git -C "$RTR" checkout -q FETCH_HEAD
+fi
+if ! grep -q "create_ratchet" "$RTR/include/rtreticulum/destination.h"; then
+    echo "applying rtreticulum_fixes.patch -> $RTR"
+    git -C "$RTR" apply "$RTRET_PATCH"
+fi
+
+# Provisioning: resolve the server's DEST_HASH + public key and, when a
+# per-device identity exists on the host, the pinned node identity.  An
+# unavailable server identity leaves the hashes empty = announce-only build
+# (the HTTP actuator still works; the controller can read /status directly).
+DEVICE_NAME="${HF_DEVICE_NAME:-baby room}"
+IDENTITY_NAME="${HF_IDENTITY_NAME:-humidifier-baby}"
+if [ -z "${HF_DEST_HASH_HEX:-}" ] || [ -z "${HF_SERVER_PUBKEY_HEX:-}" ]; then
+    # --provision mints the socket's own identity when absent and registers it
+    # approved, so its SensorReport is not dropped as a pending contact.
+    if PROVISION="$(PYTHONPATH="$REPO_ROOT" python3 "$REPO_ROOT/tools/device_provision.py" \
+            --prefix HF_ --device-name "$IDENTITY_NAME" --device-type humidifier \
+            --provision)"; then
+        while IFS='=' read -r key value; do
+            [ -n "$value" ] && export "$key=$value"
+        done <<< "$PROVISION"
+    else
+        echo "WARNING: humidifier provisioning failed — building announce-only." >&2
+    fi
+fi
+
+DEST="$RTR/firmware/humidifier_socket"
 mkdir -p "$DEST"
+# Only remove our host-owned source dirs; the container (root) owns build/
+# and ninja rebuilds deltas in place.
 rm -rf "$DEST/main" "$DEST/components" 2>/dev/null || true
 mkdir -p "$DEST/components"
 cp -r "$APP/main" "$DEST/main"
-cp -r "$APP/../../firmware_common/lma_wifi" "$DEST/components/lma_wifi"
-cp -r "$APP/../../firmware_common/lma_led" "$DEST/components/lma_led"
+cp -r "$REPO_ROOT/firmware_common/lma_common" "$DEST/components/lma_common"
+cp -r "$REPO_ROOT/firmware_common/rtreticulum" "$DEST/components/rtreticulum"
+cp -r "$REPO_ROOT/firmware_common/tcp_interface" "$DEST/components/tcp_interface"
+cp -r "$REPO_ROOT/firmware_common/lma_sensor" "$DEST/components/lma_sensor"
+cp -r "$REPO_ROOT/firmware_common/lma_wifi" "$DEST/components/lma_wifi"
+cp -r "$REPO_ROOT/firmware_common/lma_led" "$DEST/components/lma_led"
 cp "$APP/CMakeLists.txt" "$APP/sdkconfig.defaults" "$APP/partitions.csv" "$DEST/"
-echo "app staged in $DEST"
+{
+    echo "// Generated by lmao_socket_humidifier/firmware/build.sh - do not edit."
+    echo "#pragma once"
+    echo "#define HF_DEST_HASH_HEX \"${HF_DEST_HASH_HEX:-}\""
+    echo "#define HF_SERVER_PUBKEY_HEX \"${HF_SERVER_PUBKEY_HEX:-}\""
+    echo "#define HF_NODE_IDENTITY_HEX \"${HF_NODE_IDENTITY_HEX:-}\""
+    echo "#ifndef HF_DEVICE_NAME_DEFAULT"
+    printf '#define HF_DEVICE_NAME_DEFAULT "%s"\n' "$DEVICE_NAME"
+    echo "#endif"
+} > "$DEST/main/lmao_config.h"
+echo "app staged in $DEST (room='$DEVICE_NAME' identity='$IDENTITY_NAME')"
 
-docker run --rm -v "$DEST:/app" -w /app -e IDF_TARGET=esp32 \
-    "$IDF_IMG" bash -lc 'idf.py set-target esp32 && idf.py build' || exit 1
+docker run --rm -v "$RTR:/repo" -w /repo/firmware/humidifier_socket -e IDF_TARGET=esp32 \
+    "$IDF_IMG" bash -lc 'git config --global --add safe.directory /repo; idf.py set-target esp32 && idf.py build' || exit 1
 echo "Built: $DEST/build/humidifier_socket.bin"
