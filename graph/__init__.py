@@ -19,6 +19,11 @@ Design constraints (see issue #315):
 * **explicit paths.** ``load()`` resolves a project dir, a ``graphify-out`` dir,
   a ``graph.json`` file, or walks up from the CWD — the MCP server's
   CWD-relative default is why every call to it currently fails on this machine.
+* **a moving target.** The graph is rewritten by a post-commit hook (your
+  branch) and a cron watcher (``origin/master``), so a loaded ``Graph`` is a
+  point-in-time snapshot. Call ``load()`` again to pick up a rebuild — the cache
+  keys on mtime+size, so it reloads only when the file actually changed — and
+  use :mod:`graph.provenance` to check which commit it reflects.
 
 Typical use::
 
@@ -28,6 +33,7 @@ Typical use::
     g.node("Transport")           # resolve by id, norm_label or label
     g.edges_where(relation="calls", confidence="INFERRED")
     g.in_edges_of("_patch_leaf_node_path_request_delivery", relation="calls")
+    graph.provenance.describe(graph.provenance.staleness(g, "origin/master"))
 
 Derived analyses live in :mod:`graph.queries` — see ``queries.undocumented``
 and friends for the questions that motivated this package.
@@ -35,7 +41,7 @@ and friends for the questions that motivated this package.
 
 from __future__ import annotations
 
-from graph import queries
+from graph import provenance, queries
 from graph.model import (
     GRAPH_DIRNAME,
     GRAPH_FILENAME,
@@ -61,6 +67,7 @@ __all__ = [
     "Node",
     "NodeNotFoundError",
     "load",
+    "provenance",
     "queries",
     "resolve_graph_path",
 ]

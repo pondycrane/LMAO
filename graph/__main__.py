@@ -12,7 +12,7 @@ import json
 import sys
 from typing import Any
 
-from graph import queries
+from graph import provenance, queries
 from graph.model import Graph, GraphError, load
 
 
@@ -20,7 +20,7 @@ def _print_json(obj: Any) -> None:
     print(json.dumps(obj, indent=2, sort_keys=False))
 
 
-def _print_meta(g: Graph) -> None:
+def _print_meta(g: Graph, ref: str = "HEAD") -> None:
     meta = g.meta()
     print(f"graph: {meta['path']}")
     print(f"commit: {meta['built_at_commit']}")
@@ -28,6 +28,19 @@ def _print_meta(g: Graph) -> None:
     print("relations: " + ", ".join(f"{k}={v}" for k, v in meta["relations"].items()))
     print("confidence: " + ", ".join(f"{k}={v}" for k, v in meta["confidence"].items()))
     print("file_types: " + ", ".join(f"{k}={v}" for k, v in meta["file_types"].items()))
+    print("provenance: " + provenance.describe(provenance.staleness(g, ref)))
+
+
+def _print_staleness(result: dict) -> None:
+    print(provenance.describe(result))
+    print(f"  graph commit: {result.get('graph_commit')}")
+    print(f"  {result.get('ref')}: {result.get('ref_commit')}")
+    if result.get("behind") is not None:
+        print(f"  ahead={result['ahead']} behind={result['behind']}")
+    if "uncommitted_files" in result:
+        print(f"  uncommitted files (also unseen by the graph): {result['uncommitted_files']}")
+    if result.get("reason"):
+        print(f"  reason: {result['reason']}")
 
 
 def _print_undocumented(result: dict) -> None:
@@ -83,6 +96,9 @@ def _print_impact(result: dict) -> None:
         f"{result['nodes_touched']} nodes, {result['communities_touched']} communities "
         f"-> risk {result['risk']}"
     )
+    graph_commit = result.get("graph_commit")
+    if graph_commit:
+        print(f"  measured against graph built at {graph_commit[:9]}")
     if result["files_missing"]:
         print(f"  not in graph: {result['files_missing']}")
     for row in result["communities"]:
@@ -115,10 +131,16 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m graph", description=__doc__)
     parser.add_argument("--graph", dest="graph_path", default=None,
                         help="project dir, graphify-out dir, or graph.json")
+    parser.add_argument("--ref", default="HEAD",
+                        help="git ref to compare the graph's build commit against")
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("summary", help="counts and breakdowns")
     sub.add_parser("god-nodes", help="most-connected nodes")
+
+    p_stale = sub.add_parser("staleness", help="which commit the graph reflects")
+    p_stale.add_argument("--ref", default="HEAD", help="git ref to compare against")
+    p_stale.add_argument("--dirty", action="store_true", help="also count uncommitted files")
 
     p_und = sub.add_parser("undocumented", help="code with no rationale_for edge")
     p_und.add_argument("--prefix", default=None, help="limit to files under this prefix")
@@ -159,7 +181,9 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     if args.command == "summary":
-        _print_meta(g)
+        _print_meta(g, args.ref)
+    elif args.command == "staleness":
+        _print_staleness(provenance.staleness(g, args.ref, check_dirty=args.dirty))
     elif args.command == "god-nodes":
         for node, deg in g.god_nodes(15):
             print(f"  {deg:>5}  {node.name[:44]:<44} {node.where()}")

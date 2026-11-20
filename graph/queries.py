@@ -277,6 +277,10 @@ def impact(g: Graph, paths: Iterable[str], *, god_limit: int = 10) -> dict:
         "files_missing": missing,
         "nodes_touched": len(touched_nodes),
         "communities_touched": len(ranked),
+        # Provenance travels with the answer: the graph is rebuilt by a hook and
+        # a cron watcher, so "which commit was this measured against" is part of
+        # the result, not something the caller has to remember to ask.
+        "graph_commit": g.built_at_commit,
         "communities": [
             {
                 "community": cid,

@@ -61,9 +61,60 @@ default graph path resolves against the CWD.
 | `impact(g, files)` | changed files → communities → core abstractions hit |
 | `relation_matrix(g)` | which relations cross which community boundaries |
 
+### Provenance — the graph is a moving target
+
+`graph.json` is rewritten by **two** writers on this machine, not one:
+
+| Writer | Trigger | Builds from |
+|---|---|---|
+| `graphify hook install` post-commit hook | every commit in a checkout | that branch |
+| `graph-watch-branch.sh` (cron, every 15 min) | `origin/master` advancing | a detached worktree at `origin/master`, then `rsync` over the canonical `graphify-out/` |
+
+So the graph can be at *your branch* one minute and *master* the next, and it is
+routinely a few commits behind either. `built_at_commit` is the only way to tell,
+and querying `impact()` against a graph built from a different commit silently
+describes code that has moved.
+
+```python
+import graph
+g = graph.load("~/LMAO")
+graph.provenance.describe(graph.provenance.staleness(g, "origin/master"))
+```
+
+```bash
+$ python -m graph --ref origin/master staleness --dirty
+graph is current with HEAD (95b1f0918)
+  graph commit: 95b1f0918...
+  ahead=0 behind=0
+  uncommitted files (also unseen by the graph): 16
+
+$ python -m graph --ref origin/master summary
+provenance: graph DIVERGED from origin/master (1 ahead, 2 behind) at 95b1f0918
+```
+
+Statuses: `current`, `behind` (ref has commits the graph has not seen),
+`ahead` (graph built from commits not reachable from ref — e.g. your branch),
+`diverged`, `unknown` (no git, no `built_at_commit`, or the graph commit is not
+in this clone). It degrades to `unknown` rather than raising, so provenance is
+never a hard dependency of the read path. `check_dirty=True` also counts
+uncommitted files, which the graph cannot reflect either — the hook only fires
+*after* a commit.
+
+`queries.impact()` returns `graph_commit` in its result for the same reason: the
+answer carries its own provenance.
+
+### The graph is a snapshot, not a live view
+
+A loaded `Graph` does not mutate when a rebuild lands. Call `load()` again to pick
+one up — the cache keys on `(path, mtime_ns, size)`, so it reloads only when the
+file actually changed. Both writers replace `graph.json` atomically
+(`_write_json_atomic` / `rsync` temp-then-rename), so a read never sees a torn
+file.
+
 ### CLI
 
 ```bash
+python -m graph --ref origin/master staleness --dirty
 python -m graph summary
 python -m graph undocumented --prefix lma_core/
 python -m graph gaps
@@ -119,8 +170,11 @@ filtering.
 
 ## Not in scope
 
-- Writing or rebuilding the graph. `graphify-out/` is build output with a
+- Writing or rebuilding the graph. Two writers own that: the post-commit hook and
+  the cron watcher. `graphify-out/` is build output with a
   `.graphify_labels.json.sig` sidecar; treat it as an input.
+- Deciding *when* to rebuild. The watcher already skips no-op polls (it compares
+  the fetched tip against a state file) and prunes dated snapshots to 7.
 - GitHub API access (`list_prs`, `get_pr_impact`, `triage_prs`). Those need auth
   and belong behind typed functions, never a raw HTTP client in a sandbox
   namespace.
@@ -130,8 +184,9 @@ filtering.
 ## Tests
 
 ```bash
-python -m pytest tests/test_graph.py
+python -m pytest tests/test_graph.py tests/test_graph_provenance.py
 ```
 
-37 tests against a synthetic graph — no dependency on a built `graphify-out`, so
-they run in CI.
+55 tests. The query suite runs against a synthetic graph, so it needs no built
+`graphify-out`; the provenance suite builds a throwaway git repo and skips
+cleanly when git is absent.
