@@ -119,6 +119,22 @@ def test_http_refusal_does_not_fall_through(server):
 
 
 def test_all_hosts_down_reports_every_host(server):
-    client = SocketClient("127.0.0.1:1,127.0.0.1:2", TOKEN, timeout=1.0)
-    with pytest.raises(SocketError, match="tried 2 hosts"):
+    """A failed command must name the host that failed, not just one error.
+
+    The old message reported only the *last* host's exception, so a pinned IP
+    that timed out was blamed on the mDNS name's DNS error.
+    """
+    client = SocketClient("127.0.0.1:1,no-such-host.invalid", TOKEN, timeout=1.0)
+    with pytest.raises(SocketError) as exc:
+        client.status()
+    msg = str(exc.value)
+    assert "all 2 host(s)" in msg
+    assert "http://127.0.0.1:1" in msg
+    assert "no-such-host.invalid" in msg
+    assert exc.value.transport is True
+
+
+def test_single_host_failure_names_it(server):
+    client = SocketClient("127.0.0.1:1", TOKEN, timeout=1.0)
+    with pytest.raises(SocketError, match="http://127.0.0.1:1"):
         client.status()

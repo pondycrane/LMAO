@@ -10,8 +10,9 @@ from lmao_socket_humidifier.control import (
     reconcile,
 )
 
-# The shipped band: 40-50 % RH across the room's 22.6-26.1 C swing, so the
-# tests exercise production configuration.
+# A wide 4 C band, so the hysteresis mechanics are exercised with roomy
+# margins around each edge.  This is NOT the shipped band (10.0/11.5): the
+# shipped defaults are pinned by test_shipped_defaults_are_the_tuned_band.
 SP = Setpoints(
     low_dew_c=7.5,
     high_dew_c=11.5,
@@ -34,12 +35,29 @@ def cycle(st, temp, hum, age, now, day=0, sp=SP):
     return decide(sp, st, temp, hum, age, now, day)
 
 
+def test_shipped_defaults_are_the_tuned_band():
+    """The default floor is 10.0 C dew, not the old 7.5 C.
+
+    At 25 C a 7.5 C dew is 33 % RH: the room sat at 31-36 % RH all night
+    while the law logged "in band", so a silent revert to 7.5 is a real
+    regression, not a style choice.
+    """
+    sp = Setpoints()
+    assert sp.low_dew_c == 10.0
+    assert sp.high_dew_c == 11.5
+    # The floor is a restart threshold read at the room's warm end.
+    assert dew_point_c(25.8, 37) == pytest.approx(sp.low_dew_c, abs=0.1)
+    assert dew_point_c(23.6, 42) == pytest.approx(sp.low_dew_c, abs=0.1)
+    # ...and the ceiling clears 40 % at the warmest observed temperature.
+    assert dew_point_c(26.1, 40.2) == pytest.approx(sp.high_dew_c, abs=0.1)
+
+
 def test_dew_point_matches_the_magnus_reference():
     # 25 C / 50 % is the textbook 13.9 C dew point.
     assert dew_point_c(25.0, 50.0) == pytest.approx(13.86, abs=0.02)
-    # 24.2 C / 34 % is below the ON edge (7.5 C); 46 % is above the OFF edge.
+    # 24.2 C / 34 % is below the ON edge (10.0 C); 46 % is above the OFF edge.
     assert dew_point_c(T_MED, 34) == pytest.approx(7.34, abs=0.05)
-    assert dew_point_c(T_MED, 46) == pytest.approx(11.9, abs=0.05)
+    assert dew_point_c(T_MED, 46) == pytest.approx(11.85, abs=0.02)
     # Saturated air: dew point == air temperature.
     assert dew_point_c(20.0, 100.0) == pytest.approx(20.0, abs=0.01)
 
@@ -47,8 +65,13 @@ def test_dew_point_matches_the_magnus_reference():
 def test_dew_point_is_temperature_invariant_at_fixed_moisture():
     """The whole point of the change: same absolute moisture, different T,
     same dew point -- so the relay does not follow the heater."""
-    # 24.2 C / 35 % and 26.2 C / 31.4 % hold the same moisture.
-    assert dew_point_c(26.2, 31.4) == pytest.approx(dew_point_c(24.2, 35.0), abs=0.15)
+    # 24.2 C / 35 % and 26.2 C / 31.1 % hold the same moisture (7.76 C dew).
+    # 31.4 % is 0.15 C wetter, which is why the old pair failed at the
+    # tolerance edge.
+    a = dew_point_c(24.2, 35.0)
+    b = dew_point_c(26.2, 31.1)
+    assert a == pytest.approx(7.76, abs=0.02)
+    assert b == pytest.approx(a, abs=0.02)
 
 
 def test_dry_room_turns_on_after_min_off_time():
@@ -91,8 +114,10 @@ def test_off_stays_off_inside_the_band():
 
 
 def test_off_at_the_top_edge_is_not_reported_as_in_band():
+    # 24.2 C / 46 % is 11.8 C dew -- above the ceiling.  40 % is 9.7 C dew,
+    # which really is inside the band.
     st = ControlState(relay_on=False, off_since_s=0.0)
-    d = cycle(st, T_MED, 40, 5, 600)
+    d = cycle(st, T_MED, 46, 5, 600)
     assert d.relay_on is False
     assert "in band" not in d.reason
     assert ">= 11.5C" in d.reason

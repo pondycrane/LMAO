@@ -106,6 +106,32 @@ def test_off_decision_drops_the_lease():
     assert sock.calls == [("off", 0)]
 
 
+def test_off_is_skipped_when_the_relay_is_already_open():
+    """No lease, relay open: re-POSTing /off every cycle is a no-op."""
+    sock = FakeSocket()
+    status = {"relay": False, "lease_s": 0, "power_w": 0.64}
+    assert controller.apply_decision(sock, Decision(False, "in band"), SP, status) is status
+    assert sock.calls == []
+
+
+def test_off_is_still_sent_while_a_lease_is_running_out():
+    # relay False but a lease still armed: the socket may close it again, so
+    # the explicit OFF is the safe action.
+    sock = FakeSocket()
+    status = {"relay": False, "lease_s": 42}
+    controller.apply_decision(sock, Decision(False, "in band"), SP, status)
+    assert sock.calls == [("off", 0)]
+
+
+def test_on_always_renews_even_when_the_relay_is_closed():
+    # The ON request *is* the deadman renewal; skipping it would drop the
+    # relay mid-run.
+    sock = FakeSocket()
+    status = {"relay": True, "lease_s": 120}
+    controller.apply_decision(sock, Decision(True, "humidifying"), SP, status)
+    assert sock.calls == [("on", 300)]
+
+
 def test_apply_decision_returns_the_socket_status():
     sock = FakeSocket(status={"power_w": 17.0})
     status = controller.apply_decision(sock, Decision(True, "x"), SP)

@@ -17,8 +17,17 @@ swing (21.5-33.6 C observed; 22.6-26.1 C in the last day), so the dew point
 must be high enough for 40 % RH even at the *warmest* temperature: 26.1 C at
 40 % RH is 11.4 C dew.  ``high`` = 11.5 C therefore holds 40.2 % at 26.1 C,
 45.0 % at 24.2 C and 49.5 % at 22.6 C, and stays under the 12 C winter
-window-condensation line.  ``low`` = 7.5 C (4 C hysteresis) is the floor that
-starts the appliance: 34.6 % RH at 24.2 C.
+window-condensation line.
+
+``low`` is the restart floor, and it must be read at the room's *warm* end: a
+fixed dew point is temperature-invariant, so the same dew reads a lower RH as
+the room warms.  The original 7.5 C floor was 34.6 % at 24.2 C and only 33 %
+at 25 C — the overnight history showed exactly that failure, the room sitting
+at 31-36 % RH while the law logged ``in band``.  It is now 10.0 C: 42 % at
+23.6 C, 37 % at 25.8 C, against the 41-47 % the ceiling gives over the same
+swing.  No single dew band holds 40-50 % across a 2.2 C swing; this is the
+closest that still leaves usable hysteresis (1.5 C), and the duty cycle is
+``L/(L+G)`` either way — a narrower band only shortens the cycles.
 
 Do **not** take the band from the room's own dew-point deciles (p10 6.8 /
 p75 9.6 C).  That history is the room *without* humidification, so adopting
@@ -80,7 +89,8 @@ def dew_point_c(temp_c: float, humidity_pct: float) -> float:
 class Setpoints:
     """Control band + safety limits (temperatures in C, times in seconds)."""
 
-    low_dew_c: float = 7.5  # turn ON at/below this dew point (34.6 % RH at 24.2 C)
+    low_dew_c: float = 10.0  # turn ON at/below this dew point (42 % RH at 23.6 C,
+    # 37 % at 25.8 C).  7.5 C was 34.6 % at 24.2 C and read "in band" at 31-36 % RH.
     high_dew_c: float = 11.5  # turn OFF at/above this dew point (40-50 % RH across the swing)
     rh_ceiling_pct: int = 60  # hard OFF: condensation risk in a cold room
     stale_s: int = 900  # no fresh sample for this long -> OFF

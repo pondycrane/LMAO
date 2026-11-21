@@ -1037,6 +1037,11 @@ The server folds every report into `lma_core/env_history.py` **keyed by that
 when the socket has no fresh sample (unplugged sensor, reboot, or a socket
 that is unreachable).  The HLW8032 power meter is diagnostic only and is
 never an input to the control decision.
+A closed loop over the two contracts above: an **M5Stack Atom Socket** (Atom
+Lite inside) carries an **ENV III** (SHT30), so one device per room measures
+the humidity, switches the humidifier's mains plug, and reports the room to
+the server.  Nothing runs on the socket but measure/actuate/report; the
+decision law runs in the cluster (or on a host, §"Two ways to run it").
 
 ```
 ENV III (SHT30) ─┐
@@ -1276,6 +1281,196 @@ it ~1.3 °C) holds 42-50 % RH.  Both stay under the 12 °C
 window-condensation line.  The baby room also polls every 30 s instead of 60:
 it is small and the appliance lifts dew point at ~0.8 °C/min, so a minute-long
 tick would overshoot the ceiling by ~2.5 %RH.
+
+A failed server read is not fatal — it is missing data, so the humidifier
+turns off rather than running on a frozen reading.
+
+**One controller per socket.**  With `HF_SENSOR_SOURCE=socket` the controller
+needs no mesh access at all, so it runs on any host that can reach the socket;
+`auto`/`server` additionally open Reticulum TCP to the server.  In the cluster
+the pod runs on tp4 with `hostNetwork` so Reticulum TCP is `localhost:4246` and
+the socket is on the LAN:
+
+Two controllers on ONE socket is forbidden (both would renew leases and write
+state); two controllers on TWO sockets is the per-room deployment.
+
+```bash
+bazel run //lmao_socket_humidifier:deploy   # image -> registry -> K8s -> rollout
+kubectl logs deployment/humidifier-baby-controller -f
+```
+
+The deploy builds `Dockerfile.humidifier` (pure-Python, 253 MB, no compiler),
+pushes it, creates the token Secrets (`HF_API_TOKEN` → bedroom socket,
+`HF_BABY_API_TOKEN` → baby-room socket, both in `~/.config/lmao/humidifier.env`)
+plus the bedroom's identity Secret, applies `k8s/humidifier.yaml` (two
+`Recreate` Deployments, one replica each), waits for the first logged decision
+from **each** controller, and **stops and disables the host systemd unit**.
+The bedroom identity Secret is the same `lxmf/delivery` key the host
+controller used, so the server's contact book already has it approved; an
+initContainer copies it onto the state volume because a Secret mount is
+read-only while the LXMF router writes its storage.  The baby-room controller
+mounts no identity: with `HF_SENSOR_SOURCE=socket` it never opens Reticulum.
+`HF_STATE_FILE` on each room's PVC persists the daily budget, cooldown and run
+timers across restarts (a crash loop must not reset the guards).
+
+Without a cluster, the host unit is the alternative (the tokens and socket
+live in `~/.config/lmao/humidifier.env`, mode 0600; the unit below drives the
+baby-room socket):
+**Controller** (`lmao_socket_humidifier/controller.py`, host Python): reads the
+socket's `/status` (the room's own ENV III), falls back to the server's air
+series for `--env-node` when that sample is missing or stale, applies the law,
+then renews or drops the socket lease.
+
+```bash
+cp lmao_socket_humidifier/lmao-socket-humidifier.service \
+    ~/.config/systemd/user/
+systemctl --user daemon-reload && \
+    systemctl --user enable --now lmao-socket-humidifier
+journalctl --user -u lmao-socket-humidifier -f
+bazel run //lmao_socket_humidifier:controller -- \
+bazel run //lmao_socket_humidifier:controller -- --once --json  # one cycle, bench check
+```
+
+The unit also sets `HF_STATE_FILE`, so the guards survive a restart; on
+SIGTERM the controller opens the relay before exiting, so a rollout does not
+leave the humidifier running for the rest of the lease.
+`--socket` takes a **comma-separated fallback list** (`humidifier.local,
+192.168.50.22`).  mDNS resolution through nss-mdns fails transiently on the
+controller host — observed as `POST /off failed: Name or service not known`
+while the socket was up — so a pinned address keeps the relay controllable.
+Only transport failures fall through; an HTTP answer (including a 403) is
+authoritative and is never retried against the next host.  The answering host
+becomes the sticky first choice.  The systemd unit passes `${HF_SOCKET}` from
+`~/.config/lmao/humidifier.env`, so the host's pinned address stays out of the
+repo.
+
+**The appliance is a Levoit Classic 160** (`LUH-A251-WCA`, 2.5 L top-fill,
+ultrasonic cool mist, rated **17 W**, 100-190 mL/h across its dial).  It has
+**no humidistat, no auto mode and no app** — a mechanical mist dial and a
+low-water auto shut-off — so the socket's relay is the only way to hold a
+target at all; left to itself the unit runs until the tank empties and
+over-humidifies the room.  The dial is a mechanical potentiometer, so closing
+the relay resumes misting at whatever the dial is set to, with no button press
+[INFERENCE from the manual: no latching digital state].  Leave the dial at the
+setting you want the controller to run at.
+
+The meter confirms the load: with the relay closed the socket reads **16.1-16.4
+W at 121 V**, against the unit's 17 W rating — so a closed relay is genuinely
+running the humidifier, not just energising a standby circuit.  A reading near
+the socket's own 0.63 W standby means the appliance is off or unplugged.
+
+**The law controls dew point, not relative humidity.**  RH is a ratio: at
+fixed absolute moisture it moves 2-3 points for every degree the thermostat
+swings, so a 5-point RH band duty-cycles the appliance on the *heater's*
+schedule instead of on dryness.  Over 14 days of RoboDog home reports
+(2026-11-05..11-19, n=8615 paired minutes, no humidifier):
+
+| Statistic | RH | Dew point |
+|---|---|---|
+| p10 | 35.0 % | 6.8 °C |
+| p25 | 35.9 % | 7.5 °C |
+| median | 37.1 % | 8.6 °C |
+| p75 | 38.6 % | 9.6 °C |
+| p90 | 40.1 % | 10.8 °C |
+
+(T 21.5-33.6 °C, mean 24.3 °C; corr(T, RH) = -0.53.)  The **band comes from
+the comfort target, not from that history**.  Its ceiling is `11.5 °C` dew:
+that holds 40.2 % at 26.1 °C, 45.0 % at 24.2 °C and 49.5 % at 22.6 °C, and
+stays under the 12 °C winter window-condensation line.
+
+The **floor is a restart threshold, not a comfort edge**, and it has to be
+read at the room's *warm* end — a fixed dew point is temperature-invariant,
+so the same dew reads a lower RH as the room warms.  The original `7.5 °C`
+floor was 33 % RH at 25 °C, and the overnight history showed exactly that
+failure: the room sat at 31-36 % RH while the law logged `in band`.  It is
+now `10.0 °C` — 37 % at 25.8 °C, 42 % at 23.6 °C — against the 41-47 % the
+ceiling gives over the same swing.  A narrower band would put the warm end
+closer to 40 % but only shortens the cycles (duty is `L/(L+G)`, independent
+of band width): 53 min ON / 180 min OFF here, versus 141/480 at the old 4 °C
+band.  No single dew band holds 40-50 % across a 2.2 °C swing; this is the
+closest that keeps the relay from chattering.
+
+The table above is *evidence that dew point is the right variable*, not a
+setpoint source: the room's own p10/p75 (6.8/9.6 °C) is the room **without**
+humidification, so adopting it would enshrine the chronic dryness as the
+target — the failure mode where 34 % RH reads "in band" and the appliance
+never runs.  Do not convert an RH threshold at one temperature either: RH and
+dew point are anti-correlated here (r = -0.53), because a warm room reads a
+low RH while holding *more* moisture.  `--rh-ceiling 60` remains a physical
+backstop: at 11.5 °C dew a room cooled below ~19.5 °C reaches 60 % RH, which
+is condensation on windows and walls, so it is not humidified further.
+
+`max_on_s` follows from a **measured** run of this appliance in this room, not
+a spec sheet: relay closed with the Classic 160 plugged in, RH went 38.2 ->
+40.6 % in 32 min at ~23.6 °C, i.e. dew point 8.6 -> 9.5 °C, a slope of
+**+1.7 °C dew/h**.  Crossing the 1.5 °C band therefore takes ~53 min, well
+inside the 3 h cap — a cap, not a limit that bites.  At the lower dial
+(~3 %/h RH, ~+0.55 °C dew/h) a crossing needs ~2.7 h, so the cap still
+splits it into runs with the 10 min cooldown.
+
+`max_daily_on_s` is **not** the dry-spell duration (0.57 h/day below the low
+edge) — it is the duty cycle needed to hold the band.  The room loses moisture
+to ventilation at **0.5 °C dew/h** (median falling drift over the 14 days;
+0.7 °C/h at its p10) and the appliance adds a net +1.7 °C/h, so the ON
+fraction is `L/(L+G)` = 23-29 %, i.e. **5.5-7 h/day** — independent of the
+band width, which only sets the cycle length (1.5 °C = 53 min ON / 180 min
+OFF, ~8 cycles a day), plus the ramp from the dry floor to the ceiling on the
+first run of a dry day — **8-9.5 h**.  The 10 h budget covers that and still
+bounds a pathological day; the 2.5 L tank covers 10 h at the unit's 190 mL/h
+maximum (1.9 L).  The bedroom's 60 s poll bounds overshoot to ~0.05 °C dew
+per tick; the baby room's 30 s poll, ~0.4 °C (its appliance is far stronger
+for its volume).
+
+**Tuning.**  The band is set in `k8s/humidifier.yaml` (`HF_LOW_DEW` /
+`HF_HIGH_DEW`), not in code: the controller reads them as defaults.  The
+ceiling is bounded by physics, not comfort — 11.5 °C dew is under the 12 °C
+winter window-condensation line and far under the 12.8 °C mould line.  A
+moister room means a higher `HF_HIGH_DEW`, which raises the duty cycle, so
+raise `HF_MAX_DAILY_ON_H` with it (the tank holds 13 h at 190 mL/h).
+
+Re-derive the band when the season turns — for a room whose socket reports
+itself, use that room's `node_id` (the socket's `device_name`); the query API
+is on `iot-query:8080`, reachable with `kubectl port-forward`:
+
+```sql
+WITH p AS (
+  SELECT timestamp_ms,
+         max(CASE WHEN sensor_id = 3 THEN value END) AS t,
+         max(CASE WHEN sensor_id = 2 THEN value END) AS rh
+  FROM sensor_readings WHERE node_id = 'main bedroom' GROUP BY timestamp_ms
+), g AS (
+  SELECT 243.12 * (ln(rh / 100.0) + 17.62 * t / (243.12 + t))
+         / (17.62 - (ln(rh / 100.0) + 17.62 * t / (243.12 + t))) AS dew
+  FROM p WHERE t IS NOT NULL AND rh IS NOT NULL
+)
+SELECT round(quantile_cont(dew, 0.10), 2) AS p10,
+       round(quantile_cont(dew, 0.50), 2) AS p50,
+       round(quantile_cont(dew, 0.75), 2) AS p75
+FROM g;
+```
+
+Control law (`lmao_socket_humidifier/control.py`, pure and unit-tested): ON at
+`<= --low-dew`, OFF at `>= --high-dew`, hard OFF at `--rh-ceiling` (60 %),
+minimum ON/OFF runs (60/120 s), a continuous-run cap (3 h) with a cooldown
+(10 min), a daily budget (10 h), and **fail-safe OFF** when the reading is
+missing, implausible, or older than `--stale-s` (900 s).
+
+The band is per room in `k8s/humidifier.yaml` (never in code):
+
+| Room | Band (dew °C) | RH at the room's own temps | Poll |
+|---|---|---|---|
+| main bedroom | 10.0 / 11.5 | 37-42 % (ON) .. 41-47 % (OFF) over 23.6-25.8 °C | 60 s |
+| baby room | 9.5 / 11.5 | 42-47 % (ON) .. 47-54 % (OFF) over 21.2-23.4 °C | 30 s |
+
+The baby room sits at ~45 % RH on its own, so a 7.5 °C floor would let it
+drift to ~35 % before humidifying.  Its 9.5/11.5 band is quoted at the
+measured *operating* point (21.9 °C with the appliance running — the
+evaporative load cools it ~1.3 °C), which is where the sensor actually reads
+during a run.  Both rooms stay under the 12 °C window-condensation line.
+
+The baby room also polls every 30 s instead of 60: it is small and the
+appliance lifts dew point at ~0.8 °C/min, so a minute-long tick would
+overshoot the ceiling by ~2.5 %RH.
 
 A failed server read is not fatal — it is missing data, so the humidifier
 turns off rather than running on a frozen reading.
@@ -2032,6 +2227,15 @@ The registry is configured via environment variables:
 │   ├── client.py                      # announce discovery + HistoryRequest → ChartBundle
 │   ├── config.py                      # RnsConfig(role="tcp-client"): one TCPClientInterface
 │   └── firmware/                      # ESP-IDF: SHTC3 report + own-history chart (ST7305)
+│
+├── lmao_socket_humidifier/            # Atom Socket humidifier control (§7f)
+│   ├── control.py                     # hysteresis + safety law (pure, unit-tested)
+│   ├── socket_client.py               # Atom Socket leased HTTP API client
+│   ├── controller.py                  # poll server humidity → decide → renew/clear lease
+│   ├── lmao-socket-humidifier.service # systemd --user unit (controller host service)
+│   └── firmware/                      # ESP-IDF: relay G23 + HLW8032 G22 + leased HTTP API
+│       ├── main/                      # main.cpp, hlw8032, relay_lease (host-tested)
+│       └── build.sh / flash.sh        # Docker ESP-IDF build + flash; NVS provisioning
 │
 ├── lmao_socket_humidifier/            # Atom Socket humidifier control (§7f)
 │   ├── control.py                     # hysteresis + safety law (pure, unit-tested)

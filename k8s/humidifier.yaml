@@ -95,11 +95,18 @@ data:
   # Pinned LAN address first, mDNS name as the fallback (see socket_client).
   HF_SOCKET: "192.168.50.22,humidifier.local"
   HF_INTERVAL: "60"
-  # Dew-point band for 40-50 % RH across the room's 22.6-26.1 C swing:
-  # ON at <= 7.5 C (34.6 % RH at 24.2 C), OFF at >= 11.5 C (45.0 % at 24.2 C,
-  # 40.2 % at 26.1 C), under the 12 C window-condensation line.  Tune here,
-  # not in code: the law reads HF_LOW_DEW / HF_HIGH_DEW.
-  HF_LOW_DEW: "7.5"
+  # Dew-point band, read at the room's own operating range (23.6-25.8 C).
+  # The 7.5 floor was wrong: at 25 C it is 33 % RH, so the room sat at
+  # 31-36 % RH all night and the law called it "in band".  A dew floor is
+  # temperature-invariant, so no single band holds 40-50 % across a 2.2 C
+  # swing; 10.0 is the highest floor that still leaves a usable hysteresis.
+  #   ON  at <= 10.0 C: 37 % (25.8 C) .. 42 % (23.6 C)
+  #   OFF at >= 11.5 C: 41 % (25.8 C) .. 47 % (23.6 C)
+  # Both under the 12 C window-condensation line.  Duty is L/(L+G) ~ 23 %
+  # either way (~5.5 h/day); a narrower band only shortens the cycles
+  # (53 min ON / 180 min OFF here, against 141/480 at the old 4 C band).
+  # Tune here, not in code: the law reads HF_LOW_DEW / HF_HIGH_DEW.
+  HF_LOW_DEW: "10.0"
   HF_HIGH_DEW: "11.5"
   HF_RH_CEILING: "60"
   # Ramp (~2.4 h) + hold (L/(L+G) ~5.5-7 h/day) fits in 10 h; the 2.5 L tank

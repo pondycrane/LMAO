@@ -53,14 +53,18 @@ class SocketClient:
     # ---- plumbing -------------------------------------------------------
 
     def _request(self, path: str, method: str = "GET") -> dict:
-        last: SocketError | None = None
+        # Every failed host is reported with the host that failed it.  The
+        # bare ``<urlopen error … Name or service not known>`` was misleading:
+        # the pinned IP times out while the mDNS name raises the name error,
+        # so a single "last error" blamed DNS for an IP timeout.
+        failures: list[str] = []
         for idx, base in enumerate(self.base_urls):
             try:
                 body = self._send(base, path, method)
             except SocketError as exc:
                 if not exc.transport:
                     raise
-                last = exc
+                failures.append(f"{base} -> {exc}")
                 continue
             if idx:
                 # Sticky failover: the working host moves to the front so a
@@ -70,10 +74,13 @@ class SocketClient:
                 return json.loads(body)
             except json.JSONDecodeError as exc:
                 raise SocketError(f"{method} {path} returned non-JSON: {body!r}") from exc
-        assert last is not None
-        if len(self.base_urls) > 1:
-            raise SocketError(f"{last} (tried {len(self.base_urls)} hosts)") from last
-        raise last
+        # The loop returns on the first success and re-raises a non-transport
+        # error, so reaching here means every host failed.
+        raise SocketError(
+            f"{method} {path} failed on all {len(failures)} host(s): "
+            + "; ".join(failures),
+            transport=True,
+        )
 
     def _send(self, base: str, path: str, method: str) -> bytes:
         req = urllib.request.Request(base + path, method=method)

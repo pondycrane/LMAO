@@ -145,10 +145,24 @@ def read_room(reader, env_node: str | None, now_s: float):
     return float(temp), int(hum), age
 
 
-def apply_decision(client: SocketClient, decision: Decision, sp: Setpoints) -> dict:
-    """Make the socket match the decision; return the socket's status reply."""
+def apply_decision(
+    client: SocketClient, decision: Decision, sp: Setpoints, status: dict | None = None
+) -> dict:
+    """Make the socket match the decision; return the socket's status reply.
+
+    An ON decision always re-sends ``/on``: the request *is* the deadman lease
+    renewal, so skipping it would open the relay mid-run.
+
+    An OFF decision is skipped when the socket's own ``/status`` already
+    reports the relay open with no lease.  Re-sending it every cycle is a
+    no-op POST (2 880/day at a 30 s poll) and turns a transient transport
+    failure into a scary ``socket command failed`` line for a relay that was
+    already open.
+    """
     if decision.relay_on:
         return client.set_on(sp.lease_s)
+    if status is not None and status.get("relay") is False and not status.get("lease_s"):
+        return status
     return client.set_off()
 
 
@@ -279,7 +293,7 @@ def _parse_args(argv=None):
     p.add_argument(
         "--low-dew",
         type=float,
-        default=float(os.environ.get("HF_LOW_DEW", 7.5)),
+        default=float(os.environ.get("HF_LOW_DEW", 10.0)),
         help="ON at/below this dew point (C)",
     )
     p.add_argument(
@@ -472,7 +486,7 @@ def main(argv=None) -> int:
 
             if not args.dry_run:
                 try:
-                    status = apply_decision(client, decision, sp)
+                    status = apply_decision(client, decision, sp, status)
                 except SocketError as exc:
                     logger.error("socket command failed: %s", exc)
                     exit_code = 1
