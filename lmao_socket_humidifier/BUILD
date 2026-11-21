@@ -25,6 +25,13 @@ cc_library(
 )
 
 cc_library(
+    name = "directive",
+    srcs = ["firmware/main/directive.cpp"],
+    hdrs = ["firmware/main/directive.h"],
+    strip_include_prefix = "firmware/main",
+)
+
+cc_library(
     name = "relay_lease",
     srcs = ["firmware/main/relay_lease.cpp"],
     hdrs = ["firmware/main/relay_lease.h"],
@@ -35,6 +42,7 @@ cc_test(
     name = "socket_unit_test",
     srcs = ["firmware/tests/socket_unit_test.cpp"],
     deps = [
+        ":directive",
         ":hlw8032",
         ":relay_lease",
         "//firmware_common:sht30_codec",
@@ -56,6 +64,13 @@ py_library(
 )
 
 py_library(
+    name = "directive_pub",
+    srcs = ["directive.py"],
+    imports = [".."],
+    visibility = ["//visibility:public"],
+)
+
+py_library(
     name = "controller_lib",
     srcs = [
         "__init__.py",
@@ -65,6 +80,7 @@ py_library(
     visibility = ["//visibility:public"],
     deps = [
         ":control",
+        ":directive_pub",
         ":socket_client",
         "//robodog_home_client:home_client_lib",
     ],
@@ -99,6 +115,17 @@ py_test(
     main = "tests/test_socket_client.py",
     deps = [
         ":socket_client",
+        "@lmao_pip//pytest",
+    ],
+    tags = ["unit"],
+)
+
+py_test(
+    name = "directive_test",
+    srcs = ["tests/test_directive.py"],
+    main = "tests/test_directive.py",
+    deps = [
+        ":directive_pub",
         "@lmao_pip//pytest",
     ],
     tags = ["unit"],

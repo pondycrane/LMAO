@@ -93,7 +93,7 @@ data:
   LMAO_SERVER_HOST: "localhost"
   LMAO_SERVER_PORT: "4246"
   # Pinned LAN address first, mDNS name as the fallback (see socket_client).
-  HF_SOCKET: "192.168.50.22,humidifier.local"
+  HF_SOCKET: "192.168.50.21,humidifier.local"
   HF_INTERVAL: "60"
   # Dew-point band, read at the room's own operating range (23.6-25.8 C).
   # The 7.5 floor was wrong: at 25 C it is 33 % RH, so the room sat at
@@ -113,6 +113,16 @@ data:
   # covers it at the unit's 190 mL/h maximum.
   HF_MAX_DAILY_ON_H: "10"
   HF_STATE_FILE: "/state/state.json"
+  # Pull, not push: publish the decision to the server's directive relay
+  # (lma_core.humidifier_api, hostNetwork so localhost:8082 is the server
+  # pod's own API).  The socket GETs /humidifier/<mdns_host> from its own
+  # outbound path, so actuation no longer depends on resolving its DHCP
+  # address — the failure that dried this room out on 2026-11-21.
+  HF_DIRECTIVE_URL: "http://localhost:8082/humidifier"
+  HF_DIRECTIVE_KEY: "humidifier"
+  # Push stays on until the socket runs the pull firmware; flip to "0" after
+  # flashing (the controller then only publishes).
+  HF_PUSH: "1"
   LMAO_HOME_CLIENT_STATE_PATH: "/state/rns"
   HF_IDENTITY_DIR: "/state/identity"
 
@@ -155,6 +165,11 @@ data:
   HF_RH_CEILING: "60"
   HF_MAX_DAILY_ON_H: "10"
   HF_STATE_FILE: "/state/state.json"
+  # Pull, not push (see humidifier-config): the socket polls the server's
+  # directive relay with its own mdns_host as the key.
+  HF_DIRECTIVE_URL: "http://localhost:8082/humidifier"
+  HF_DIRECTIVE_KEY: "humidifier-baby"
+  HF_PUSH: "1"
 
 ---
 apiVersion: apps/v1

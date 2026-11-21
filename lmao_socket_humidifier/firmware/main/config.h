@@ -102,6 +102,28 @@
 #define HF_ANNOUNCE_INTERVAL_MS 30000
 #endif
 
+/* ---- directive pull ----
+ * The socket polls the LMAO server's directive relay from its own outbound
+ * path (the one its SensorReport uses).  Nothing pushes to the socket, so
+ * actuation does not depend on anyone resolving its DHCP address.
+ * The key is the NVS mdns_host; the relay is the server host + this port. */
+#ifndef HF_DIRECTIVE_PORT
+#define HF_DIRECTIVE_PORT 8082
+#endif
+#ifndef HF_DIRECTIVE_POLL_S
+#define HF_DIRECTIVE_POLL_S 30
+#endif
+
+/* Local interlocks: the last line of defence if the controller or its law
+ * misbehaves.  Sized like the controller's own caps (3 h run, 10 min
+ * cooldown); the lease is still the deadman. */
+#ifndef HF_LOCAL_MAX_ON_S
+#define HF_LOCAL_MAX_ON_S (3 * 3600)
+#endif
+#ifndef HF_LOCAL_COOLDOWN_S
+#define HF_LOCAL_COOLDOWN_S 600
+#endif
+
 /* ---- loop cadence ---- */
 #define HF_TICK_MS 200
 #define HF_METER_STALE_MS 5000

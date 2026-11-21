@@ -17,6 +17,7 @@ py_library(
         "device_detect.py",
         "env_history.py",
         "grpc_types.py",
+        "humidifier_api.py",
         "message_utils.py",
         "query_api.py",
         "queue.py",

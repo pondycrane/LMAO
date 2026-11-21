@@ -651,6 +651,19 @@ py_test(
     ],
 )
 
+# Humidifier directive relay (lma_core/humidifier_api.py): the store's
+# validation + staleness cutoff, and the loopback-only publish / public read.
+py_test(
+    name = "test_humidifier_api",
+    srcs = ["test_humidifier_api.py"],
+    deps = [
+        "//lma_core",
+        "@lmao_pip//aiohttp",
+        "@lmao_pip//pytest",
+        "@lmao_pip//pytest_asyncio",
+    ],
+)
+
 # Client side of the contact book (lma_core/contact_client.py): the payload a
 # provisioning run posts, and the unreachable-API / taken-name failure modes.
 py_test(

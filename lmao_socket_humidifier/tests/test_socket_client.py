@@ -138,3 +138,9 @@ def test_single_host_failure_names_it(server):
     client = SocketClient("127.0.0.1:1", TOKEN, timeout=1.0)
     with pytest.raises(SocketError, match="http://127.0.0.1:1"):
         client.status()
+
+
+if __name__ == "__main__":
+    import sys
+
+    sys.exit(pytest.main([__file__] + sys.argv[1:]))

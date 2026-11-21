@@ -20,6 +20,11 @@
 # a re-provisioned socket keeps no stale token).  An unprovisioned socket
 # refuses relay commands (fails closed).
 #
+# --keep-nvs reflashes the app ONLY and leaves the device's NVS untouched, so
+# an already-provisioned socket keeps its WiFi creds, mDNS host, device name
+# and API token.  That needs no secrets at all: use it to put new firmware on
+# a socket that is already reporting (the usual case).
+#
 # Flashing goes through the ESP-IDF Docker image (the sanctioned Atom Lite
 # path — the same one the Sprout uses), at 115200 baud: the ESP32-PICO-D4
 # embedded flash is unreliable at 460800+ (AGENTS.md).
@@ -46,6 +51,7 @@ LEASE_DEFAULT="${HF_LEASE_DEFAULT:-300}"
 SERVER_HOST="${HF_SERVER_HOST:-tp4}"
 SERVER_PORT="${HF_SERVER_PORT:-4246}"
 DEVICE_NAME="${HF_DEVICE_NAME:-}"
+KEEP_NVS=0
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -59,10 +65,14 @@ while [ $# -gt 0 ]; do
         --server-host)  SERVER_HOST="${2:-}";  shift 2 || true;;
         --server-port)  SERVER_PORT="${2:-}";  shift 2 || true;;
         --device-name)  DEVICE_NAME="${2:-}";  shift 2 || true;;
+        --keep-nvs)     KEEP_NVS=1;            shift 1 || true;;
         -h|--help)
             echo "usage: $0 --port X --wifi-ssid S --wifi-pass P --api-token T" >&2
             echo "          --device-name NAME [--server-host H] [--server-port P]" >&2
             echo "          [--mdns-host NAME] [--lease-default SECS] [--baud 115200]" >&2
+            echo "" >&2
+            echo "  reflash an already-provisioned socket (NVS untouched):" >&2
+            echo "    $0 --port X --device-name NAME --keep-nvs" >&2
             exit 0;;
         *) echo "unknown argument: $1" >&2; exit 2;;
     esac
@@ -79,15 +89,19 @@ PY
     echo "Run tools/identify_device.py to classify by type, then re-run." >&2
     exit 3
 fi
-if [ -z "$WIFI_SSID" ] || [ -z "$WIFI_PASS" ]; then
-    echo "error: WiFi credentials are required (nothing is compiled in)." >&2
-    echo "  pass --wifi-ssid/--wifi-pass, or export LMAO_WIFI_SSID/LMAO_WIFI_PASS." >&2
-    exit 2
-fi
-if [ -z "$API_TOKEN" ]; then
-    echo "error: --api-token is required: the HTTP API fails closed without it." >&2
-    echo "  generate one with: openssl rand -hex 16" >&2
-    exit 2
+if [ "$KEEP_NVS" = 0 ]; then
+    if [ -z "$WIFI_SSID" ] || [ -z "$WIFI_PASS" ]; then
+        echo "error: WiFi credentials are required (nothing is compiled in)." >&2
+        echo "  pass --wifi-ssid/--wifi-pass, or export LMAO_WIFI_SSID/LMAO_WIFI_PASS." >&2
+        echo "  Reflashing a socket that is already provisioned? use --keep-nvs." >&2
+        exit 2
+    fi
+    if [ -z "$API_TOKEN" ]; then
+        echo "error: --api-token is required: the HTTP API fails closed without it." >&2
+        echo "  generate one with: openssl rand -hex 16" >&2
+        echo "  Reflashing a socket that is already provisioned? use --keep-nvs." >&2
+        exit 2
+    fi
 fi
 case "$LEASE_DEFAULT" in
     ''|*[!0-9]*) echo "invalid --lease-default '$LEASE_DEFAULT'" >&2; exit 2;;
@@ -109,6 +123,20 @@ fi
 
 WORK="$(mktemp -d /tmp/humidifier_nvs.XXXXXX)"
 trap 'rm -rf "${WORK:-}"' EXIT
+
+if [ "$KEEP_NVS" = 1 ]; then
+    # App-only reflash: idf.py flash writes bootloader + partition table +
+    # app, never NVS, so WiFi/host/token/name all survive.  The staged build
+    # must still be for this room (checked above).
+    echo "flashing app to $PORT @ $BAUD (NVS preserved) ..."
+    docker run --rm -v "$RTR:/repo" -w /repo/firmware/humidifier_socket \
+        --device "$PORT:$PORT" -e IDF_TARGET=esp32 "$IDF_IMG" \
+        bash -lc "git config --global --add safe.directory /repo; idf.py -p $PORT -b $BAUD flash" || exit 1
+    echo "==== $PORT reflashed (app only): device='$DEVICE_NAME' — NVS untouched ===="
+    echo "    WiFi, mdns_host, api_token, server_host/port and lease_default are unchanged."
+    echo "    Verify: curl -s http://<mdns_host>.local/status | grep directive_polls"
+    exit 0
+fi
 
 csv_quote() {
     case "$1" in

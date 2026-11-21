@@ -11,9 +11,14 @@ Per cycle (``--interval``, default 60 s):
    second env reporter cannot hijack the reading);
 3. apply the dew-point hysteresis + safety law
    (``lmao_socket_humidifier.control``);
-4. renew or drop the Atom Socket's relay lease
+4. publish the decision for the socket to PULL
+   (``lmao_socket_humidifier.directive`` -> the server's directive relay).
+   The socket polls it from its own outbound path, so actuation does not
+   depend on this process resolving the socket's DHCP address; the push
+   path is kept (``--no-push`` disables it) for firmware that predates pull;
+5. renew or drop the Atom Socket's relay lease
    (``lmao_socket_humidifier.socket_client``);
-5. persist the control state so a restart does not reset the daily budget or
+6. persist the control state so a restart does not reset the daily budget or
    a cooldown (``--state-file``).
 
 A failed read is NOT fatal: it is fed to the law as missing data, which turns
@@ -49,6 +54,7 @@ from lmao_socket_humidifier.control import (
     dew_point_c,
     reconcile,
 )
+from lmao_socket_humidifier.directive import DEFAULT_URL, Directive, Publisher
 from lmao_socket_humidifier.socket_client import SocketClient, SocketError
 
 logger = logging.getLogger("lmao_socket_humidifier")
@@ -326,6 +332,25 @@ def _parse_args(argv=None):
     p.add_argument(
         "--lease-s", type=int, default=300, help="lease granted to the socket each ON cycle"
     )
+    p.add_argument(
+        "--directive-url",
+        default=os.environ.get("HF_DIRECTIVE_URL", DEFAULT_URL),
+        help="directive relay base URL; the decision is POSTed to "
+        "<url>/<key> and the socket GETs it (default %s)" % DEFAULT_URL,
+    )
+    p.add_argument(
+        "--directive-key",
+        default=os.environ.get("HF_DIRECTIVE_KEY", ""),
+        help="socket key for the directive (the socket's mDNS host, e.g. "
+        "'humidifier-baby'); empty disables publishing",
+    )
+    p.add_argument(
+        "--no-push",
+        action="store_true",
+        default=os.environ.get("HF_PUSH", "1").strip().lower() in ("0", "false", "no", "off"),
+        help="do not command the socket directly — publish the directive only "
+        "(set HF_PUSH=0 once the firmware polls)",
+    )
     p.add_argument("--once", action="store_true", help="run exactly one cycle (bench verification)")
     p.add_argument(
         "--dry-run", action="store_true", help="decide and log, but do not command the socket"
@@ -358,6 +383,20 @@ def main(argv=None) -> int:
 
     client = SocketClient(args.socket, args.token)
     state = load_state(args.state_file)
+
+    # The pull path.  The key is the socket's own mDNS host (what the firmware
+    # polls with), not its address — that is the whole point of pulling.
+    publisher = None
+    if args.directive_key:
+        publisher = Publisher(args.directive_url)
+        logger.info(
+            "publishing directives for %r to %s", args.directive_key, args.directive_url
+        )
+    else:
+        logger.info(
+            "no --directive-key/HF_DIRECTIVE_KEY — the socket cannot pull a "
+            "directive (push path only)"
+        )
 
     # Reconcile the persisted state with the socket's actual relay before the
     # first decision.  The socket is authoritative: its lease expired while
@@ -455,6 +494,18 @@ def main(argv=None) -> int:
             decision = decide(sp, state, temp, hum, age, now_s, _day_index(now_s))
             save_state(args.state_file, state)
 
+            if publisher is not None:
+                publisher.publish(
+                    Directive(
+                        key=args.directive_key,
+                        relay_on=decision.relay_on,
+                        reason=decision.reason,
+                        lease_s=sp.lease_s,
+                        issued_s=now_s,
+                        fail_safe=decision.fail_safe,
+                    )
+                )
+
             if args.json:
                 print(
                     json.dumps(
@@ -484,7 +535,7 @@ def main(argv=None) -> int:
                     decision.reason,
                 )
 
-            if not args.dry_run:
+            if not args.dry_run and not args.no_push:
                 try:
                     status = apply_decision(client, decision, sp, status)
                 except SocketError as exc:
@@ -510,8 +561,22 @@ def main(argv=None) -> int:
         graceful = True
     finally:
         if graceful and not args.dry_run:
-            with contextlib.suppress(SocketError):
-                client.set_off()
+            # A stopping controller must not leave its last ON directive live:
+            # publish OFF so the socket opens within one poll, and only then
+            # (push mode) open the relay directly.
+            if publisher is not None:
+                publisher.publish(
+                    Directive(
+                        key=args.directive_key,
+                        relay_on=False,
+                        reason="controller stopping",
+                        lease_s=0,
+                        issued_s=time.time(),
+                    )
+                )
+            if not args.no_push:
+                with contextlib.suppress(SocketError):
+                    client.set_off()
         if reader is not None:
             reader.stop()
     logger.info("stopped; relay opened")

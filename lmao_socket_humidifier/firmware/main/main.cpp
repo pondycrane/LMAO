@@ -30,6 +30,7 @@
 #include <cstring>
 
 #include "esp_event.h"
+#include "esp_http_client.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include "esp_netif.h"
@@ -46,6 +47,7 @@
 #include "driver/uart.h"
 
 #include "config.h"
+#include "directive.h"
 #include "hlw8032.h"
 #include "led_rgb.h"
 #include "net_report.h"
@@ -82,6 +84,7 @@ static Config s_cfg;
 static SemaphoreHandle_t s_lock = nullptr;
 static humidifier::Lease s_lease;
 static humidifier::LeaseLimits s_limits;
+static humidifier::LocalLimits s_limits_local;
 static hlw8032::Sample s_meter;
 static uint32_t s_meter_last_ms = 0;
 static bool s_meter_seen = false;
@@ -91,6 +94,15 @@ static uint32_t s_relay_writes = 0;
 static bool s_relay_state = false;
 static bool s_led_ready = false;
 static uint32_t s_refusals = 0;
+
+// ── directive pull (the server's decision, fetched on our own outbound path) ──
+static humidifier::LocalState s_local;
+static humidifier::Directive s_last_directive;
+static uint32_t s_directive_polls = 0;
+static uint32_t s_directive_fails = 0;
+static uint32_t s_directive_applied = 0;
+static uint32_t s_directive_last_ms = 0;
+static char s_directive_why[48] = "no poll yet";
 
 // Metering diagnostics.  A dead HLW8032 looks identical to "no load" in the
 // readings (0 V/0 A), so the raw UART evidence is exposed: a wiring/parity
@@ -332,7 +344,7 @@ static esp_err_t status_get(httpd_req_t* req) {
         snprintf(first_raw + 3 * i, 4, "%02x ", s_first_raw[i]);
     }
 
-    char body[1280];
+    char body[1792];
     int n = snprintf(
         body, sizeof(body),
         "{\"relay\":%s,\"lease_s\":%u,\"on_ms_total\":%u,\"relay_writes\":%u,"
@@ -346,6 +358,8 @@ static esp_err_t status_get(httpd_req_t* req) {
         "\"server_known\":%s,\"reports_sent\":%u,\"reports_failed\":%u,"
         "\"device_name\":\"%s\",\"server_host\":\"%s\",\"server_port\":%u,"
         "\"led\":\"%s\","
+        "\"directive_polls\":%u,\"directive_fails\":%u,\"directive_applied\":%u,"
+        "\"directive_age_s\":%ld,\"directive_why\":\"%s\","
         "\"first_raw\":\"%s\",\"uptime_s\":%u,\"mdns_host\":\"%s\"}",
         lease.on ? "true" : "false",
         (unsigned)humidifier::lease_remaining_s(lease, t),
@@ -362,7 +376,12 @@ static esp_err_t status_get(httpd_req_t* req) {
         (unsigned)net_report::reports_sent(),
         (unsigned)net_report::reports_failed(),
         s_cfg.name, s_cfg.server_host, (unsigned)s_cfg.server_port,
-        s_relay_state ? "red" : "off", first_raw,
+        s_relay_state ? "red" : "off",
+        (unsigned)s_directive_polls, (unsigned)s_directive_fails,
+        (unsigned)s_directive_applied,
+        s_directive_last_ms == 0 ? -1L
+                                 : (long)((t - s_directive_last_ms) / 1000u),
+        s_directive_why, first_raw,
         (unsigned)(t / 1000), s_cfg.host);
     (void)n;
     httpd_resp_set_type(req, "application/json");
@@ -411,6 +430,94 @@ static esp_err_t health_get(httpd_req_t* req) {
     return httpd_resp_sendstr(req, "ok");
 }
 
+// ── directive pull ───────────────────────────────────────────────────
+// GET http://<server_host>:8082/humidifier/<mdns_host>.  A 200 carries the
+// controller's decision; a 503 is the relay's authoritative "no fresh
+// decision" and opens the relay at once.  A transport failure is NOT a
+// decision: the current state stands and the lease deadman covers it, so a
+// single dropped poll does not flap a running appliance.
+
+static bool directive_fetch(humidifier::Directive* out) {
+    char url[160];
+    snprintf(url, sizeof(url), "http://%s:%d/humidifier/%s", s_cfg.server_host,
+             HF_DIRECTIVE_PORT, s_cfg.host);
+
+    esp_http_client_config_t cfg = {};
+    cfg.url = url;
+    cfg.timeout_ms = 5000;
+    cfg.disable_auto_redirect = true;
+
+    esp_http_client_handle_t cli = esp_http_client_init(&cfg);
+    if (cli == nullptr) return false;
+
+    bool ok = false;
+    if (esp_http_client_open(cli, 0) == ESP_OK) {
+        const int len = esp_http_client_fetch_headers(cli);
+        const int status = esp_http_client_get_status_code(cli);
+        if (status == 503) {
+            // No fresh directive: the relay must be open, not riding a lease.
+            *out = humidifier::Directive{};
+            ok = true;
+        } else if (status == 200 && len > 0 && len < 512) {
+            // A single read() is not guaranteed to return the whole body over
+            // TCP; loop until we have what the server declared.
+            char body[512];
+            int got = 0;
+            while (got < len && got < (int)sizeof(body) - 1) {
+                const int n =
+                    esp_http_client_read(cli, body + got, (int)sizeof(body) - 1 - got);
+                if (n <= 0) break;
+                got += n;
+            }
+            if (got > 0) {
+                body[got] = '\0';
+                ok = humidifier::parse_directive(body, (size_t)got, out);
+            }
+        }
+    }
+    esp_http_client_close(cli);
+    esp_http_client_cleanup(cli);
+    return ok;
+}
+
+static void directive_poll(uint32_t t) {
+    s_directive_polls++;
+    humidifier::Directive d;
+    if (!directive_fetch(&d)) {
+        s_directive_fails++;
+        // Not a decision — leave the relay alone; the lease is the deadman.
+        ESP_LOGW(TAG, "directive poll failed (relay unchanged, lease %us)",
+                 (unsigned)humidifier::lease_remaining_s(s_lease, t));
+        return;
+    }
+    s_last_directive = d;
+    s_directive_last_ms = t;
+
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    const char* why = "";
+    const humidifier::Action act =
+        humidifier::apply_directive(d, t, s_lease.on, s_lease.on_since_ms,
+                                    s_limits_local, &s_local, &why);
+    snprintf(s_directive_why, sizeof(s_directive_why), "%s", why);
+
+    if (act == humidifier::Action::On) {
+        if (humidifier::lease_arm(&s_lease, d.lease_s, t, s_limits) != 0) {
+            relay_write(true);
+        }
+    } else {
+        if (s_lease.on) humidifier::lease_clear(&s_lease, t);
+        relay_write(false);
+    }
+    xSemaphoreGive(s_lock);
+
+    if (act != humidifier::Action::None) {
+        s_directive_applied++;
+        ESP_LOGI(TAG, "directive: relay %s (%s, lease %us)",
+                 act == humidifier::Action::On ? "ON" : "OFF", why,
+                 (unsigned)d.lease_s);
+    }
+}
+
 static void http_start() {
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.server_port = HF_HTTP_PORT;
@@ -457,6 +564,8 @@ void app_main(void) {
     nvs_load();
     s_limits.default_s = s_cfg.lease_default_s;
     s_limits.max_s = HF_MAX_LEASE_S;
+    s_limits_local.max_on_s = HF_LOCAL_MAX_ON_S;
+    s_limits_local.cooldown_s = HF_LOCAL_COOLDOWN_S;
 
     // Relay first, explicitly OPEN: a booting socket must never energize the
     // appliance before the controller asks.
@@ -496,6 +605,7 @@ void app_main(void) {
     hlw8032::FrameAssembler assembler;
     uint32_t last_tick = now_ms();
     uint32_t last_sensor_ms = now_ms();
+    uint32_t last_directive_ms = 0;
     for (;;) {
         meter_poll(&assembler);
 
@@ -505,6 +615,15 @@ void app_main(void) {
             continue;
         }
         last_tick = t;
+
+        // Pull the server's decision first: the relay follows the controller,
+        // and the poll cadence is shorter than the lease so a running relay
+        // stays armed without a push path.
+        if (last_directive_ms == 0 ||
+            t - last_directive_ms >= HF_DIRECTIVE_POLL_S * 1000u) {
+            last_directive_ms = t;
+            directive_poll(t);
+        }
 
         if (t - last_sensor_ms >= HF_SENSOR_INTERVAL_S * 1000u) {
             last_sensor_ms = t;
