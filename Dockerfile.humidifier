@@ -3,7 +3,10 @@
 # The in-cluster controller (k8s/humidifier.yaml): reads the room's humidity
 # from the Atom Socket's own ENV III (GET /status) — or, when that sample is
 # missing/stale, from the LMAO server's air series over Reticulum TCP — applies
-# the dew-point law, and drives the socket's leased HTTP API.
+# the dew-point law, then PUBLISHES the decision to the server's directive
+# relay (lma_core/humidifier_api.py, :8082).  The socket polls that relay from
+# its own outbound path; the direct push to the socket's leased HTTP API stays
+# as HF_PUSH=1 until the socket runs the pull firmware.
 #
 # Build + release + deploy in one step (the sanctioned path):
 #   bazel run //lmao_socket_humidifier:deploy
@@ -29,6 +32,19 @@
 FROM python:3.12-slim
 
 WORKDIR /app
+
+# mDNS fallback.  HF_SOCKET's second entry is the socket's mDNS name, but
+# python:3.12-slim has no mDNS resolver and its nsswitch.conf is
+# "hosts: files dns" — so the fallback never resolved.  On 2026-11-21 the
+# bedroom socket's DHCP lease moved .22 -> .21, the pinned address went dead,
+# and the controller drove it for 7 h with "Name or service not known" on the
+# fallback.  libnss-mdns + mdns4_minimal makes the fallback real; hostNetwork
+# gives the pod the host's LAN interface, so multicast reaches the socket.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends libnss-mdns \
+ && rm -rf /var/lib/apt/lists/* \
+ && sed -i 's/^hosts:.*/hosts: files mdns4_minimal [NOTFOUND=return] dns/' /etc/nsswitch.conf \
+ && grep -q '^hosts:.*mdns4_minimal' /etc/nsswitch.conf
 
 RUN pip install --no-cache-dir \
     protobuf==6.33.6 \

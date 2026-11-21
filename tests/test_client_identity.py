@@ -81,6 +81,20 @@ class TestEnsureClientIdentity:
         assert os.path.dirname(path) == str(tmp_path / "sub")
         sentinel.to_file.assert_called_once_with(path)
 
+    def test_minted_key_is_owner_only(self, tmp_path, mock_rns):
+        def write(path):
+            with open(path, "wb") as fh:
+                fh.write(b"k" * 64)
+
+        sentinel = MagicMock(name="identity")
+        sentinel.to_file.side_effect = write
+        mock_rns.Identity.return_value = sentinel
+
+        _, path = client_identity.ensure_client_identity(str(tmp_path / "sub"))
+
+        # The 64-byte file is the private key: never group/world readable.
+        assert (os.stat(path).st_mode & 0o777) == 0o600
+
     def test_recreates_when_load_fails(self, tmp_path, mock_rns):
         identity_file = tmp_path / "identity"
         identity_file.write_bytes(b"corrupt")

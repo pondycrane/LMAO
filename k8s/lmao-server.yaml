@@ -95,6 +95,12 @@ spec:
             # touched.  Approve/revoke devices at runtime instead:
             #   POST :8081/contacts/<hash>/approve  (no rollout needed)
             #   curl :8081/contacts?state=pending    (see what awaits approval)
+            # Humidifier pull path (hostNetwork, port 8082):
+            #   curl :8082/healthz                      (keys held)
+            #   curl :8082/humidifier/humidifier-baby   (the socket's GET)
+            # Controllers POST the decision on loopback; the socket pulls it
+            # from its own outbound path, so actuation never depends on
+            # resolving the socket's DHCP address.
             # Hashes: native Cardputer (7b38fa21…, opt-in runtime), Sprout
             # (f5f05952…), the MicroPython Cardputer client — 277bf9fb… is
             # from a prior reflash, 99ce3231… was minted when the M5Stack
@@ -160,6 +166,11 @@ spec:
               protocol: TCP
             - name: cal-tcp
               containerPort: 4247
+              protocol: TCP
+            # Humidifier directive relay (hostNetwork): the Atom Sockets pull
+            # GET /humidifier/<key> here; controllers POST on loopback.
+            - name: humidifier
+              containerPort: 8082
               protocol: TCP
           volumeMounts:
             - name: rnode

@@ -1439,6 +1439,25 @@ async def async_main():
     except Exception as e:
         logger.warning("Contacts API unavailable (%s)", e)
 
+    # ── Humidifier directive API (the Atom Socket pulls) ─────────────
+    # The controllers keep the dew-point law + its persisted state and
+    # publish the decision here every cycle; the socket polls GET
+    # /humidifier/<key> from its own outbound path, so actuation no longer
+    # depends on the controller resolving the socket's DHCP address.
+    humidifier_runner = None
+    try:
+        from lma_core.humidifier_api import DirectiveStore, start_humidifier_server
+
+        humidifier_store = DirectiveStore(
+            max_age_s=int(os.environ.get("LMAO_DIRECTIVE_MAX_AGE_S", "180"))
+        )
+        humidifier_runner = await start_humidifier_server(
+            humidifier_store,
+            port=int(os.environ.get("LMAO_HUMIDIFIER_PORT", "8082")),
+        )
+    except Exception as e:
+        logger.warning("Humidifier directive API unavailable (%s)", e)
+
     # ── Calendar TCP read service (RoboDog native client, no RNS) ────
     # Framed-TCP CalendarRequest/CalendarBundle read on LMAO_CAL_TCP_PORT so
     # the ESP-IDF display can pull the family calendar from the LAN with a
@@ -1476,6 +1495,11 @@ async def async_main():
         if contacts_runner is not None:
             try:
                 await contacts_runner.cleanup()
+            except Exception:
+                pass
+        if humidifier_runner is not None:
+            try:
+                await humidifier_runner.cleanup()
             except Exception:
                 pass
         if cal_tcp_server is not None:

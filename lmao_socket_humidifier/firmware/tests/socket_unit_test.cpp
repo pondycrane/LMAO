@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstring>
 
+#include "directive.h"
 #include "hlw8032.h"
 #include "relay_lease.h"
 #include "sht30_codec.h"
@@ -183,6 +184,87 @@ static void test_sht30_frame_gate() {
     assert(!lma_sensor::sht30_decode(f, &t, &h));
 }
 
+// ── directive pull: parse + local interlocks ─────────────────────────────
+
+static void test_directive_parse_on_off() {
+    humidifier::Directive d;
+    const char* on =
+        "{\"on\":true,\"lease_s\":300,\"reason\":\"dew 9.4C <= 9.5C\","
+        "\"issued_s\":1763700000.123,\"fail_safe\":false}";
+    assert(humidifier::parse_directive(on, strlen(on), &d));
+    assert(d.valid && d.on && d.lease_s == 300);
+    assert(d.issued_s == 1763700000u);
+
+    const char* off = "{\"on\":false,\"lease_s\":0,\"reason\":\"in band\"}";
+    assert(humidifier::parse_directive(off, strlen(off), &d));
+    assert(d.valid && !d.on && d.lease_s == 0);
+}
+
+static void test_directive_parse_rejects_malformed() {
+    humidifier::Directive d;
+    const char* cases[] = {
+        "",                                        // empty
+        "not json",                                // not an object
+        "[]",                                      // not an object
+        "{\"lease_s\":300}",                       // no 'on'
+        "{\"on\":\"true\"}",                       // string, not bool
+        "{\"on\":true",                            // unterminated
+        "{\"on\":true,\"lease_s\":\"300\"}",       // lease not a number
+        "{\"on\":true,\"lease_s\":}",              // missing value
+        "{\"reason\":{\"on\":true}}",              // nested object
+    };
+    for (const char* c : cases) {
+        assert(!humidifier::parse_directive(c, strlen(c), &d));
+        assert(!d.valid);
+    }
+}
+
+static void test_directive_parse_ignores_on_inside_a_string() {
+    humidifier::Directive d;
+    // The reason mentions the field; only the real key may set it.
+    const char* body =
+        "{\"reason\":\"quoted \\\"on\\\":true is not a key\",\"on\":false}";
+    assert(humidifier::parse_directive(body, strlen(body), &d));
+    assert(!d.on);
+}
+
+static void test_directive_interlocks() {
+    humidifier::LocalLimits limits{3600, 600};
+    humidifier::LocalState st;
+    const char* why = "";
+    humidifier::Directive on;
+    on.valid = true;
+    on.on = true;
+    on.lease_s = 300;
+
+    // A plain ON directive is applied.
+    assert(humidifier::apply_directive(on, 1000, false, 0, limits, &st, &why) ==
+           humidifier::Action::On);
+
+    // Continuous run past the cap is cut and starts a cooldown.
+    assert(humidifier::apply_directive(on, 3600 * 1000 + 1000, true, 1000, limits,
+                                       &st, &why) == humidifier::Action::Off);
+    assert(st.cooldown_until_ms == 3600 * 1000u + 1000u + 600 * 1000u);
+
+    // During the cooldown ON is refused...
+    assert(humidifier::apply_directive(on, 3600 * 1000u + 2000u, false, 0, limits,
+                                       &st, &why) == humidifier::Action::Off);
+    // ...and after it, ON is allowed again.
+    assert(humidifier::apply_directive(on, 3600 * 1000u + 1000u + 600 * 1000u + 1u,
+                                       false, 0, limits, &st, &why) ==
+           humidifier::Action::On);
+
+    // An OFF directive and an invalid one both open the relay.
+    humidifier::Directive off;
+    off.valid = true;
+    off.on = false;
+    assert(humidifier::apply_directive(off, 5000, true, 4000, limits, &st, &why) ==
+           humidifier::Action::Off);
+    humidifier::Directive invalid;
+    assert(humidifier::apply_directive(invalid, 5000, true, 4000, limits, &st,
+                                       &why) == humidifier::Action::Off);
+}
+
 int main() {
     test_nominal_frame();
     test_no_load_reads_zero_current();
@@ -192,6 +274,10 @@ int main() {
     test_lease_arms_and_clamps();
     test_lease_wrap_safe();
     test_remaining_seconds_rounds_up();
-    printf("hlw8032 + relay_lease: all host tests passed\n");
+    test_directive_parse_on_off();
+    test_directive_parse_rejects_malformed();
+    test_directive_parse_ignores_on_inside_a_string();
+    test_directive_interlocks();
+    printf("hlw8032 + relay_lease + directive: all host tests passed\n");
     return 0;
 }

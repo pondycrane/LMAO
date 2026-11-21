@@ -132,6 +132,12 @@ def ensure_client_identity(identity_dir: str | None = None):
     identity = RNS.Identity()
     os.makedirs(os.path.dirname(identity_file), exist_ok=True)
     identity.to_file(identity_file)
+    # to_file() leaves the 64-byte private key at the process umask (0664 on a
+    # default box).  It is a secret: pin it to owner-only, next to the 0700 dir.
+    try:
+        os.chmod(identity_file, 0o600)
+    except OSError:  # pragma: no cover - best-effort perms
+        _logger.warning("Could not chmod 0600 %s", identity_file)
     _logger.info("Created new canonical client identity, saved to %s", identity_file)
     return identity, identity_file
 

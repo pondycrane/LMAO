@@ -1,5 +1,6 @@
 set(SRCS
     "main.cpp"
+    "directive.cpp"
     "hlw8032.cpp"
     "relay_lease.cpp"
     "net_report.cpp"
@@ -21,6 +22,7 @@ idf_component_register(
         esp_driver_i2c
         esp_driver_rmt
         esp_http_server
+        esp_http_client
         mdns
         esp_timer
         esp_event
