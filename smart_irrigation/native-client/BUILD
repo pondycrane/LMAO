@@ -7,6 +7,12 @@
 # sh_binary targets (:build_firmware / :flash_firmware) and the sources are
 # represented as filegroups so the whole tree is in the Bazel graph.
 
+# The RTReticulum fixes patch is applied by every device build.sh (the pinned
+# checkout is unpatched upstream, and an unpatched RTR rejects ratcheted
+# announces).  Exported so the other firmware packages can carry it in
+# runfiles.
+exports_files(["rtreticulum_fixes.patch"])
+
 # ── Host-testable core: the wire-compatible SensorReport/ LMAOEnvelope encoder ──
 # Pure C++ (std::string/vector only) — no ESP-IDF, no RTReticulum deps.
 cc_library(

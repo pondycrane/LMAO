@@ -174,11 +174,11 @@ class TestAirOnlyHistoryRequest:
         assert list(chart.hum) == []
 
     def test_explicit_node_id_wins_over_requester_scoping(self, server_instance):
-        """A passive reader (humidifier controller) names the room it wants.
+        """A passive reader names the room it wants.
 
-        The socket never reports air readings, so it has no EnvHistory ring of
-        its own; the request's node_id must select the RoboDog home node's
-        series instead of falling back to the newest reporter.
+        A reader with no EnvHistory ring of its own (a controller running on a
+        host that reports nothing) must get the requested node's series rather
+        than the newest reporter's.
         """
         instance, fake_lxmf = server_instance
         server.ENV_HISTORY.update(

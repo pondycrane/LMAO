@@ -2,14 +2,18 @@
 
 Per cycle (``--interval``, default 60 s):
 
-1. ask the LMAO server for the RoboDog home node's air series
-   (``HistoryRequest`` with the node pinned, so a second env reporter cannot
-   hijack the reading);
-2. apply the dew-point hysteresis + safety law
+1. read the socket's ``/status`` — it carries the room's own ENV III sample
+   (``temp_c``/``hum_pct``/``sensor_age_s``), so the sensor and the actuator
+   are one device and the loop has no server round trip
+   (``--sensor-source auto``);
+2. when the socket has no fresh sample, fall back to the LMAO server's air
+   series for ``--env-node`` (``HistoryRequest`` with the node pinned, so a
+   second env reporter cannot hijack the reading);
+3. apply the dew-point hysteresis + safety law
    (``lmao_socket_humidifier.control``);
-3. renew or drop the Atom Socket's relay lease
+4. renew or drop the Atom Socket's relay lease
    (``lmao_socket_humidifier.socket_client``);
-4. persist the control state so a restart does not reset the daily budget or
+5. persist the control state so a restart does not reset the daily budget or
    a cooldown (``--state-file``).
 
 A failed read is NOT fatal: it is fed to the law as missing data, which turns
@@ -17,7 +21,8 @@ the humidifier OFF (fail-safe) — the socket's lease expires on its own if this
 process dies entirely.
 
     bazel run //lmao_socket_humidifier:controller -- \
-        --env-node "main bedroom" --socket humidifier.local --token "$HF_API_TOKEN"
+        --env-node "baby room" --socket humidifier-baby.local \
+        --token "$HF_API_TOKEN"
 
 Exit codes: 0 = ran (or --once succeeded), 1 = the socket never answered.
 """
@@ -70,6 +75,26 @@ def _install_stop_handler() -> None:
         signal.signal(sig, handler)
 
 
+def read_socket_room(status: dict | None):
+    """Return ``(temp_c, humidity_pct, sample_age_s)`` from the socket's /status.
+
+    The socket's ENV III is the room's own sensor, so its sample is the most
+    direct input available.  ``sensor_ok`` false or a missing/negative age is
+    missing data (never a zero that reads as a real 0 %RH).  The law still
+    applies its plausibility + staleness checks to whatever comes back.
+    """
+    if not status:
+        return None, None, None
+    if not status.get("sensor_ok"):
+        return None, None, None
+    temp = status.get("temp_c")
+    hum = status.get("hum_pct")
+    age = status.get("sensor_age_s")
+    if temp is None or hum is None or age is None or age < 0:
+        return None, None, None
+    return float(temp), int(hum), float(age)
+
+
 def read_room(reader, env_node: str | None, now_s: float):
     """Return ``(temp_c, humidity_pct, sample_age_s)``; Nones on failure.
 
@@ -120,10 +145,24 @@ def read_room(reader, env_node: str | None, now_s: float):
     return float(temp), int(hum), age
 
 
-def apply_decision(client: SocketClient, decision: Decision, sp: Setpoints) -> dict:
-    """Make the socket match the decision; return the socket's status reply."""
+def apply_decision(
+    client: SocketClient, decision: Decision, sp: Setpoints, status: dict | None = None
+) -> dict:
+    """Make the socket match the decision; return the socket's status reply.
+
+    An ON decision always re-sends ``/on``: the request *is* the deadman lease
+    renewal, so skipping it would open the relay mid-run.
+
+    An OFF decision is skipped when the socket's own ``/status`` already
+    reports the relay open with no lease.  Re-sending it every cycle is a
+    no-op POST (2 880/day at a 30 s poll) and turns a transient transport
+    failure into a scary ``socket command failed`` line for a relay that was
+    already open.
+    """
     if decision.relay_on:
         return client.set_on(sp.lease_s)
+    if status is not None and status.get("relay") is False and not status.get("lease_s"):
+        return status
     return client.set_off()
 
 
@@ -206,8 +245,17 @@ def _parse_args(argv=None):
     p.add_argument(
         "--env-node",
         default=os.environ.get("LMAO_ENV_NODE"),
-        help="Reporting node whose temperature/humidity is read "
-        "(SensorReport.node_id, e.g. 'main bedroom')",
+        help="Reporting node for the server fallback path "
+        "(SensorReport.node_id, e.g. 'baby room')",
+    )
+    p.add_argument(
+        "--sensor-source",
+        choices=("auto", "socket", "server"),
+        default=os.environ.get("HF_SENSOR_SOURCE", "auto"),
+        help="where the room reading comes from: 'socket' = the socket's own "
+        "ENV III via /status (no server round trip), 'server' = the LMAO "
+        "server's air series for --env-node, 'auto' = socket when its sample "
+        "is fresh, else the server (default auto)",
     )
     p.add_argument("--server-host", default=os.environ.get("LMAO_SERVER_HOST", "tp4"))
     p.add_argument(
@@ -216,8 +264,8 @@ def _parse_args(argv=None):
     p.add_argument(
         "--identity-dir",
         default=os.environ.get("HF_IDENTITY_DIR"),
-        help="Reticulum identity directory (default: the home client's "
-        "~/.local/share/lmao_home_client/lxmf)",
+        help="Reticulum identity directory for the server fallback path "
+        "(default: the home client's ~/.local/share/lmao_home_client/lxmf)",
     )
     p.add_argument(
         "--socket",
@@ -245,7 +293,7 @@ def _parse_args(argv=None):
     p.add_argument(
         "--low-dew",
         type=float,
-        default=float(os.environ.get("HF_LOW_DEW", 7.5)),
+        default=float(os.environ.get("HF_LOW_DEW", 10.0)),
         help="ON at/below this dew point (C)",
     )
     p.add_argument(
@@ -332,36 +380,77 @@ def main(argv=None) -> int:
             if actual:
                 logger.info("relay is already closed; counting ON time from now")
 
-    # Imported here so the module stays importable (and testable) without the
-    # Reticulum client's ``import config`` path requirement.
-    from robodog_home_client.client import HomeClient
+    # The server path is opened lazily: with ``--sensor-source socket`` (and in
+    # ``auto`` while the socket's own sample is fresh) no Reticulum client is
+    # needed at all, so a controller can run with no mesh access.
+    reader = None
 
-    reader = HomeClient(
-        server_host=args.server_host,
-        server_port=args.server_port,
-        identity_dir=args.identity_dir,
-    )
-    reader.start()
-    if not reader.wait_for_interface():
-        logger.error(
-            "Reticulum TCP interface never came online — is %s:%d up?",
-            args.server_host,
-            args.server_port,
+    def server_reader():
+        nonlocal reader
+        if reader is not None:
+            return reader
+        # Imported here so the module stays importable (and testable) without
+        # the Reticulum client's ``import config`` path requirement.
+        from robodog_home_client.client import HomeClient
+
+        client_ = HomeClient(
+            server_host=args.server_host,
+            server_port=args.server_port,
+            identity_dir=args.identity_dir,
         )
-        return 1
-    if reader.resolve_server() == (None, None):
-        logger.error("server announce never arrived; check the pinned dest hash or the mesh path")
-        return 1
+        client_.start()
+        if not client_.wait_for_interface():
+            logger.error(
+                "Reticulum TCP interface never came online — is %s:%d up?",
+                args.server_host,
+                args.server_port,
+            )
+            return None
+        if client_.resolve_server() == (None, None):
+            logger.error(
+                "server announce never arrived; check the pinned dest hash or the mesh path"
+            )
+            return None
+        reader = client_
+        return reader
 
     exit_code = 0
     last_load_warn_s = 0.0
+    socket_answered = False
     graceful = False
     _STOP.clear()
     _install_stop_handler()
     try:
         while not _STOP.is_set():
             now_s = time.time()
-            temp, hum, age = read_room(reader, args.env_node, now_s)
+
+            # One /status per cycle: it is the room's reading (ENV III), the
+            # relay's actual state, and the load evidence for the warning.
+            # Read even under --dry-run: a bench check that reports "no room
+            # data" because it skipped the read proves nothing.
+            status = None
+            try:
+                status = client.status()
+            except SocketError as exc:
+                logger.warning("socket status unavailable: %s", exc)
+            else:
+                socket_answered = True
+
+            source = "socket"
+            temp, hum, age = read_socket_room(status)
+            if args.sensor_source == "socket":
+                pass
+            elif args.sensor_source == "server" or temp is None or (age or 0.0) > sp.stale_s:
+                source = "server"
+                temp, hum, age = None, None, None
+                rd = server_reader()
+                if rd is None:
+                    exit_code = 1
+                    if args.once:
+                        return exit_code
+                else:
+                    temp, hum, age = read_room(rd, args.env_node, now_s)
+
             dew = dew_point_c(temp, hum) if temp is not None and hum is not None else None
             decision = decide(sp, state, temp, hum, age, now_s, _day_index(now_s))
             save_state(args.state_file, state)
@@ -370,6 +459,7 @@ def main(argv=None) -> int:
                 print(
                     json.dumps(
                         {
+                            "source": source,
                             "temp_c": temp,
                             "humidity_pct": hum,
                             "dew_c": None if dew is None else round(dew, 2),
@@ -384,18 +474,19 @@ def main(argv=None) -> int:
                 )
             else:
                 logger.info(
-                    "T=%s RH=%s dew=%s age=%s -> relay %s (%s)",
+                    "T=%s RH=%s dew=%s age=%s (%s) -> relay %s (%s)",
                     f"{temp:.1f}C" if temp is not None else "none",
                     f"{hum}%" if hum is not None else "none",
                     f"{dew:.1f}C" if dew is not None else "none",
                     f"{age:.0f}s" if age is not None else "unknown",
+                    source,
                     "ON" if decision.relay_on else "OFF",
                     decision.reason,
                 )
 
             if not args.dry_run:
                 try:
-                    status = apply_decision(client, decision, sp)
+                    status = apply_decision(client, decision, sp, status)
                 except SocketError as exc:
                     logger.error("socket command failed: %s", exc)
                     exit_code = 1
@@ -414,14 +505,15 @@ def main(argv=None) -> int:
                         last_load_warn_s = now_s
 
             if args.once:
-                return exit_code
+                return exit_code if socket_answered or args.dry_run else 1
             _STOP.wait(args.interval)
         graceful = True
     finally:
         if graceful and not args.dry_run:
             with contextlib.suppress(SocketError):
                 client.set_off()
-        reader.stop()
+        if reader is not None:
+            reader.stop()
     logger.info("stopped; relay opened")
     return exit_code
 

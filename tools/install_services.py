@@ -819,6 +819,36 @@ def _apply_secret_from_yaml(result: DeviceResult, step: str, yaml_text: str) -> 
     return True
 
 
+def _ensure_token_secret(result: DeviceResult, name: str, token: str) -> bool:
+    """Create/update one socket-token Secret from a provisioned token."""
+    try:
+        proc = subprocess.run(
+            [
+                "kubectl",
+                "create",
+                "secret",
+                "generic",
+                name,
+                f"--from-literal=token={token}",
+                "--dry-run=client",
+                "-o",
+                "yaml",
+            ],
+            capture_output=True,
+            text=True,
+        )
+    except (subprocess.SubprocessError, OSError) as exc:
+        result.fail(f"secret render failed: {exc}")
+        print(f"  FAIL: {exc}")
+        return False
+    if proc.returncode != 0:
+        err = "; ".join(proc.stderr.strip().split("\n")[-3:])
+        result.fail(f"secret render failed: {err}")
+        print(f"  FAIL: {err}")
+        return False
+    return _apply_secret_from_yaml(result, f"{name} Secret", proc.stdout)
+
+
 def _ensure_humidifier_secrets(result: DeviceResult) -> bool:
     """Provision the socket token and the approved LXMF identity as Secrets.
 
@@ -846,32 +876,21 @@ def _ensure_humidifier_secrets(result: DeviceResult) -> bool:
         print(f"  FAIL: identity not found at {HUMIDIFIER_IDENTITY_FILE}")
         return False
 
-    try:
-        proc = subprocess.run(
-            [
-                "kubectl",
-                "create",
-                "secret",
-                "generic",
-                "humidifier-socket-token",
-                f"--from-literal=token={token}",
-                "--dry-run=client",
-                "-o",
-                "yaml",
-            ],
-            capture_output=True,
-            text=True,
+    if not _ensure_token_secret(result, "humidifier-socket-token", token):
+        return False
+
+    # The baby-room socket has its OWN NVS token (a per-socket credential).
+    # Absent from the env file is a warning, not a failure: the bedroom
+    # controller must still deploy when only that room is provisioned.
+    baby_token = env.get("HF_BABY_API_TOKEN", "")
+    if not baby_token:
+        print(
+            f"  WARN: no HF_BABY_API_TOKEN in {HUMIDIFIER_ENV_FILE} — the "
+            "baby-room controller's socket-token Secret is left untouched"
         )
-    except (subprocess.SubprocessError, OSError) as exc:
-        result.fail(f"secret render failed: {exc}")
-        print(f"  FAIL: {exc}")
-        return False
-    if proc.returncode != 0:
-        err = "; ".join(proc.stderr.strip().split("\n")[-3:])
-        result.fail(f"secret render failed: {err}")
-        print(f"  FAIL: {err}")
-        return False
-    if not _apply_secret_from_yaml(result, "socket-token Secret", proc.stdout):
+    elif not _ensure_token_secret(
+        result, "humidifier-baby-socket-token", baby_token
+    ):
         return False
 
     try:
@@ -1043,6 +1062,16 @@ def deploy_humidifier(result: DeviceResult, repo_root: str | None = None) -> Non
     if not _force_restart_and_wait(result, "humidifier-controller", timeout_s=900):
         print("  Rollout did not complete — check: kubectl describe deployment/humidifier-controller")
         return
+    # Per-room control: the baby-room Deployment rides the same manifest.  Its
+    # socket is the room's sensor, so it needs no Reticulum identity mount.
+    if not _force_restart_and_wait(
+        result, "humidifier-baby-controller", timeout_s=900
+    ):
+        print(
+            "  Baby-room rollout did not complete — check: "
+            "kubectl describe deployment/humidifier-baby-controller"
+        )
+        return
 
     proc = _run_kubectl_step(
         result,
@@ -1067,31 +1096,37 @@ def deploy_humidifier(result: DeviceResult, repo_root: str | None = None) -> Non
 
     # A Running pod is not proof the loop works: wait for the first decision
     # line, which only appears after a successful read of the room.
-    decision = None
-    deadline = time.time() + 150
-    while time.time() < deadline:
-        logs = subprocess.run(
-            ["kubectl", "logs", "deployment/humidifier-controller", "--tail=40"],
-            capture_output=True,
-            text=True,
-        )
-        for line in logs.stdout.splitlines():
-            if "-> relay" in line:
-                decision = line.strip()
-        if decision:
-            break
-        time.sleep(10)
+    decisions = {}
+    for deployment in ("humidifier-controller", "humidifier-baby-controller"):
+        decision = None
+        deadline = time.time() + 150
+        while time.time() < deadline:
+            logs = subprocess.run(
+                ["kubectl", "logs", f"deployment/{deployment}", "--tail=40"],
+                capture_output=True,
+                text=True,
+            )
+            for line in logs.stdout.splitlines():
+                if "-> relay" in line:
+                    decision = line.strip()
+            if decision:
+                break
+            time.sleep(10)
+        decisions[deployment] = decision
 
     _stop_host_humidifier_unit()
 
-    if not decision:
-        result.fail("pod is Running but logged no control decision within 150 s")
-        print("  FAIL: no control decision in the pod log")
-        print("  Inspect with: kubectl logs deployment/humidifier-controller")
+    missing = [d for d, line in decisions.items() if not line]
+    if missing:
+        result.fail(f"pod Running but no control decision within 150 s: {missing}")
+        print(f"  FAIL: no control decision in {missing}")
+        for d in missing:
+            print(f"  Inspect with: kubectl logs deployment/{d}")
         return
 
-    print(f"  Decision: {decision}")
-    result.ok(f"Humidifier controller deployed and Running ({registry_image})")
+    for deployment, decision in decisions.items():
+        print(f"  {deployment}: {decision}")
+    result.ok(f"Humidifier controllers deployed and Running ({registry_image})")
 
 
 GCAL_TOKEN_DEFAULT = "~/.hermes/google_token.json"

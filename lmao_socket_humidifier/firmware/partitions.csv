@@ -1,6 +1,8 @@
 # Name,   Type, SubType, Offset,  Size,  Flags
 # Atom Lite is a 4 MB ESP32 (ESP32-PICO-D4).  NVS at 0x9000 (the standard
-# layout the Sprout Atom Lite uses), a 1 MB factory app, and the rest free.
+# layout the Sprout Atom Lite uses).  The factory app is 2 MB: the firmware now
+# carries the Reticulum TCP client + LXMF SensorReport path on top of the HTTP
+# API and HLW8032 decoder, which no longer fits the old 1 MB partition.
 nvs,      data, nvs,     0x9000, 0x6000,
 phy_init, data, phy,     0xf000, 0x1000,
-factory,  app,  factory, 0x10000, 0x100000,
+factory,  app,  factory, 0x10000, 0x200000,

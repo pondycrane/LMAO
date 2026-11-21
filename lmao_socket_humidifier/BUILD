@@ -2,16 +2,19 @@ load("@rules_python//python:defs.bzl", "py_binary", "py_library")
 load("@rules_python//python:py_test.bzl", "py_test")
 load("//robodog_client:firmware_tools.bzl", "firmware_tool")
 
-# ── LMAO socket humidifier: room humidity (RoboDog home node) → Atom Socket ──
+# ── LMAO socket humidifier: room humidity → Atom Socket ─────────────────
 #
 #   bazel run //lmao_socket_humidifier:controller -- \
-#       --env-node "main bedroom" --socket humidifier.local
+#       --env-node "baby room" --socket humidifier-baby.local
 #   bazel run //lmao_socket_humidifier:deploy        # K8s controller
 #   bazel run //lmao_socket_humidifier:build_firmware
 #   bazel run //lmao_socket_humidifier:flash_firmware -- --port /dev/ttyUSB0 ...
 #
-# The controller is an LMAO client (HistoryRequest over Reticulum TCP); the
-# socket firmware is a plain LAN actuator driven over its leased HTTP API.
+# One device per room: the socket carries an ENV III, so it is BOTH the sensor
+# and the actuator.  The controller prefers the socket's own /status reading
+# (direct, no server round trip) and falls back to the server's history for
+# --env-node (the socket also reports SensorReport over Reticulum TCP, so the
+# room keeps its air series).
 
 # ── Host-testable firmware units (pure C++, no ESP-IDF) ────────────────
 cc_library(
@@ -34,6 +37,7 @@ cc_test(
     deps = [
         ":hlw8032",
         ":relay_lease",
+        "//firmware_common:sht30_codec",
     ],
     tags = ["unit"],
 )
@@ -132,7 +136,10 @@ firmware_tool(
         "firmware/CMakeLists.txt",
         "firmware/sdkconfig.defaults",
         "firmware/partitions.csv",
-    ]) + ["//firmware_common:shared_firmware_sources"],
+    ]) + [
+        "//firmware_common:shared_firmware_sources",
+        "//smart_irrigation/native-client:rtreticulum_fixes.patch",
+    ],
 )
 
 firmware_tool(
@@ -143,5 +150,8 @@ firmware_tool(
         "firmware/CMakeLists.txt",
         "firmware/sdkconfig.defaults",
         "firmware/partitions.csv",
-    ]) + ["//firmware_common:shared_firmware_sources"],
+    ]) + [
+        "//firmware_common:shared_firmware_sources",
+        "//smart_irrigation/native-client:rtreticulum_fixes.patch",
+    ],
 )

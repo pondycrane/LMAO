@@ -6,6 +6,7 @@
 
 #include "hlw8032.h"
 #include "relay_lease.h"
+#include "sht30_codec.h"
 
 // ── frame builder: header + 24-bit big-endian fields + checksum ──────────
 static void put24(uint8_t* p, uint32_t v) {
@@ -158,11 +159,36 @@ static void test_remaining_seconds_rounds_up() {
     assert(humidifier::lease_remaining_s(lease, 10000) == 0);
 }
 
+// The ENV III sample is the control input now, so a fabricated reading is a
+// safety bug: a CRC-invalid frame (no sensor / bad wiring) must never decode.
+static void test_sht30_frame_gate() {
+    // 0x6666 -> 25.00 C / 40.00 %RH with valid Sensirion CRCs.
+    uint8_t f[6] = {0x66, 0x66, 0, 0x66, 0x66, 0};
+    f[2] = lma_sensor::sht30_crc8(f, 2);
+    f[5] = lma_sensor::sht30_crc8(f + 3, 2);
+    float t = 0, h = 0;
+    assert(lma_sensor::sht30_decode(f, &t, &h));
+    assert(t > 24.99f && t < 25.01f);
+    assert(h > 39.99f && h < 40.01f);
+
+    // Pulled-up bus: 0xFF x6 would otherwise decode to 130 C / 100 %RH.
+    uint8_t idle[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+    assert(!lma_sensor::sht30_decode(idle, &t, &h));
+
+    // One flipped bit per half is rejected.
+    f[1] ^= 0x01;
+    assert(!lma_sensor::sht30_decode(f, &t, &h));
+    f[1] ^= 0x01;
+    f[4] ^= 0x01;
+    assert(!lma_sensor::sht30_decode(f, &t, &h));
+}
+
 int main() {
     test_nominal_frame();
     test_no_load_reads_zero_current();
     test_rejects_bad_frames();
     test_assembler_resyncs_through_noise();
+    test_sht30_frame_gate();
     test_lease_arms_and_clamps();
     test_lease_wrap_safe();
     test_remaining_seconds_rounds_up();

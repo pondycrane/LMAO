@@ -1,15 +1,27 @@
-# Humidifier controller — dew-point law driving the Atom Socket relay
+# Humidifier controllers — dew-point law driving the Atom Socket relay
 #
-# One replica, `Recreate`: two controllers would both renew leases and write
-# state, and the relay must have exactly one writer.  The socket's lease is a
-# deadman (300 s), so a dead or evicted pod opens the relay on its own.
+# ONE controller per socket.  Two controllers on ONE socket is forbidden: both
+# would renew leases and write state, and the relay must have exactly one
+# writer.  Two sockets = two Deployments of the same image (per-room control).
 #
-# Networking: the pod runs on tp4 with `hostNetwork`, which lets it reach the
-# LMAO server's Reticulum TCP interface at `localhost:4246` (that pod is
-# hostNetwork on the same node) without pinning any node address — the Turing
-# Pi nodes are DHCP (tools/check_node_addresses.py).  The Atom Socket is a LAN
-# appliance, addressed by its own IP with the mDNS name as a fallback; mDNS
-# does not resolve inside a container, so the IP comes first there.
+#   humidifier-controller        main bedroom — socket 192.168.50.22, room
+#                                humidity from the RoboDog home board via the
+#                                server (the old socket has no ENV III)
+#   humidifier-baby-controller   baby room  — socket humidifier-baby, room
+#                                humidity from the socket's OWN ENV III
+#                                (GET /status; no Reticulum client at all)
+#
+# One replica, `Recreate` per Deployment: the socket's lease is a deadman
+# (300 s), so a dead or evicted pod opens the relay on its own.
+#
+# Networking: the pods run on tp4 with `hostNetwork`, which lets the bedroom
+# controller reach the LMAO server's Reticulum TCP interface at
+# `localhost:4246` (that pod is hostNetwork on the same node) without pinning
+# any node address — the Turing Pi nodes are DHCP
+# (tools/check_node_addresses.py).  The Atom Socket is a LAN appliance,
+# addressed by its own IP with the mDNS name as a fallback; mDNS does not
+# resolve inside a container (no nss-mdns in the image), so the IP must come
+# first for a pinned host.
 #
 # Identity: `humidifier-identity` holds the SAME `lxmf/delivery` identity the
 # host controller used, so the server's contact book already has it approved
@@ -18,9 +30,12 @@
 # mount is always read-only, but the LXMF router writes its storage (known
 # destinations, announces) into the identity dir, so an initContainer copies
 # the key onto the writable state volume and HF_IDENTITY_DIR points there.
+# The baby-room controller needs none of that: with HF_SENSOR_SOURCE=socket it
+# never opens Reticulum (its socket reports the room to the server itself).
 #
-# State: `humidifier-state` carries the persisted control state (daily budget,
-# cooldown, run timers) and Reticulum's known destinations across restarts.
+# State: `humidifier-state` / `humidifier-baby-state` carry the persisted
+# control state (daily budget, cooldown, run timers) and, for the bedroom,
+# Reticulum's known destinations across restarts.
 #
 # Usage:
 #   bazel run //lmao_socket_humidifier:deploy
@@ -47,6 +62,21 @@ spec:
 
 ---
 apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: humidifier-baby-state
+  namespace: default
+  labels:
+    app: humidifier-baby-controller
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 100Mi
+
+---
+apiVersion: v1
 kind: ConfigMap
 metadata:
   name: humidifier-config
@@ -56,6 +86,8 @@ metadata:
 data:
   # SensorReport.node_id of the RoboDog home board in the room being controlled.
   LMAO_ENV_NODE: "main bedroom"
+  # This socket has no ENV III: 'auto' reads the server series for the room.
+  HF_SENSOR_SOURCE: "auto"
   # Same node as the lmao-server pod (hostNetwork), so the Reticulum TCP
   # interface is local.
   LMAO_SERVER_HOST: "localhost"
@@ -63,11 +95,18 @@ data:
   # Pinned LAN address first, mDNS name as the fallback (see socket_client).
   HF_SOCKET: "192.168.50.22,humidifier.local"
   HF_INTERVAL: "60"
-  # Dew-point band for 40-50 % RH across the room's 22.6-26.1 C swing:
-  # ON at <= 7.5 C (34.6 % RH at 24.2 C), OFF at >= 11.5 C (45.0 % at 24.2 C,
-  # 40.2 % at 26.1 C), under the 12 C window-condensation line.  Tune here,
-  # not in code: the law reads HF_LOW_DEW / HF_HIGH_DEW.
-  HF_LOW_DEW: "7.5"
+  # Dew-point band, read at the room's own operating range (23.6-25.8 C).
+  # The 7.5 floor was wrong: at 25 C it is 33 % RH, so the room sat at
+  # 31-36 % RH all night and the law called it "in band".  A dew floor is
+  # temperature-invariant, so no single band holds 40-50 % across a 2.2 C
+  # swing; 10.0 is the highest floor that still leaves a usable hysteresis.
+  #   ON  at <= 10.0 C: 37 % (25.8 C) .. 42 % (23.6 C)
+  #   OFF at >= 11.5 C: 41 % (25.8 C) .. 47 % (23.6 C)
+  # Both under the 12 C window-condensation line.  Duty is L/(L+G) ~ 23 %
+  # either way (~5.5 h/day); a narrower band only shortens the cycles
+  # (53 min ON / 180 min OFF here, against 141/480 at the old 4 C band).
+  # Tune here, not in code: the law reads HF_LOW_DEW / HF_HIGH_DEW.
+  HF_LOW_DEW: "10.0"
   HF_HIGH_DEW: "11.5"
   HF_RH_CEILING: "60"
   # Ramp (~2.4 h) + hold (L/(L+G) ~5.5-7 h/day) fits in 10 h; the 2.5 L tank
@@ -76,6 +115,46 @@ data:
   HF_STATE_FILE: "/state/state.json"
   LMAO_HOME_CLIENT_STATE_PATH: "/state/rns"
   HF_IDENTITY_DIR: "/state/identity"
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: humidifier-baby-config
+  namespace: default
+  labels:
+    app: humidifier-baby-controller
+data:
+  # The socket reports its own ENV III under this node_id; the server fallback
+  # path pins it (a typo'd/unknown name would make the server fall back to the
+  # newest reporter, which the controller refuses).
+  LMAO_ENV_NODE: "baby room"
+  # The socket is the room's sensor: read /status directly, no server round
+  # trip.  'auto' would fall back to the server when the sample is stale, but
+  # that needs a Reticulum client + identity mount (see the header).
+  HF_SENSOR_SOURCE: "socket"
+  LMAO_SERVER_HOST: "localhost"
+  LMAO_SERVER_PORT: "4246"
+  # mDNS does not resolve inside the container image, so the pinned IP comes
+  # first (DHCP; re-check with `getent hosts humidifier-baby.local`) and the
+  # name stays as the fallback for a host run.
+  HF_SOCKET: "192.168.50.223,humidifier-baby.local"
+  # 30 s, not 60: this room is small and the appliance lifts dew point at
+  # ~0.8 C/min (measured 2026-11-20, 16.9 W, 11.7 -> 13.3 C in 2 min), so a
+  # 60 s tick overshoots the ceiling by ~0.8 C (~2.5 %RH).  A poll is one HTTP
+  # GET; the lease renewal is idempotent, so this adds no relay writes.
+  HF_INTERVAL: "30"
+  # Baby room, not as dry as the bedroom (it sits ~48 % RH on its own) and
+  # small enough to respond fast.  The humidifier's evaporative load also
+  # cools the room ~1.3 C (23.2 -> 21.9 C measured), so the band is quoted at
+  # the operating temperature: at 21.9 C, 9.5 C dew = 41.7 % RH (restart) and
+  # 11.5 C dew = 50.6 % RH (stop) — a 42-50 % hold inside the 40-60 % comfort
+  # range, under the 12 C window-condensation line.  Tune here, not in code.
+  HF_LOW_DEW: "9.5"
+  HF_HIGH_DEW: "11.5"
+  HF_RH_CEILING: "60"
+  HF_MAX_DAILY_ON_H: "10"
+  HF_STATE_FILE: "/state/state.json"
 
 ---
 apiVersion: apps/v1
@@ -149,3 +228,55 @@ spec:
           secret:
             secretName: humidifier-identity
             defaultMode: 0400
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: humidifier-baby-controller
+  namespace: default
+  labels:
+    app: humidifier-baby-controller
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: humidifier-baby-controller
+  template:
+    metadata:
+      labels:
+        app: humidifier-baby-controller
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: tp4
+      hostNetwork: true
+      dnsPolicy: Default
+      terminationGracePeriodSeconds: 15
+      containers:
+        - name: controller
+          image: 192.168.50.153:5000/lmao-humidifier:latest
+          imagePullPolicy: Always
+          envFrom:
+            - configMapRef:
+                name: humidifier-baby-config
+          env:
+            - name: HF_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: humidifier-baby-socket-token
+                  key: token
+          volumeMounts:
+            - name: state
+              mountPath: /state
+          resources:
+            requests:
+              cpu: 20m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+      volumes:
+        - name: state
+          persistentVolumeClaim:
+            claimName: humidifier-baby-state

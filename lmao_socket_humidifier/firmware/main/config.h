@@ -18,6 +18,13 @@
 #ifndef HF_CONFIG_H
 #define HF_CONFIG_H
 
+/* build.sh generates this beside the staged main/ — server dest hash, server
+ * public key, pinned node identity and the device name.  Include it FIRST so
+ * its HF_DEVICE_NAME_DEFAULT wins over the empty fallback below. */
+#if __has_include("lmao_config.h")
+#include "lmao_config.h"
+#endif
+
 #include "driver/gpio.h"
 
 /* ---- relay + metering pins ---- */
@@ -57,6 +64,42 @@
 #endif
 #ifndef HF_MDNS_HOST_DEFAULT
 #define HF_MDNS_HOST_DEFAULT "humidifier"
+#endif
+
+/* ---- ENV III (SHT30 + QMP6988) on I2C ----
+ * The socket's own 4-pin HY2.0 port carries relay-in / VCC_MCU / GND /
+ * button-out — it has NO I2C.  The ENV III therefore goes on the Atom Lite's
+ * Grove/HY2.0-4P port (yellow = G26, white = G32; Grove I2C is yellow SDA,
+ * white SCL) or on the 9-pin header's dedicated I2C pins (G25 = SDA,
+ * G21 = SCL).  ESP32's I2C pins are fully routable, so the driver probes both
+ * pairs (and both polarities) and keeps the first where a CRC-valid SHT30
+ * answers; the boot log names the pair that worked. */
+#define HF_ENV_PAIR_COUNT 4
+#define HF_ENV_SDA_G26 26
+#define HF_ENV_SCL_G32 32
+#define HF_ENV_SDA_G25 25
+#define HF_ENV_SCL_G21 21
+
+/* ---- reporting to the LMAO server ---- */
+#ifndef HF_SERVER_HOST_DEFAULT
+#define HF_SERVER_HOST_DEFAULT "tp4"
+#endif
+#ifndef HF_SERVER_PORT_DEFAULT
+#define HF_SERVER_PORT_DEFAULT 4246
+#endif
+/* SensorReport.node_id + announce display name.  Overridden by the generated
+ * lmao_config.h when the build is provisioned with a device name. */
+#ifndef HF_DEVICE_NAME_DEFAULT
+#define HF_DEVICE_NAME_DEFAULT ""
+#endif
+#ifndef HF_SENSOR_INTERVAL_S
+#define HF_SENSOR_INTERVAL_S 30
+#endif
+#ifndef HF_REPORT_INTERVAL_S
+#define HF_REPORT_INTERVAL_S 60
+#endif
+#ifndef HF_ANNOUNCE_INTERVAL_MS
+#define HF_ANNOUNCE_INTERVAL_MS 30000
 #endif
 
 /* ---- loop cadence ---- */

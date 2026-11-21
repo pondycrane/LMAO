@@ -13,6 +13,7 @@ idf_component_register(
         "lma_encoder.cpp"
         "lma_chart.cpp"
         "lxmf_send.cpp"
+        "lma_report.cpp"
         "path_find.cpp"
         "lma_identity.cpp"
     INCLUDE_DIRS "."

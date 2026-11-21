@@ -1,6 +1,7 @@
 # Humidifier Atom Socket — M5Stack Atom Lite (ESP32-PICO-D4, 4 MB flash).
 CONFIG_IDF_TARGET="esp32"
 CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
 
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
@@ -10,11 +11,27 @@ CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 CONFIG_ESP_CONSOLE_UART_DEFAULT=y
 CONFIG_ESP_CONSOLE_UART_BAUDRATE=115200
 
-# HLW8032 RX is UART2; the driver + HTTP server + mDNS fit internal RAM.
+# HLW8032 RX is UART2; WiFi + the HTTP server + mDNS + the Reticulum TCP
+# client share the 520 KB internal SRAM (no PSRAM on the classic Atom Lite).
 CONFIG_ESP_WIFI_ENABLED=y
-CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 CONFIG_HTTPD_MAX_REQ_HDR_LEN=1024
 CONFIG_MDNS_MAX_SERVICES=4
 
+# Reticulum TCP + LXMF + HTTP + I2C all run from app_main's main task; the
+# default 3584 B stack overflows during the X25519/Ed25519 key load at boot.
+# 16 KiB matches the Sprout (same chip, same RTReticulum crypto chain).
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_160=y
+
+# RTReticulum is built with -fexceptions and throws on parse/decrypt errors.
+# With exceptions disabled those throws resolve to ESP-IDF abort stubs, so a
+# malformed inbound packet would reset the board instead of being dropped.
+CONFIG_COMPILER_CXX_EXCEPTIONS=y
+CONFIG_COMPILER_CXX_EXCEPTIONS_EMG_POOL_SIZE=0
+CONFIG_MBEDTLS_HARDWARE_AES=y
+CONFIG_MBEDTLS_HARDWARE_SHA=y
+CONFIG_MBEDTLS_HKDF_C=y
+
+CONFIG_FREERTOS_USE_TIMERS=y
 CONFIG_FREERTOS_HZ=1000
 CONFIG_COMPILER_OPTIMIZATION_SIZE=y

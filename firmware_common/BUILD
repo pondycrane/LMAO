@@ -7,6 +7,7 @@
 #   lma_common/path_find.*    — on-demand RNS path request (ESP-IDF only)
 #   lma_wifi/wifi_helper.*    — WiFi STA connect + SNTP for every LAN client
 #   lma_led/led_rgb.*         — SK6812/WS2812 RGB LED writer (Atom Lite G27/G35)
+#   lma_sensor/sht30.*        — SHT30 air T/RH (M5Stack ENV III), CRC-checked
 #   rtreticulum/CMakeLists.txt shared RNS lib wrapper for the ESP-IDF builds
 #
 # The pure-C++ units are host-testable here under Bazel (same code the device
@@ -20,6 +21,21 @@ cc_library(
     hdrs = ["lma_common/lma_encoder.h"],
     strip_include_prefix = "lma_common",
     visibility = ["//visibility:public"],
+)
+
+# ── Host-testable: SHT30 (ENV III) CRC + decode (pure C++) ──
+cc_library(
+    name = "sht30_codec",
+    hdrs = ["lma_sensor/sht30_codec.h"],
+    strip_include_prefix = "lma_sensor",
+    visibility = ["//visibility:public"],
+)
+
+cc_test(
+    name = "sht30_codec_test",
+    srcs = ["lma_sensor/sht30_codec_test.cpp"],
+    deps = [":sht30_codec"],
+    tags = ["unit"],
 )
 
 # ── Host-testable: air-series history request + ChartBundle decoder ──
@@ -69,6 +85,9 @@ filegroup(
         "lma_led/**/*.cpp",
         "lma_led/**/*.h",
         "lma_led/CMakeLists.txt",
+        "lma_sensor/**/*.cpp",
+        "lma_sensor/**/*.h",
+        "lma_sensor/CMakeLists.txt",
         "tcp_interface/**/*.cpp",
         "tcp_interface/**/*.h",
         "tcp_interface/CMakeLists.txt",
