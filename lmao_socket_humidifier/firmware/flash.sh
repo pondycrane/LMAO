@@ -113,12 +113,21 @@ if [ -z "$DEVICE_NAME" ]; then
 fi
 # Rebuild when the staged image was built for a different room (the node_id
 # and the pinned identity are baked at build time, so a stale image would
-# report into another room's series).
+# report into another room's series) or for a different IDENTITY (a socket
+# flashed with the room's RoboDog-home key would share that delivery hash,
+# and two devices on one hash corrupt LXMF delivery).
 STAGED_NAME="$(sed -n 's/^#define HF_DEVICE_NAME_DEFAULT "\(.*\)"/\1/p' \
     "$DEST/main/lmao_config.h" 2>/dev/null | head -1)"
-if [ ! -f "$DEST/build/flash_args" ] || [ "$STAGED_NAME" != "$DEVICE_NAME" ]; then
-    echo "no matching build at $DEST (staged device='${STAGED_NAME:-none}') — building for '$DEVICE_NAME'"
-    HF_DEVICE_NAME="$DEVICE_NAME" "$APP/build.sh" || exit 1
+STAGED_IDENTITY="$(sed -n 's/^#define HF_IDENTITY_NAME_DEFAULT "\(.*\)"/\1/p' \
+    "$DEST/main/lmao_config.h" 2>/dev/null | head -1)"
+IDENTITY_NAME="${HF_IDENTITY_NAME:-humidifier-baby}"
+if [ ! -f "$DEST/build/flash_args" ] || [ "$STAGED_NAME" != "$DEVICE_NAME" ] \
+    || [ "$STAGED_IDENTITY" != "$IDENTITY_NAME" ]; then
+    echo "no matching build at $DEST (staged room='${STAGED_NAME:-none}'" \
+         "identity='${STAGED_IDENTITY:-none}') — building for room='$DEVICE_NAME'" \
+         "identity='$IDENTITY_NAME'"
+    HF_DEVICE_NAME="$DEVICE_NAME" HF_IDENTITY_NAME="$IDENTITY_NAME" \
+        "$APP/build.sh" || exit 1
 fi
 
 WORK="$(mktemp -d /tmp/humidifier_nvs.XXXXXX)"

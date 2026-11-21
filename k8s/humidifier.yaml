@@ -120,9 +120,10 @@ data:
   # address — the failure that dried this room out on 2026-11-21.
   HF_DIRECTIVE_URL: "http://localhost:8082/humidifier"
   HF_DIRECTIVE_KEY: "humidifier"
-  # Push stays on until the socket runs the pull firmware; flip to "0" after
-  # flashing (the controller then only publishes).
-  HF_PUSH: "1"
+  # Push is OFF: this socket runs the pull firmware (flashed 2026-11-21,
+  # directive_polls/directive_applied advancing on /status).  The controller
+  # now only publishes; the socket fetches the decision itself.
+  HF_PUSH: "0"
   LMAO_HOME_CLIENT_STATE_PATH: "/state/rns"
   HF_IDENTITY_DIR: "/state/identity"
 

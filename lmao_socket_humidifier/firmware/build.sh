@@ -102,6 +102,9 @@ cp "$APP/CMakeLists.txt" "$APP/sdkconfig.defaults" "$APP/partitions.csv" "$DEST/
     echo "#ifndef HF_DEVICE_NAME_DEFAULT"
     printf '#define HF_DEVICE_NAME_DEFAULT "%s"\n' "$DEVICE_NAME"
     echo "#endif"
+    echo "#ifndef HF_IDENTITY_NAME_DEFAULT"
+    printf '#define HF_IDENTITY_NAME_DEFAULT "%s"\n' "$IDENTITY_NAME"
+    echo "#endif"
 } > "$DEST/main/lmao_config.h"
 echo "app staged in $DEST (room='$DEVICE_NAME' identity='$IDENTITY_NAME')"
 
